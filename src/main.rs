@@ -49,15 +49,20 @@ struct Streamer {
 
 impl Streamer {
     fn new(config: Config) -> Self {
-        Self { config }
+        Self {
+            id: "foo".to_string(),
+            config,
+        }
     }
-    fn start(&self) -> tokio::task::JoinHandle<Streamer> {
-        println!("hello from streamer")
+    fn start(&self) -> tokio::task::JoinHandle<()> {
+        tokio::task::spawn(async move {
+            println!("streamer started");
+        })
     }
 }
 type StreamerId = String;
 struct AppState {
-    streamers: Mutex<HashMap<StreamerId, tokio::task::JoinHandle<Streamer>>>,
+    streamers: Mutex<HashMap<StreamerId, tokio::task::JoinHandle<()>>>,
 }
 
 #[tokio::main]
@@ -78,7 +83,8 @@ async fn create_stream(
 ) -> (StatusCode, Json<Streamer>) {
     let streamer = Streamer::new(payload);
     let streamer_handle = streamer.start();
-    let foo = state.streamers.lock().unwrap();
-    foo.insert(streamer.id, streamer_handle);
+    let mut app = state.streamers.lock().unwrap();
+    app.insert(streamer.id.clone(), streamer_handle);
+    println!("streamer inserted into app state");
     (StatusCode::CREATED, Json(streamer))
 }
