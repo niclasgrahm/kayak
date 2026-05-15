@@ -13,6 +13,7 @@ struct NatsInputConfig {
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 enum InputConfig {
+    Dummy,
     Nats(NatsInputConfig),
     Streamer { upstream: StreamerId },
 }
@@ -24,6 +25,9 @@ struct BuildCtx<'a> {
 impl InputConfig {
     fn build(self, ctx: &mut BuildCtx) -> Result<Input> {
         match self {
+            InputConfig::Dummy => {
+                todo!()
+            }
             InputConfig::Nats(nats_cfg) => {
                 todo!()
                 // Input::Nats(NatsConnection {}),
@@ -69,6 +73,7 @@ struct NatsConnection {}
 
 #[derive(Debug)]
 enum Input {
+    Dummy,
     Nats(NatsConnection),
     Streamer(tokio::sync::mpsc::Receiver<Arc<serde_json::Value>>),
 }
@@ -86,12 +91,20 @@ struct Streamer {
     id: StreamerId,
     config: Config,
     #[serde(skip)]
-    input: Input,
-    #[serde(skip)]
-    transforms: Vec<Transform>,
-    #[serde(skip)]
-    output: Output,
     downstream_senders: Mutex<Vec<mpsc::Sender<Arc<serde_json::Value>>>>,
+}
+
+#[derive(Serialize)]
+struct StreamerView<'a> {
+    id: &'a StreamerId,
+    config: &'a Config,
+}
+
+struct StreamerRuntime {
+    input: Input,
+    transforms: Vec<Transform>,
+    output: Output,
+    shared: Arc<Streamer>,
 }
 
 impl Streamer {
@@ -100,25 +113,45 @@ impl Streamer {
         Self {
             id,
             config,
-            input: Input::Nats(NatsConnection {}),
-            transforms: Vec::new(),
-            output: Output::Stdout,
+            // input: Input::Nats(NatsConnection {}),
+            // transforms: Vec::new(),
+            // output: Output::Stdout,
             downstream_senders: Mutex::new(Vec::new()),
         }
     }
-    fn start(&self) -> tokio::task::JoinHandle<()> {
+
+    fn create_runtime(self: &Arc<Self>) -> Result<StreamerRuntime> {
+        Ok(StreamerRuntime {
+            input: Input::Nats(NatsConnection {}),
+            transforms: Vec::new(),
+            output: Output::Stdout,
+            shared: Arc::clone(self),
+        })
+    }
+    fn start(self: &Arc<Self>) -> tokio::task::JoinHandle<()> {
+        let runtime = self.create_runtime();
         tokio::task::spawn(async move {
             println!("streamer started");
         })
     }
-    fn subscribe(&mut self, tx: mpsc::Sender<Arc<serde_json::Value>>) -> Result<()> {
-        let mut senders = self.downstream_senders.get_mut()?;
+    fn subscribe(&self, tx: mpsc::Sender<Arc<serde_json::Value>>) -> Result<()> {
+        let mut senders = self.downstream_senders.lock().unwrap();
         senders.push(tx);
         Ok(())
     }
+    fn view(&self) -> StreamerView<'_> {
+        StreamerView {
+            id: &self.id,
+            config: &self.config,
+        }
+    }
 }
 type StreamerId = String;
-type StreamerHandle = tokio::task::JoinHandle<()>;
+struct StreamerHandle {
+    join_handle: tokio::task::JoinHandle<()>,
+    shared: Arc<Streamer>,
+}
+
 struct AppState {
     streamers: Mutex<HashMap<StreamerId, StreamerHandle>>,
 }
@@ -138,11 +171,18 @@ async fn main() {
 async fn create_stream(
     State(state): State<Arc<AppState>>,
     Json(payload): Json<Config>,
-) -> (StatusCode, Json<Streamer>) {
-    let streamer = Streamer::new(payload.clone());
-    let streamer_handle = streamer.start();
+) -> (StatusCode, Json<serde_json::Value>) {
+    let streamer = Arc::new(Streamer::new(payload.clone()));
+    let join_handle = streamer.start();
+
+    let streamer_handle = StreamerHandle {
+        join_handle,
+        shared: Arc::clone(&streamer),
+    };
+    let id = streamer.id.clone();
     let mut app = state.streamers.lock().unwrap();
-    app.insert(streamer.id.clone(), streamer_handle);
+    app.insert(id, streamer_handle);
     println!("streamer inserted into app state");
-    (StatusCode::CREATED, Json(streamer))
+    let body = serde_json::to_value(streamer.view()).unwrap();
+    (StatusCode::CREATED, Json(body))
 }
