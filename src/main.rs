@@ -5,20 +5,16 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use std::time;
 use tokio;
-use tokio::sync::mpsc;
 
-#[derive(Clone, Debug, Deserialize, Serialize)]
-struct NatsInputConfig {
-    brokers: String,
-}
-
-#[derive(Clone, Debug, Deserialize, Serialize)]
-#[serde(tag = "type", rename_all = "snake_case")]
-enum InputConfig {
-    Dummy,
-    Nats(NatsInputConfig),
-    Streamer { upstream: StreamerId },
-}
+mod config;
+mod inputs;
+mod outputs;
+mod state;
+mod streamer;
+mod transforms;
+use crate::config::Config;
+use crate::state::{AppState, StreamerHandle, StreamerId};
+use crate::streamer::Streamer;
 
 struct BuildCtx<'a> {
     streamers: &'a mut HashMap<StreamerId, StreamerHandle>,
@@ -30,161 +26,11 @@ impl<'a> BuildCtx<'a> {
     }
 }
 
-impl InputConfig {
-    fn build(self, ctx: &mut BuildCtx) -> Result<Input> {
-        match self {
-            InputConfig::Dummy => Ok(Input::Dummy),
-            InputConfig::Nats(nats_cfg) => {
-                todo!()
-                // Input::Nats(NatsConnection {}),
-            }
-            InputConfig::Streamer { upstream } => {
-                // let (_, rx) = mpsc::channel(100);
-                // Input::Streamer(rx)
-                todo!()
-            }
-        }
-    }
-}
-
-#[derive(Clone, Debug, Deserialize, Serialize)]
-enum TransformConfig {}
-
-#[derive(Clone, Debug, Deserialize, Serialize)]
-enum OutputConfig {
-    Stdout,
-}
-
-#[derive(Clone, Debug, Deserialize, Serialize)]
-struct Config {
-    input: InputConfig,
-    transforms: Vec<TransformConfig>,
-    output: OutputConfig,
-}
-
-impl Config {
-    fn new() -> Self {
-        Self {
-            input: InputConfig::Nats(NatsInputConfig {
-                brokers: "http://yoyo:4222".to_string(),
-            }),
-            transforms: Vec::new(),
-            output: OutputConfig::Stdout,
-        }
-    }
-}
-
 #[derive(Debug)]
 struct NatsConnection {}
 
-#[derive(Debug)]
-enum Input {
-    Dummy,
-    Nats(NatsConnection),
-    Streamer(tokio::sync::mpsc::Receiver<Arc<serde_json::Value>>),
-}
-
 #[derive(Debug, Deserialize, Serialize)]
 enum Transform {}
-
-#[derive(Debug, Deserialize, Serialize)]
-enum Output {
-    Stdout,
-}
-
-#[derive(Serialize)]
-struct Streamer {
-    id: StreamerId,
-    config: Config,
-    #[serde(skip)]
-    downstream_senders: Mutex<Vec<mpsc::Sender<Arc<serde_json::Value>>>>,
-}
-
-#[derive(Serialize)]
-struct StreamerView<'a> {
-    id: &'a StreamerId,
-    config: &'a Config,
-}
-
-struct StreamerRuntime {
-    input: Input,
-    transforms: Vec<Transform>,
-    output: Output,
-    shared: Arc<Streamer>,
-}
-
-impl StreamerRuntime {
-    async fn run(&self) {
-        println!("[{}]\t inside StreamerRuntime::run()", self.shared.id);
-        loop {
-            let next_msg = match self.input {
-                Input::Dummy => {
-                    tokio::time::sleep(time::Duration::from_secs(1)).await;
-                    Arc::new(serde_json::json!({"hello": "streamer"}))
-                }
-                _ => {
-                    todo!()
-                }
-            };
-
-            // transform; skip for now
-            match self.output {
-                Output::Stdout => {
-                    println!("[{}]\t {:?}", self.shared.id, next_msg.to_string());
-                }
-            }
-        }
-    }
-}
-
-impl Streamer {
-    fn new(config: Config) -> Self {
-        let id = petname::petname(3, "-").unwrap();
-        Self {
-            id,
-            config,
-            // input: Input::Nats(NatsConnection {}),
-            // transforms: Vec::new(),
-            // output: Output::Stdout,
-            downstream_senders: Mutex::new(Vec::new()),
-        }
-    }
-
-    fn create_runtime(self: &Arc<Self>, mut ctx: BuildCtx) -> Result<StreamerRuntime> {
-        Ok(StreamerRuntime {
-            input: self.config.input.clone().build(&mut ctx)?,
-            transforms: Vec::new(),
-            output: Output::Stdout,
-            shared: Arc::clone(self),
-        })
-    }
-    fn start(self: &Arc<Self>, mut ctx: BuildCtx) -> tokio::task::JoinHandle<()> {
-        let runtime = self.create_runtime(ctx).unwrap();
-        tokio::task::spawn(async move {
-            runtime.run().await;
-        })
-    }
-    fn subscribe(&self, tx: mpsc::Sender<Arc<serde_json::Value>>) -> Result<()> {
-        let mut senders = self.downstream_senders.lock().unwrap();
-        senders.push(tx);
-        Ok(())
-    }
-    fn view(&self) -> StreamerView<'_> {
-        StreamerView {
-            id: &self.id,
-            config: &self.config,
-        }
-    }
-}
-type StreamerId = String;
-struct StreamerHandle {
-    join_handle: tokio::task::JoinHandle<()>,
-    shared: Arc<Streamer>,
-}
-
-struct AppState {
-    streamers: Mutex<HashMap<StreamerId, StreamerHandle>>,
-}
 
 #[tokio::main]
 async fn main() {
