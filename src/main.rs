@@ -3,6 +3,8 @@ use axum::{Json, Router, extract::State, http::StatusCode, routing::post};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
+use std::time;
+use tokio;
 use tokio::sync::mpsc;
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -22,12 +24,16 @@ struct BuildCtx<'a> {
     streamers: &'a mut HashMap<StreamerId, StreamerHandle>,
 }
 
+impl<'a> BuildCtx<'a> {
+    fn new(streamers: &'a mut HashMap<StreamerId, StreamerHandle>) -> Self {
+        Self { streamers }
+    }
+}
+
 impl InputConfig {
     fn build(self, ctx: &mut BuildCtx) -> Result<Input> {
         match self {
-            InputConfig::Dummy => {
-                todo!()
-            }
+            InputConfig::Dummy => Ok(Input::Dummy),
             InputConfig::Nats(nats_cfg) => {
                 todo!()
                 // Input::Nats(NatsConnection {}),
@@ -107,6 +113,30 @@ struct StreamerRuntime {
     shared: Arc<Streamer>,
 }
 
+impl StreamerRuntime {
+    async fn run(&self) {
+        println!("[{}]\t inside StreamerRuntime::run()", self.shared.id);
+        loop {
+            let next_msg = match self.input {
+                Input::Dummy => {
+                    tokio::time::sleep(time::Duration::from_secs(1)).await;
+                    Arc::new(serde_json::json!({"hello": "streamer"}))
+                }
+                _ => {
+                    todo!()
+                }
+            };
+
+            // transform; skip for now
+            match self.output {
+                Output::Stdout => {
+                    println!("[{}]\t {:?}", self.shared.id, next_msg.to_string());
+                }
+            }
+        }
+    }
+}
+
 impl Streamer {
     fn new(config: Config) -> Self {
         let id = petname::petname(3, "-").unwrap();
@@ -120,18 +150,18 @@ impl Streamer {
         }
     }
 
-    fn create_runtime(self: &Arc<Self>) -> Result<StreamerRuntime> {
+    fn create_runtime(self: &Arc<Self>, mut ctx: BuildCtx) -> Result<StreamerRuntime> {
         Ok(StreamerRuntime {
-            input: Input::Nats(NatsConnection {}),
+            input: self.config.input.clone().build(&mut ctx)?,
             transforms: Vec::new(),
             output: Output::Stdout,
             shared: Arc::clone(self),
         })
     }
-    fn start(self: &Arc<Self>) -> tokio::task::JoinHandle<()> {
-        let runtime = self.create_runtime();
+    fn start(self: &Arc<Self>, mut ctx: BuildCtx) -> tokio::task::JoinHandle<()> {
+        let runtime = self.create_runtime(ctx).unwrap();
         tokio::task::spawn(async move {
-            println!("streamer started");
+            runtime.run().await;
         })
     }
     fn subscribe(&self, tx: mpsc::Sender<Arc<serde_json::Value>>) -> Result<()> {
@@ -173,14 +203,15 @@ async fn create_stream(
     Json(payload): Json<Config>,
 ) -> (StatusCode, Json<serde_json::Value>) {
     let streamer = Arc::new(Streamer::new(payload.clone()));
-    let join_handle = streamer.start();
+    let mut app = state.streamers.lock().unwrap();
+    let mut ctx = BuildCtx::new(&mut app);
+    let join_handle = streamer.start(ctx);
 
     let streamer_handle = StreamerHandle {
         join_handle,
         shared: Arc::clone(&streamer),
     };
     let id = streamer.id.clone();
-    let mut app = state.streamers.lock().unwrap();
     app.insert(id, streamer_handle);
     println!("streamer inserted into app state");
     let body = serde_json::to_value(streamer.view()).unwrap();
