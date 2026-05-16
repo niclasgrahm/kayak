@@ -1,8 +1,13 @@
 use crate::BuildCtx;
 use crate::inputs::Input;
 use crate::state::StreamerId;
+
 use anyhow::Result;
+use anyhow::anyhow;
 use serde::{Deserialize, Serialize};
+use std::sync::Arc;
+use tokio::sync::mpsc;
+
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct NatsInputConfig {
     brokers: String,
@@ -22,12 +27,15 @@ impl InputConfig {
             InputConfig::Dummy => Ok(Input::Dummy),
             InputConfig::Nats(nats_cfg) => {
                 todo!()
-                // Input::Nats(NatsConnection {}),
             }
             InputConfig::Streamer { upstream } => {
-                // let (_, rx) = mpsc::channel(100);
-                // Input::Streamer(rx)
-                todo!()
+                let upstream_handle = ctx
+                    .streamers
+                    .get(&upstream)
+                    .ok_or_else(|| anyhow!("upstream streamer '{}' not found", upstream))?;
+                let (tx, rx) = mpsc::channel::<Arc<serde_json::Value>>(100);
+                upstream_handle.shared.subscribe(tx)?;
+                Ok(Input::Streamer(rx))
             }
         }
     }

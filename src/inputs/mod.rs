@@ -1,6 +1,6 @@
 use std::sync::Arc;
 #[derive(Debug)]
-struct NatsConnection {}
+pub struct NatsConnection {}
 
 #[derive(Debug)]
 pub enum Input {
