@@ -1,3 +1,6 @@
 use serde::{Deserialize, Serialize};
 #[derive(Debug, Deserialize, Serialize)]
-pub enum Transform {}
+pub enum Transform {
+    Buffer,
+    Reduce,
+}

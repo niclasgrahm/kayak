@@ -1,5 +1,6 @@
 use crate::BuildCtx;
 use crate::inputs::Input;
+use crate::inputs::dummy::DummyInput;
 use crate::state::StreamerId;
 
 use anyhow::Result;
@@ -17,7 +18,7 @@ pub struct NatsInputConfig {
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum InputConfig {
-    Dummy,
+    Dummy { duration: usize },
     Nats(NatsInputConfig),
     Streamer { upstream: StreamerId },
 }
@@ -25,7 +26,9 @@ pub enum InputConfig {
 impl InputConfig {
     pub fn build(self, ctx: &mut BuildCtx) -> Result<Input> {
         match self {
-            InputConfig::Dummy => Ok(Input::Dummy),
+            InputConfig::Dummy { duration } => Ok(Input::Dyn(Box::new(DummyInput {
+                interval: std::time::Duration::from_secs(duration as u64),
+            }))),
             InputConfig::Nats(nats_cfg) => {
                 println!("connecting to nats");
                 Ok(Input::Nats {

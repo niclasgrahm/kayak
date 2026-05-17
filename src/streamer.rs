@@ -28,13 +28,10 @@ pub struct StreamerView<'a> {
     config: &'a Config,
 }
 
-async fn next_input_message(input: &mut Input) -> Arc<serde_json::Value> {
+async fn next_input_message(input: &mut Input) -> Result<Arc<serde_json::Value>> {
     match input {
-        Input::Dummy => {
-            tokio::time::sleep(Duration::from_secs(1)).await;
-            Arc::new(serde_json::json!({"hello": "streamer"}))
-        }
-        Input::Streamer(rx) => rx.recv().await.expect("upstream channel closed"),
+        Input::Dyn(source) => source.next().await,
+        Input::Streamer(rx) => Ok(rx.recv().await.expect("upstream channel closed")),
         Input::Nats { cfg, sub } => {
             if sub.is_none() {
                 let client = async_nats::connect(&cfg.urls)
@@ -49,7 +46,7 @@ async fn next_input_message(input: &mut Input) -> Arc<serde_json::Value> {
             let subscriber = sub.as_mut().unwrap();
             let msg = subscriber.next().await.expect("sub ended");
             let value = serde_json::from_slice(&msg.payload).expect("we assume json");
-            Arc::new(value)
+            Ok(Arc::new(value))
         }
     }
 }
@@ -65,14 +62,16 @@ impl StreamerRuntime {
     async fn run(mut self) {
         println!("[{}]\t inside StreamerRuntime::run()", self.shared.id);
         loop {
-            let next_msg = select! {
-                _ = self.shared.cancellation_token.cancelled() => {
-                    println!("[{}]\t cancellation received, shutting down", self.shared.id);
+            let next_msg = match select! {
+                _ = self.shared.cancellation_token.cancelled() => break,
+                msg = next_input_message(&mut self.input) => msg,
+            } {
+                Ok(msg) => msg,
+                Err(e) => {
+                    eprintln!("[{}]\t input error: {:?}", self.shared.id, e);
                     break;
                 }
-                msg = next_input_message(&mut self.input) => msg,
             };
-
             // transform; skip for now
             match self.output {
                 Output::Stdout => {
