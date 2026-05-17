@@ -10,7 +10,8 @@ use tokio::sync::mpsc;
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct NatsInputConfig {
-    brokers: String,
+    pub urls: String,
+    pub subject: String,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -26,7 +27,11 @@ impl InputConfig {
         match self {
             InputConfig::Dummy => Ok(Input::Dummy),
             InputConfig::Nats(nats_cfg) => {
-                todo!()
+                println!("connecting to nats");
+                Ok(Input::Nats {
+                    cfg: nats_cfg,
+                    sub: None,
+                })
             }
             InputConfig::Streamer { upstream } => {
                 let upstream_handle = ctx
@@ -60,7 +65,8 @@ impl Config {
     fn new() -> Self {
         Self {
             input: InputConfig::Nats(NatsInputConfig {
-                brokers: "http://yoyo:4222".to_string(),
+                urls: "http://yoyo:4222".to_string(),
+                subject: "test".to_string(),
             }),
             transforms: Vec::new(),
             output: OutputConfig::Stdout,

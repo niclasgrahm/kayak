@@ -1,0 +1,17 @@
+services:
+  nats:
+    image: nats:latest
+    ports:
+      - "4222:4222"
+
+  publisher:
+    image: natsio/nats-box:latest
+    depends_on:
+      - nats
+    entrypoint: ["sh", "-c"]
+    command:
+      - |
+        while true; do
+          nats --server nats://nats:4222 pub test.subject "{\"ts\":\"$(date -Iseconds)\",\"msg\":\"hello\"}"
+          sleep 1
+        done
