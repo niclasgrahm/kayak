@@ -3,13 +3,10 @@ use serde_json::Value;
 use std::sync::Arc;
 
 pub mod dummy;
+pub mod nats;
 
 pub enum Input {
     Dyn(Box<dyn InputSource>),
-    Nats {
-        cfg: NatsInputConfig,
-        sub: Option<async_nats::Subscriber>,
-    },
     Streamer(tokio::sync::mpsc::Receiver<Arc<serde_json::Value>>),
 }
 

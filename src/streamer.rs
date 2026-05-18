@@ -10,7 +10,6 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tokio::select;
 use tokio::sync::mpsc;
-use tokio_stream::StreamExt;
 
 #[derive(Serialize)]
 pub struct Streamer {
@@ -32,22 +31,6 @@ async fn next_input_message(input: &mut Input) -> Result<Arc<serde_json::Value>>
     match input {
         Input::Dyn(source) => source.next().await,
         Input::Streamer(rx) => Ok(rx.recv().await.expect("upstream channel closed")),
-        Input::Nats { cfg, sub } => {
-            if sub.is_none() {
-                let client = async_nats::connect(&cfg.urls)
-                    .await
-                    .expect("failed to connect to nats");
-                let subscriber = client
-                    .subscribe(cfg.subject.clone())
-                    .await
-                    .expect("failed to subscribe to nats subject");
-                *sub = Some(subscriber);
-            }
-            let subscriber = sub.as_mut().unwrap();
-            let msg = subscriber.next().await.expect("sub ended");
-            let value = serde_json::from_slice(&msg.payload).expect("we assume json");
-            Ok(Arc::new(value))
-        }
     }
 }
 

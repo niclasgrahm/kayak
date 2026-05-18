@@ -1,6 +1,7 @@
 use crate::BuildCtx;
 use crate::inputs::Input;
 use crate::inputs::dummy::DummyInput;
+use crate::inputs::nats::NatsInput;
 use crate::state::StreamerId;
 
 use anyhow::Result;
@@ -29,13 +30,10 @@ impl InputConfig {
             InputConfig::Dummy { duration } => Ok(Input::Dyn(Box::new(DummyInput {
                 interval: std::time::Duration::from_secs(duration as u64),
             }))),
-            InputConfig::Nats(nats_cfg) => {
-                println!("connecting to nats");
-                Ok(Input::Nats {
-                    cfg: nats_cfg,
-                    sub: None,
-                })
-            }
+            InputConfig::Nats(nats_cfg) => Ok(Input::Dyn(Box::new(NatsInput {
+                cfg: nats_cfg,
+                sub: None,
+            }))),
             InputConfig::Streamer { upstream } => {
                 let upstream_handle = ctx
                     .streamers
