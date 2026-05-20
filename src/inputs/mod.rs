@@ -1,14 +1,9 @@
-use crate::config::NatsInputConfig;
 use serde_json::Value;
 use std::sync::Arc;
 
 pub mod dummy;
 pub mod nats;
 pub mod streamer;
-
-pub enum Input {
-    Dyn(Box<dyn InputSource>),
-}
 
 #[async_trait::async_trait]
 pub trait InputSource: Send + 'static {

@@ -1,5 +1,5 @@
 use crate::BuildCtx;
-use crate::inputs::Input;
+use crate::inputs::InputSource;
 use crate::inputs::dummy::DummyInput;
 use crate::inputs::nats::NatsInput;
 use crate::inputs::streamer::StreamerInput;
@@ -25,15 +25,15 @@ pub enum InputConfig {
     Streamer { upstream: StreamerId },
 }
 impl InputConfig {
-    pub fn build(self, ctx: &mut BuildCtx) -> Result<Input> {
+    pub fn build(self, ctx: &mut BuildCtx) -> Result<Box<dyn InputSource>> {
         match self {
-            InputConfig::Dummy { duration } => Ok(Input::Dyn(Box::new(DummyInput {
+            InputConfig::Dummy { duration } => Ok(Box::new(DummyInput {
                 interval: std::time::Duration::from_secs(duration as u64),
-            }))),
-            InputConfig::Nats(nats_cfg) => Ok(Input::Dyn(Box::new(NatsInput {
+            })),
+            InputConfig::Nats(nats_cfg) => Ok(Box::new(NatsInput {
                 cfg: nats_cfg,
                 sub: None,
-            }))),
+            })),
             InputConfig::Streamer { upstream } => {
                 let upstream_handle = ctx
                     .streamers
@@ -41,7 +41,7 @@ impl InputConfig {
                     .ok_or_else(|| anyhow!("upstream streamer '{}' not found", upstream))?;
                 let (tx, rx) = mpsc::channel::<Arc<serde_json::Value>>(100);
                 upstream_handle.shared.subscribe(tx)?;
-                Ok(Input::Dyn(Box::new(StreamerInput { upstream, rx })))
+                Ok(Box::new(StreamerInput { upstream, rx }))
             }
         }
     }

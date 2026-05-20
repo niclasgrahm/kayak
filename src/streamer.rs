@@ -1,13 +1,12 @@
 use crate::BuildCtx;
 use crate::config::Config;
-use crate::inputs::Input;
+use crate::inputs::InputSource;
 use crate::outputs::Output;
 use crate::state::StreamerId;
 use crate::transforms::Transform;
 use anyhow::Result;
 use serde::Serialize;
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
 use tokio::select;
 use tokio::sync::mpsc;
 
@@ -27,14 +26,12 @@ pub struct StreamerView<'a> {
     config: &'a Config,
 }
 
-async fn next_input_message(input: &mut Input) -> Result<Arc<serde_json::Value>> {
-    match input {
-        Input::Dyn(source) => source.next().await,
-    }
+async fn next_input_message(input: &mut Box<dyn InputSource>) -> Result<Arc<serde_json::Value>> {
+    input.next().await
 }
 
 pub struct StreamerRuntime {
-    input: Input,
+    input: Box<dyn InputSource>,
     transforms: Vec<Transform>,
     output: Output,
     shared: Arc<Streamer>,
