@@ -30,7 +30,6 @@ pub struct StreamerView<'a> {
 async fn next_input_message(input: &mut Input) -> Result<Arc<serde_json::Value>> {
     match input {
         Input::Dyn(source) => source.next().await,
-        Input::Streamer(rx) => Ok(rx.recv().await.expect("upstream channel closed")),
     }
 }
 

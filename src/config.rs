@@ -2,6 +2,7 @@ use crate::BuildCtx;
 use crate::inputs::Input;
 use crate::inputs::dummy::DummyInput;
 use crate::inputs::nats::NatsInput;
+use crate::inputs::streamer::StreamerInput;
 use crate::state::StreamerId;
 
 use anyhow::Result;
@@ -23,7 +24,6 @@ pub enum InputConfig {
     Nats(NatsInputConfig),
     Streamer { upstream: StreamerId },
 }
-
 impl InputConfig {
     pub fn build(self, ctx: &mut BuildCtx) -> Result<Input> {
         match self {
@@ -41,7 +41,7 @@ impl InputConfig {
                     .ok_or_else(|| anyhow!("upstream streamer '{}' not found", upstream))?;
                 let (tx, rx) = mpsc::channel::<Arc<serde_json::Value>>(100);
                 upstream_handle.shared.subscribe(tx)?;
-                Ok(Input::Streamer(rx))
+                Ok(Input::Dyn(Box::new(StreamerInput { upstream, rx })))
             }
         }
     }

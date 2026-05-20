@@ -4,10 +4,10 @@ use std::sync::Arc;
 
 pub mod dummy;
 pub mod nats;
+pub mod streamer;
 
 pub enum Input {
     Dyn(Box<dyn InputSource>),
-    Streamer(tokio::sync::mpsc::Receiver<Arc<serde_json::Value>>),
 }
 
 #[async_trait::async_trait]
