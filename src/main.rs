@@ -1,16 +1,11 @@
-use anyhow::Result;
 use axum::{
     Json, Router,
-    extract::Path,
-    extract::State,
+    extract::{Path, State},
     http::StatusCode,
-    routing::{delete, post},
+    routing::{delete, get, post},
 };
-use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
-use std::time;
-use tokio;
 
 mod config;
 mod inputs;
@@ -39,12 +34,19 @@ async fn main() {
     };
     let app = Router::new()
         .route("/", post(create_stream))
+        .route("/", get(get_streams))
         .route("/{stream_id}", delete(delete_stream))
         .with_state(Arc::new(state));
     let listener = tokio::net::TcpListener::bind("0.0.0.0:6767").await.unwrap();
     let _ = axum::serve(listener, app).await;
 }
 
+async fn get_streams(State(state): State<Arc<AppState>>) -> (StatusCode, Json<serde_json::Value>) {
+    (
+        StatusCode::OK,
+        Json(serde_json::to_value(&*state.streamers.lock().unwrap()).unwrap()),
+    )
+}
 async fn create_stream(
     State(state): State<Arc<AppState>>,
     Json(payload): Json<Config>,
@@ -60,7 +62,6 @@ async fn create_stream(
     };
     let id = streamer.id.clone();
     app.insert(id, streamer_handle);
-    println!("streamer inserted into app state");
     let body = serde_json::to_value(streamer.view()).unwrap();
     (StatusCode::CREATED, Json(body))
 }
@@ -70,7 +71,6 @@ async fn delete_stream(
     Path(stream_id): Path<String>,
 ) -> StatusCode {
     let mut app = state.streamers.lock().unwrap();
-
     if let Some(streamer) = app.get(stream_id.as_str()) {
         // signal cancellation here
         streamer.shared.cancellation_token.cancel();
