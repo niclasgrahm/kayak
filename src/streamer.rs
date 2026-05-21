@@ -18,7 +18,7 @@ pub struct Streamer {
     #[serde(skip)]
     pub cancellation_token: tokio_util::sync::CancellationToken,
     #[serde(skip)]
-    downstream_senders: Mutex<Vec<mpsc::Sender<MessageBatch>>>,
+    downstream_senders: Mutex<Vec<mpsc::Sender<Arc<MessageBatch>>>>,
 }
 
 #[derive(Serialize)]
@@ -27,7 +27,7 @@ pub struct StreamerView<'a> {
     config: &'a Config,
 }
 
-async fn next_input_message(input: &mut Box<dyn InputSource>) -> Result<MessageBatch> {
+async fn next_input_message(input: &mut Box<dyn InputSource>) -> Result<Arc<MessageBatch>> {
     input.next().await
 }
 
@@ -62,7 +62,7 @@ impl StreamerRuntime {
             // send to downstream subscribers
             let senders = self.shared.downstream_senders.lock().unwrap().clone();
             for tx in &senders {
-                let _ = tx.send(next_msg.clone()).await;
+                let _ = tx.send(Arc::clone(&next_msg)).await;
             }
         }
     }
@@ -94,7 +94,7 @@ impl Streamer {
             runtime.run().await;
         })
     }
-    pub fn subscribe(&self, tx: mpsc::Sender<MessageBatch>) -> Result<()> {
+    pub fn subscribe(&self, tx: mpsc::Sender<Arc<MessageBatch>>) -> Result<()> {
         let mut senders = self.downstream_senders.lock().unwrap();
         senders.push(tx);
         Ok(())

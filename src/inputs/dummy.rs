@@ -13,11 +13,11 @@ pub struct DummyInput {
 
 #[async_trait::async_trait]
 impl InputSource for DummyInput {
-    async fn next(&mut self) -> Result<MessageBatch> {
+    async fn next(&mut self) -> Result<Arc<MessageBatch>> {
         tokio::time::sleep(self.interval).await;
-        Ok(vec![Arc::new(json!({
+        Ok(Arc::new(vec![Arc::new(json!({
             "hello": "streamer",
             "current_time": Utc::now().to_string(),
-        }))])
+        }))]))
     }
 }

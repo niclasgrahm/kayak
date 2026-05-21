@@ -9,5 +9,5 @@ pub type MessageBatch = Vec<Arc<serde_json::Value>>;
 
 #[async_trait::async_trait]
 pub trait InputSource: Send + 'static {
-    async fn next(&mut self) -> anyhow::Result<MessageBatch>;
+    async fn next(&mut self) -> anyhow::Result<Arc<MessageBatch>>;
 }

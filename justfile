@@ -1,2 +1,5 @@
 test-http:
-  hurl --test hurl/*.hurl
+  hurl --test hurl/tests/*.hurl
+
+start-baseline:
+  hurl hurl/create_baseline.hurl

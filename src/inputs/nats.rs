@@ -13,7 +13,7 @@ pub struct NatsInput {
 
 #[async_trait::async_trait]
 impl InputSource for NatsInput {
-    async fn next(&mut self) -> Result<MessageBatch> {
+    async fn next(&mut self) -> Result<Arc<MessageBatch>> {
         if self.sub.is_none() {
             let client = async_nats::connect(&self.cfg.urls)
                 .await
@@ -27,6 +27,6 @@ impl InputSource for NatsInput {
         let subscriber = self.sub.as_mut().unwrap();
         let msg = subscriber.next().await.expect("sub ended");
         let value = serde_json::from_slice(&msg.payload).expect("we assume json");
-        Ok(vec![Arc::new(value)])
+        Ok(Arc::new(vec![Arc::new(value)]))
     }
 }

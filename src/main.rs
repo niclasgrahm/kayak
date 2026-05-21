@@ -17,8 +17,6 @@ use crate::config::Config;
 use crate::state::{AppState, StreamerHandle, StreamerId};
 use crate::streamer::Streamer;
 
-type MessageBatch = Vec<Arc<serde_json::Value>>;
-
 struct BuildCtx<'a> {
     streamers: &'a mut HashMap<StreamerId, StreamerHandle>,
 }
