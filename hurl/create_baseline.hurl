@@ -3,7 +3,7 @@ Content-Type: application/json
 {
     "input": { "type": "dummy", "duration": 1, "buffer": 10 },
     "transforms": [],
-    "output": "Stdout"
+    "output": { "type": "stdout" }
 }
 
 HTTP 201
@@ -15,7 +15,7 @@ Content-Type: application/json
 {
     "input": { "type": "streamer", "upstream": "{{ dummy_streamer_id }}" },
     "transforms": [],
-    "output": "Stdout"
+    "output": { "type": "stdout" }
 }
 
 
@@ -29,7 +29,7 @@ Content-Type: application/json
         
     },
     "transforms": [],
-    "output": "Stdout"
+    "output": { "type": "stdout" }
 }
 HTTP 201
 [Captures]
@@ -40,7 +40,7 @@ Content-Type: application/json
 {
     "input": { "type": "streamer", "upstream": "{{ nats_streamer_id }}" },
     "transforms": [],
-    "output": "Stdout"
+    "output": { "type": "stdout" }
 }
 HTTP 201
 

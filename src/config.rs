@@ -5,6 +5,9 @@ use crate::inputs::MessageBatch;
 use crate::inputs::dummy::DummyInput;
 use crate::inputs::nats::NatsInput;
 use crate::inputs::streamer::StreamerInput;
+use crate::outputs::OutputDestination;
+use crate::outputs::OutputKind;
+use crate::outputs::StdoutOutput;
 use crate::state::StreamerId;
 
 use anyhow::Result;
@@ -67,8 +70,17 @@ impl InputKind {
 pub enum TransformConfig {}
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
-pub enum OutputConfig {
-    Stdout,
+pub struct OutputConfig {
+    #[serde(flatten)]
+    pub kind: OutputKind,
+}
+
+impl OutputConfig {
+    pub fn build(self, ctx: &mut BuildCtx) -> Result<Box<dyn OutputDestination>> {
+        match self.kind {
+            OutputKind::Stdout => Ok(Box::new(StdoutOutput {})),
+        }
+    }
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]

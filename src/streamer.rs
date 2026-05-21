@@ -2,7 +2,7 @@ use crate::BuildCtx;
 use crate::config::Config;
 use crate::inputs::InputSource;
 use crate::inputs::MessageBatch;
-use crate::outputs::Output;
+use crate::outputs::OutputDestination;
 use crate::state::StreamerId;
 use crate::transforms::Transform;
 use anyhow::Result;
@@ -34,7 +34,7 @@ async fn next_input_message(input: &mut Box<dyn InputSource>) -> Result<Arc<Mess
 pub struct StreamerRuntime {
     input: Box<dyn InputSource>,
     transforms: Vec<Transform>,
-    output: Output,
+    output: Box<dyn OutputDestination>,
     shared: Arc<Streamer>,
 }
 
@@ -53,11 +53,7 @@ impl StreamerRuntime {
                 }
             };
             // transform; skip for now
-            match self.output {
-                Output::Stdout => {
-                    println!("{}", serde_json::to_string_pretty(&next_msg).unwrap());
-                }
-            }
+            self.output.emit(next_msg.clone()).await.unwrap();
 
             // send to downstream subscribers
             let senders = self.shared.downstream_senders.lock().unwrap().clone();
@@ -84,7 +80,7 @@ impl Streamer {
         Ok(StreamerRuntime {
             input: self.config.input.clone().build(&mut ctx)?,
             transforms: Vec::new(),
-            output: Output::Stdout,
+            output: self.config.output.clone().build(&mut ctx)?,
             shared: Arc::clone(self),
         })
     }
