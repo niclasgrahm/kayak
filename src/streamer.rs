@@ -1,6 +1,7 @@
 use crate::BuildCtx;
 use crate::config::Config;
 use crate::inputs::InputSource;
+use crate::inputs::MessageBatch;
 use crate::outputs::Output;
 use crate::state::StreamerId;
 use crate::transforms::Transform;
@@ -17,7 +18,7 @@ pub struct Streamer {
     #[serde(skip)]
     pub cancellation_token: tokio_util::sync::CancellationToken,
     #[serde(skip)]
-    downstream_senders: Mutex<Vec<mpsc::Sender<Arc<serde_json::Value>>>>,
+    downstream_senders: Mutex<Vec<mpsc::Sender<MessageBatch>>>,
 }
 
 #[derive(Serialize)]
@@ -26,7 +27,7 @@ pub struct StreamerView<'a> {
     config: &'a Config,
 }
 
-async fn next_input_message(input: &mut Box<dyn InputSource>) -> Result<Arc<serde_json::Value>> {
+async fn next_input_message(input: &mut Box<dyn InputSource>) -> Result<MessageBatch> {
     input.next().await
 }
 
@@ -54,14 +55,14 @@ impl StreamerRuntime {
             // transform; skip for now
             match self.output {
                 Output::Stdout => {
-                    println!("[{}]\t {:?}", self.shared.id, next_msg.to_string());
+                    println!("{}", serde_json::to_string_pretty(&next_msg).unwrap());
                 }
             }
 
             // send to downstream subscribers
             let senders = self.shared.downstream_senders.lock().unwrap().clone();
             for tx in &senders {
-                let _ = tx.send(Arc::clone(&next_msg)).await;
+                let _ = tx.send(next_msg.clone()).await;
             }
         }
     }
@@ -93,7 +94,7 @@ impl Streamer {
             runtime.run().await;
         })
     }
-    pub fn subscribe(&self, tx: mpsc::Sender<Arc<serde_json::Value>>) -> Result<()> {
+    pub fn subscribe(&self, tx: mpsc::Sender<MessageBatch>) -> Result<()> {
         let mut senders = self.downstream_senders.lock().unwrap();
         senders.push(tx);
         Ok(())

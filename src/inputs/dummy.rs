@@ -1,4 +1,5 @@
 use crate::inputs::InputSource;
+use crate::inputs::MessageBatch;
 use anyhow::Result;
 use chrono::Utc;
 use serde_json::Value;
@@ -12,11 +13,11 @@ pub struct DummyInput {
 
 #[async_trait::async_trait]
 impl InputSource for DummyInput {
-    async fn next(&mut self) -> Result<Arc<Value>> {
+    async fn next(&mut self) -> Result<MessageBatch> {
         tokio::time::sleep(self.interval).await;
-        Ok(Arc::new(json!({
+        Ok(vec![Arc::new(json!({
             "hello": "streamer",
             "current_time": Utc::now().to_string(),
-        })))
+        }))])
     }
 }

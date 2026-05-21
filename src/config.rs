@@ -1,5 +1,6 @@
 use crate::BuildCtx;
 use crate::inputs::InputSource;
+use crate::inputs::MessageBatch;
 use crate::inputs::dummy::DummyInput;
 use crate::inputs::nats::NatsInput;
 use crate::inputs::streamer::StreamerInput;
@@ -39,7 +40,7 @@ impl InputConfig {
                     .streamers
                     .get(&upstream)
                     .ok_or_else(|| anyhow!("upstream streamer '{}' not found", upstream))?;
-                let (tx, rx) = mpsc::channel::<Arc<serde_json::Value>>(100);
+                let (tx, rx) = mpsc::channel::<MessageBatch>(100);
                 upstream_handle.shared.subscribe(tx)?;
                 Ok(Box::new(StreamerInput { upstream, rx }))
             }
