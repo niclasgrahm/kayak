@@ -1,13 +1,12 @@
-use crate::config::NatsInputConfig;
 use crate::inputs::{InputSource, MessageBatch};
 use anyhow::Result;
 use tokio_stream::StreamExt;
 
-use serde_json::Value;
 use std::sync::Arc;
 
 pub struct NatsInput {
-    pub cfg: NatsInputConfig,
+    pub urls: String,
+    pub subject: String,
     pub sub: Option<async_nats::Subscriber>,
 }
 
@@ -15,11 +14,11 @@ pub struct NatsInput {
 impl InputSource for NatsInput {
     async fn next(&mut self) -> Result<Arc<MessageBatch>> {
         if self.sub.is_none() {
-            let client = async_nats::connect(&self.cfg.urls)
+            let client = async_nats::connect(&self.urls)
                 .await
                 .expect("failed to connect to nats");
             let subscriber = client
-                .subscribe(self.cfg.subject.clone())
+                .subscribe(self.subject.clone())
                 .await
                 .expect("failed to subscribe to nats subject");
             self.sub = Some(subscriber);

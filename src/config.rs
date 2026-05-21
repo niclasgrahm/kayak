@@ -1,4 +1,5 @@
 use crate::BuildCtx;
+use crate::inputs::Buffered;
 use crate::inputs::InputSource;
 use crate::inputs::MessageBatch;
 use crate::inputs::dummy::DummyInput;
@@ -13,29 +14,43 @@ use std::sync::Arc;
 use tokio::sync::mpsc;
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
-pub struct NatsInputConfig {
-    pub urls: String,
-    pub subject: String,
+pub struct InputConfig {
+    #[serde(flatten)]
+    pub kind: InputKind,
+
+    #[serde(default)]
+    pub buffer: Option<usize>,
+}
+
+impl InputConfig {
+    pub fn build(self, ctx: &mut BuildCtx) -> Result<Box<dyn InputSource>> {
+        let inner = self.kind.build(ctx)?;
+        Ok(match self.buffer {
+            Some(n) if n > 1 => Box::new(Buffered { inner, buffer: n }),
+            _ => inner,
+        })
+    }
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
-pub enum InputConfig {
+pub enum InputKind {
     Dummy { duration: usize },
-    Nats(NatsInputConfig),
+    Nats { urls: String, subject: String },
     Streamer { upstream: StreamerId },
 }
-impl InputConfig {
+impl InputKind {
     pub fn build(self, ctx: &mut BuildCtx) -> Result<Box<dyn InputSource>> {
         match self {
-            InputConfig::Dummy { duration } => Ok(Box::new(DummyInput {
+            InputKind::Dummy { duration } => Ok(Box::new(DummyInput {
                 interval: std::time::Duration::from_secs(duration as u64),
             })),
-            InputConfig::Nats(nats_cfg) => Ok(Box::new(NatsInput {
-                cfg: nats_cfg,
+            InputKind::Nats { urls, subject } => Ok(Box::new(NatsInput {
+                urls,
+                subject,
                 sub: None,
             })),
-            InputConfig::Streamer { upstream } => {
+            InputKind::Streamer { upstream } => {
                 let upstream_handle = ctx
                     .streamers
                     .get(&upstream)
@@ -61,17 +76,4 @@ pub struct Config {
     pub input: InputConfig,
     pub transforms: Vec<TransformConfig>,
     pub output: OutputConfig,
-}
-
-impl Config {
-    fn new() -> Self {
-        Self {
-            input: InputConfig::Nats(NatsInputConfig {
-                urls: "http://yoyo:4222".to_string(),
-                subject: "test".to_string(),
-            }),
-            transforms: Vec::new(),
-            output: OutputConfig::Stdout,
-        }
-    }
 }

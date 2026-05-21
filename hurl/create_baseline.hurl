@@ -1,7 +1,7 @@
 POST http://localhost:6767
 Content-Type: application/json
 {
-    "input": { "type": "dummy", "duration": 1 },
+    "input": { "type": "dummy", "duration": 1, "buffer": 10 },
     "transforms": [],
     "output": "Stdout"
 }
@@ -42,3 +42,6 @@ Content-Type: application/json
     "transforms": [],
     "output": "Stdout"
 }
+HTTP 201
+
+GET http://localhost:6767
