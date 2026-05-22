@@ -2,7 +2,6 @@ use crate::inputs::InputSource;
 use crate::inputs::MessageBatch;
 use anyhow::Result;
 use chrono::Utc;
-use serde_json::Value;
 use serde_json::json;
 use std::sync::Arc;
 use std::time::Duration;

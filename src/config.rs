@@ -5,10 +5,10 @@ use crate::inputs::MessageBatch;
 use crate::inputs::dummy::DummyInput;
 use crate::inputs::nats::NatsInput;
 use crate::inputs::streamer::StreamerInput;
-use crate::outputs::FileOutput;
 use crate::outputs::OutputDestination;
 use crate::outputs::OutputKind;
-use crate::outputs::StdoutOutput;
+use crate::outputs::file::FileOutput;
+use crate::outputs::stdout::StdoutOutput;
 use crate::state::StreamerId;
 
 use anyhow::Result;
