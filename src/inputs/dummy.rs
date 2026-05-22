@@ -15,6 +15,7 @@ pub struct DummyInput {
 impl InputSource for DummyInput {
     async fn next(&mut self) -> Result<Arc<MessageBatch>> {
         tokio::time::sleep(self.interval).await;
+        tracing::debug!("Emitting dummy message inside dummy input");
         Ok(Arc::new(vec![Arc::new(json!({
             "hello": "streamer",
             "current_time": Utc::now().to_string(),

@@ -6,6 +6,7 @@ use axum::{
 };
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
+use tracing::Level;
 
 mod config;
 mod inputs;
@@ -16,6 +17,13 @@ mod transforms;
 use crate::config::Config;
 use crate::state::{AppState, StreamerHandle, StreamerId};
 use crate::streamer::Streamer;
+use clap::Parser;
+
+#[derive(Parser)]
+struct Args {
+    #[arg(long)]
+    debug: bool,
+}
 
 struct BuildCtx<'a> {
     streamers: &'a mut HashMap<StreamerId, StreamerHandle>,
@@ -29,6 +37,16 @@ impl<'a> BuildCtx<'a> {
 
 #[tokio::main]
 async fn main() {
+    let args = Args::parse();
+    let level = if args.debug {
+        Level::DEBUG
+    } else {
+        Level::INFO
+    };
+
+    tracing_subscriber::fmt().with_max_level(level).init();
+    tracing::info!("Starting server...");
+
     let state = AppState {
         streamers: Mutex::new(HashMap::new()),
     };
@@ -63,6 +81,7 @@ async fn create_stream(
     let id = streamer.id.clone();
     app.insert(id, streamer_handle);
     let body = serde_json::to_value(streamer.view()).unwrap();
+    tracing::debug!("streamer created, config: {}", &body);
     (StatusCode::CREATED, Json(body))
 }
 
@@ -74,7 +93,9 @@ async fn delete_stream(
     if let Some(streamer) = app.get(stream_id.as_str()) {
         // signal cancellation here
         streamer.shared.cancellation_token.cancel();
-        app.remove(stream_id.as_str());
+        app.remove(stream_id.clone().as_str());
+        tracing::debug!("streamer deleted: {}", stream_id);
+
         StatusCode::OK
     } else {
         StatusCode::NOT_FOUND
