@@ -38,6 +38,20 @@ nats_streamer_id : jsonpath "$.id"
 POST http://localhost:6767
 Content-Type: application/json
 {
+    "input": {
+        "type": "nats",
+        "urls": "localhost:4222",
+        "subject": "test.subject"
+        
+    },
+    "transforms": [],
+    "output": { "type": "file", "file_type": "csv" }
+}
+HTTP 201
+
+POST http://localhost:6767
+Content-Type: application/json
+{
     "input": { "type": "streamer", "upstream": "{{ nats_streamer_id }}" },
     "transforms": [],
     "output": { "type": "stdout" }

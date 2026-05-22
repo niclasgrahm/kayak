@@ -3,7 +3,7 @@ Content-Type: application/json
 {
     "input": { "type": "dummy", "duration": 1 },
     "transforms": [],
-    "output": "Stdout"
+    "output": {"type": "file", "file_type": "csv"}
 }
 
 HTTP 201
