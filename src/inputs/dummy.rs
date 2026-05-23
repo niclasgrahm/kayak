@@ -1,10 +1,27 @@
+use crate::BuildCtx;
+use crate::inputs::BuildInput;
 use crate::inputs::InputSource;
 use crate::inputs::MessageBatch;
 use anyhow::Result;
 use chrono::Utc;
+use serde::Deserialize;
+use serde::Serialize;
 use serde_json::json;
 use std::sync::Arc;
 use std::time::Duration;
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct DummyConfig {
+    pub duration: u64,
+}
+
+impl BuildInput for DummyConfig {
+    fn build(self, _ctx: &mut BuildCtx) -> Result<Box<dyn InputSource>> {
+        Ok(Box::new(DummyInput {
+            interval: Duration::from_secs(self.duration),
+        }))
+    }
+}
 
 pub struct DummyInput {
     pub interval: Duration,

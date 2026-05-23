@@ -1,9 +1,15 @@
 use anyhow::Result;
 use std::sync::Arc;
 
+use crate::BuildCtx;
+
 pub mod dummy;
 pub mod nats;
 pub mod streamer;
+
+pub trait BuildInput {
+    fn build(self, ctx: &mut BuildCtx) -> anyhow::Result<Box<dyn InputSource>>;
+}
 
 pub type MessageBatch = Vec<Arc<serde_json::Value>>;
 

@@ -1,8 +1,28 @@
-use crate::inputs::{InputSource, MessageBatch};
+use crate::{
+    BuildCtx,
+    inputs::{BuildInput, InputSource, MessageBatch},
+};
 use anyhow::Result;
+use serde::{Deserialize, Serialize};
 use tokio_stream::StreamExt;
 
 use std::sync::Arc;
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct NatsConfig {
+    pub urls: String,
+    pub subject: String,
+}
+
+impl BuildInput for NatsConfig {
+    fn build(self, _ctx: &mut BuildCtx) -> Result<Box<dyn InputSource>> {
+        Ok(Box::new(NatsInput {
+            urls: self.urls,
+            subject: self.subject,
+            sub: None,
+        }))
+    }
+}
 
 pub struct NatsInput {
     pub urls: String,

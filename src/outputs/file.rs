@@ -4,8 +4,20 @@ use std::sync::Arc;
 use tokio::fs::File;
 use tokio::io::{AsyncWriteExt, BufWriter};
 
+use crate::BuildCtx;
 use crate::inputs::MessageBatch;
-use crate::outputs::OutputDestination;
+use crate::outputs::{BuildOutput, OutputDestination};
+
+// we have nats both as input and output; lets differentiate their configs like this
+// for now; perhaps we can consolidate later
+pub struct FileOutputConfig {}
+
+impl BuildOutput for FileOutputConfig {
+    fn build(self, _ctx: &mut BuildCtx) -> Result<Box<dyn OutputDestination>> {
+        Ok(Box::new(FileOutput::new()))
+    }
+}
+
 #[derive(Debug, Deserialize, Serialize)]
 pub struct FileOutput {
     // there's probably a better type for this
