@@ -39,8 +39,9 @@ pub struct StreamerRuntime {
 }
 
 impl StreamerRuntime {
-    async fn run(mut self) {
+    async fn run(mut self) -> anyhow::Result<()> {
         println!("[{}]\t inside StreamerRuntime::run()", self.shared.id);
+        self.output.init().await?;
         loop {
             let next_msg = match select! {
                 _ = self.shared.cancellation_token.cancelled() => break,
@@ -61,6 +62,7 @@ impl StreamerRuntime {
                 let _ = tx.send(Arc::clone(&next_msg)).await;
             }
         }
+        Ok(())
     }
 }
 

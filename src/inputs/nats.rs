@@ -43,7 +43,10 @@ impl InputSource for NatsInput {
                 .expect("failed to subscribe to nats subject");
             self.sub = Some(subscriber);
         }
-        let subscriber = self.sub.as_mut().unwrap();
+        let subscriber = self
+            .sub
+            .as_mut()
+            .ok_or_else(|| anyhow::anyhow!("nats subscriber not initialized"))?;
         let msg = subscriber.next().await.expect("sub ended");
         let value = serde_json::from_slice(&msg.payload).expect("we assume json");
         Ok(Arc::new(vec![Arc::new(value)]))

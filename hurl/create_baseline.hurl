@@ -15,7 +15,12 @@ Content-Type: application/json
 {
     "input": { "type": "streamer", "upstream": "{{ dummy_streamer_id }}" },
     "transforms": [],
-    "output": { "type": "stdout" }
+    "output": { 
+      "type": "nats",
+      "urls": "localhost:4222",
+      "subject": "test.output_11"
+
+    }
 }
 
 

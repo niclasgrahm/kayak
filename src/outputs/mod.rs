@@ -1,5 +1,4 @@
 use anyhow::Result;
-use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 
 use crate::{BuildCtx, inputs::MessageBatch};

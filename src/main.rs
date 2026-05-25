@@ -55,7 +55,9 @@ async fn main() {
         .route("/", get(get_streams))
         .route("/{stream_id}", delete(delete_stream))
         .with_state(Arc::new(state));
-    let listener = tokio::net::TcpListener::bind("0.0.0.0:6767").await.unwrap();
+    let listener = tokio::net::TcpListener::bind("0.0.0.0:6767")
+        .await
+        .expect("failed to bind to address");
     let _ = axum::serve(listener, app).await;
 }
 
@@ -70,19 +72,26 @@ async fn create_stream(
     Json(payload): Json<Config>,
 ) -> (StatusCode, Json<serde_json::Value>) {
     let streamer = Arc::new(Streamer::new(payload.clone()));
-    let mut app = state.streamers.lock().unwrap();
-    let ctx = BuildCtx::new(&mut app);
-    let join_handle = streamer.start(ctx);
+    match state.streamers.lock() {
+        Ok(mut app) => {
+            let ctx = BuildCtx::new(&mut app);
+            let join_handle = streamer.start(ctx);
 
-    let streamer_handle = StreamerHandle {
-        join_handle,
-        shared: Arc::clone(&streamer),
-    };
-    let id = streamer.id.clone();
-    app.insert(id, streamer_handle);
-    let body = serde_json::to_value(streamer.view()).unwrap();
-    tracing::debug!("streamer created, config: {}", &body);
-    (StatusCode::CREATED, Json(body))
+            let streamer_handle = StreamerHandle {
+                join_handle,
+                shared: Arc::clone(&streamer),
+            };
+            let id = streamer.id.clone();
+            app.insert(id, streamer_handle);
+            let body = serde_json::to_value(streamer.view()).unwrap();
+            tracing::debug!("streamer created, config: {}", &body);
+            (StatusCode::CREATED, Json(body))
+        }
+        Err(_) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({"error": "foo"})),
+        ),
+    }
 }
 
 async fn delete_stream(

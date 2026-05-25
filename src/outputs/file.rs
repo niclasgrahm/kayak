@@ -10,6 +10,7 @@ use crate::outputs::{BuildOutput, OutputDestination};
 
 // we have nats both as input and output; lets differentiate their configs like this
 // for now; perhaps we can consolidate later
+#[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct FileOutputConfig {}
 
 impl BuildOutput for FileOutputConfig {
@@ -37,17 +38,18 @@ impl OutputDestination for FileOutput {
         if self.writer.is_none() {
             self.init().await?;
         }
-
-        self.writer
+        let writer = self
+            .writer
             .as_mut()
-            .unwrap()
+            .ok_or_else(|| anyhow::anyhow!("file output writer not initialized"))?;
+
+        writer
             .write_all(serde_json::to_string(&message_batch)?.as_bytes())
             .await?;
-
-        self.writer.as_mut().unwrap().flush().await?;
-
+        writer.flush().await?;
         Ok(())
     }
+
     async fn init(&mut self) -> Result<()> {
         let path = std::path::PathBuf::from("/Users/niclas/projects/rust/streamer/data.csv");
         let file = tokio::fs::File::create(path).await?;

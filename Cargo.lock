@@ -1543,6 +1543,7 @@ dependencies = [
  "async-nats",
  "async-trait",
  "axum",
+ "bytes",
  "chrono",
  "clap",
  "petname",

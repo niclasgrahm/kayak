@@ -5,13 +5,16 @@ use crate::inputs::InputSource;
 use crate::inputs::dummy::DummyConfig;
 use crate::inputs::nats::NatsConfig;
 use crate::inputs::streamer::StreamerConfig;
+use crate::outputs::BuildOutput;
 use crate::outputs::OutputDestination;
-use crate::outputs::OutputKind;
-use crate::outputs::file::FileOutput;
-use crate::outputs::stdout::StdoutOutput;
+use crate::outputs::file::FileOutputConfig;
+use crate::outputs::nats::NatsOutputConfig;
+use crate::outputs::stdout::StdoutOutputConfig;
 
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
+
+/////// INPUTS
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
@@ -48,10 +51,20 @@ impl InputConfig {
         })
     }
 }
+/////// TRANSFORM
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub enum TransformConfig {}
 
+/////// OUTPUT
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum OutputKind {
+    Stdout(StdoutOutputConfig),
+    File(FileOutputConfig),
+    Nats(NatsOutputConfig),
+}
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct OutputConfig {
     #[serde(flatten)]
@@ -61,8 +74,9 @@ pub struct OutputConfig {
 impl OutputConfig {
     pub fn build(self, ctx: &mut BuildCtx) -> Result<Box<dyn OutputDestination>> {
         match self.kind {
-            OutputKind::Stdout => Ok(Box::new(StdoutOutput {})),
-            OutputKind::File => Ok(Box::new(FileOutput::new())),
+            OutputKind::Stdout(c) => c.build(ctx),
+            OutputKind::File(c) => c.build(ctx),
+            OutputKind::Nats(c) => c.build(ctx),
         }
     }
 }
