@@ -10,6 +10,9 @@ use crate::outputs::OutputDestination;
 use crate::outputs::file::FileOutputConfig;
 use crate::outputs::nats::NatsOutputConfig;
 use crate::outputs::stdout::StdoutOutputConfig;
+use crate::transforms::BuildTransform;
+use crate::transforms::Transform;
+use crate::transforms::buffer::BufferTransformConfig;
 
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
@@ -52,9 +55,28 @@ impl InputConfig {
     }
 }
 /////// TRANSFORM
-
 #[derive(Clone, Debug, Deserialize, Serialize)]
-pub enum TransformConfig {}
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum TransformKind {
+    Buffer(BufferTransformConfig),
+    // Reduce(ReduceTransformConfig),
+    // Http(HttpTransformConfig),
+}
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct TransformConfig {
+    #[serde(flatten)]
+    pub kind: TransformKind,
+}
+
+impl TransformConfig {
+    pub fn build(self, ctx: &mut BuildCtx) -> Result<Box<dyn Transform>> {
+        match self.kind {
+            TransformKind::Buffer(c) => c.build(ctx),
+            // TransformKind::Reduce(c) => c.build(ctx),
+            // TransformKind::Http(c) => c.build(ctx),
+        }
+    }
+}
 
 /////// OUTPUT
 

@@ -10,6 +10,7 @@ use serde::Serialize;
 use std::sync::{Arc, Mutex};
 use tokio::select;
 use tokio::sync::mpsc;
+use tracing::debug;
 
 #[derive(Serialize)]
 pub struct Streamer {
@@ -33,17 +34,17 @@ async fn next_input_message(input: &mut Box<dyn InputSource>) -> Result<Arc<Mess
 
 pub struct StreamerRuntime {
     input: Box<dyn InputSource>,
-    transforms: Vec<Transform>,
+    transforms: Vec<Box<dyn Transform>>,
     output: Box<dyn OutputDestination>,
     shared: Arc<Streamer>,
 }
 
 impl StreamerRuntime {
     async fn run(mut self) -> anyhow::Result<()> {
-        println!("[{}]\t inside StreamerRuntime::run()", self.shared.id);
+        debug!("[{}]\t inside StreamerRuntime::run()", self.shared.id);
         self.output.init().await?;
         loop {
-            let next_msg = match select! {
+            let mut next_msg = match select! {
                 _ = self.shared.cancellation_token.cancelled() => break,
                 msg = next_input_message(&mut self.input) => msg,
             } {
@@ -53,13 +54,20 @@ impl StreamerRuntime {
                     break;
                 }
             };
-            // transform; skip for now
-            self.output.emit(next_msg.clone()).await.unwrap();
-
-            // send to downstream subscribers
-            let senders = self.shared.downstream_senders.lock().unwrap().clone();
-            for tx in &senders {
-                let _ = tx.send(Arc::clone(&next_msg)).await;
+            let mut batches = vec![next_msg];
+            for t in &mut self.transforms {
+                let mut next = Vec::new();
+                for b in batches {
+                    next.extend(t.apply(b).await?);
+                }
+                batches = next;
+            }
+            for b in &batches {
+                self.output.emit(b.clone()).await?;
+                let senders = self.shared.downstream_senders.lock().unwrap().clone();
+                for tx in &senders {
+                    let _ = tx.send(Arc::clone(b)).await;
+                }
             }
         }
         Ok(())
@@ -79,9 +87,13 @@ impl Streamer {
     }
 
     fn create_runtime(self: &Arc<Self>, mut ctx: BuildCtx) -> Result<StreamerRuntime> {
+        let mut transforms = Vec::with_capacity(self.config.transforms.len());
+        for t in self.config.transforms.iter().cloned() {
+            transforms.push(t.build(&mut ctx)?);
+        }
         Ok(StreamerRuntime {
             input: self.config.input.clone().build(&mut ctx)?,
-            transforms: Vec::new(),
+            transforms,
             output: self.config.output.clone().build(&mut ctx)?,
             shared: Arc::clone(self),
         })

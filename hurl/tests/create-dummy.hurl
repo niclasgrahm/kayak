@@ -2,7 +2,9 @@ POST http://localhost:6767
 Content-Type: application/json
 {
     "input": { "type": "dummy", "duration": 1 },
-    "transforms": [],
+    "transforms": [
+    { "type": "buffer", "size": 10}
+    ],
     "output": {"type": "file", "file_type": "csv"}
 }
 

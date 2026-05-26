@@ -1,19 +1,17 @@
-use serde::{Deserialize, Serialize};
+use std::sync::Arc;
 
-#[derive(Debug, Deserialize, Serialize)]
-pub enum ReduceFn {
-    Min,
-    Max,
-    Sum,
+use crate::{BuildCtx, inputs::MessageBatch};
+
+pub mod buffer;
+
+pub trait BuildTransform {
+    fn build(self, ctx: &mut BuildCtx) -> anyhow::Result<Box<dyn Transform>>;
 }
 
-#[derive(Debug, Deserialize, Serialize)]
-pub enum Transform {
-    Buffer {
-        size: usize,
-    },
-    Reduce {
-        reduce_field: String,
-        reduce_fn: ReduceFn,
-    },
+#[async_trait::async_trait]
+pub trait Transform: Send + 'static {
+    async fn apply(
+        &mut self,
+        message_batch: Arc<MessageBatch>,
+    ) -> anyhow::Result<Vec<Arc<MessageBatch>>>;
 }
