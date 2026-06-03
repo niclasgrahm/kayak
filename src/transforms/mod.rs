@@ -3,6 +3,8 @@ use std::sync::Arc;
 use crate::{BuildCtx, inputs::MessageBatch};
 
 pub mod buffer;
+pub mod http;
+pub mod splitter;
 
 pub trait BuildTransform {
     fn build(self, ctx: &mut BuildCtx) -> anyhow::Result<Box<dyn Transform>>;

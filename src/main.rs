@@ -44,7 +44,12 @@ async fn main() {
         Level::INFO
     };
 
-    tracing_subscriber::fmt().with_max_level(level).init();
+    tracing_subscriber::fmt()
+        .with_env_filter(match level {
+            Level::DEBUG => "info,streamer=debug",
+            _ => "info",
+        })
+        .init();
     tracing::info!("Starting server...");
 
     let state = AppState {

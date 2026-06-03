@@ -13,6 +13,8 @@ use crate::outputs::stdout::StdoutOutputConfig;
 use crate::transforms::BuildTransform;
 use crate::transforms::Transform;
 use crate::transforms::buffer::BufferTransformConfig;
+use crate::transforms::http::HttpTransformConfig;
+use crate::transforms::splitter::SplitterTransformConfig;
 
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
@@ -59,8 +61,8 @@ impl InputConfig {
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum TransformKind {
     Buffer(BufferTransformConfig),
-    // Reduce(ReduceTransformConfig),
-    // Http(HttpTransformConfig),
+    Http(HttpTransformConfig),
+    Splitter(SplitterTransformConfig),
 }
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct TransformConfig {
@@ -72,8 +74,8 @@ impl TransformConfig {
     pub fn build(self, ctx: &mut BuildCtx) -> Result<Box<dyn Transform>> {
         match self.kind {
             TransformKind::Buffer(c) => c.build(ctx),
-            // TransformKind::Reduce(c) => c.build(ctx),
-            // TransformKind::Http(c) => c.build(ctx),
+            TransformKind::Http(c) => c.build(ctx),
+            TransformKind::Splitter(c) => c.build(ctx),
         }
     }
 }
