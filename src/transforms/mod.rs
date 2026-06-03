@@ -4,6 +4,7 @@ use crate::{BuildCtx, inputs::MessageBatch};
 
 pub mod buffer;
 pub mod http;
+pub mod reduce;
 pub mod splitter;
 
 pub trait BuildTransform {
