@@ -1,9 +1,14 @@
 POST http://localhost:6767
 Content-Type: application/json
 {
-    "input": { "type": "dummy", "duration": 1, "buffer": 10 },
+    "input": { 
+      "type": "nats", 
+      "urls": "nats://localhost:4222",
+      "subject": "test.subject"
+    },
     "transforms": [
-    { "type": "splitter", "out_size": 2}
+      { "type": "buffer", "size": 2},
+      { "type": "reducer",  "function": "sum", "field": "value" }
     ],
     "output": { "type": "stdout" }
 }

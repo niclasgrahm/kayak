@@ -10,6 +10,7 @@ use crate::{
 };
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
 enum ReduceFnKind {
     Sum,
     Avg,
@@ -21,7 +22,6 @@ enum ReduceFnKind {
 pub struct ReduceTransformConfig {
     function: ReduceFnKind,
     field: String,
-    new_field_name: String,
 }
 impl BuildTransform for ReduceTransformConfig {
     fn build(self, ctx: &mut BuildCtx) -> anyhow::Result<Box<dyn Transform>> {

@@ -12,6 +12,6 @@ services:
     command:
       - |
         while true; do
-          nats --server nats://nats:4222 pub test.subject "{\"ts\":\"$(date -Iseconds)\",\"msg\":\"hello\"}"
+          nats --server nats://nats:4222 pub test.subject "{\"ts\":\"$(date -Iseconds)\",\"value\":$((RANDOM % 101))}"
           sleep 1
         done

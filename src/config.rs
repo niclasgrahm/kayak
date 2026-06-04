@@ -14,6 +14,7 @@ use crate::transforms::BuildTransform;
 use crate::transforms::Transform;
 use crate::transforms::buffer::BufferTransformConfig;
 use crate::transforms::http::HttpTransformConfig;
+use crate::transforms::reduce::ReduceTransformConfig;
 use crate::transforms::splitter::SplitterTransformConfig;
 
 use anyhow::Result;
@@ -63,7 +64,9 @@ pub enum TransformKind {
     Buffer(BufferTransformConfig),
     Http(HttpTransformConfig),
     Splitter(SplitterTransformConfig),
+    Reducer(ReduceTransformConfig),
 }
+
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct TransformConfig {
     #[serde(flatten)]
@@ -76,6 +79,7 @@ impl TransformConfig {
             TransformKind::Buffer(c) => c.build(ctx),
             TransformKind::Http(c) => c.build(ctx),
             TransformKind::Splitter(c) => c.build(ctx),
+            TransformKind::Reducer(c) => c.build(ctx),
         }
     }
 }
