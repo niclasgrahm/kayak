@@ -1,7 +1,9 @@
+use askama::Template;
 use axum::{
     Json, Router,
     extract::{Path, State},
     http::StatusCode,
+    response::{Html, IntoResponse},
     routing::{delete, get, post},
 };
 use std::collections::HashMap;
@@ -56,6 +58,7 @@ async fn main() {
         streamers: Mutex::new(HashMap::new()),
     };
     let app = Router::new()
+        .route("/ui", get(index_handler))
         .route("/", post(create_stream))
         .route("/", get(get_streams))
         .route("/{stream_id}", delete(delete_stream))
@@ -114,4 +117,15 @@ async fn delete_stream(
     } else {
         StatusCode::NOT_FOUND
     }
+}
+
+async fn index_handler(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+    #[derive(Template)]
+    #[template(path = "index.html")]
+    struct Tmpl {
+        streamers: Vec<String>,
+    }
+    let streamers = state.streamers.lock().unwrap().keys().cloned().collect();
+    let template = Tmpl { streamers };
+    Html(template.render().unwrap())
 }
