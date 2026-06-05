@@ -6,8 +6,8 @@ use axum::{
     response::{Html, IntoResponse},
     routing::{delete, get, post},
 };
-use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
+use std::{collections::HashMap, path::PathBuf};
 use tracing::Level;
 
 mod config;
@@ -25,6 +25,10 @@ use clap::Parser;
 struct Args {
     #[arg(long)]
     debug: bool,
+    #[arg(long)]
+    config: Option<PathBuf>,
+    #[arg(long, default_value_t = 6767)]
+    port: u16,
 }
 
 struct BuildCtx<'a> {
@@ -52,18 +56,21 @@ async fn main() {
             _ => "info",
         })
         .init();
-    tracing::info!("Starting server...");
+    let addr = format!("0.0.0.0:{}", args.port);
+    tracing::info!("Starting server on {}", addr);
 
-    let state = AppState {
-        streamers: Mutex::new(HashMap::new()),
+    let state = match &args.config {
+        Some(path) => AppState::from_config(path),
+        None => AppState::new(),
     };
+
     let app = Router::new()
         .route("/ui", get(index_handler))
         .route("/", post(create_stream))
         .route("/", get(get_streams))
         .route("/{stream_id}", delete(delete_stream))
         .with_state(Arc::new(state));
-    let listener = tokio::net::TcpListener::bind("0.0.0.0:6767")
+    let listener = tokio::net::TcpListener::bind(addr)
         .await
         .expect("failed to bind to address");
     let _ = axum::serve(listener, app).await;
