@@ -77,34 +77,26 @@ async fn main() {
 }
 
 async fn get_streams(State(state): State<Arc<AppState>>) -> (StatusCode, Json<serde_json::Value>) {
-    (
-        StatusCode::OK,
-        Json(serde_json::to_value(&*state.streamers.lock().unwrap()).unwrap()),
-    )
+    match state.get_streamers() {
+        Ok(streamers) => (StatusCode::OK, Json(streamers)),
+        Err(err) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({"error": err.to_string()})),
+        ),
+    }
 }
 async fn create_stream(
     State(state): State<Arc<AppState>>,
     Json(payload): Json<Config>,
 ) -> (StatusCode, Json<serde_json::Value>) {
-    let streamer = Arc::new(Streamer::new(payload.clone()));
-    match state.streamers.lock() {
-        Ok(mut app) => {
-            let ctx = BuildCtx::new(&mut app);
-            let join_handle = streamer.start(ctx);
-
-            let streamer_handle = StreamerHandle {
-                join_handle,
-                shared: Arc::clone(&streamer),
-            };
-            let id = streamer.id.clone();
-            app.insert(id, streamer_handle);
+    match state.create_streamer(payload) {
+        Ok(streamer) => {
             let body = serde_json::to_value(streamer.view()).unwrap();
-            tracing::debug!("streamer created, config: {}", &body);
             (StatusCode::CREATED, Json(body))
         }
-        Err(_) => (
+        Err(err) => (
             StatusCode::INTERNAL_SERVER_ERROR,
-            Json(serde_json::json!({"error": "foo"})),
+            Json(serde_json::json!({"error": err.to_string()})),
         ),
     }
 }
@@ -113,16 +105,10 @@ async fn delete_stream(
     State(state): State<Arc<AppState>>,
     Path(stream_id): Path<String>,
 ) -> StatusCode {
-    let mut app = state.streamers.lock().unwrap();
-    if let Some(streamer) = app.get(stream_id.as_str()) {
-        // signal cancellation here
-        streamer.shared.cancellation_token.cancel();
-        app.remove(stream_id.clone().as_str());
-        tracing::debug!("streamer deleted: {}", stream_id);
-
-        StatusCode::OK
-    } else {
-        StatusCode::NOT_FOUND
+    match state.delete_streamer(stream_id) {
+        Ok(_) => StatusCode::NO_CONTENT,
+        // i guess we need to match on error; not found or something messed up
+        Err(err) => StatusCode::NOT_FOUND,
     }
 }
 
@@ -132,7 +118,7 @@ async fn index_handler(State(state): State<Arc<AppState>>) -> impl IntoResponse 
     struct Tmpl {
         streamers: Vec<String>,
     }
-    let streamers = state.streamers.lock().unwrap().keys().cloned().collect();
+    let streamers = state.get_stremer_ids().unwrap_or_default();
     let template = Tmpl { streamers };
     Html(template.render().unwrap())
 }
