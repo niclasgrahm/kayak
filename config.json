@@ -1,9 +1,21 @@
 [
   {
+    "id": "pipeline1",
     "input": {
       "type": "nats",
       "urls": "nats://localhost:4222",
       "subject": "test.subject"
+    },
+    "transforms": [
+      { "type": "buffer", "size": 2 },
+      { "type": "reducer", "function": "sum", "field": "value" }
+    ],
+    "output": { "type": "stdout" }
+  },
+  {
+    "input": {
+      "type": "streamer",
+      "upstream": "pipeline1"
     },
     "transforms": [
       { "type": "buffer", "size": 2 },

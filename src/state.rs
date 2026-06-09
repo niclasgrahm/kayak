@@ -65,6 +65,11 @@ impl AppState {
         let streamer = Arc::new(Streamer::new(config));
         match self.streamers.lock() {
             Ok(mut app) => {
+                let id = streamer.id.clone();
+                // we require unique ids, so if this id already exists we should error out
+                if app.contains_key(id.as_str()) {
+                    return Err(anyhow::anyhow!("Streamer with id {} already exists", id));
+                }
                 let ctx = BuildCtx::new(&mut app);
                 let join_handle = streamer.start(ctx);
 
@@ -72,7 +77,6 @@ impl AppState {
                     join_handle,
                     shared: Arc::clone(&streamer),
                 };
-                let id = streamer.id.clone();
                 app.insert(id, streamer_handle);
                 let body = serde_json::to_value(streamer.view())?;
                 tracing::debug!("streamer created, config: {}", &body);

@@ -76,7 +76,10 @@ impl StreamerRuntime {
 
 impl Streamer {
     pub fn new(config: Config) -> Self {
-        let id = petname::petname(3, "-").unwrap();
+        let id = match config.id.clone() {
+            Some(id) => id,
+            None => petname::petname(3, "-").unwrap(),
+        };
         let cancellation_token = tokio_util::sync::CancellationToken::new();
         Self {
             id,

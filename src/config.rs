@@ -111,6 +111,7 @@ impl OutputConfig {
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct Config {
+    pub id: Option<String>,
     pub input: InputConfig,
     pub transforms: Vec<TransformConfig>,
     pub output: OutputConfig,
