@@ -1,24 +1,22 @@
 use askama::Template;
 use axum::{
-    Json, Router,
-    extract::{Path, State},
-    http::StatusCode,
-    response::{Html, IntoResponse},
+    Router,
     routing::{delete, get, post},
 };
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use std::{collections::HashMap, path::PathBuf};
 use tracing::Level;
 
 mod config;
+mod handlers;
 mod inputs;
 mod outputs;
 mod state;
 mod streamer;
 mod transforms;
-use crate::config::Config;
+use crate::handlers::rest::streamer::{create_stream, delete_stream, get_streams};
+use crate::handlers::ui::ui::index_handler;
 use crate::state::{AppState, StreamerHandle, StreamerId};
-use crate::streamer::Streamer;
 use clap::Parser;
 
 #[derive(Parser)]
@@ -74,51 +72,4 @@ async fn main() {
         .await
         .expect("failed to bind to address");
     let _ = axum::serve(listener, app).await;
-}
-
-async fn get_streams(State(state): State<Arc<AppState>>) -> (StatusCode, Json<serde_json::Value>) {
-    match state.get_streamers() {
-        Ok(streamers) => (StatusCode::OK, Json(streamers)),
-        Err(err) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(serde_json::json!({"error": err.to_string()})),
-        ),
-    }
-}
-async fn create_stream(
-    State(state): State<Arc<AppState>>,
-    Json(payload): Json<Config>,
-) -> (StatusCode, Json<serde_json::Value>) {
-    match state.create_streamer(payload) {
-        Ok(streamer) => {
-            let body = serde_json::to_value(streamer.view()).unwrap();
-            (StatusCode::CREATED, Json(body))
-        }
-        Err(err) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(serde_json::json!({"error": err.to_string()})),
-        ),
-    }
-}
-
-async fn delete_stream(
-    State(state): State<Arc<AppState>>,
-    Path(stream_id): Path<String>,
-) -> StatusCode {
-    match state.delete_streamer(stream_id) {
-        Ok(_) => StatusCode::NO_CONTENT,
-        // i guess we need to match on error; not found or something messed up
-        Err(err) => StatusCode::NOT_FOUND,
-    }
-}
-
-async fn index_handler(State(state): State<Arc<AppState>>) -> impl IntoResponse {
-    #[derive(Template)]
-    #[template(path = "index.html")]
-    struct Tmpl {
-        streamers: Vec<String>,
-    }
-    let streamers = state.get_streamer_ids().unwrap_or_default();
-    let template = Tmpl { streamers };
-    Html(template.render().unwrap())
 }
