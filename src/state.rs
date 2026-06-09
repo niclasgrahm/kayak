@@ -26,14 +26,19 @@ impl AppState {
             streamers: Mutex::new(HashMap::new()),
         }
     }
-    pub fn from_config(path: &PathBuf) -> Self {
+    pub fn from_config(path: &PathBuf) -> anyhow::Result<Self> {
+        let new_state = AppState::new();
         tracing::debug!("Loading initial configuration from {:?}...", path);
-        Self {
-            streamers: Mutex::new(HashMap::new()),
+        let file = std::fs::File::open(path)?;
+        let configs: Vec<Config> = serde_json::from_reader(file)?;
+        for c in configs {
+            let _ = new_state.create_streamer(c)?;
         }
+
+        Ok(new_state)
     }
 
-    pub fn get_stremer_ids(&self) -> anyhow::Result<Vec<StreamerId>> {
+    pub fn get_streamer_ids(&self) -> anyhow::Result<Vec<StreamerId>> {
         match self.streamers.lock() {
             Ok(app) => Ok(app.keys().cloned().collect()),
             Err(err) => Err(anyhow::anyhow!(

@@ -60,7 +60,7 @@ async fn main() {
     tracing::info!("Starting server on {}", addr);
 
     let state = match &args.config {
-        Some(path) => AppState::from_config(path),
+        Some(path) => AppState::from_config(path).unwrap(),
         None => AppState::new(),
     };
 
@@ -118,7 +118,7 @@ async fn index_handler(State(state): State<Arc<AppState>>) -> impl IntoResponse 
     struct Tmpl {
         streamers: Vec<String>,
     }
-    let streamers = state.get_stremer_ids().unwrap_or_default();
+    let streamers = state.get_streamer_ids().unwrap_or_default();
     let template = Tmpl { streamers };
     Html(template.render().unwrap())
 }
