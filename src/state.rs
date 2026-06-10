@@ -1,13 +1,16 @@
 use serde::Serialize;
+use tokio::sync::broadcast;
 
 use crate::BuildCtx;
 use crate::config::Config;
+use crate::inputs::MessageBatch;
 use crate::streamer::Streamer;
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
 pub type StreamerId = String;
+
 #[derive(Serialize)]
 pub struct StreamerHandle {
     #[serde(skip)]
@@ -17,15 +20,23 @@ pub struct StreamerHandle {
 
 pub struct AppState {
     streamers: Mutex<HashMap<StreamerId, StreamerHandle>>,
+    events: broadcast::Sender<UiEvent>,
 }
 
 impl AppState {
     pub fn new() -> Self {
         tracing::debug!("Initializing empty server state...");
+        let (events, _) = broadcast::channel(1024);
         Self {
             streamers: Mutex::new(HashMap::new()),
+            events,
         }
     }
+
+    pub fn subscribe_events(&self) -> broadcast::Receiver<UiEvent> {
+        self.events.subscribe()
+    }
+
     pub fn from_config(path: &PathBuf) -> anyhow::Result<Self> {
         let new_state = AppState::new();
         tracing::debug!("Loading initial configuration from {:?}...", path);
@@ -70,7 +81,7 @@ impl AppState {
                 if app.contains_key(id.as_str()) {
                     return Err(anyhow::anyhow!("Streamer with id {} already exists", id));
                 }
-                let ctx = BuildCtx::new(&mut app);
+                let ctx = BuildCtx::new(&mut app, self.events.clone());
                 let join_handle = streamer.start(ctx);
 
                 let streamer_handle = StreamerHandle {
@@ -102,4 +113,11 @@ impl AppState {
             Err(anyhow::anyhow!("Streamer with id {} not found", id))
         }
     }
+}
+
+#[derive(Clone, Serialize)]
+pub struct UiEvent {
+    pub streamer_id: StreamerId,
+    pub stage: String, //let's see if we like this
+    pub batch: Arc<MessageBatch>,
 }

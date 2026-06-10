@@ -5,6 +5,7 @@ use axum::{
 };
 use std::sync::Arc;
 use std::{collections::HashMap, path::PathBuf};
+use tokio::sync::broadcast;
 use tracing::Level;
 
 mod config;
@@ -14,9 +15,12 @@ mod outputs;
 mod state;
 mod streamer;
 mod transforms;
-use crate::handlers::rest::streamer::{create_stream, delete_stream, get_streams};
-use crate::handlers::ui::ui::index_handler;
+use crate::handlers::{
+    rest::streamer::{create_stream, delete_stream, get_streams},
+    ui::ui::events_handler,
+};
 use crate::state::{AppState, StreamerHandle, StreamerId};
+use crate::{handlers::ui::ui::index_handler, state::UiEvent};
 use clap::Parser;
 
 #[derive(Parser)]
@@ -31,11 +35,15 @@ struct Args {
 
 struct BuildCtx<'a> {
     streamers: &'a mut HashMap<StreamerId, StreamerHandle>,
+    events: broadcast::Sender<UiEvent>,
 }
 
 impl<'a> BuildCtx<'a> {
-    fn new(streamers: &'a mut HashMap<StreamerId, StreamerHandle>) -> Self {
-        Self { streamers }
+    fn new(
+        streamers: &'a mut HashMap<StreamerId, StreamerHandle>,
+        events: broadcast::Sender<UiEvent>,
+    ) -> Self {
+        Self { streamers, events }
     }
 }
 
@@ -64,6 +72,7 @@ async fn main() {
 
     let app = Router::new()
         .route("/ui", get(index_handler))
+        .route("/events", get(events_handler))
         .route("/", post(create_stream))
         .route("/", get(get_streams))
         .route("/{stream_id}", delete(delete_stream))

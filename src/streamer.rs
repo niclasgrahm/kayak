@@ -4,11 +4,13 @@ use crate::inputs::InputSource;
 use crate::inputs::MessageBatch;
 use crate::outputs::OutputDestination;
 use crate::state::StreamerId;
+use crate::state::UiEvent;
 use crate::transforms::Transform;
 use anyhow::Result;
 use serde::Serialize;
 use std::sync::{Arc, Mutex};
 use tokio::select;
+use tokio::sync::broadcast;
 use tokio::sync::mpsc;
 use tracing::debug;
 
@@ -37,6 +39,7 @@ pub struct StreamerRuntime {
     transforms: Vec<Box<dyn Transform>>,
     output: Box<dyn OutputDestination>,
     shared: Arc<Streamer>,
+    events: broadcast::Sender<UiEvent>,
 }
 
 impl StreamerRuntime {
@@ -54,6 +57,13 @@ impl StreamerRuntime {
                     break;
                 }
             };
+            if self.events.receiver_count() > 0 {
+                let _ = self.events.send(UiEvent {
+                    streamer_id: self.shared.id.clone(),
+                    stage: "input".to_string(),
+                    batch: Arc::clone(&next_msg),
+                });
+            }
             let mut batches = vec![next_msg];
             for t in &mut self.transforms {
                 let mut next = Vec::new();
@@ -99,6 +109,7 @@ impl Streamer {
             transforms,
             output: self.config.output.clone().build(&mut ctx)?,
             shared: Arc::clone(self),
+            events: ctx.events.clone(),
         })
     }
     pub fn start(self: &Arc<Self>, ctx: BuildCtx) -> tokio::task::JoinHandle<()> {
