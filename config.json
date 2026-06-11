@@ -19,7 +19,7 @@
     },
     "transforms": [
       { "type": "buffer", "size": 2 },
-      { "type": "reducer", "function": "sum", "field": "value" }
+      { "type": "reducer", "function": "sum", "field": "reduced_value" }
     ],
     "output": { "type": "stdout" }
   }
