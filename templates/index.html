@@ -2,10 +2,44 @@
   <title>streamer</title>
   <body>
     <h1>streamer</h1>
-    <ul>
-      {% for s in streamers %}
-      <li>{{ s }}</li>
-      {% endfor %}
-    </ul>
+    <div class="cards">
+        {% for s in streamers %}
+        <div class="card" data-streamer="{{ s }}">
+          <strong>{{ s }}</strong>     
+          <pre></pre>
+        </div>
+        {% endfor %}
+    </div>
+    <script>
+      const MAX_LINES = 10;
+
+      function logFor(id) {
+        let card = document.querySelector(`[data-streamer="${CSS.escape(id)}"]`);
+        return card?.querySelector("pre");
+      }
+
+      function append(pre, text, cls) {
+        const line = document.createElement("div");
+        line.textContent = text;
+        if (cls) line.className = cls;
+        pre.appendChild(line);
+        while (pre.childNodes.length > MAX_LINES) pre.removeChild(pre.firstChild);
+        pre.scrollTop = pre.scrollHeight;
+      }
+
+      const es = new EventSource("/events");
+
+      es.onmessage = (e) => {
+        const ev = JSON.parse(e.data);
+        const pre = logFor(ev.streamer_id);
+        if (pre) append(pre, `[${ev.stage}] ${JSON.stringify(ev.batch)}`);
+      };
+
+      es.addEventListener("lagged", (e) => {
+        document.querySelectorAll(".card pre").forEach(pre => append(pre, `missed ${e.data} events`, "lagged"));
+      });
+
+      es.onerror = (e) => console.warn("sse connection lost, browser will retry...");
+    </script>
   </body>
 </html>

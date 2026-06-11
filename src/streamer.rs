@@ -57,6 +57,7 @@ impl StreamerRuntime {
                     break;
                 }
             };
+            // NOTE this is temporary! Send input to web client
             if self.events.receiver_count() > 0 {
                 let _ = self.events.send(UiEvent {
                     streamer_id: self.shared.id.clone(),
@@ -64,6 +65,7 @@ impl StreamerRuntime {
                     batch: Arc::clone(&next_msg),
                 });
             }
+            // END NOTE this is temporary! Send input to web client
             let mut batches = vec![next_msg];
             for t in &mut self.transforms {
                 let mut next = Vec::new();
@@ -72,6 +74,19 @@ impl StreamerRuntime {
                 }
                 batches = next;
             }
+
+            // NOTE this is temporary! Send output to web client
+            if self.events.receiver_count() > 0 {
+                for b in &batches {
+                    let _ = self.events.send(UiEvent {
+                        streamer_id: self.shared.id.clone(),
+                        stage: "output".to_string(),
+                        batch: Arc::clone(b),
+                    });
+                }
+            }
+            // END NOTE this is temporary! Send output to web client
+
             for b in &batches {
                 self.output.emit(b.clone()).await?;
                 let senders = self.shared.downstream_senders.lock().unwrap().clone();
