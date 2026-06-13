@@ -1,4 +1,5 @@
 use crate::BuildCtx;
+use crate::inputs::BufferKind;
 use crate::inputs::Buffered;
 use crate::inputs::BuildInput;
 use crate::inputs::InputSource;
@@ -40,20 +41,33 @@ impl InputKind {
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum BufferConfig {
+    Static { size: usize },
+    Tumbling { window_seconds: usize },
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct InputConfig {
     #[serde(flatten)]
     pub kind: InputKind,
 
     #[serde(default)]
-    pub buffer: Option<usize>,
+    pub buffer: Option<BufferConfig>,
 }
 
 impl InputConfig {
     pub fn build(self, ctx: &mut BuildCtx) -> Result<Box<dyn InputSource>> {
         let inner = self.kind.build(ctx)?;
         Ok(match self.buffer {
-            Some(n) if n > 1 => Box::new(Buffered { inner, buffer: n }),
-            _ => inner,
+            Some(BufferConfig::Static { size }) => {
+                Box::new(Buffered::new(inner, BufferKind::Static { size }))
+            }
+            Some(BufferConfig::Tumbling { window_seconds }) => Box::new(Buffered::new(
+                inner,
+                BufferKind::Tumbling { window_seconds },
+            )),
+            None => inner,
         })
     }
 }

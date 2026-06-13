@@ -6,21 +6,37 @@
       "urls": "nats://localhost:4222",
       "subject": "test.subject"
     },
-    "transforms": [
-      { "type": "buffer", "size": 2 },
-      { "type": "reducer", "function": "sum", "field": "value" }
-    ],
+    "transforms": [],
     "output": { "type": "stdout" }
   },
   {
+    "id": "60second_aggregator",
     "input": {
       "type": "streamer",
-      "upstream": "pipeline1"
+      "upstream": "pipeline1",
+      "buffer": { "type": "tumbling", "window_seconds": 60 }
     },
-    "transforms": [
-      { "type": "buffer", "size": 2 },
-      { "type": "reducer", "function": "sum", "field": "reduced_value" }
-    ],
+    "transforms": [{ "type": "reducer", "function": "sum", "field": "value" }],
+    "output": { "type": "stdout" }
+  },
+  {
+    "id": "10second_aggregator",
+    "input": {
+      "type": "streamer",
+      "upstream": "pipeline1",
+      "buffer": { "type": "tumbling", "window_seconds": 10 }
+    },
+    "transforms": [{ "type": "reducer", "function": "sum", "field": "value" }],
+    "output": { "type": "stdout" }
+  },
+  {
+    "id": "5second_aggregator",
+    "input": {
+      "type": "streamer",
+      "upstream": "pipeline1",
+      "buffer": { "type": "tumbling", "window_seconds": 5 }
+    },
+    "transforms": [{ "type": "reducer", "function": "sum", "field": "value" }],
     "output": { "type": "stdout" }
   }
 ]
