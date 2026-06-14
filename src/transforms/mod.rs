@@ -3,6 +3,7 @@ use std::sync::Arc;
 use crate::{BuildCtx, inputs::MessageBatch};
 
 pub mod buffer;
+pub mod filter;
 pub mod http;
 pub mod reduce;
 pub mod splitter;

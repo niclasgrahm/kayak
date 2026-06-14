@@ -37,7 +37,7 @@ impl Transform for HttpTransform {
         let body = serde_json::to_string(&message_batch)?;
         let out = self
             .client
-            .post("http://foo.com")
+            .post(&self.url)
             .body(body)
             .send()
             .await?
