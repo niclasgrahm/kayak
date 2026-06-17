@@ -27,12 +27,12 @@ enum FilterKind {
     Numeric {
         /// the field to filter on
         field: String,
-        Operator: NumericFilterOperatorKind,
+        operator: NumericFilterOperatorKind,
         value: f64,
     },
     String {
         field: String,
-        Operator: StringFilterOperatorKind,
+        operator: StringFilterOperatorKind,
         value: String,
     },
 }
@@ -44,7 +44,7 @@ pub struct FilterTransformConfig {
 }
 
 impl BuildTransform for FilterTransformConfig {
-    fn build(self, ctx: &mut BuildCtx) -> anyhow::Result<Box<dyn Transform>> {
+    fn build(self, _ctx: &mut BuildCtx) -> anyhow::Result<Box<dyn Transform>> {
         Ok(Box::new(FilterTransform {
             filter: self.filter,
         }))
@@ -52,7 +52,7 @@ impl BuildTransform for FilterTransformConfig {
 }
 
 pub struct FilterTransform {
-    pub filter: FilterKind,
+    filter: FilterKind,
 }
 
 #[async_trait::async_trait]
@@ -66,11 +66,11 @@ impl Transform for FilterTransform {
             .filter(|message| match &self.filter {
                 FilterKind::Numeric {
                     field,
-                    Operator,
+                    operator,
                     value,
                 } => {
                     let field_value = message.get(field).unwrap().as_f64().unwrap();
-                    match Operator {
+                    match operator {
                         NumericFilterOperatorKind::GreaterThan => field_value > *value,
                         NumericFilterOperatorKind::LessThan => field_value < *value,
                         NumericFilterOperatorKind::EqualTo => field_value == *value,
@@ -78,11 +78,11 @@ impl Transform for FilterTransform {
                 }
                 FilterKind::String {
                     field,
-                    Operator,
+                    operator,
                     value,
                 } => {
                     let field_value = message.get(field).unwrap().as_str().unwrap();
-                    match Operator {
+                    match operator {
                         StringFilterOperatorKind::EqualTo => field_value == value,
                         StringFilterOperatorKind::Contains => field_value.contains(value),
                     }

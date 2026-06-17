@@ -20,7 +20,7 @@ enum ReduceFnKind {
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, JsonSchema)]
-#[schemars(title = "reduce")]
+#[schemars(title = "reducer")]
 pub struct ReduceTransformConfig {
     function: ReduceFnKind,
     field: String,

@@ -66,7 +66,7 @@ async fn main() {
     tracing::info!("Starting server on {}", addr);
 
     let state = match &args.config {
-        Some(path) => AppState::from_config(path).unwrap(),
+        Some(path) => AppState::from_config(path).expect("should be able to read config file"),
         None => AppState::new(),
     };
 

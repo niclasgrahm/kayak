@@ -33,6 +33,7 @@ impl BuildInput for StreamerConfig {
 }
 
 pub struct StreamerInput {
+    #[allow(dead_code)]
     pub upstream: String,
     pub rx: tokio::sync::mpsc::Receiver<Arc<MessageBatch>>,
 }
