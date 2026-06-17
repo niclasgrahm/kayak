@@ -14,16 +14,18 @@ use crate::outputs::stdout::StdoutOutputConfig;
 use crate::transforms::BuildTransform;
 use crate::transforms::Transform;
 use crate::transforms::buffer::BufferTransformConfig;
+use crate::transforms::filter::FilterTransformConfig;
 use crate::transforms::http::HttpTransformConfig;
 use crate::transforms::reduce::ReduceTransformConfig;
 use crate::transforms::splitter::SplitterTransformConfig;
 
 use anyhow::Result;
+use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 /////// INPUTS
 
-#[derive(Clone, Debug, Deserialize, Serialize)]
+#[derive(Clone, Debug, Deserialize, Serialize, JsonSchema)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum InputKind {
     Dummy(DummyConfig),
@@ -40,14 +42,14 @@ impl InputKind {
     }
 }
 
-#[derive(Clone, Debug, Deserialize, Serialize)]
+#[derive(Clone, Debug, Deserialize, Serialize, JsonSchema)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum BufferConfig {
     Static { size: usize },
     Tumbling { window_seconds: usize },
 }
 
-#[derive(Clone, Debug, Deserialize, Serialize)]
+#[derive(Clone, Debug, Deserialize, Serialize, JsonSchema)]
 pub struct InputConfig {
     #[serde(flatten)]
     pub kind: InputKind,
@@ -72,16 +74,17 @@ impl InputConfig {
     }
 }
 /////// TRANSFORM
-#[derive(Clone, Debug, Deserialize, Serialize)]
+#[derive(Clone, Debug, Deserialize, Serialize, JsonSchema)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum TransformKind {
     Buffer(BufferTransformConfig),
     Http(HttpTransformConfig),
     Splitter(SplitterTransformConfig),
     Reducer(ReduceTransformConfig),
+    Filter(FilterTransformConfig),
 }
 
-#[derive(Clone, Debug, Deserialize, Serialize)]
+#[derive(Clone, Debug, Deserialize, Serialize, JsonSchema)]
 pub struct TransformConfig {
     #[serde(flatten)]
     pub kind: TransformKind,
@@ -94,20 +97,21 @@ impl TransformConfig {
             TransformKind::Http(c) => c.build(ctx),
             TransformKind::Splitter(c) => c.build(ctx),
             TransformKind::Reducer(c) => c.build(ctx),
+            TransformKind::Filter(c) => c.build(ctx),
         }
     }
 }
 
 /////// OUTPUT
 
-#[derive(Clone, Debug, Deserialize, Serialize)]
+#[derive(Clone, Debug, Deserialize, Serialize, JsonSchema)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum OutputKind {
     Stdout(StdoutOutputConfig),
     File(FileOutputConfig),
     Nats(NatsOutputConfig),
 }
-#[derive(Clone, Debug, Deserialize, Serialize)]
+#[derive(Clone, Debug, Deserialize, Serialize, JsonSchema)]
 pub struct OutputConfig {
     #[serde(flatten)]
     pub kind: OutputKind,
@@ -123,7 +127,7 @@ impl OutputConfig {
     }
 }
 
-#[derive(Clone, Debug, Deserialize, Serialize)]
+#[derive(Clone, Debug, Deserialize, Serialize, JsonSchema)]
 pub struct Config {
     pub id: Option<String>,
     pub input: InputConfig,

@@ -1,5 +1,6 @@
 use std::sync::Arc;
 
+use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 
@@ -9,7 +10,7 @@ use crate::{
     transforms::{BuildTransform, Transform},
 };
 
-#[derive(Clone, Debug, Deserialize, Serialize)]
+#[derive(Clone, Debug, Deserialize, Serialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 enum ReduceFnKind {
     Sum,
@@ -18,7 +19,8 @@ enum ReduceFnKind {
     Max,
 }
 
-#[derive(Clone, Debug, Deserialize, Serialize)]
+#[derive(Clone, Debug, Deserialize, Serialize, JsonSchema)]
+#[schemars(title = "reduce")]
 pub struct ReduceTransformConfig {
     function: ReduceFnKind,
     field: String,

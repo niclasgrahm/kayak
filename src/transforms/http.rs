@@ -1,5 +1,6 @@
 use std::sync::Arc;
 
+use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 use crate::{
@@ -7,7 +8,8 @@ use crate::{
     transforms::{BuildTransform, Transform},
 };
 
-#[derive(Clone, Debug, Deserialize, Serialize)]
+#[derive(Clone, Debug, Deserialize, Serialize, JsonSchema)]
+#[schemars(title = "http")]
 pub struct HttpTransformConfig {
     url: String,
     verb: String,

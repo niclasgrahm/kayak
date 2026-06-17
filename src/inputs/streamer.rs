@@ -7,10 +7,12 @@ use crate::{
 };
 use anyhow::Result;
 use anyhow::anyhow;
+use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use tokio::sync::mpsc;
 
-#[derive(Clone, Debug, Deserialize, Serialize)]
+#[derive(Clone, Debug, Deserialize, Serialize, JsonSchema)]
+#[schemars(title = "streamer")]
 pub struct StreamerConfig {
     pub upstream: StreamerId,
 }

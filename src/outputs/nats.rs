@@ -1,4 +1,5 @@
 use bytes::Bytes;
+use schemars::JsonSchema;
 use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
@@ -9,7 +10,8 @@ use crate::{
     outputs::{BuildOutput, OutputDestination},
 };
 
-#[derive(Clone, Debug, Deserialize, Serialize)]
+#[derive(Clone, Debug, Deserialize, Serialize, JsonSchema)]
+#[schemars(title = "nats")]
 pub struct NatsOutputConfig {
     pub urls: String,
     pub subject: String,

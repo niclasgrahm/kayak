@@ -1,5 +1,6 @@
 use std::sync::Arc;
 
+use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 use crate::{
@@ -8,7 +9,8 @@ use crate::{
     transforms::{BuildTransform, Transform},
 };
 
-#[derive(Clone, Debug, Deserialize, Serialize)]
+#[derive(Clone, Debug, Deserialize, Serialize, JsonSchema)]
+#[schemars(title = "buffer")]
 pub struct BufferTransformConfig {
     pub size: usize,
 }

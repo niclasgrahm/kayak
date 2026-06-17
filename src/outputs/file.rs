@@ -1,4 +1,5 @@
 use anyhow::Result;
+use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use tokio::fs::File;
@@ -10,7 +11,8 @@ use crate::outputs::{BuildOutput, OutputDestination};
 
 // we have nats both as input and output; lets differentiate their configs like this
 // for now; perhaps we can consolidate later
-#[derive(Clone, Debug, Deserialize, Serialize)]
+#[derive(Clone, Debug, Deserialize, Serialize, JsonSchema)]
+#[schemars(title = "file")]
 pub struct FileOutputConfig {}
 
 impl BuildOutput for FileOutputConfig {

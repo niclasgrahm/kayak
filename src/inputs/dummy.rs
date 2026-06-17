@@ -4,13 +4,15 @@ use crate::inputs::InputSource;
 use crate::inputs::MessageBatch;
 use anyhow::Result;
 use chrono::Utc;
+use schemars::JsonSchema;
 use serde::Deserialize;
 use serde::Serialize;
 use serde_json::json;
 use std::sync::Arc;
 use std::time::Duration;
 
-#[derive(Clone, Debug, Deserialize, Serialize)]
+#[derive(Clone, Debug, Deserialize, Serialize, JsonSchema)]
+#[schemars(title = "dummy")]
 pub struct DummyConfig {
     pub duration: u64,
 }

@@ -1,5 +1,6 @@
 use std::sync::Arc;
 
+use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 use crate::{
@@ -9,7 +10,8 @@ use crate::{
 };
 
 // takes a batch, emits each message as a separate batch
-#[derive(Clone, Debug, Deserialize, Serialize)]
+#[derive(Clone, Debug, Deserialize, Serialize, JsonSchema)]
+#[schemars(title = "splitter")]
 pub struct SplitterTransformConfig {
     out_size: usize,
 }

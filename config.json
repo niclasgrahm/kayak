@@ -38,5 +38,22 @@
     },
     "transforms": [{ "type": "reducer", "function": "sum", "field": "value" }],
     "output": { "type": "stdout" }
+  },
+  {
+    "id": "5second_aggregator",
+    "input": {
+      "type": "streamer",
+      "upstream": "pipeline1"
+    },
+    "transforms": [
+      {
+        "type": "filter",
+        "value_type": "numeric",
+        "field": "value",
+        "operator": "greater_than",
+        "value": 5
+      }
+    ],
+    "output": { "type": "stdout" }
   }
 ]

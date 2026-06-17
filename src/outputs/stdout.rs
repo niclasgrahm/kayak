@@ -6,9 +6,11 @@ use crate::{
     outputs::{BuildOutput, OutputDestination},
 };
 use anyhow::Result;
+use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
-#[derive(Clone, Debug, Deserialize, Serialize)]
+#[derive(Clone, Debug, Deserialize, Serialize, JsonSchema)]
+#[schemars(title = "stdout")]
 pub struct StdoutOutputConfig {}
 impl BuildOutput for StdoutOutputConfig {
     fn build(self, _ctx: &mut BuildCtx) -> Result<Box<dyn OutputDestination>> {

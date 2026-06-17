@@ -17,7 +17,7 @@ mod streamer;
 mod transforms;
 use crate::handlers::{
     rest::streamer::{create_stream, delete_stream, get_streams},
-    ui::ui::events_handler,
+    ui::{docs::get_docs, ui::events_handler},
 };
 use crate::state::{AppState, StreamerHandle, StreamerId};
 use crate::{handlers::ui::ui::index_handler, state::UiEvent};
@@ -72,6 +72,7 @@ async fn main() {
 
     let app = Router::new()
         .route("/ui", get(index_handler))
+        .route("/docs", get(get_docs))
         .route("/events", get(events_handler))
         .route("/", post(create_stream))
         .route("/", get(get_streams))

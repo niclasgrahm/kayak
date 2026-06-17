@@ -1,0 +1,25 @@
+<html>
+  <title>docs</title>
+  <body>
+    <h1>docs</h1>
+    <h2>inputs</h2>
+    <div>
+      {% for input in inputs %}
+      <div><h3>{{ input.title }}</h3></div>
+      {% endfor %}
+    </div>
+    <h2>transforms</h2>
+    <div>
+      {% for transform in transforms %}
+      <div><h3>{{ transform.title }}</h3></div>
+      {% endfor %}
+    </div>
+    <h2>outputs</h2>
+    <div>
+      {% for output in outputs %}
+      <div><h3>{{ output.title }}</h3></div>
+      {% endfor %}
+    </div>
+  </body>
+  <style></style>
+</html>

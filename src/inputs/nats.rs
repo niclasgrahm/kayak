@@ -3,12 +3,14 @@ use crate::{
     inputs::{BuildInput, InputSource, MessageBatch},
 };
 use anyhow::Result;
+use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use tokio_stream::StreamExt;
 
 use std::sync::Arc;
 
-#[derive(Clone, Debug, Deserialize, Serialize)]
+#[derive(Clone, Debug, Deserialize, Serialize, JsonSchema)]
+#[schemars(title = "nats")]
 pub struct NatsConfig {
     pub urls: String,
     pub subject: String,
