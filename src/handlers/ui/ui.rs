@@ -9,8 +9,8 @@ use axum::{
     response::{Html, IntoResponse},
 };
 
-use futures_util::stream::{self, Stream};
-use std::{convert::Infallible, time::Duration};
+use futures_util::stream::Stream;
+use std::convert::Infallible;
 use tokio_stream::StreamExt as _;
 
 use crate::state::AppState;

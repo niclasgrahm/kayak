@@ -2,7 +2,6 @@ use std::sync::Arc;
 
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
-use serde_json::json;
 
 use crate::{
     BuildCtx,
@@ -26,7 +25,7 @@ pub struct ReduceTransformConfig {
     field: String,
 }
 impl BuildTransform for ReduceTransformConfig {
-    fn build(self, ctx: &mut BuildCtx) -> anyhow::Result<Box<dyn Transform>> {
+    fn build(self, _ctx: &mut BuildCtx) -> anyhow::Result<Box<dyn Transform>> {
         Ok(Box::new(ReduceTransform {
             function: self.function,
             field: self.field,

@@ -1,14 +1,8 @@
 use askama::Template;
-use axum::{
-    Json,
-    response::{Html, IntoResponse},
-};
-use schemars::{Schema, schema_for};
+use axum::response::{Html, IntoResponse};
+use schemars::schema_for;
 
-use crate::{
-    config::{InputKind, OutputKind, TransformKind},
-    transforms::filter::FilterTransformConfig,
-};
+use crate::config::{InputKind, OutputKind, TransformKind};
 
 struct FieldDoc {
     name: String,
@@ -45,9 +39,9 @@ fn value_to_component_doc_vec(value: serde_json::Value) -> anyhow::Result<Vec<Co
 }
 
 pub async fn get_docs() -> impl IntoResponse {
-    let inputs = serde_json::to_value(&schema_for!(InputKind)).unwrap();
-    let transforms = serde_json::to_value(&schema_for!(TransformKind)).unwrap();
-    let outputs = serde_json::to_value(&schema_for!(OutputKind)).unwrap();
+    let inputs = serde_json::to_value(schema_for!(InputKind)).unwrap();
+    let transforms = serde_json::to_value(schema_for!(TransformKind)).unwrap();
+    let outputs = serde_json::to_value(schema_for!(OutputKind)).unwrap();
     let inputs = value_to_component_doc_vec(inputs).unwrap();
     let transforms = value_to_component_doc_vec(transforms).unwrap();
     let outputs = value_to_component_doc_vec(outputs).unwrap();

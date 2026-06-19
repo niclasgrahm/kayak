@@ -15,7 +15,7 @@ pub struct HttpTransformConfig {
     verb: String,
 }
 impl BuildTransform for HttpTransformConfig {
-    fn build(self, ctx: &mut crate::BuildCtx) -> anyhow::Result<Box<dyn Transform>> {
+    fn build(self, _ctx: &mut crate::BuildCtx) -> anyhow::Result<Box<dyn Transform>> {
         Ok(Box::new(HttpTransform {
             url: self.url,
             verb: self.verb,

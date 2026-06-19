@@ -47,8 +47,8 @@ impl StreamerRuntime {
         debug!("[{}]\t inside StreamerRuntime::run()", self.shared.id);
         self.output.init().await?;
         loop {
-            let mut next_msg = match select! {
-                _ = self.shared.cancellation_token.cancelled() => break,
+            let next_msg = match select! {
+                () = self.shared.cancellation_token.cancelled() => break,
                 msg = next_input_message(&mut self.input) => msg,
             } {
                 Ok(msg) => msg,

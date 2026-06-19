@@ -24,7 +24,7 @@ pub struct StdoutOutput {}
 impl OutputDestination for StdoutOutput {
     async fn emit(&mut self, message_batch: Arc<MessageBatch>) -> anyhow::Result<()> {
         let msg_str = serde_json::to_string_pretty(&message_batch)?;
-        println!("{}", msg_str);
+        println!("{msg_str}");
         Ok(())
     }
     async fn init(&mut self) -> Result<()> {

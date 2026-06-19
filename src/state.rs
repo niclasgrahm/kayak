@@ -53,8 +53,7 @@ impl AppState {
         match self.streamers.lock() {
             Ok(app) => Ok(app.keys().cloned().collect()),
             Err(err) => Err(anyhow::anyhow!(
-                "Failed to acquire lock on streamers: {}",
-                err
+                "Failed to acquire lock on streamers: {err}"
             )),
         }
     }
@@ -66,8 +65,7 @@ impl AppState {
                 Ok(serde_json::to_value(views)?)
             }
             Err(err) => Err(anyhow::anyhow!(
-                "failed to acquire lock on streamers: {}",
-                err
+                "failed to acquire lock on streamers: {err}"
             )),
         }
     }
@@ -79,7 +77,7 @@ impl AppState {
                 let id = streamer.id.clone();
                 // we require unique ids, so if this id already exists we should error out
                 if app.contains_key(id.as_str()) {
-                    return Err(anyhow::anyhow!("Streamer with id {} already exists", id));
+                    return Err(anyhow::anyhow!("Streamer with id {id} already exists"));
                 }
                 let ctx = BuildCtx::new(&mut app, self.events.clone());
                 let join_handle = streamer.start(ctx);
@@ -94,8 +92,7 @@ impl AppState {
                 Ok(streamer)
             }
             Err(err) => Err(anyhow::anyhow!(
-                "Failed to acquire lock on streamers: {}",
-                err
+                "Failed to acquire lock on streamers: {err}"
             )),
         }
     }
@@ -110,7 +107,7 @@ impl AppState {
             Ok(())
         } else {
             tracing::debug!("failed to delete streamer: {}", id);
-            Err(anyhow::anyhow!("Streamer with id {} not found", id))
+            Err(anyhow::anyhow!("Streamer with id {id} not found"))
         }
     }
 }

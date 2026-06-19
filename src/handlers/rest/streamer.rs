@@ -29,9 +29,9 @@ pub async fn delete_stream(
     Path(stream_id): Path<String>,
 ) -> StatusCode {
     match state.delete_streamer(stream_id) {
-        Ok(_) => StatusCode::NO_CONTENT,
+        Ok(()) => StatusCode::NO_CONTENT,
         // i guess we need to match on error; not found or something messed up
-        Err(err) => StatusCode::NOT_FOUND,
+        Err(_err) => StatusCode::NOT_FOUND,
     }
 }
 

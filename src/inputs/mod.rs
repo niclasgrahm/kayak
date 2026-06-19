@@ -77,7 +77,7 @@ impl InputSource for Buffered {
                             Some(Err(e)) => return Err(e),
                             None => return Ok(Arc::new(out)),
                         },
-                        _ = &mut window_closed => return Ok(Arc::new(out)),
+                        () = &mut window_closed => return Ok(Arc::new(out)),
                     }
                 }
             } // BufferKind::Tumbling { window_seconds } => {

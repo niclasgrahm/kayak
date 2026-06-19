@@ -1,4 +1,3 @@
-use askama::Template;
 use axum::{
     Router,
     routing::{delete, get, post},
