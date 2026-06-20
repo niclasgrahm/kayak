@@ -13,10 +13,13 @@ pub async fn create_stream(
     Json(payload): Json<Config>,
 ) -> (StatusCode, Json<serde_json::Value>) {
     match state.create_streamer(payload) {
-        Ok(streamer) => {
-            let body = serde_json::to_value(streamer.view()).unwrap();
-            (StatusCode::CREATED, Json(body))
-        }
+        Ok(streamer) => match serde_json::to_value(streamer.view()) {
+            Ok(body) => (StatusCode::CREATED, Json(body)),
+            Err(err) => (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({ "error": err.to_string()})),
+            ),
+        },
         Err(err) => (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(serde_json::json!({"error": err.to_string()})),

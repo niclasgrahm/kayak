@@ -40,7 +40,7 @@ enum FilterKind {
 #[schemars(title = "filter")]
 pub struct FilterTransformConfig {
     #[serde(flatten)]
-    pub filter: FilterKind,
+    filter: FilterKind,
 }
 
 impl BuildTransform for FilterTransformConfig {

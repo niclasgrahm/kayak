@@ -1,3 +1,4 @@
+use anyhow::Context;
 use axum::{
     Router,
     routing::{delete, get, post},
@@ -21,6 +22,11 @@ use crate::handlers::{
 use crate::state::{AppState, StreamerHandle, StreamerId};
 use crate::{handlers::ui::ui::index_handler, state::UiEvent};
 use clap::Parser;
+macro_rules! hello {
+    () => {
+        println!("Hello, world!");
+    };
+}
 
 #[derive(Parser)]
 struct Args {
@@ -47,7 +53,7 @@ impl<'a> BuildCtx<'a> {
 }
 
 #[tokio::main]
-async fn main() {
+async fn main() -> anyhow::Result<()> {
     let args = Args::parse();
     let level = if args.debug {
         Level::DEBUG
@@ -65,7 +71,9 @@ async fn main() {
     tracing::info!("Starting server on {}", addr);
 
     let state = match &args.config {
-        Some(path) => AppState::from_config(path).expect("should be able to read config file"),
+        Some(path) => {
+            AppState::from_config(path).context("failed to initialize app state from config")?
+        }
         None => AppState::new(),
     };
 
@@ -79,6 +87,8 @@ async fn main() {
         .with_state(Arc::new(state));
     let listener = tokio::net::TcpListener::bind(addr)
         .await
-        .expect("failed to bind to address");
+        .context("failed to bind to address")?;
     let _ = axum::serve(listener, app).await;
+    hello!();
+    Ok(())
 }

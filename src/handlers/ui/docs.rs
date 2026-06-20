@@ -4,6 +4,7 @@ use schemars::schema_for;
 
 use crate::config::{InputKind, OutputKind, TransformKind};
 
+#[allow(dead_code)]
 struct FieldDoc {
     name: String,
     description: Option<String>,

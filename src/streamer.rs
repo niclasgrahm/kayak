@@ -13,6 +13,7 @@ use tokio::select;
 use tokio::sync::broadcast;
 use tokio::sync::mpsc;
 use tracing::debug;
+use tracing::error;
 
 #[derive(Serialize)]
 pub struct Streamer {
@@ -130,7 +131,11 @@ impl Streamer {
     pub fn start(self: &Arc<Self>, ctx: BuildCtx) -> tokio::task::JoinHandle<()> {
         let runtime = self.create_runtime(ctx).unwrap();
         tokio::task::spawn(async move {
-            runtime.run().await;
+            let shared = Arc::clone(&runtime.shared);
+            match runtime.run().await {
+                Ok(_) => debug!("streamer {} exited successfully", shared.id),
+                Err(e) => error!("streamer {} exited with error: {:?}", shared.id, e),
+            }
         })
     }
     pub fn subscribe(&self, tx: mpsc::Sender<Arc<MessageBatch>>) -> Result<()> {
