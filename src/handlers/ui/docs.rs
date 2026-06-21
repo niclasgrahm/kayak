@@ -11,6 +11,7 @@ struct FieldDoc {
     type_hint: Option<String>,
 }
 
+#[allow(dead_code)]
 struct ComponentDoc {
     title: String,
     component_type: String,

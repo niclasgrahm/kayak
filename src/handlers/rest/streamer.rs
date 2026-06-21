@@ -3,28 +3,19 @@ use std::sync::Arc;
 use axum::{
     Json,
     extract::{Path, State},
+    response::IntoResponse,
 };
 use reqwest::StatusCode;
 
-use crate::{config::Config, state::AppState};
+use crate::{config::Config, handlers::error::AppError, state::AppState};
 
 pub async fn create_stream(
     State(state): State<Arc<AppState>>,
     Json(payload): Json<Config>,
-) -> (StatusCode, Json<serde_json::Value>) {
-    match state.create_streamer(payload) {
-        Ok(streamer) => match serde_json::to_value(streamer.view()) {
-            Ok(body) => (StatusCode::CREATED, Json(body)),
-            Err(err) => (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(serde_json::json!({ "error": err.to_string()})),
-            ),
-        },
-        Err(err) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(serde_json::json!({"error": err.to_string()})),
-        ),
-    }
+) -> Result<impl IntoResponse, AppError> {
+    let streamer = state.create_streamer(payload)?;
+    let body = serde_json::to_value(streamer.view())?;
+    Ok((StatusCode::CREATED, Json(body)))
 }
 
 pub async fn delete_stream(
@@ -40,12 +31,7 @@ pub async fn delete_stream(
 
 pub async fn get_streams(
     State(state): State<Arc<AppState>>,
-) -> (StatusCode, Json<serde_json::Value>) {
-    match state.get_streamers() {
-        Ok(streamers) => (StatusCode::OK, Json(streamers)),
-        Err(err) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(serde_json::json!({"error": err.to_string()})),
-        ),
-    }
+) -> Result<impl IntoResponse, AppError> {
+    let streamers = state.get_streamers()?;
+    Ok((StatusCode::OK, Json(streamers)))
 }
