@@ -1,8 +1,12 @@
+use anyhow::Context;
 use askama::Template;
 use axum::response::{Html, IntoResponse};
 use schemars::schema_for;
 
-use crate::config::{InputKind, OutputKind, TransformKind};
+use crate::{
+    config::{InputKind, OutputKind, TransformKind},
+    handlers::error::AppError,
+};
 
 #[allow(dead_code)]
 struct FieldDoc {
@@ -26,10 +30,10 @@ struct Tmpl {
     outputs: Vec<ComponentDoc>,
 }
 
-fn value_to_component_doc_vec(value: serde_json::Value) -> anyhow::Result<Vec<ComponentDoc>> {
+fn value_to_component_doc_vec(value: &serde_json::Value) -> anyhow::Result<Vec<ComponentDoc>> {
     Ok(value["$defs"]
         .as_object()
-        .unwrap()
+        .context("schema missing $defs object")?
         .iter()
         .map(|item| ComponentDoc {
             title: item.1["title"].as_str().unwrap_or("failed").to_string(),
@@ -40,17 +44,17 @@ fn value_to_component_doc_vec(value: serde_json::Value) -> anyhow::Result<Vec<Co
         .collect())
 }
 
-pub async fn get_docs() -> impl IntoResponse {
-    let inputs = serde_json::to_value(schema_for!(InputKind)).unwrap();
-    let transforms = serde_json::to_value(schema_for!(TransformKind)).unwrap();
-    let outputs = serde_json::to_value(schema_for!(OutputKind)).unwrap();
-    let inputs = value_to_component_doc_vec(inputs).unwrap();
-    let transforms = value_to_component_doc_vec(transforms).unwrap();
-    let outputs = value_to_component_doc_vec(outputs).unwrap();
+pub async fn get_docs() -> Result<impl IntoResponse, AppError> {
+    let inputs = serde_json::to_value(schema_for!(InputKind))?;
+    let transforms = serde_json::to_value(schema_for!(TransformKind))?;
+    let outputs = serde_json::to_value(schema_for!(OutputKind))?;
+    let inputs = value_to_component_doc_vec(&inputs)?;
+    let transforms = value_to_component_doc_vec(&transforms)?;
+    let outputs = value_to_component_doc_vec(&outputs)?;
     let template = Tmpl {
         inputs,
         transforms,
         outputs,
     };
-    Html(template.render().unwrap())
+    Ok(Html(template.render()?))
 }
