@@ -13,8 +13,10 @@ leptos_meta = "0.8"
 console_error_panic_hook = "0.1.7"
 wasm-bindgen = "0.2"
 gloo-net = "0.7.0"
+leptos-use = "0.16"
+codee = { version = "0.3", features = ["json_serde"]}
 
 [features]
 hydrate = ["leptos/hydrate"]
-ssr = ["leptos/ssr", "leptos_meta/ssr"]
+ssr = ["leptos/ssr", "leptos_meta/ssr", "leptos-use/ssr"]
 

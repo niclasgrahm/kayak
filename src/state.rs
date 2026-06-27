@@ -8,8 +8,7 @@ use crate::streamer::Streamer;
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
-
-pub type StreamerId = String;
+pub use streamer_core::{StreamerId, UiEvent};
 
 #[derive(Serialize)]
 pub struct StreamerHandle {
@@ -110,11 +109,4 @@ impl AppState {
             Err(anyhow::anyhow!("Streamer with id {id} not found"))
         }
     }
-}
-
-#[derive(Clone, Serialize)]
-pub struct UiEvent {
-    pub streamer_id: StreamerId,
-    pub stage: String, //let's see if we like this
-    pub batch: Arc<MessageBatch>,
 }

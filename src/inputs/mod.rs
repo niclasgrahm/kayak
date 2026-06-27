@@ -11,7 +11,8 @@ pub trait BuildInput {
     fn build(self, ctx: &mut BuildCtx) -> anyhow::Result<Box<dyn InputSource>>;
 }
 
-pub type MessageBatch = Vec<Arc<serde_json::Value>>;
+// pub type MessageBatch = Vec<Arc<serde_json::Value>>;
+pub use streamer_core::MessageBatch;
 
 #[async_trait::async_trait]
 pub trait InputSource: Send + 'static {

@@ -1,5 +1,7 @@
 use leptos::prelude::*;
 use leptos_meta::*;
+use leptos_use::{UseEventSourceReturn, use_event_source};
+use streamer_core::UiEvent;
 
 use crate::api_client::ApiClient;
 
@@ -46,5 +48,22 @@ pub fn App() -> impl IntoView {
             Err(err) => view! { <p>"error: " {err.to_string()}</p>}.into_any(),
         })}
         </Suspense>
+        <LiveEvents/>
     }
+}
+
+#[component]
+pub fn LiveEvents() -> impl IntoView {
+    let UseEventSourceReturn {
+        data, ready_state, ..
+    } = use_event_source::<UiEvent, codee::string::JsonSerdeCodec>("/events");
+    view! {
+    <h2>"live events (" {move || format!("{:?}", ready_state.get())}</h2>
+    {move || match data.get() {
+        Some(ev) => view!{
+            <p>{ev.streamer_id} " / " {ev.stage} " - " {ev.batch.len()} " msgs"</p>
+        }.into_any(),
+        None => view! { <p>"waiting for events..."</p>}.into_any(),
+        }
+    }}
 }
