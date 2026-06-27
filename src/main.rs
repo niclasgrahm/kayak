@@ -3,6 +3,9 @@ use axum::{
     Router,
     routing::{delete, get, post},
 };
+use frontend::app::{App, shell};
+use leptos::config::get_configuration;
+use leptos_axum::{LeptosRoutes, generate_route_list};
 use std::sync::Arc;
 use std::{collections::HashMap, path::PathBuf};
 use tokio::sync::broadcast;
@@ -77,18 +80,29 @@ async fn main() -> anyhow::Result<()> {
         None => AppState::new(),
     };
 
-    let app = Router::new()
-        .route("/ui", get(index_handler))
+    let conf = get_configuration(None)?;
+    let leptos_options = conf.leptos_options;
+    let routes = generate_route_list(App);
+
+    let api = Router::new()
         .route("/docs", get(get_docs))
         .route("/events", get(events_handler))
-        .route("/", post(create_stream))
-        .route("/", get(get_streams))
-        .route("/{stream_id}", delete(delete_stream))
+        // .route("/ui", get(index_handler))
+        .route("/api/streams", post(create_stream))
+        .route("/api/streams", get(get_streams))
+        .route("/api/streams/{stream_id}", delete(delete_stream))
         .with_state(Arc::new(state));
-    let listener = tokio::net::TcpListener::bind(addr)
-        .await
-        .context("failed to bind to address")?;
-    let _ = axum::serve(listener, app).await;
+
+    let leptos = Router::new()
+        .leptos_routes(&leptos_options, routes, {
+            let opts = leptos_options.clone();
+            move || shell(opts.clone())
+        })
+        .fallback(leptos_axum::file_and_error_handler(shell))
+        .with_state(leptos_options.clone());
+    let app = api.merge(leptos);
+    let listener = tokio::net::TcpListener::bind(&leptos_options.site_addr).await?;
+    let _ = axum::serve(listener, app.into_make_service()).await;
     hello!();
     Ok(())
 }

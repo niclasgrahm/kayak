@@ -1,3 +1,6 @@
+[workspace]
+members = ["streamer-core", "frontend"]
+
 [package]
 name = "streamer"
 version = "0.1.0"
@@ -17,7 +20,19 @@ module_name_repetitions = "allow"
 missing_errors_doc = "allow"
 missing_panics_doc = "allow"
 
+[[workspace.metadata.leptos]]
+name = "streamer"
+bin-package = "streamer"
+lib-package = "frontend"
+bin-features = []
+lib-features = ["hydrate"]
+site-addr = "127.0.0.1:6767"
+reload-port = 3001
+site-root = "target/site"
+site-pkg-dir = "pkg"
+
 [dependencies]
+streamer-core = { path = "streamer-core" }
 anyhow = "1.0.102"
 askama = "0.16.0"
 async-nats = "0.48.0"
@@ -37,3 +52,8 @@ tokio-stream = {version = "0.1.18", features = ["sync"] }
 tokio-util = "0.7.18"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["fmt", "env-filter"] }
+frontend = { path = "frontend", features =["ssr"]}
+leptos = { version = "0.8", features = ["ssr"] }
+leptos_axum = "0.8"
+leptos_meta = { version = "0.8", features = ["ssr"]}
+

@@ -1,0 +1,20 @@
+[package]
+name = "frontend"
+version = "0.1.0"
+edition = "2024"
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+streamer-core = { path = "../streamer-core" }
+leptos = { version = "0.8"}
+leptos_meta = "0.8"
+console_error_panic_hook = "0.1.7"
+wasm-bindgen = "0.2"
+gloo-net = "0.7.0"
+
+[features]
+hydrate = ["leptos/hydrate"]
+ssr = ["leptos/ssr", "leptos_meta/ssr"]
+
