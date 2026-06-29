@@ -7,6 +7,7 @@
 
 ## todo
 
+- [ ] make sure to clean up old template based UI stuff
 - [ ] add time based buffer for the transform buffer
 - [ ] make outputs optional (for example, when a parent node is only used to push data to children)
 - [ ] think about necessary metadata to add to each message
