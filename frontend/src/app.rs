@@ -2,27 +2,33 @@ use leptos::prelude::*;
 use leptos_meta::*;
 use leptos_use::{UseEventSourceReturn, use_event_source};
 use std::collections::VecDeque;
-use streamer_core::{StreamerId, UiEvent};
+use streamer_core::{StreamerDto, StreamerId, UiEvent};
 
-use crate::api_client::ApiClient;
+use crate::api_client::{ApiClient, ApiError};
 
 pub fn shell(options: LeptosOptions) -> impl IntoView {
     view! {
         <!DOCTYPE html>
         <html lang="en">
             <head>
-                <meta charset="utf-8"/>
-                <meta name="viewport" content="width=device-width,initial-scale=1"/>
-                <AutoReload options=options.clone()/>
-                <HydrationScripts options/>
-                <Stylesheet id="leptos" href="/pkg/streamer.css"/>
-                <MetaTags/>
+                <meta charset="utf-8" />
+                <meta name="viewport" content="width=device-width,initial-scale=1" />
+                <AutoReload options=options.clone() />
+                <HydrationScripts options />
+                <Stylesheet id="leptos" href="/pkg/streamer.css" />
+                <MetaTags />
             </head>
             <body>
-                <App/>
+                <App />
             </body>
         </html>
     }
+}
+
+#[derive(Clone, Copy)]
+pub struct AppState {
+    pub streams: LocalResource<Result<Vec<StreamerDto>, ApiError>>,
+    pub events: Signal<Option<UiEvent>>,
 }
 
 #[component]
@@ -39,21 +45,71 @@ pub fn App() -> impl IntoView {
         data, ready_state, ..
     } = use_event_source::<UiEvent, codee::string::JsonSerdeCodec>("/events");
 
+    provide_context(AppState {
+        streams,
+        events: data,
+    });
+
     view! {
-        <h1>"Streamer App"</h1>
-        <Suspense fallback=move || view! { <p>"Loading streams..."</p>}>
-        {move || streams.get().map(|res| match res {
-            Ok(list) => view! {
-                <For each=move || list.clone() key=|s| s.id.clone() let:s>
-                <Card streamer_id=s.id.clone() events=data/>
-                </For>
-            }.into_any(),
-            Err(err) => view! { <p>"error: " {err.to_string()}</p>}.into_any(),
-        })}
+        <Suspense fallback=move || view! { <p>"Loading streams..."</p> }>
+            <Navbar />
+            <div class="main-content">
+                <Sidebar />
+                <div class="nodes">
+                    {move || {
+                        streams
+                            .get()
+                            .map(|res| match res {
+                                Ok(list) => {
+                                    view! {
+                                        <For each=move || list.clone() key=|s| s.id.clone() let:s>
+                                            <Card streamer_id=s.id.clone() events=data />
+                                        </For>
+                                    }
+                                        .into_any()
+                                }
+                                Err(err) => view! { <p>"error: " {err.to_string()}</p> }.into_any(),
+                            })
+                    }}
+                </div>
+            </div>
         </Suspense>
     }
 }
 
+#[component]
+pub fn Sidebar() -> impl IntoView {
+    let state = expect_context::<AppState>();
+    view! {
+        <div class="sidebar">
+            {move || {
+                state
+                    .streams
+                    .get()
+                    .map(|res| match res {
+                        Ok(list) => {
+                            view! {
+                                <For each=move || list.clone() key=|s| s.id.clone() let:s>
+                                    <div>{s.id.clone()}</div>
+                                </For>
+                            }
+                                .into_any()
+                        }
+                        Err(err) => view! { <p>"error: " {err.to_string()}</p> }.into_any(),
+                    })
+            }}
+        </div>
+    }
+}
+
+#[component]
+pub fn Navbar() -> impl IntoView {
+    view! {
+        <aside>
+            <div>"navb"</div>
+        </aside>
+    }
+}
 #[component]
 pub fn Card(streamer_id: StreamerId, events: Signal<Option<UiEvent>>) -> impl IntoView {
     let messages = RwSignal::new(VecDeque::<(u64, String)>::with_capacity(10));
@@ -79,13 +135,9 @@ pub fn Card(streamer_id: StreamerId, events: Signal<Option<UiEvent>>) -> impl In
         <div class="card">
             <header>{streamer_id.clone()}</header>
             <div>
-            <For
-                each=move || messages.get()
-                key=|(i, _)| *i
-                let:entry
-            >
-                <div>{entry.1}</div>
-            </For>
+                <For each=move || messages.get() key=|(i, _)| *i let:entry>
+                    <div>{entry.1}</div>
+                </For>
             </div>
         </div>
     }
