@@ -16,8 +16,9 @@ body {
 
 .nodes {
   flex: 1;
-  display: flex;
   border: 1px solid green;
+  position: relative;
+  overflow: hidden;
 }
 
 .sidebar {
@@ -28,7 +29,8 @@ body {
   flex-direction: column;
 }
 .card {
-  margin: 10px;
+  position: absolute;
+  width: 250px;
   padding: 10px;
   border: 1px solid #313244;
   background-color: #1e1e2e;
