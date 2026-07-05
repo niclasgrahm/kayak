@@ -1,5 +1,6 @@
 use std::sync::Arc;
 
+use crate::config::Config;
 use serde::{Deserialize, Serialize};
 
 pub mod config;
@@ -7,7 +8,7 @@ pub mod config;
 #[derive(Serialize, Deserialize, Clone)]
 pub struct StreamerDto {
     pub id: String,
-    pub config: serde_json::Value,
+    pub config: Config,
 }
 
 pub type StreamerId = String;

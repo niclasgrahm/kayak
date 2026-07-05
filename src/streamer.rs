@@ -9,7 +9,6 @@ use crate::transforms::Transform;
 use anyhow::Result;
 use serde::Serialize;
 use std::sync::{Arc, Mutex};
-use streamer_core::StreamerDto;
 use tokio::select;
 use tokio::sync::broadcast;
 use tokio::sync::mpsc;
@@ -29,17 +28,14 @@ pub struct Streamer {
     downstream_senders: Mutex<Vec<mpsc::Sender<Arc<MessageBatch>>>>,
 }
 
-impl Streamer {
-    pub fn to_dto(&self) -> anyhow::Result<StreamerDto> {
-        match serde_json::to_value(&self.config) {
-            Ok(config_value) => Ok(StreamerDto {
-                id: self.id.clone(),
-                config: config_value,
-            }),
-            Err(e) => Err(anyhow::anyhow!("Failed to serialize config: {:?}", e)),
-        }
-    }
-}
+// impl Streamer {
+//     pub fn to_dto(&self) -> anyhow::Result<StreamerDto> {
+//             Ok(StreamerDto {
+//                 id: self.id.clone(),
+//                 config: self.config.clone(),
+//             })
+//         }
+//     }
 
 #[derive(Serialize)]
 pub struct StreamerView<'a> {

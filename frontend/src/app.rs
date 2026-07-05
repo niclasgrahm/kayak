@@ -2,7 +2,7 @@ use leptos::prelude::*;
 use leptos_meta::*;
 use leptos_use::{UseEventSourceReturn, use_event_source};
 use std::collections::{HashMap, VecDeque};
-use streamer_core::{StreamerDto, StreamerId, UiEvent};
+use streamer_core::{StreamerDto, StreamerId, UiEvent, config::Config};
 
 use crate::api_client::{ApiClient, ApiError};
 
@@ -75,6 +75,7 @@ pub fn App() -> impl IntoView {
                                             <Card
                                                 streamer_id=s.id.clone()
                                                 events=data
+                                                config=s.config.clone()
                                                 x=positions.get(&s.id).copied().unwrap_or_default().0
                                                 y=positions.get(&s.id).copied().unwrap_or_default().1
                                             />
@@ -125,7 +126,7 @@ pub fn Navbar() -> impl IntoView {
     }
 }
 #[component]
-pub fn Card(streamer_id: StreamerId, events: Signal<Option<UiEvent>>, x: f64, y:f64) -> impl IntoView {
+pub fn Card(streamer_id: StreamerId, config: Config, events: Signal<Option<UiEvent>>, x: f64, y:f64) -> impl IntoView {
     let messages = RwSignal::new(VecDeque::<(u64, String)>::with_capacity(10));
     let next_id = RwSignal::new(0u64);
     let id = streamer_id.clone();
@@ -146,10 +147,12 @@ pub fn Card(streamer_id: StreamerId, events: Signal<Option<UiEvent>>, x: f64, y:
             }
         }
     });
+    let json = serde_json::to_string_pretty(&config).unwrap_or_default();
     view! {
         <div class="card" style:left=format!("{x}px") style:top=format!("{y}px")>
             <header>{streamer_id.clone()}</header>
             <div>
+                <pre>{json}</pre>
                 <For each=move || messages.get() key=|(i, _)| *i let:entry>
                     <div>{entry.1}</div>
                 </For>
