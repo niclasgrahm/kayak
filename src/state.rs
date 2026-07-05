@@ -1,13 +1,12 @@
 use serde::Serialize;
 use tokio::sync::broadcast;
 
-use crate::BuildCtx;
-use crate::config::Config;
-use crate::inputs::MessageBatch;
 use crate::streamer::Streamer;
+use crate::BuildCtx;
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
+use streamer_core::config::Config;
 pub use streamer_core::{StreamerId, UiEvent};
 
 #[derive(Serialize)]

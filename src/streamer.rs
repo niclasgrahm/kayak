@@ -1,5 +1,5 @@
 use crate::BuildCtx;
-use crate::config::Config;
+use streamer_core::config::Config;
 use crate::inputs::InputSource;
 use crate::inputs::MessageBatch;
 use crate::outputs::OutputDestination;
@@ -15,6 +15,9 @@ use tokio::sync::broadcast;
 use tokio::sync::mpsc;
 use tracing::debug;
 use tracing::error;
+use crate::config::BuildInputConfig;
+use crate::config::BuildTransformConfig;
+use crate::config::BuildOutputConfig;
 
 #[derive(Serialize)]
 pub struct Streamer {

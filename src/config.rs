@@ -1,39 +1,30 @@
-use crate::BuildCtx;
 use crate::inputs::BufferKind;
 use crate::inputs::Buffered;
 use crate::inputs::BuildInput;
 use crate::inputs::InputSource;
-use crate::inputs::dummy::DummyConfig;
-use crate::inputs::nats::NatsConfig;
-use crate::inputs::streamer::StreamerConfig;
 use crate::outputs::BuildOutput;
 use crate::outputs::OutputDestination;
-use crate::outputs::file::FileOutputConfig;
-use crate::outputs::nats::NatsOutputConfig;
-use crate::outputs::stdout::StdoutOutputConfig;
 use crate::transforms::BuildTransform;
 use crate::transforms::Transform;
-use crate::transforms::buffer::BufferTransformConfig;
-use crate::transforms::filter::FilterTransformConfig;
-use crate::transforms::http::HttpTransformConfig;
-use crate::transforms::reduce::ReduceTransformConfig;
-use crate::transforms::splitter::SplitterTransformConfig;
+use crate::BuildCtx;
+use streamer_core::config::BufferConfig;
+use streamer_core::config::InputConfig;
+use streamer_core::config::InputKind;
+use streamer_core::config::OutputConfig;
+use streamer_core::config::OutputKind;
+use streamer_core::config::TransformConfig;
+use streamer_core::config::TransformKind;
 
 use anyhow::Result;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
-/////// INPUTS
-
-#[derive(Clone, Debug, Deserialize, Serialize, JsonSchema)]
-#[serde(tag = "type", rename_all = "snake_case")]
-pub enum InputKind {
-    Dummy(DummyConfig),
-    Nats(NatsConfig),
-    Streamer(StreamerConfig),
+pub trait BuildInputConfig {
+    fn build(self, ctx: &mut BuildCtx) -> Result<Box<dyn InputSource>>;
 }
-impl InputKind {
-    pub fn build(self, ctx: &mut BuildCtx) -> Result<Box<dyn InputSource>> {
+
+impl BuildInputConfig for InputKind {
+    fn build(self, ctx: &mut BuildCtx) -> Result<Box<dyn InputSource>> {
         match self {
             InputKind::Dummy(c) => c.build(ctx),
             InputKind::Nats(c) => c.build(ctx),
@@ -42,24 +33,8 @@ impl InputKind {
     }
 }
 
-#[derive(Clone, Debug, Deserialize, Serialize, JsonSchema)]
-#[serde(tag = "type", rename_all = "snake_case")]
-pub enum BufferConfig {
-    Static { size: usize },
-    Tumbling { window_seconds: usize },
-}
-
-#[derive(Clone, Debug, Deserialize, Serialize, JsonSchema)]
-pub struct InputConfig {
-    #[serde(flatten)]
-    pub kind: InputKind,
-
-    #[serde(default)]
-    pub buffer: Option<BufferConfig>,
-}
-
-impl InputConfig {
-    pub fn build(self, ctx: &mut BuildCtx) -> Result<Box<dyn InputSource>> {
+impl BuildInputConfig for InputConfig {
+    fn build(self, ctx: &mut BuildCtx) -> Result<Box<dyn InputSource>> {
         let inner = self.kind.build(ctx)?;
         Ok(match self.buffer {
             Some(BufferConfig::Static { size }) => {
@@ -73,25 +48,13 @@ impl InputConfig {
         })
     }
 }
-/////// TRANSFORM
-#[derive(Clone, Debug, Deserialize, Serialize, JsonSchema)]
-#[serde(tag = "type", rename_all = "snake_case")]
-pub enum TransformKind {
-    Buffer(BufferTransformConfig),
-    Http(HttpTransformConfig),
-    Splitter(SplitterTransformConfig),
-    Reducer(ReduceTransformConfig),
-    Filter(FilterTransformConfig),
+
+pub trait BuildTransformConfig {
+    fn build(self, ctx: &mut BuildCtx) -> Result<Box<dyn Transform>>;
 }
 
-#[derive(Clone, Debug, Deserialize, Serialize, JsonSchema)]
-pub struct TransformConfig {
-    #[serde(flatten)]
-    pub kind: TransformKind,
-}
-
-impl TransformConfig {
-    pub fn build(self, ctx: &mut BuildCtx) -> Result<Box<dyn Transform>> {
+impl BuildTransformConfig for TransformConfig {
+    fn build(self, ctx: &mut BuildCtx) -> Result<Box<dyn Transform>> {
         match self.kind {
             TransformKind::Buffer(c) => c.build(ctx),
             TransformKind::Http(c) => c.build(ctx),
@@ -102,35 +65,16 @@ impl TransformConfig {
     }
 }
 
-/////// OUTPUT
-
-#[derive(Clone, Debug, Deserialize, Serialize, JsonSchema)]
-#[serde(tag = "type", rename_all = "snake_case")]
-pub enum OutputKind {
-    Stdout(StdoutOutputConfig),
-    File(FileOutputConfig),
-    Nats(NatsOutputConfig),
-}
-#[derive(Clone, Debug, Deserialize, Serialize, JsonSchema)]
-pub struct OutputConfig {
-    #[serde(flatten)]
-    pub kind: OutputKind,
+pub trait BuildOutputConfig {
+    fn build(self, ctx: &mut BuildCtx) -> Result<Box<dyn OutputDestination>>;
 }
 
-impl OutputConfig {
-    pub fn build(self, ctx: &mut BuildCtx) -> Result<Box<dyn OutputDestination>> {
+impl BuildOutputConfig for OutputConfig {
+    fn build(self, ctx: &mut BuildCtx) -> Result<Box<dyn OutputDestination>> {
         match self.kind {
             OutputKind::Stdout(c) => c.build(ctx),
             OutputKind::File(c) => c.build(ctx),
             OutputKind::Nats(c) => c.build(ctx),
         }
     }
-}
-
-#[derive(Clone, Debug, Deserialize, Serialize, JsonSchema)]
-pub struct Config {
-    pub id: Option<String>,
-    pub input: InputConfig,
-    pub transforms: Vec<TransformConfig>,
-    pub output: OutputConfig,
 }

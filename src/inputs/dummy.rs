@@ -11,11 +11,7 @@ use serde_json::json;
 use std::sync::Arc;
 use std::time::Duration;
 
-#[derive(Clone, Debug, Deserialize, Serialize, JsonSchema)]
-#[schemars(title = "dummy")]
-pub struct DummyConfig {
-    pub duration: u64,
-}
+use streamer_core::config::DummyConfig;
 
 impl BuildInput for DummyConfig {
     fn build(self, _ctx: &mut BuildCtx) -> Result<Box<dyn InputSource>> {

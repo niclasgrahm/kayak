@@ -1,7 +1,5 @@
 use std::sync::Arc;
-
-use schemars::JsonSchema;
-use serde::{Deserialize, Serialize};
+use streamer_core::config::SplitterTransformConfig;
 
 use crate::{
     BuildCtx,
@@ -9,12 +7,6 @@ use crate::{
     transforms::{BuildTransform, Transform},
 };
 
-// takes a batch, emits each message as a separate batch
-#[derive(Clone, Debug, Deserialize, Serialize, JsonSchema)]
-#[schemars(title = "splitter")]
-pub struct SplitterTransformConfig {
-    out_size: usize,
-}
 impl BuildTransform for SplitterTransformConfig {
     fn build(self, _ctx: &mut BuildCtx) -> anyhow::Result<Box<dyn Transform>> {
         Ok(Box::new(SplitterTransform {

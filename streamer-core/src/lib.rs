@@ -2,6 +2,8 @@ use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
 
+pub mod config;
+
 #[derive(Serialize, Deserialize, Clone)]
 pub struct StreamerDto {
     pub id: String,

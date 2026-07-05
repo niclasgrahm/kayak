@@ -6,8 +6,8 @@ use axum::{
     response::IntoResponse,
 };
 use reqwest::StatusCode;
-
-use crate::{config::Config, handlers::error::AppError, state::AppState};
+use streamer_core::config::Config;
+use crate::{handlers::error::AppError, state::AppState};
 
 pub async fn create_stream(
     State(state): State<Arc<AppState>>,

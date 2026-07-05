@@ -1,8 +1,7 @@
 use bytes::Bytes;
-use schemars::JsonSchema;
 use std::sync::Arc;
+use streamer_core::config::NatsOutputConfig;
 
-use serde::{Deserialize, Serialize};
 
 use crate::{
     BuildCtx,
@@ -10,12 +9,6 @@ use crate::{
     outputs::{BuildOutput, OutputDestination},
 };
 
-#[derive(Clone, Debug, Deserialize, Serialize, JsonSchema)]
-#[schemars(title = "nats")]
-pub struct NatsOutputConfig {
-    pub urls: String,
-    pub subject: String,
-}
 
 impl BuildOutput for NatsOutputConfig {
     fn build(self, _ctx: &mut BuildCtx) -> anyhow::Result<Box<dyn OutputDestination>> {

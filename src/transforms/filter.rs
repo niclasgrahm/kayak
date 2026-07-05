@@ -1,47 +1,15 @@
 use std::sync::Arc;
 
-use schemars::JsonSchema;
-use serde::{Deserialize, Serialize};
+use streamer_core::config::FilterTransformConfig;
+use streamer_core::config::FilterKind;
+use streamer_core::config::NumericFilterOperatorKind;
+use streamer_core::config::StringFilterOperatorKind;
 
 use crate::{
     BuildCtx,
     inputs::MessageBatch,
     transforms::{BuildTransform, Transform},
 };
-
-#[derive(Clone, Debug, Deserialize, Serialize, JsonSchema)]
-enum NumericFilterOperatorKind {
-    GreaterThan,
-    LessThan,
-    EqualTo,
-}
-
-#[derive(Clone, Debug, Deserialize, Serialize, JsonSchema)]
-enum StringFilterOperatorKind {
-    EqualTo,
-    Contains,
-}
-
-#[derive(Clone, Debug, Deserialize, Serialize, JsonSchema)]
-enum FilterKind {
-    Numeric {
-        /// the field to filter on
-        field: String,
-        operator: NumericFilterOperatorKind,
-        value: f64,
-    },
-    String {
-        field: String,
-        operator: StringFilterOperatorKind,
-        value: String,
-    },
-}
-#[derive(Clone, Debug, Deserialize, Serialize, JsonSchema)]
-#[schemars(title = "filter")]
-pub struct FilterTransformConfig {
-    #[serde(flatten)]
-    filter: FilterKind,
-}
 
 impl BuildTransform for FilterTransformConfig {
     fn build(self, _ctx: &mut BuildCtx) -> anyhow::Result<Box<dyn Transform>> {
@@ -92,23 +60,5 @@ impl Transform for FilterTransform {
             .collect();
         Ok(vec![Arc::new(out)])
 
-        // let out = message_batch
-        //     .iter()
-        //     .filter(|message| match &self.filter {
-        //         FilterKind::Numeric { field, Operator, value } => {
-        //                     let field_value = message.get(field)?.as_f64()?;
-        //                     match Operator {
-        //                         NumericFilterOperatorKind::GreaterThan => field_value > *value,
-        //                         NumericFilterOperatorKind::LessThan => field_value < *value,
-        //                         NumericFilterOperatorKind::EqualTo => field_value == *value,
-        //                     }
-        //             FilterKind::String { field, Operator, value } => {
-        //                 let field_value = message.get(field)?.as_str()?;
-        //                 match Operator {
-        //                     StringFilterOperatorKind::EqualTo => field_value == value,
-        //                     StringFilterOperatorKind::Contains => field_value.contains(value),
-        //             }
-        //         }
-        //     }}).cloned();
     }
 }

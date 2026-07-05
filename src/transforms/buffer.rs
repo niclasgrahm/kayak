@@ -1,7 +1,6 @@
 use std::sync::Arc;
 
-use schemars::JsonSchema;
-use serde::{Deserialize, Serialize};
+use streamer_core::config::BufferTransformConfig;
 
 use crate::{
     BuildCtx,
@@ -9,11 +8,6 @@ use crate::{
     transforms::{BuildTransform, Transform},
 };
 
-#[derive(Clone, Debug, Deserialize, Serialize, JsonSchema)]
-#[schemars(title = "buffer")]
-pub struct BufferTransformConfig {
-    pub size: usize,
-}
 
 impl BuildTransform for BufferTransformConfig {
     fn build(self, _ctx: &mut BuildCtx) -> anyhow::Result<Box<dyn Transform>> {

@@ -10,12 +10,7 @@ use anyhow::anyhow;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use tokio::sync::mpsc;
-
-#[derive(Clone, Debug, Deserialize, Serialize, JsonSchema)]
-#[schemars(title = "streamer")]
-pub struct StreamerConfig {
-    pub upstream: StreamerId,
-}
+use streamer_core::config::StreamerConfig;
 
 impl BuildInput for StreamerConfig {
     fn build(self, ctx: &mut BuildCtx) -> Result<Box<dyn InputSource>> {

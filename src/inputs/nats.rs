@@ -3,18 +3,12 @@ use crate::{
     inputs::{BuildInput, InputSource, MessageBatch},
 };
 use anyhow::Result;
-use schemars::JsonSchema;
-use serde::{Deserialize, Serialize};
 use tokio_stream::StreamExt;
 
 use std::sync::Arc;
 
-#[derive(Clone, Debug, Deserialize, Serialize, JsonSchema)]
-#[schemars(title = "nats")]
-pub struct NatsConfig {
-    pub urls: String,
-    pub subject: String,
-}
+use streamer_core::config::NatsConfig;
+
 
 impl BuildInput for NatsConfig {
     fn build(self, _ctx: &mut BuildCtx) -> Result<Box<dyn InputSource>> {

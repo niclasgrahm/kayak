@@ -1,6 +1,6 @@
 use std::sync::Arc;
+use streamer_core::config::{ReduceFnKind, ReduceTransformConfig};
 
-use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 use crate::{
@@ -9,21 +9,6 @@ use crate::{
     transforms::{BuildTransform, Transform},
 };
 
-#[derive(Clone, Debug, Deserialize, Serialize, JsonSchema)]
-#[serde(rename_all = "snake_case")]
-enum ReduceFnKind {
-    Sum,
-    Avg,
-    Min,
-    Max,
-}
-
-#[derive(Clone, Debug, Deserialize, Serialize, JsonSchema)]
-#[schemars(title = "reducer")]
-pub struct ReduceTransformConfig {
-    function: ReduceFnKind,
-    field: String,
-}
 impl BuildTransform for ReduceTransformConfig {
     fn build(self, _ctx: &mut BuildCtx) -> anyhow::Result<Box<dyn Transform>> {
         Ok(Box::new(ReduceTransform {

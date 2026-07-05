@@ -3,8 +3,9 @@ use askama::Template;
 use axum::response::{Html, IntoResponse};
 use schemars::schema_for;
 
+use streamer_core::config::{InputKind, OutputKind, TransformKind};
+
 use crate::{
-    config::{InputKind, OutputKind, TransformKind},
     handlers::error::AppError,
 };
 

@@ -6,12 +6,8 @@ use crate::{
     outputs::{BuildOutput, OutputDestination},
 };
 use anyhow::Result;
-use schemars::JsonSchema;
-use serde::{Deserialize, Serialize};
+use streamer_core::config::StdoutOutputConfig;
 
-#[derive(Clone, Debug, Deserialize, Serialize, JsonSchema)]
-#[schemars(title = "stdout")]
-pub struct StdoutOutputConfig {}
 impl BuildOutput for StdoutOutputConfig {
     fn build(self, _ctx: &mut BuildCtx) -> Result<Box<dyn OutputDestination>> {
         Ok(Box::new(StdoutOutput {}))

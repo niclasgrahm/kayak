@@ -1,19 +1,12 @@
 use std::sync::Arc;
+use streamer_core::config::HttpTransformConfig;
 
-use schemars::JsonSchema;
-use serde::{Deserialize, Serialize};
 
 use crate::{
     inputs::MessageBatch,
     transforms::{BuildTransform, Transform},
 };
 
-#[derive(Clone, Debug, Deserialize, Serialize, JsonSchema)]
-#[schemars(title = "http")]
-pub struct HttpTransformConfig {
-    url: String,
-    verb: String,
-}
 impl BuildTransform for HttpTransformConfig {
     fn build(self, _ctx: &mut crate::BuildCtx) -> anyhow::Result<Box<dyn Transform>> {
         Ok(Box::new(HttpTransform {
