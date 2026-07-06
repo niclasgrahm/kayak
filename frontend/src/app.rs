@@ -10,7 +10,7 @@ fn layout(streams: &[StreamerDto]) -> HashMap<StreamerId, (f64, f64)> {
     streams
         .iter()
         .enumerate()
-        .map(|(i, s)| (s.id.clone(), (40.0 + (i as f64) * 280.0, 40.0)))
+        .map(|(i, s)| (s.id.clone(), (40.0 + (i as f64) * 500.0, 40.0)))
         .collect()
 }
 
@@ -105,7 +105,7 @@ pub fn Sidebar() -> impl IntoView {
                         Ok(list) => {
                             view! {
                                 <For each=move || list.clone() key=|s| s.id.clone() let:s>
-                                    <div>{s.id.clone()}</div>
+                                    <div class="tree-item">{s.id.clone()}</div>
                                 </For>
                             }
                                 .into_any()
@@ -120,7 +120,7 @@ pub fn Sidebar() -> impl IntoView {
 #[component]
 pub fn Navbar() -> impl IntoView {
     view! {
-        <aside>
+        <aside class="navbar">
             <div>"navb"</div>
         </aside>
     }
@@ -151,8 +151,10 @@ pub fn Card(streamer_id: StreamerId, config: Config, events: Signal<Option<UiEve
     view! {
         <div class="card" style:left=format!("{x}px") style:top=format!("{y}px")>
             <header>{streamer_id.clone()}</header>
-            <div>
+            <div class="config">
                 <pre>{json}</pre>
+            </div>
+            <div class="messages">
                 <For each=move || messages.get() key=|(i, _)| *i let:entry>
                     <div>{entry.1}</div>
                 </For>
