@@ -30,6 +30,7 @@ body {
   font-size: 13px;
   display: flex;
   flex-direction: column;
+  overscroll-behavior-x: none;
 }
 .navbar {
   background: var(--bg-titlebar);
@@ -42,6 +43,13 @@ body {
   display: flex;
   flex-direction: row;
   min-height: 0;
+}
+
+.surface {
+  position: absolute;
+  top: 0;
+  left: 0;
+  transform-origin: 0 0;
 }
 
 .nodes {
