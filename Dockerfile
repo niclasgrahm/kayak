@@ -4,7 +4,7 @@ run rustup target add wasm32-unknown-unknown
 RUN rustup target add wasm32-unknown-unknown
 RUN curl -L --proto '=https' --tlsv1.2 -sSf \
   https://raw.githubusercontent.com/cargo-bins/cargo-binstall/main/install-from-binary-release.sh | bash \
-  && cargo binstall cargo-leptos -y
+  && cargo install cargo-leptos -y
 
 workdir /app
 copy . .

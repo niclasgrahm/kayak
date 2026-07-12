@@ -78,7 +78,7 @@ impl AppState {
                     return Err(anyhow::anyhow!("Streamer with id {id} already exists"));
                 }
                 let ctx = BuildCtx::new(&mut app, self.events.clone());
-                let join_handle = streamer.start(ctx);
+                let join_handle = streamer.start(ctx)?;
 
                 let streamer_handle = StreamerHandle {
                     join_handle,

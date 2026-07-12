@@ -57,7 +57,6 @@ pub struct StreamerRuntime {
 
 impl StreamerRuntime {
     async fn run(mut self) -> anyhow::Result<()> {
-        debug!("[{}]\t inside StreamerRuntime::run()", self.shared.id);
         self.output.init().await?;
         loop {
             let next_msg = match select! {
@@ -83,7 +82,13 @@ impl StreamerRuntime {
             for t in &mut self.transforms {
                 let mut next = Vec::new();
                 for b in batches {
-                    next.extend(t.apply(b).await?);
+                    match t.apply(b).await {
+                        Ok(b) => next.extend(b),
+                        Err(e) => {
+                            error!("[{}]\t transform error: {:?}", self.shared.id, e);
+                            continue;
+                        }
+                    }
                 }
                 batches = next;
             }
@@ -140,15 +145,15 @@ impl Streamer {
             events: ctx.events.clone(),
         })
     }
-    pub fn start(self: &Arc<Self>, ctx: BuildCtx) -> tokio::task::JoinHandle<()> {
-        let runtime = self.create_runtime(ctx).unwrap();
-        tokio::task::spawn(async move {
+    pub fn start(self: &Arc<Self>, ctx: BuildCtx) -> anyhow::Result<tokio::task::JoinHandle<()>> {
+        let runtime = self.create_runtime(ctx)?;
+        Ok(tokio::task::spawn(async move {
             let shared = Arc::clone(&runtime.shared);
             match runtime.run().await {
                 Ok(_) => debug!("streamer {} exited successfully", shared.id),
                 Err(e) => error!("streamer {} exited with error: {:?}", shared.id, e),
             }
-        })
+        }))
     }
     pub fn subscribe(&self, tx: mpsc::Sender<Arc<MessageBatch>>) -> Result<()> {
         let mut senders = self.downstream_senders.lock().unwrap();
