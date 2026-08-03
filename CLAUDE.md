@@ -10,6 +10,8 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 cargo leptos watch                  # dev server w/ hot reload on 127.0.0.1:6767 (builds WASM + server)
 cargo leptos build --release        # production build (server binary + target/site assets)
 cargo check                         # fast type check of the whole workspace
+just ci                             # lint + test — what GitHub Actions runs
+just test                           # cargo test --all-targets (offline: no NATS, no server)
 just lint                           # cargo clippy --all-targets -- -D warnings
 cargo run -- --config config.json --debug --port 6767   # run server binary directly (no WASM rebuild)
 
@@ -18,7 +20,14 @@ just test-http                      # hurl --test hurl/tests/*.hurl (needs the s
 just start-baseline                 # hurl hurl/create_baseline.hurl — creates a sample pipeline
 ```
 
-There are currently no `#[test]`/`#[cfg(test)]` unit tests; the only automated tests are the hurl HTTP tests above (`cargo test` passes trivially).
+## Definition of done
+
+These two rules are not negotiable and apply to every change, however small:
+
+1. **New code ships with tests.** Any new or changed behaviour — a component, a handler, a config field, a bug fix — needs a test that fails without the change. A bug fix without a regression test is not a fix. If something genuinely can't be tested offline (a real NATS connection, say), say so explicitly and explain why rather than skipping quietly.
+2. **`just ci` must be green before a task is called done.** That's `just lint` (clippy `-D warnings`) plus `just test`. Not "compiles", not "the new test passes" — the whole suite. If tests fail, report the failure and the output; never describe a task as complete with a red suite, and never disable, `#[ignore]` or weaken an existing test to get to green. A test that turns out to encode the wrong behaviour is a conversation to have first, not something to edit away.
+
+Testing is documented in `readme.md` under "testing" — read that before adding tests. In short: the runtime lives in `src/lib.rs` (not `main.rs`) so `tests/` can reach it; `src/testing.rs` holds the test doubles; `StreamerRuntime::from_parts` drives a run loop without a config; `api_router()` is called through `tower::oneshot` so HTTP tests need no socket. Adding a component config variant fails `tests/config.rs` until a wire-format sample is added — that's intentional.
 
 Lints are strict by design: clippy `pedantic` plus `unwrap_used`/`expect_used` as warnings, and `clippy.toml` makes those apply in tests too. Removing remaining `.unwrap()`s is active work — flag new ones in review.
 
@@ -27,7 +36,7 @@ Lints are strict by design: clippy `pedantic` plus `unwrap_used`/`expect_used` a
 Three workspace crates:
 
 - **`streamer-core/`** — shared, dependency-light types. All config structs/enums (`config.rs`), plus `StreamerId`, `MessageBatch = Vec<Arc<serde_json::Value>>`, `UiEvent`, `StreamerDto`. Compiles for both native and `wasm32`, which is why it exists: the frontend needs the same config types as the server. It has no async/network deps and no real `main.rs`.
-- **`/` (root `streamer` bin)** — the Axum server and the whole stream-processing runtime.
+- **`/` (root `streamer` crate)** — the Axum server and the whole stream-processing runtime. It is a **lib + bin**: everything lives in `src/lib.rs` and its modules so integration tests can import it; `src/main.rs` is only clap args, tracing setup and the Leptos router wiring. `api_router()` in `lib.rs` builds the JSON/SSE routes for both.
 - **`frontend/`** — Leptos 0.8 SSR + hydrate crate. `cdylib`+`rlib` with `ssr`/`hydrate` features; the root binary depends on it with `ssr` and mounts it via `leptos_axum`.
 
 ### The pipeline model
@@ -46,9 +55,9 @@ Three object-safe traits define the plugin points, all in the root crate:
 
 Config types live in `streamer-core::config` and are pure data. The *building* of runtime objects from them lives in the root crate, `src/config.rs`, via three local traits (`BuildInputConfig`, `BuildTransformConfig`, `BuildOutputConfig`) implemented **on the core config enums** — this is how the orphan rule is worked around while keeping core wasm-friendly. Each enum variant delegates to a per-component `BuildInput`/`BuildTransform`/`BuildOutput` impl in `src/inputs/*.rs`, `src/transforms/*.rs`, `src/outputs/*.rs`.
 
-`BuildCtx` (defined in `src/main.rs`) is threaded through every `build()` call. It carries `&mut HashMap<StreamerId, StreamerHandle>` — needed so a `streamer` input can look up its upstream and register an mpsc sender on it — and the `broadcast::Sender<UiEvent>`.
+`BuildCtx` (defined in `src/lib.rs`) is threaded through every `build()` call. It carries `&mut HashMap<StreamerId, StreamerHandle>` — needed so a `streamer` input can look up its upstream and register an mpsc sender on it — and the `broadcast::Sender<UiEvent>`.
 
-**Adding a component** therefore touches four places: the config struct + enum variant in `streamer-core/src/config.rs`, the `build()` dispatch arm in `src/config.rs`, and the impl module.
+**Adding a component** therefore touches five places: the config struct + enum variant in `streamer-core/src/config.rs`, the `build()` dispatch arm in `src/config.rs`, the impl module, and a wire-format sample in `tests/config.rs` (which fails until you add it).
 
 The config enums use `#[serde(tag = "type", rename_all = "snake_case")]` with `#[serde(flatten)]` wrappers, so JSON looks like `{"type": "nats", "urls": ..., "subject": ...}`. They also derive `schemars::JsonSchema` with `#[schemars(title = "...")]` — `/docs` generates component documentation by reflecting over `schema_for!(InputKind)` etc., so the title/doc-comments on config fields *are* the docs.
 

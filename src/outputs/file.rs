@@ -25,7 +25,14 @@ pub struct FileOutput {
     writer: Option<BufWriter<File>>,
 }
 
+impl Default for FileOutput {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl FileOutput {
+    #[must_use] 
     pub fn new() -> Self {
         Self { writer: None }
     }

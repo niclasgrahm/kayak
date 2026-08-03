@@ -3228,6 +3228,7 @@ dependencies = [
  "clap",
  "frontend",
  "futures-util",
+ "http-body-util",
  "leptos",
  "leptos_axum",
  "leptos_meta",
@@ -3240,6 +3241,7 @@ dependencies = [
  "tokio",
  "tokio-stream",
  "tokio-util",
+ "tower",
  "tracing",
  "tracing-subscriber",
 ]

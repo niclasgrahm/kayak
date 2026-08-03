@@ -18,6 +18,10 @@ impl BuildTransform for HttpTransformConfig {
 }
 pub struct HttpTransform {
     url: String,
+    // TODO: `verb` is accepted in the config but not honoured yet — every
+    // request is a POST. Wiring it up changes behaviour for existing configs,
+    // so it needs a decision first (see readme "known issues").
+    #[allow(dead_code)]
     verb: String,
     client: reqwest::Client,
 }

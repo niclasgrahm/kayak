@@ -1,35 +1,15 @@
 use anyhow::Context;
-use axum::{
-    Router,
-    routing::{delete, get, post},
-};
+use axum::Router;
 use frontend::app::{App, shell};
 use leptos::config::get_configuration;
 use leptos_axum::{LeptosRoutes, generate_route_list};
+use std::path::PathBuf;
 use std::sync::Arc;
-use std::{collections::HashMap, path::PathBuf};
-use tokio::sync::broadcast;
 use tracing::Level;
 
-mod config;
-mod handlers;
-mod inputs;
-mod outputs;
-mod state;
-mod streamer;
-mod transforms;
-use crate::handlers::{
-    rest::streamer::{create_stream, delete_stream, get_streams},
-    ui::{docs::get_docs, ui::events_handler},
-};
-use crate::state::{AppState, StreamerHandle, StreamerId};
-use crate::{handlers::ui::ui::index_handler, state::UiEvent};
 use clap::Parser;
-macro_rules! hello {
-    () => {
-        println!("Hello, world!");
-    };
-}
+use streamer::api_router;
+use streamer::state::AppState;
 
 #[derive(Parser)]
 struct Args {
@@ -39,20 +19,6 @@ struct Args {
     config: Option<PathBuf>,
     #[arg(long, default_value_t = 6767)]
     port: u16,
-}
-
-struct BuildCtx<'a> {
-    streamers: &'a mut HashMap<StreamerId, StreamerHandle>,
-    events: broadcast::Sender<UiEvent>,
-}
-
-impl<'a> BuildCtx<'a> {
-    fn new(
-        streamers: &'a mut HashMap<StreamerId, StreamerHandle>,
-        events: broadcast::Sender<UiEvent>,
-    ) -> Self {
-        Self { streamers, events }
-    }
 }
 
 #[tokio::main]
@@ -84,14 +50,7 @@ async fn main() -> anyhow::Result<()> {
     let leptos_options = conf.leptos_options;
     let routes = generate_route_list(App);
 
-    let api = Router::new()
-        .route("/docs", get(get_docs))
-        .route("/events", get(events_handler))
-        // .route("/ui", get(index_handler))
-        .route("/api/streams", post(create_stream))
-        .route("/api/streams", get(get_streams))
-        .route("/api/streams/{stream_id}", delete(delete_stream))
-        .with_state(Arc::new(state));
+    let api = api_router(Arc::new(state));
 
     let leptos = Router::new()
         .leptos_routes(&leptos_options, routes, {
@@ -107,6 +66,5 @@ async fn main() -> anyhow::Result<()> {
     axum::serve(listener, app.into_make_service())
         .await
         .context("server error")?;
-    hello!();
     Ok(())
 }

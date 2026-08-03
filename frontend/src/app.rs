@@ -43,9 +43,8 @@ pub fn App() -> impl IntoView {
         .list_streams()
         .await
     });
-    let UseEventSourceReturn {
-        data, ready_state, ..
-    } = use_event_source::<UiEvent, codee::string::JsonSerdeCodec>("/events");
+    let UseEventSourceReturn { data, .. } =
+        use_event_source::<UiEvent, codee::string::JsonSerdeCodec>("/events");
 
     let canvas_state = CanvasState {
         cards: RwSignal::new(HashMap::new()),
@@ -224,19 +223,19 @@ pub fn Card(streamer_id: StreamerId, config: Config, events: Signal<Option<UiEve
     let id = streamer_id.clone();
     
     Effect::new(move |_| {
-        if let Some(ev) = events.get() {
-            if ev.streamer_id == id {
-                messages.update(|log| {
-                    for msg in ev.batch.iter() {
-                        if log.len() == 10 {
-                            log.pop_front();
-                        }
-                        let id = next_id.get_untracked();
-                        next_id.set(id + 1);
-                        log.push_back((id, msg.to_string()));
+        if let Some(ev) = events.get()
+            && ev.streamer_id == id
+        {
+            messages.update(|log| {
+                for msg in ev.batch.iter() {
+                    if log.len() == 10 {
+                        log.pop_front();
                     }
-                });
-            }
+                    let id = next_id.get_untracked();
+                    next_id.set(id + 1);
+                    log.push_back((id, msg.to_string()));
+                }
+            });
         }
     });
     let log_ref = NodeRef::<leptos::html::Div>::new();

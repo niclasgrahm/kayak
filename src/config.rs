@@ -16,8 +16,6 @@ use streamer_core::config::TransformConfig;
 use streamer_core::config::TransformKind;
 
 use anyhow::Result;
-use schemars::JsonSchema;
-use serde::{Deserialize, Serialize};
 
 pub trait BuildInputConfig {
     fn build(self, ctx: &mut BuildCtx) -> Result<Box<dyn InputSource>>;

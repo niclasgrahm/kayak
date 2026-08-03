@@ -16,6 +16,8 @@ use tokio_stream::StreamExt as _;
 use crate::handlers::error::AppError;
 use crate::state::AppState;
 
+// axum handlers have to be async even when they do no awaiting
+#[allow(clippy::unused_async)]
 pub async fn index_handler(
     State(state): State<Arc<AppState>>,
 ) -> Result<impl IntoResponse, AppError> {

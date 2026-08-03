@@ -124,7 +124,9 @@ pub struct InputConfig {
     #[serde(flatten)]
     pub kind: InputKind,
 
-    #[serde(default)]
+    // omitted rather than emitted as `null` when absent, so a config that comes
+    // back out of `GET /api/streams` is byte-identical to the one that went in
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub buffer: Option<BufferConfig>,
 }
 /////// TRANSFORM

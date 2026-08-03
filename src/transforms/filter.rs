@@ -90,3 +90,99 @@ impl Transform for FilterTransform {
         Ok(vec![Arc::new(out)])
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::testing::batch;
+    use serde_json::{Value, json};
+
+    fn transform(filter: FilterKind) -> FilterTransform {
+        FilterTransform { filter }
+    }
+
+    fn numeric(operator: NumericFilterOperatorKind, value: f64) -> FilterKind {
+        FilterKind::Numeric {
+            field: "value".to_string(),
+            operator,
+            value,
+        }
+    }
+
+    /// Flatten `apply`'s nested output to the plain JSON that survived.
+    async fn kept(t: &mut FilterTransform, values: Vec<serde_json::Value>) -> Vec<Vec<Value>> {
+        let out = t.apply(batch(values)).await.unwrap_or_default();
+        out.iter()
+            .map(|b| b.iter().map(|m| (**m).clone()).collect())
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn numeric_greater_than_keeps_only_larger_values() {
+        let mut t = transform(numeric(NumericFilterOperatorKind::GreaterThan, 10.0));
+        let out = kept(&mut t, vec![json!({"value": 5}), json!({"value": 20})]).await;
+        assert_eq!(out, vec![vec![json!({"value": 20})]]);
+    }
+
+    #[tokio::test]
+    async fn numeric_less_than_keeps_only_smaller_values() {
+        let mut t = transform(numeric(NumericFilterOperatorKind::LessThan, 10.0));
+        let out = kept(&mut t, vec![json!({"value": 5}), json!({"value": 20})]).await;
+        assert_eq!(out, vec![vec![json!({"value": 5})]]);
+    }
+
+    #[tokio::test]
+    async fn numeric_equal_to_matches_across_int_and_float_encodings() {
+        let mut t = transform(numeric(NumericFilterOperatorKind::EqualTo, 10.0));
+        let out = kept(&mut t, vec![json!({"value": 10}), json!({"value": 10.0})]).await;
+        assert_eq!(out, vec![vec![json!({"value": 10}), json!({"value": 10.0})]]);
+    }
+
+    #[tokio::test]
+    async fn string_operators_match_equality_and_substrings() {
+        let mut equals = transform(FilterKind::String {
+            field: "name".to_string(),
+            operator: StringFilterOperatorKind::EqualTo,
+            value: "kayak".to_string(),
+        });
+        let out = kept(&mut equals, vec![json!({"name": "kayak"}), json!({"name": "kayaking"})]).await;
+        assert_eq!(out, vec![vec![json!({"name": "kayak"})]]);
+
+        let mut contains = transform(FilterKind::String {
+            field: "name".to_string(),
+            operator: StringFilterOperatorKind::Contains,
+            value: "kayak".to_string(),
+        });
+        let out = kept(&mut contains, vec![json!({"name": "kayak"}), json!({"name": "kayaking"})]).await;
+        assert_eq!(
+            out,
+            vec![vec![json!({"name": "kayak"}), json!({"name": "kayaking"})]]
+        );
+    }
+
+    /// A message that can't satisfy the predicate is dropped, not an error —
+    /// one odd message must not stop the pipeline.
+    #[tokio::test]
+    async fn missing_or_mistyped_fields_are_dropped_without_erroring() {
+        let mut t = transform(numeric(NumericFilterOperatorKind::GreaterThan, 0.0));
+        let out = kept(
+            &mut t,
+            vec![
+                json!({"other": 1}),
+                json!({"value": "not a number"}),
+                json!({"value": 1}),
+            ],
+        )
+        .await;
+        assert_eq!(out, vec![vec![json!({"value": 1})]]);
+    }
+
+    /// An all-dropped batch emits nothing at all, rather than an empty batch
+    /// that a downstream reducer would turn into a meaningless result.
+    #[tokio::test]
+    async fn a_batch_with_no_matches_emits_nothing() {
+        let mut t = transform(numeric(NumericFilterOperatorKind::GreaterThan, 100.0));
+        let out = kept(&mut t, vec![json!({"value": 1})]).await;
+        assert!(out.is_empty(), "expected no batches, got {out:?}");
+    }
+}

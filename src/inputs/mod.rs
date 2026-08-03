@@ -34,6 +34,7 @@ pub struct Buffered {
 }
 
 impl Buffered {
+    #[must_use] 
     pub fn new(inner: Box<dyn InputSource>, kind: BufferKind) -> Self {
         let (tx, rx) = tokio::sync::mpsc::channel(1);
         tokio::spawn(async move {

@@ -3,12 +3,9 @@ use std::sync::Arc;
 use crate::{
     BuildCtx,
     inputs::{BuildInput, InputSource, MessageBatch},
-    state::StreamerId,
 };
 use anyhow::Result;
 use anyhow::anyhow;
-use schemars::JsonSchema;
-use serde::{Deserialize, Serialize};
 use tokio::sync::mpsc;
 use streamer_core::config::StreamerConfig;
 

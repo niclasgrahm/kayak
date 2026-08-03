@@ -57,7 +57,28 @@ pub struct StreamerRuntime {
 }
 
 impl StreamerRuntime {
-    async fn run(mut self) -> anyhow::Result<()> {
+    /// Assemble a runtime from already-built components, bypassing the config
+    /// layer. This is the seam integration tests use to drive the run loop with
+    /// scripted inputs and collecting outputs; production code goes through
+    /// [`Streamer::start`].
+    pub fn from_parts(
+        input: Box<dyn InputSource>,
+        transforms: Vec<Box<dyn Transform>>,
+        output: Box<dyn OutputDestination>,
+        shared: Arc<Streamer>,
+        events: broadcast::Sender<UiEvent>,
+    ) -> Self {
+        Self {
+            input,
+            transforms,
+            output,
+            shared,
+            events,
+        }
+    }
+
+    /// Run until the input errors or the streamer is cancelled.
+    pub async fn run(mut self) -> anyhow::Result<()> {
         self.output.init().await?;
         loop {
             let next_msg = match select! {
@@ -85,10 +106,9 @@ impl StreamerRuntime {
                 for b in batches {
                     match t.apply(b).await {
                         Ok(b) => next.extend(b),
-                        Err(e) => {
-                            error!("[{}]\t transform error: {:?}", self.shared.id, e);
-                            continue;
-                        }
+                        // the batch is dropped and the loop moves on to the
+                        // next one — one bad batch must not stop the pipeline
+                        Err(e) => error!("[{}]\t transform error: {:?}", self.shared.id, e),
                     }
                 }
                 batches = next;
@@ -160,7 +180,7 @@ impl Streamer {
         Ok(tokio::task::spawn(async move {
             let shared = Arc::clone(&runtime.shared);
             match runtime.run().await {
-                Ok(_) => debug!("streamer {} exited successfully", shared.id),
+                Ok(()) => debug!("streamer {} exited successfully", shared.id),
                 Err(e) => error!("streamer {} exited with error: {:?}", shared.id, e),
             }
         }))
