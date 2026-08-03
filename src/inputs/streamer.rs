@@ -19,7 +19,7 @@ impl BuildInput for StreamerConfig {
             .get(&self.upstream)
             .ok_or_else(|| anyhow!("upstream streamer '{}' not found", self.upstream))?;
         let (tx, rx) = mpsc::channel(100);
-        upstream_handle.shared.subscribe(tx)?;
+        upstream_handle.shared.subscribe(tx);
         Ok(Box::new(StreamerInput {
             upstream: self.upstream,
             rx,
@@ -28,7 +28,6 @@ impl BuildInput for StreamerConfig {
 }
 
 pub struct StreamerInput {
-    #[allow(dead_code)]
     pub upstream: String,
     pub rx: tokio::sync::mpsc::Receiver<Arc<MessageBatch>>,
 }
@@ -36,6 +35,11 @@ pub struct StreamerInput {
 #[async_trait::async_trait]
 impl InputSource for StreamerInput {
     async fn next(&mut self) -> Result<Arc<MessageBatch>> {
-        Ok(self.rx.recv().await.expect("upstream channel closed"))
+        // recv() only returns None once every sender is gone, i.e. the upstream
+        // streamer was deleted or died. Nothing more will ever arrive.
+        self.rx
+            .recv()
+            .await
+            .ok_or_else(|| anyhow!("upstream streamer '{}' is gone", self.upstream))
     }
 }

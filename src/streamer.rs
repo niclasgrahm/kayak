@@ -6,6 +6,7 @@ use crate::outputs::OutputDestination;
 use crate::state::StreamerId;
 use crate::state::UiEvent;
 use crate::transforms::Transform;
+use anyhow::Context;
 use anyhow::Result;
 use serde::Serialize;
 use std::sync::{Arc, Mutex};
@@ -65,7 +66,7 @@ impl StreamerRuntime {
             } {
                 Ok(msg) => msg,
                 Err(e) => {
-                    eprintln!("[{}]\t input error: {:?}", self.shared.id, e);
+                    error!("[{}]\t input error, stopping streamer: {:?}", self.shared.id, e);
                     break;
                 }
             };
@@ -106,10 +107,19 @@ impl StreamerRuntime {
             // END NOTE this is temporary! Send output to web client
 
             for b in &batches {
-                self.output.emit(b.clone()).await?;
-                let senders = self.shared.downstream_senders.lock().unwrap().clone();
+                // a failing output shouldn't tear the pipeline down — downstream
+                // streamers are still fed, same as we do for transform errors
+                if let Err(e) = self.output.emit(b.clone()).await {
+                    error!("[{}]\t output error: {:?}", self.shared.id, e);
+                }
+                let senders = self.shared.downstream_senders();
                 for tx in &senders {
-                    let _ = tx.send(Arc::clone(b)).await;
+                    if let Err(e) = tx.send(Arc::clone(b)).await {
+                        debug!(
+                            "[{}]\t dropping batch for a downstream that went away: {}",
+                            self.shared.id, e
+                        );
+                    }
                 }
             }
         }
@@ -118,18 +128,18 @@ impl StreamerRuntime {
 }
 
 impl Streamer {
-    pub fn new(config: Config) -> Self {
+    pub fn new(config: Config) -> Result<Self> {
         let id = match config.id.clone() {
             Some(id) => id,
-            None => petname::petname(3, "-").unwrap(),
+            None => petname::petname(3, "-").context("failed to generate a random streamer id")?,
         };
         let cancellation_token = tokio_util::sync::CancellationToken::new();
-        Self {
+        Ok(Self {
             id,
             cancellation_token,
             config,
             downstream_senders: Mutex::new(Vec::new()),
-        }
+        })
     }
 
     fn create_runtime(self: &Arc<Self>, mut ctx: BuildCtx) -> Result<StreamerRuntime> {
@@ -155,10 +165,22 @@ impl Streamer {
             }
         }))
     }
-    pub fn subscribe(&self, tx: mpsc::Sender<Arc<MessageBatch>>) -> Result<()> {
-        let mut senders = self.downstream_senders.lock().unwrap();
-        senders.push(tx);
-        Ok(())
+    /// A poisoned lock only means some other task panicked while pushing or
+    /// cloning this vec; the vec itself can't be left inconsistent, so we
+    /// recover rather than propagate a panic into every downstream send.
+    fn lock_senders(&self) -> std::sync::MutexGuard<'_, Vec<mpsc::Sender<Arc<MessageBatch>>>> {
+        self.downstream_senders.lock().unwrap_or_else(|poisoned| {
+            tracing::warn!("[{}]\t downstream senders lock was poisoned; recovering", self.id);
+            poisoned.into_inner()
+        })
+    }
+
+    fn downstream_senders(&self) -> Vec<mpsc::Sender<Arc<MessageBatch>>> {
+        self.lock_senders().clone()
+    }
+
+    pub fn subscribe(&self, tx: mpsc::Sender<Arc<MessageBatch>>) {
+        self.lock_senders().push(tx);
     }
     pub fn view(&self) -> StreamerView<'_> {
         StreamerView {

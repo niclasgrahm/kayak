@@ -4,13 +4,25 @@ use axum::{
     response::{IntoResponse, Response},
 };
 
-pub struct AppError(anyhow::Error);
+use crate::state::StreamerError;
+
+pub struct AppError {
+    status: StatusCode,
+    err: anyhow::Error,
+}
 
 impl IntoResponse for AppError {
     fn into_response(self) -> Response {
+        // the full cause chain is useful in the log but not in the response body
+        if self.status.is_server_error() {
+            tracing::error!("request failed: {:?}", self.err);
+        } else {
+            tracing::debug!("request rejected ({}): {}", self.status, self.err);
+        }
         (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(serde_json::json!({"error": self.0.to_string()})),
+            self.status,
+            // `{:#}` keeps the context chain, so the client learns the actual cause
+            Json(serde_json::json!({"error": format!("{:#}", self.err)})),
         )
             .into_response()
     }
@@ -21,6 +33,15 @@ where
     E: Into<anyhow::Error>,
 {
     fn from(err: E) -> Self {
-        Self(err.into())
+        let err = err.into();
+        // downcast_ref walks the whole cause chain, so added context doesn't
+        // hide the classification
+        let status = match err.downcast_ref::<StreamerError>() {
+            Some(StreamerError::NotFound(_)) => StatusCode::NOT_FOUND,
+            Some(StreamerError::DuplicateId(_)) => StatusCode::CONFLICT,
+            Some(StreamerError::InvalidConfig(_)) => StatusCode::UNPROCESSABLE_ENTITY,
+            Some(StreamerError::Internal(_)) | None => StatusCode::INTERNAL_SERVER_ERROR,
+        };
+        Self { status, err }
     }
 }

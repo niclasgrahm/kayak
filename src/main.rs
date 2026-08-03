@@ -101,8 +101,12 @@ async fn main() -> anyhow::Result<()> {
         .fallback(leptos_axum::file_and_error_handler(shell))
         .with_state(leptos_options.clone());
     let app = api.merge(leptos);
-    let listener = tokio::net::TcpListener::bind(&leptos_options.site_addr).await?;
-    let _ = axum::serve(listener, app.into_make_service()).await;
+    let listener = tokio::net::TcpListener::bind(&leptos_options.site_addr)
+        .await
+        .with_context(|| format!("failed to bind {}", leptos_options.site_addr))?;
+    axum::serve(listener, app.into_make_service())
+        .await
+        .context("server error")?;
     hello!();
     Ok(())
 }

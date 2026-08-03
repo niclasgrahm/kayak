@@ -21,12 +21,11 @@ pub async fn create_stream(
 pub async fn delete_stream(
     State(state): State<Arc<AppState>>,
     Path(stream_id): Path<String>,
-) -> StatusCode {
-    match state.delete_streamer(stream_id) {
-        Ok(()) => StatusCode::NO_CONTENT,
-        // i guess we need to match on error; not found or something messed up
-        Err(_err) => StatusCode::NOT_FOUND,
-    }
+) -> Result<StatusCode, AppError> {
+    // AppError maps NotFound to 404; anything else is a genuine 500 rather
+    // than a misleading "not found"
+    state.delete_streamer(&stream_id)?;
+    Ok(StatusCode::NO_CONTENT)
 }
 
 pub async fn get_streams(

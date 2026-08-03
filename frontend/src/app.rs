@@ -248,7 +248,9 @@ pub fn Card(streamer_id: StreamerId, config: Config, events: Signal<Option<UiEve
             el.set_scroll_top(el.scroll_height());
         }
     });
-    let json = serde_json::to_string_pretty(&config).unwrap_or_default();
+    // an empty pane would look like "no config"; show why it's missing instead
+    let json = serde_json::to_string_pretty(&config)
+        .unwrap_or_else(|e| format!("<could not render config: {e}>"));
     view! {
         <div
             class="card"

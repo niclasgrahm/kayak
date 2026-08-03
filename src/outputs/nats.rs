@@ -1,3 +1,4 @@
+use anyhow::Context;
 use bytes::Bytes;
 use std::sync::Arc;
 use streamer_core::config::NatsOutputConfig;
@@ -29,17 +30,29 @@ pub struct NatsOutput {
 #[async_trait::async_trait]
 impl OutputDestination for NatsOutput {
     async fn emit(&mut self, message_batch: Arc<MessageBatch>) -> anyhow::Result<()> {
-        if let Some(c) = &self.client {
-            for msg in message_batch.iter() {
-                let msg2 = serde_json::to_vec(msg)?;
-                c.publish(self.subject.clone(), Bytes::from(msg2)).await?;
-            }
+        // silently doing nothing when init() never ran would look like the
+        // messages were published, so make it an error instead
+        let client = self
+            .client
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("nats output is not connected; init() was not called"))?;
+
+        for msg in message_batch.iter() {
+            let payload = serde_json::to_vec(msg).context("failed to serialize message for nats")?;
+            client
+                .publish(self.subject.clone(), Bytes::from(payload))
+                .await
+                .with_context(|| format!("failed to publish to nats subject '{}'", self.subject))?;
         }
         Ok(())
     }
 
     async fn init(&mut self) -> anyhow::Result<()> {
-        self.client = Some(async_nats::connect(&self.urls).await?);
+        self.client = Some(
+            async_nats::connect(&self.urls)
+                .await
+                .with_context(|| format!("failed to connect to nats at {}", self.urls))?,
+        );
         Ok(())
     }
 }

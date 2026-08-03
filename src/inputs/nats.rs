@@ -2,7 +2,7 @@ use crate::{
     BuildCtx,
     inputs::{BuildInput, InputSource, MessageBatch},
 };
-use anyhow::Result;
+use anyhow::{Context, Result};
 use tokio_stream::StreamExt;
 
 use std::sync::Arc;
@@ -32,19 +32,32 @@ impl InputSource for NatsInput {
         if self.sub.is_none() {
             let client = async_nats::connect(&self.urls)
                 .await
-                .expect("failed to connect to nats");
+                .with_context(|| format!("failed to connect to nats at {}", self.urls))?;
             let subscriber = client
                 .subscribe(self.subject.clone())
                 .await
-                .expect("failed to subscribe to nats subject");
+                .with_context(|| format!("failed to subscribe to nats subject '{}'", self.subject))?;
             self.sub = Some(subscriber);
         }
         let subscriber = self
             .sub
             .as_mut()
             .ok_or_else(|| anyhow::anyhow!("nats subscriber not initialized"))?;
-        let msg = subscriber.next().await.expect("sub ended");
-        let value = serde_json::from_slice(&msg.payload).expect("we assume json");
-        Ok(Arc::new(vec![Arc::new(value)]))
+
+        loop {
+            let msg = subscriber.next().await.ok_or_else(|| {
+                anyhow::anyhow!("nats subscription on '{}' ended", self.subject)
+            })?;
+            // a single malformed payload shouldn't kill the pipeline; skip it
+            // and wait for the next message
+            match serde_json::from_slice(&msg.payload) {
+                Ok(value) => return Ok(Arc::new(vec![Arc::new(value)])),
+                Err(e) => tracing::warn!(
+                    "skipping non-json message on nats subject '{}': {}",
+                    self.subject,
+                    e
+                ),
+            }
+        }
     }
 }
