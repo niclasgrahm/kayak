@@ -1,4 +1,5 @@
 use std::sync::Arc;
+use anyhow::Context;
 use streamer_core::config::{ReduceFnKind, ReduceTransformConfig};
 
 use serde::{Deserialize, Serialize};
@@ -29,10 +30,13 @@ impl Transform for ReduceTransform {
         &mut self,
         message_batch: Arc<MessageBatch>,
     ) -> anyhow::Result<Vec<Arc<MessageBatch>>> {
-        let values: Vec<f64> = message_batch
-            .iter()
-            .map(|msg| msg.get(&self.field).unwrap().as_f64().unwrap())
-            .collect();
+        let values: Vec<f64> = message_batch.iter()
+            .map(|msg| {
+                msg.get(&self.field)
+                    .and_then(|v| v.as_f64())
+                    .with_context(|| format!("field '{}' missing or not numeric", self.field))
+            })
+            .collect::<anyhow::Result<_>>()?;
 
         let reduced = match self.function {
             ReduceFnKind::Sum => values.iter().sum::<f64>(),
