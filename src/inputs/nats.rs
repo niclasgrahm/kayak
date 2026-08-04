@@ -1,6 +1,7 @@
 use crate::{
     BuildCtx,
     inputs::{BuildInput, InputSource, MessageBatch},
+    secrets::Resolved,
 };
 use anyhow::{Context, Result};
 use tokio_stream::StreamExt;
@@ -11,9 +12,11 @@ use streamer_core::config::NatsConfig;
 
 
 impl BuildInput for NatsConfig {
-    fn build(self, _ctx: &mut BuildCtx) -> Result<Box<dyn InputSource>> {
+    fn build(self, ctx: &mut BuildCtx) -> Result<Box<dyn InputSource>> {
         Ok(Box::new(NatsInput {
-            urls: self.urls,
+            urls: ctx
+                .resolve(&self.urls)
+                .context("failed to resolve secrets in the nats input url")?,
             subject: self.subject,
             sub: None,
         }))
@@ -21,7 +24,7 @@ impl BuildInput for NatsConfig {
 }
 
 pub struct NatsInput {
-    pub urls: String,
+    pub urls: Resolved,
     pub subject: String,
     pub sub: Option<async_nats::Subscriber>,
 }
@@ -30,7 +33,7 @@ pub struct NatsInput {
 impl InputSource for NatsInput {
     async fn next(&mut self) -> Result<Arc<MessageBatch>> {
         if self.sub.is_none() {
-            let client = async_nats::connect(&self.urls)
+            let client = async_nats::connect(self.urls.expose())
                 .await
                 .with_context(|| format!("failed to connect to nats at {}", self.urls))?;
             let subscriber = client

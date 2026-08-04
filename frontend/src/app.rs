@@ -1,14 +1,18 @@
 use leptos::prelude::*;
 use leptos_meta::*;
+use leptos_router::components::{A, Route, Router, Routes};
+use leptos_router::path;
 use leptos_use::{
     UseElementSizeOptions, UseElementSizeReturn, UseEventSourceReturn, UseIntervalFnOptions,
     UseRafFnCallbackArgs, UseRafFnOptions, use_element_size, use_element_size_with_options,
     use_event_source, use_interval_fn_with_options, use_raf_fn_with_options,
 };
 use std::collections::{HashMap, VecDeque};
+use streamer_core::docs::all_components;
 use streamer_core::{StreamerDto, StreamerId, UiEvent, config::Config};
 
 use crate::api_client::{ApiClient, ApiError};
+use crate::docs;
 use crate::inspector;
 use crate::graph::{
     CardGeom, Camera, Edge, FALLBACK_CARD_HEIGHT, PULSE_TICK_MS, PULSE_TICKS, approach, bounds,
@@ -89,9 +93,25 @@ impl CanvasState {
     }
 }
 
+/// The two pages, behind a router so `/docs` is a real url that can be linked
+/// to and reloaded rather than a mode the canvas is in.
 #[component]
 pub fn App() -> impl IntoView {
     provide_meta_context();
+    view! {
+        <Router>
+            <Routes fallback=|| view! { <p class="empty">"no such page"</p> }>
+                <Route path=path!("") view=CanvasPage />
+                <Route path=path!("/docs") view=DocsPage />
+            </Routes>
+        </Router>
+    }
+}
+
+/// The pipeline graph: every streamer the server is running, as a pannable,
+/// zoomable canvas of cards.
+#[component]
+pub fn CanvasPage() -> impl IntoView {
     let streams = LocalResource::new(|| async move {
         ApiClient {
             base: String::new(),
@@ -453,18 +473,254 @@ pub fn Sidebar() -> impl IntoView {
     }
 }
 
+/// Shared by both pages. The zoom readout is canvas-only, so it's driven by an
+/// optional context rather than by knowing which page it's on: `/docs` provides
+/// no `AppState` and simply gets no readout.
 #[component]
 pub fn Navbar() -> impl IntoView {
-    let state = expect_context::<AppState>();
-    let zoom = move || format!("{:.0}%", state.canvas_state.camera.get().zoom * 100.0);
+    let canvas = use_context::<AppState>().map(|state| state.canvas_state);
+    let zoom = move || {
+        canvas.map(|c| format!("{:.0}%", c.camera.get().zoom * 100.0))
+    };
     view! {
         <aside class="navbar">
-            <div>"navb"</div>
+            <div class="brand">"kayak"</div>
+            <nav class="nav-links">
+                <A href="/" exact=true>"canvas"</A>
+                <A href="/docs">"docs"</A>
+            </nav>
             <div class="zoom-level" title="scroll to zoom, drag to pan">
                 {zoom}
             </div>
         </aside>
     }
+}
+
+/// The component reference: every input, transform and output kayak can build,
+/// generated from the config schemas rather than written by hand.
+///
+/// The docs are the same on every visit, so they're built once here and only
+/// re-filtered as the search box changes.
+#[component]
+pub fn DocsPage() -> impl IntoView {
+    let all = StoredValue::new(all_components());
+    let query = RwSignal::new(String::new());
+    let selected = RwSignal::new(Option::<String>::None);
+    let groups = Memo::new(move |_| all.with_value(|all| docs::groups(all, &query.get())));
+
+    view! {
+        <Navbar />
+        <div class="main-content">
+            <DocsSidebar groups=groups query=query selected=selected />
+            <div class="docs-content">
+                <Show
+                    when=move || docs::total(&groups.get()) != 0
+                    fallback=move || {
+                        view! {
+                            <p class="empty">
+                                "no component matches “" {move || query.get()} "”"
+                            </p>
+                        }
+                    }
+                >
+                    // Rebuilt wholesale on every keystroke rather than keyed
+                    // with <For>: the groups are keyed by family, and a family
+                    // whose *contents* changed keeps its key, so a keyed list
+                    // would leave filtered-out components on screen.
+                    {move || {
+                        groups
+                            .get()
+                            .into_iter()
+                            .map(|group| {
+                                view! {
+                                    <section class="docs-family">
+                                        <h2>{group.family.label()}</h2>
+                                        {group
+                                            .components
+                                            .into_iter()
+                                            .map(|component| {
+                                                view! {
+                                                    <ComponentDoc component=component selected=selected />
+                                                }
+                                            })
+                                            .collect_view()}
+                                    </section>
+                                }
+                            })
+                            .collect_view()
+                    }}
+                </Show>
+            </div>
+        </div>
+    }
+}
+
+/// Search box plus the matching components, grouped by family. Clicking one
+/// scrolls the reference to it — the list is short enough that jumping is
+/// friendlier than replacing the page with a single component.
+#[component]
+fn DocsSidebar(
+    groups: Memo<Vec<docs::Group>>,
+    query: RwSignal<String>,
+    selected: RwSignal<Option<String>>,
+) -> impl IntoView {
+    view! {
+        <div class="sidebar docs-sidebar">
+            <input
+                class="search"
+                type="search"
+                placeholder="search components"
+                prop:value=move || query.get()
+                on:input=move |ev| query.set(event_target_value(&ev))
+            />
+            // rebuilt rather than keyed, for the same reason as the reference
+            // pane: the key is the family, and filtering changes its contents
+            {move || {
+                groups
+                    .get()
+                    .into_iter()
+                    .map(|group| {
+                        view! {
+                            <div class="nav-group">
+                                <div class="nav-group-title">{group.family.label()}</div>
+                                {group
+                                    .components
+                                    .into_iter()
+                                    .map(|component| {
+                                        let anchor = docs::anchor_id(&component);
+                                        let on_click = anchor.clone();
+                                        view! {
+                                            <div
+                                                class="tree-item"
+                                                class:selected=move || {
+                                                    selected.get().as_deref() == Some(anchor.as_str())
+                                                }
+                                                on:click=move |_| {
+                                                    selected.set(Some(on_click.clone()));
+                                                    scroll_to(&on_click);
+                                                }
+                                            >
+                                                {component.kind.clone()}
+                                            </div>
+                                        }
+                                    })
+                                    .collect_view()}
+                            </div>
+                        }
+                    })
+                    .collect_view()
+            }}
+        </div>
+    }
+}
+
+/// One component's entry in the reference.
+#[component]
+fn ComponentDoc(
+    component: streamer_core::docs::ComponentDoc,
+    selected: RwSignal<Option<String>>,
+) -> impl IntoView {
+    let anchor = docs::anchor_id(&component);
+    let is_selected = anchor.clone();
+    let description = component.description.clone().unwrap_or_default();
+    let has_settings = !component.fields.is_empty() || !component.variants.is_empty();
+    let variants = component.variants.clone();
+
+    view! {
+        <article
+            class="doc-card"
+            class:selected=move || selected.get().as_deref() == Some(is_selected.as_str())
+            id=anchor
+        >
+            <header>
+                <span class="doc-kind">{component.kind.clone()}</span>
+                // the tag is what actually goes in the config, so show it as
+                // the json it will be
+                <code class="doc-tag">{format!("\"type\": \"{}\"", component.kind)}</code>
+            </header>
+            <Description text=description />
+            <Show when=move || has_settings fallback=|| view! { <p class="empty">"no settings"</p> }>
+                <FieldTable fields=component.fields.clone() />
+                <For
+                    each={
+                        let variants = variants.clone();
+                        move || variants.clone()
+                    }
+                    key=|v| v.name.clone()
+                    let:variant
+                >
+                    <div class="doc-variant">
+                        <div class="section-kind">{variant.name.clone()}</div>
+                        <FieldTable fields=variant.fields.clone() />
+                    </div>
+                </For>
+            </Show>
+        </article>
+    }
+}
+
+/// The settings table: name, type, whether it has to be there, and what it does.
+#[component]
+fn FieldTable(fields: Vec<streamer_core::docs::FieldDoc>) -> impl IntoView {
+    if fields.is_empty() {
+        return ().into_any();
+    }
+    view! {
+        <div class="field-table">
+            <For each=move || fields.clone() key=|f| f.name.clone() let:field>
+                <div class="field">
+                    <code class="field-name">{field.name.clone()}</code>
+                    <code class="field-type">{field.type_name.clone()}</code>
+                    <span
+                        class="field-requirement"
+                        class:optional=move || !field.required
+                    >
+                        {docs::requirement_label(field.required)}
+                    </span>
+                    <div class="field-description">
+                        <Description text=field.description.clone().unwrap_or_default() />
+                    </div>
+                </div>
+            </For>
+        </div>
+    }
+    .into_any()
+}
+
+/// A doc comment, as paragraphs with `code spans` picked out.
+#[component]
+fn Description(text: String) -> impl IntoView {
+    let paragraphs = docs::rendered_description(&text);
+    view! {
+        <For each=move || paragraphs.clone().into_iter().enumerate() key=|(i, _)| *i let:paragraph>
+            <p class="doc-description">
+                <For
+                    each=move || paragraph.1.clone().into_iter().enumerate()
+                    key=|(i, _)| *i
+                    let:segment
+                >
+                    {match segment.1 {
+                        docs::Segment::Text(t) => view! { <span>{t}</span> }.into_any(),
+                        docs::Segment::Code(c) => view! { <code>{c}</code> }.into_any(),
+                    }}
+                </For>
+            </p>
+        </For>
+    }
+}
+
+/// Bring a component into view in the reference pane. A no-op anywhere there
+/// isn't a document — server-side rendering, where no click can happen anyway.
+fn scroll_to(anchor: &str) {
+    let Some(element) = leptos::web_sys::window()
+        .and_then(|w| w.document())
+        .and_then(|d| d.get_element_by_id(anchor))
+    else {
+        return;
+    };
+    // the smooth part is css (`scroll-behavior` on the pane); the options
+    // object that would set it here isn't in web-sys' default feature set
+    element.scroll_into_view();
 }
 
 /// The three stages of a pipeline, which are also the inspector's tabs.

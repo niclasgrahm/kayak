@@ -2,6 +2,7 @@ use anyhow::Context;
 use serde::Serialize;
 use tokio::sync::broadcast;
 
+use crate::secrets::{EnvStore, SecretStore};
 use crate::streamer::Streamer;
 use crate::BuildCtx;
 use std::collections::HashMap;
@@ -68,6 +69,11 @@ impl From<serde_json::Error> for StreamerError {
 pub struct AppState {
     streamers: Mutex<HashMap<StreamerId, StreamerHandle>>,
     events: broadcast::Sender<UiEvent>,
+    /// What `${NAME}` references in an incoming config resolve against. Held
+    /// here rather than passed per request because it's fixed at startup — a
+    /// pipeline posted to `/api/streams` gets the same secrets as one loaded
+    /// from the config file.
+    secrets: Arc<dyn SecretStore>,
 }
 
 impl Default for AppState {
@@ -77,12 +83,19 @@ impl Default for AppState {
 }
 
 impl AppState {
+    /// Resolves secrets from the environment only; see [`AppState::with_secrets`].
+    #[must_use]
     pub fn new() -> Self {
+        Self::with_secrets(Arc::new(EnvStore))
+    }
+
+    pub fn with_secrets(secrets: Arc<dyn SecretStore>) -> Self {
         tracing::debug!("Initializing empty server state...");
         let (events, _) = broadcast::channel(1024);
         Self {
             streamers: Mutex::new(HashMap::new()),
             events,
+            secrets,
         }
     }
 
@@ -90,8 +103,17 @@ impl AppState {
         self.events.subscribe()
     }
 
+    /// Resolves secrets from the environment only; see
+    /// [`AppState::from_config_with_secrets`].
     pub fn from_config(path: &Path) -> anyhow::Result<Self> {
-        let new_state = AppState::new();
+        Self::from_config_with_secrets(path, Arc::new(EnvStore))
+    }
+
+    pub fn from_config_with_secrets(
+        path: &Path,
+        secrets: Arc<dyn SecretStore>,
+    ) -> anyhow::Result<Self> {
+        let new_state = AppState::with_secrets(secrets);
         tracing::debug!("Loading initial configuration from {}...", path.display());
         let file = std::fs::File::open(path)
             .with_context(|| format!("failed to open config file {}", path.display()))?;
@@ -136,7 +158,7 @@ impl AppState {
         if app.contains_key(id.as_str()) {
             return Err(StreamerError::DuplicateId(id));
         }
-        let ctx = BuildCtx::new(&mut app, self.events.clone());
+        let ctx = BuildCtx::with_secrets(&mut app, self.events.clone(), Arc::clone(&self.secrets));
         // building the runtime only fails on things the config got wrong
         // (unknown upstream, unbuildable component)
         let join_handle = streamer.start(ctx).map_err(|e| {

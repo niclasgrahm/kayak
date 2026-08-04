@@ -4,6 +4,7 @@ use crate::config::Config;
 use serde::{Deserialize, Serialize};
 
 pub mod config;
+pub mod docs;
 
 #[derive(Serialize, Deserialize, Clone)]
 pub struct StreamerDto {

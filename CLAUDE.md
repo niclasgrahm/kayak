@@ -55,9 +55,15 @@ Three object-safe traits define the plugin points, all in the root crate:
 
 Config types live in `streamer-core::config` and are pure data. The *building* of runtime objects from them lives in the root crate, `src/config.rs`, via three local traits (`BuildInputConfig`, `BuildTransformConfig`, `BuildOutputConfig`) implemented **on the core config enums** — this is how the orphan rule is worked around while keeping core wasm-friendly. Each enum variant delegates to a per-component `BuildInput`/`BuildTransform`/`BuildOutput` impl in `src/inputs/*.rs`, `src/transforms/*.rs`, `src/outputs/*.rs`.
 
-`BuildCtx` (defined in `src/lib.rs`) is threaded through every `build()` call. It carries `&mut HashMap<StreamerId, StreamerHandle>` — needed so a `streamer` input can look up its upstream and register an mpsc sender on it — and the `broadcast::Sender<UiEvent>`.
+`BuildCtx` (defined in `src/lib.rs`) is threaded through every `build()` call. It carries `&mut HashMap<StreamerId, StreamerHandle>` — needed so a `streamer` input can look up its upstream and register an mpsc sender on it — the `broadcast::Sender<UiEvent>`, and the `Arc<dyn SecretStore>` that `${NAME}` references resolve against.
 
-**Adding a component** therefore touches five places: the config struct + enum variant in `streamer-core/src/config.rs`, the `build()` dispatch arm in `src/config.rs`, the impl module, and a wire-format sample in `tests/config.rs` (which fails until you add it).
+### Secrets
+
+Config fields that can hold credentials are typed `Secret` (`streamer-core::config`), not `String`. `Secret` only ever holds the *unresolved* `${NAME}` template, which is what makes it safe to serialize back out of `GET /api/streams` and to compile for wasm. Resolution happens at build time via `ctx.resolve()` and yields a `secrets::Resolved`, whose `Display`/`Debug` print the template rather than the value — so error contexts can name a connection without leaking it. Reaching the real value takes `.expose()`; flag new call sites in review, and never put a `Resolved` into anything `Serialize`. Stores (`EnvStore`, `FileStore`, `ChainStore`) live in `src/secrets.rs`; `main.rs` chains env ahead of `--secrets <file>`. `src/testing.rs` has `MapSecretStore` for tests. See "secrets" in `readme.md`.
+
+Note that `$defs` in the generated schema now holds non-component types (`Secret`), so anything reflecting over the schema has to distinguish those from components — see the docs section below.
+
+**Adding a component** therefore touches five places: the config struct + enum variant in `streamer-core/src/config.rs`, the `build()` dispatch arm in `src/config.rs`, the impl module, and a wire-format sample in `tests/config.rs` (which fails until you add it). The config struct also needs a doc comment, and its fields want one — that's what `/docs` shows, and a missing one fails a test in `streamer-core/src/docs.rs`.
 
 The config enums use `#[serde(tag = "type", rename_all = "snake_case")]` with `#[serde(flatten)]` wrappers, so JSON looks like `{"type": "nats", "urls": ..., "subject": ...}`. They also derive `schemars::JsonSchema` with `#[schemars(title = "...")]` — `/docs` generates component documentation by reflecting over `schema_for!(InputKind)` etc., so the title/doc-comments on config fields *are* the docs.
 
@@ -71,11 +77,21 @@ Note the concurrency shape: `std::sync::Mutex` guards, held across map lookups b
 
 ### HTTP surface
 
-`src/main.rs` builds two routers and merges them: an `api` router with `Arc<AppState>` state (`POST/GET /api/streams`, `DELETE /api/streams/{id}`, `GET /events` SSE, `GET /docs`), and the Leptos router with `LeptosOptions` state plus `file_and_error_handler` fallback.
+`src/main.rs` builds two routers and merges them: an `api` router with `Arc<AppState>` state (`POST/GET /api/streams`, `DELETE /api/streams/{id}`, `GET /events` SSE, `GET /api/docs`), and the Leptos router with `LeptosOptions` state plus `file_and_error_handler` fallback.
 
 `/events` is an SSE stream over the `UiEvent` broadcast; the frontend consumes it with `leptos_use::use_event_source` + `codee` JSON. Streamer run loops only send events when `receiver_count() > 0`. This is explicitly marked temporary in `src/streamer.rs`.
 
-The frontend (`frontend/src/app.rs`) is a pannable/zoomable canvas of streamer "cards" fed by `ApiClient::list_streams()` plus the live event signal. The older Askama templates (`templates/index.html`, `docs.html`, `src/handlers/ui/`) are the pre-Leptos UI and are slated for removal — `/ui` is already commented out, but `/docs` still uses Askama.
+The frontend has two routes behind `leptos_router` (`frontend/src/app.rs`): `/` is the pannable/zoomable canvas of streamer "cards" fed by `ApiClient::list_streams()` plus the live event signal, and `/docs` is the generated component reference. `Navbar` is shared and reads `AppState` through `use_context` rather than `expect_context`, because only the canvas provides it.
+
+Of the older Askama templates, only `templates/index.html` and the dead `/ui` `index_handler` are left; both are slated for removal, and Askama goes with them.
+
+### The component reference (`/docs`)
+
+Generated, never hand-written. `streamer-core/src/docs.rs` reflects over `schema_for!(InputKind)` etc. and produces `ComponentDoc`s — kind, family, description, fields (name, type, required) and, for enum-shaped configs like `filter`, variants. **The doc comments on the config structs are the docs**, and a component with no doc comment fails a unit test. Two consumers: the Leptos `/docs` page renders it, `GET /api/docs` serves it as JSON.
+
+Nothing in there knows the name of any component — keep it that way. Notes for anyone touching it: walk `oneOf` (which pairs a `type` tag with a config struct), never `$defs` (which also holds shared field types like `Secret`); field order is `required` order then alphabetical; `Option<T>` arrives as `anyOf: [T, null]`.
+
+`frontend/src/docs.rs` holds the page's pure logic (search filtering, grouping, anchors, doc-comment rendering) with unit tests, same convention as `graph.rs`/`inspector.rs`. One trap worth remembering: the docs lists are rebuilt with plain closures rather than `<For>`, because keying groups by family leaves stale components on screen when a filter changes a group's contents without changing its key.
 
 ## Notes
 

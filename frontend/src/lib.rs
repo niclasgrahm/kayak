@@ -1,5 +1,6 @@
 pub mod api_client;
 pub mod app;
+pub mod docs;
 pub mod graph;
 pub mod inspector;
 

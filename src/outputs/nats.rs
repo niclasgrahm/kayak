@@ -8,13 +8,16 @@ use crate::{
     BuildCtx,
     inputs::MessageBatch,
     outputs::{BuildOutput, OutputDestination},
+    secrets::Resolved,
 };
 
 
 impl BuildOutput for NatsOutputConfig {
-    fn build(self, _ctx: &mut BuildCtx) -> anyhow::Result<Box<dyn OutputDestination>> {
+    fn build(self, ctx: &mut BuildCtx) -> anyhow::Result<Box<dyn OutputDestination>> {
         Ok(Box::new(NatsOutput {
-            urls: self.urls,
+            urls: ctx
+                .resolve(&self.urls)
+                .context("failed to resolve secrets in the nats output url")?,
             subject: self.subject,
             client: None,
         }))
@@ -22,7 +25,7 @@ impl BuildOutput for NatsOutputConfig {
 }
 
 pub struct NatsOutput {
-    urls: String,
+    urls: Resolved,
     subject: String,
     client: Option<async_nats::Client>,
 }
@@ -49,7 +52,7 @@ impl OutputDestination for NatsOutput {
 
     async fn init(&mut self) -> anyhow::Result<()> {
         self.client = Some(
-            async_nats::connect(&self.urls)
+            async_nats::connect(self.urls.expose())
                 .await
                 .with_context(|| format!("failed to connect to nats at {}", self.urls))?,
         );

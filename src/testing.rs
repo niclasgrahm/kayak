@@ -18,7 +18,46 @@ use streamer_core::config::{
 
 use crate::inputs::{InputSource, MessageBatch};
 use crate::outputs::OutputDestination;
+use crate::secrets::SecretStore;
 use crate::transforms::Transform;
+
+/// An in-memory [`SecretStore`], so tests about resolution don't have to touch
+/// the process environment or the filesystem.
+pub struct MapSecretStore {
+    values: std::collections::HashMap<String, String>,
+    name: String,
+}
+
+impl MapSecretStore {
+    /// `name` is what shows up in "not set in ..." errors, which lets a test
+    /// tell two chained stores apart.
+    #[must_use]
+    pub fn new(name: &str, values: &[(&str, &str)]) -> Self {
+        Self {
+            values: values
+                .iter()
+                .map(|(k, v)| ((*k).to_string(), (*v).to_string()))
+                .collect(),
+            name: name.to_string(),
+        }
+    }
+
+    /// A store that knows nothing — for asserting that a missing secret fails.
+    #[must_use]
+    pub fn empty() -> Self {
+        Self::new("an empty test store", &[])
+    }
+}
+
+impl SecretStore for MapSecretStore {
+    fn get(&self, name: &str) -> Option<String> {
+        self.values.get(name).cloned()
+    }
+
+    fn describe(&self) -> String {
+        self.name.clone()
+    }
+}
 
 /// Wrap one JSON value as a single-message batch.
 #[must_use]

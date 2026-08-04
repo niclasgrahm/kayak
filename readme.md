@@ -32,6 +32,64 @@ for the inspector rows. Keep it that way: the Leptos components should only feed
 those functions and render the result, since anything inside a component can't
 be tested without a browser.
 
+## the component reference
+
+`/docs` is a generated reference for every input, transform and output: field
+names, types, which are required, and what each one does. Nothing about it is
+written by hand — `streamer_core::docs` reflects over the same `JsonSchema`
+derives the config types already carry, and `schemars` carries the doc comments
+through as descriptions.
+
+What that means in practice: **the doc comments on the config structs in
+`streamer-core/src/config.rs` are the documentation**. Add a component and it
+appears; add a field and it appears; leave the doc comment off and a unit test
+fails (`every_component_has_a_description_from_its_doc_comment`). Two things are
+worth knowing when writing them: blank lines start a new paragraph and single
+newlines don't, and `backticks` render as code.
+
+The page itself is a Leptos route with a searchable sidebar; the search matches
+kinds, field names and descriptions, so "subject" finds both nats components.
+The same data is served as JSON at `GET /api/docs` for anything that isn't a
+browser. The arranging logic is pure and unit-tested in `frontend/src/docs.rs`,
+same as `graph` and `inspector`.
+
+## secrets
+
+Config files are meant to be version controlled, so they carry *references* to
+secrets rather than the secrets themselves. Any field typed `Secret` — currently
+the `urls` of the nats input and output — accepts `${NAME}` placeholders:
+
+```json
+{ "type": "nats", "urls": "nats://app:${NATS_PASSWORD}@broker:4222", "subject": "s" }
+```
+
+Those are filled in when the pipeline is built, from two sources consulted in
+order:
+
+1. the process environment;
+2. a JSON file of `"NAME": "value"` pairs passed as `--secrets ./secrets.json`.
+
+The environment comes first so a single secret can be overridden for one run
+without touching the file. The flip side is that an unrelated environment
+variable with a colliding name shadows the file, so keep the names specific;
+a shadowed lookup is logged at debug level. `secrets.example.json` shows the
+file format, and `secrets.json` is gitignored.
+
+A value with no `${...}` in it is passed through untouched, so fields that hold
+nothing sensitive need no special handling. An unknown name is an error, not an
+empty string — the streamer fails to start (or the `POST /api/streams` gets a
+4xx) rather than quietly connecting without credentials.
+
+The resolved value never leaves the runtime component that needs it. `Secret`
+(in `streamer-core`, so wasm-safe) only ever holds the unresolved template, and
+that is what `GET /api/streams` returns and what the UI shows. `Resolved` (in
+`src/secrets.rs`) holds the real value but prints the *template* from `Display`
+and `Debug`, so a connection error logs
+`nats://app:${NATS_PASSWORD}@broker:4222` and nothing worth leaking. Getting at
+the value takes an explicit `.expose()`, which is the thing to grep for in
+review. Writing a password inline instead of referencing it defeats all of
+this — that's the habit the syntax exists to replace.
+
 ## testing
 
 `just ci` (= `just lint` + `just test`) is what has to be green before pushing;
@@ -72,11 +130,16 @@ HTTP transform, which are thin wrappers over their clients — they need
 ## currently working on
 
 - [ ] add filter transform
-- [ ] add some kind of component plugin registry which can be used to generate docs
+- [x] add some kind of component plugin registry which can be used to generate docs
+      (done 2026-08-04: no registry in the end — `/docs` reflects over the config
+      schemas instead, so a component documents itself through its doc comments.
+      See "the component reference" above.)
 
 ## todo
 
 - [ ] make sure to clean up old template based UI stuff
+      (2026-08-04: `/docs` and `templates/docs.html` are gone — Askama is now
+      only used by the dead `/ui` index handler, which is all that's left)
 - [ ] add time based buffer for the transform buffer
 - [ ] make outputs optional (for example, when a parent node is only used to push data to children)
 - [ ] think about necessary metadata to add to each message

@@ -1,0 +1,478 @@
+//! Component documentation, reflected out of the config schemas.
+//!
+//! Every component's config derives `JsonSchema`, and `schemars` carries the
+//! doc comments through as `description`. That makes the config types the single
+//! source of truth for the reference docs: a new component, a new field or a
+//! reworded doc comment shows up on `/docs` without anyone editing a template.
+//! The rule that keeps it that way is that nothing here knows the name of any
+//! particular component.
+//!
+//! This module is pure — schema in, [`ComponentDoc`] out — and lives in
+//! `streamer-core` so both consumers can use it: the Leptos `/docs` page
+//! renders it, and `GET /api/docs` serves it as JSON.
+
+use crate::config::{InputConfig, InputKind, OutputKind, TransformKind};
+use schemars::schema_for;
+use serde::{Deserialize, Serialize};
+use serde_json::Value;
+
+/// Which of the three plugin points a component plugs into. Also the grouping
+/// the docs sidebar uses, which is why it's ordered the way a pipeline reads.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Family {
+    Input,
+    Transform,
+    Output,
+}
+
+impl Family {
+    #[must_use]
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Input => "inputs",
+            Self::Transform => "transforms",
+            Self::Output => "outputs",
+        }
+    }
+}
+
+/// One configurable field of a component.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FieldDoc {
+    /// The wire name — what actually goes in the JSON.
+    pub name: String,
+    /// A rendered type, e.g. `string`, `integer`, or `sum | avg | min | max`
+    /// for a field that only accepts certain values.
+    pub type_name: String,
+    /// The field's doc comment, if it has one.
+    pub description: Option<String>,
+    /// Required fields have to appear in the JSON; optional ones may be omitted.
+    pub required: bool,
+}
+
+/// A component config that is a tagged enum rather than a flat struct — the
+/// `filter` transform, whose fields depend on which kind of filter it is.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct VariantDoc {
+    pub name: String,
+    pub fields: Vec<FieldDoc>,
+}
+
+/// One component: everything `/docs` shows about it.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ComponentDoc {
+    /// The `type` tag that selects this component in a config file.
+    pub kind: String,
+    pub family: Family,
+    /// The config struct's doc comment, if it has one.
+    pub description: Option<String>,
+    pub fields: Vec<FieldDoc>,
+    /// Empty for all but the enum-shaped components; when it isn't, the fields
+    /// live on the variants instead.
+    pub variants: Vec<VariantDoc>,
+}
+
+impl ComponentDoc {
+    /// Whether this component matches a search box query. Matching the field
+    /// names too is the point: "how do I set a subject" should find `nats`
+    /// without the user knowing that's where it lives.
+    #[must_use]
+    pub fn matches(&self, query: &str) -> bool {
+        let query = query.trim().to_lowercase();
+        if query.is_empty() {
+            return true;
+        }
+        let in_fields = |fields: &[FieldDoc]| {
+            fields
+                .iter()
+                .any(|f| f.name.to_lowercase().contains(&query))
+        };
+        self.kind.to_lowercase().contains(&query)
+            || self.family.label().contains(&query)
+            || self
+                .description
+                .as_ref()
+                .is_some_and(|d| d.to_lowercase().contains(&query))
+            || in_fields(&self.fields)
+            || self
+                .variants
+                .iter()
+                .any(|v| v.name.to_lowercase().contains(&query) || in_fields(&v.fields))
+    }
+}
+
+/// Every component kayak can build, in the order the config enums declare them.
+///
+/// The three schemas are generated here rather than passed in so that callers
+/// can't document a stale one.
+#[must_use]
+pub fn all_components() -> Vec<ComponentDoc> {
+    // a schema that can't be turned into a Value would mean schemars produced
+    // something non-serialisable, which can't happen; an empty family is the
+    // harmless reading of it either way
+    let of = |schema: Value, family: Family| components_of(&schema, family);
+
+    // `buffer` sits on `InputConfig` alongside the flattened `InputKind`, so
+    // every input accepts it and none of them declare it. Documenting it per
+    // input is what the wire format actually looks like.
+    let shared = shared_input_fields();
+    let mut docs = of(json_schema_of_input(), Family::Input);
+    for component in &mut docs {
+        component.fields.extend(shared.iter().cloned());
+    }
+
+    docs.extend(of(json_schema_of_transform(), Family::Transform));
+    docs.extend(of(json_schema_of_output(), Family::Output));
+    docs
+}
+
+/// The fields every input has, whatever its kind — the ones `InputConfig`
+/// declares itself rather than getting from the flattened `InputKind`.
+fn shared_input_fields() -> Vec<FieldDoc> {
+    let schema = serde_json::to_value(schema_for!(InputConfig)).unwrap_or(Value::Null);
+    fields_of(&schema, &schema)
+}
+
+fn json_schema_of_input() -> Value {
+    serde_json::to_value(schema_for!(InputKind)).unwrap_or(Value::Null)
+}
+
+fn json_schema_of_transform() -> Value {
+    serde_json::to_value(schema_for!(TransformKind)).unwrap_or(Value::Null)
+}
+
+fn json_schema_of_output() -> Value {
+    serde_json::to_value(schema_for!(OutputKind)).unwrap_or(Value::Null)
+}
+
+/// Read the components out of one `#[serde(tag = "type")]` enum's schema.
+///
+/// The `oneOf` list — not `$defs` — is what's walked, because it's the only
+/// place that pairs a `type` tag with a config struct. `$defs` also holds shared
+/// field types like `Secret`, which are not components.
+#[must_use]
+pub fn components_of(schema: &Value, family: Family) -> Vec<ComponentDoc> {
+    let Some(variants) = schema["oneOf"].as_array() else {
+        return Vec::new();
+    };
+
+    variants
+        .iter()
+        .filter_map(|variant| {
+            let kind = variant["properties"]["type"]["const"].as_str()?;
+            let def = resolve_ref(schema, variant)?;
+            Some(ComponentDoc {
+                kind: kind.to_string(),
+                family,
+                description: description_of(def),
+                fields: fields_of(schema, def),
+                variants: variants_of(schema, def),
+            })
+        })
+        .collect()
+}
+
+/// Follow a `$ref` into `$defs`. Anything else is already the schema it needs
+/// to be — an inline field type, say.
+fn resolve_ref<'a>(root: &'a Value, schema: &'a Value) -> Option<&'a Value> {
+    match schema["$ref"].as_str() {
+        Some(reference) => {
+            let name = reference.strip_prefix("#/$defs/")?;
+            root["$defs"].get(name)
+        }
+        None => Some(schema),
+    }
+}
+
+fn description_of(schema: &Value) -> Option<String> {
+    schema["description"].as_str().map(ToString::to_string)
+}
+
+/// Fields in a useful order: required ones first, in the order the struct
+/// declares them, then optional ones alphabetically.
+///
+/// The order matters because it's the order someone writes the JSON in, and
+/// schemars gives `properties` alphabetically — but `required` happens to be in
+/// declaration order, which is a better default for the fields that must be
+/// there. Optional fields fall back to alphabetical, which is at least stable.
+fn fields_of(root: &Value, def: &Value) -> Vec<FieldDoc> {
+    let Some(properties) = def["properties"].as_object() else {
+        return Vec::new();
+    };
+    let required: Vec<&str> = def["required"]
+        .as_array()
+        .map(|r| r.iter().filter_map(Value::as_str).collect())
+        .unwrap_or_default();
+
+    let field = |name: &str, schema: &Value| FieldDoc {
+        name: name.to_string(),
+        type_name: type_name_of(root, schema),
+        // a doc comment on the field wins over the one on its type: `urls` is
+        // better described as "the nats url" than as all of `Secret`'s docs
+        description: description_of(schema)
+            .or_else(|| resolve_ref(root, schema).and_then(description_of)),
+        required: required.contains(&name),
+    };
+
+    let mut fields: Vec<FieldDoc> = required
+        .iter()
+        .filter_map(|name| properties.get(*name).map(|s| field(name, s)))
+        .collect();
+    fields.extend(
+        properties
+            .iter()
+            .filter(|(name, _)| !required.contains(&name.as_str()))
+            .map(|(name, schema)| field(name, schema)),
+    );
+    fields
+}
+
+/// The variants of an enum-shaped component config, e.g. the `filter`
+/// transform's `Numeric` and `String`. Each is an object with exactly one
+/// property, named for the variant.
+fn variants_of(root: &Value, def: &Value) -> Vec<VariantDoc> {
+    let Some(variants) = def["oneOf"].as_array() else {
+        return Vec::new();
+    };
+    variants
+        .iter()
+        .filter_map(|variant| {
+            let (name, body) = variant["properties"].as_object()?.iter().next()?;
+            Some(VariantDoc {
+                name: name.clone(),
+                fields: fields_of(root, body),
+            })
+        })
+        .collect()
+}
+
+/// A human-readable type for a field.
+///
+/// Anything with a closed set of values renders as that set — `sum | avg | min
+/// | max` says more than "string", and it's exactly what a config file has to
+/// contain. That covers both plain string enums and the tagged-object kind like
+/// a buffer's `static | tumbling`.
+fn type_name_of(root: &Value, schema: &Value) -> String {
+    // how an `Option<T>` arrives: T or null. The null half is already said by
+    // the field being optional, so it would only add noise here.
+    if let Some(branches) = schema["anyOf"].as_array() {
+        let mut real = branches.iter().filter(|b| b["type"] != "null");
+        if let (Some(only), None) = (real.next(), real.next()) {
+            return type_name_of(root, only);
+        }
+    }
+    if let Some(values) = schema["enum"].as_array() {
+        return join_values(values.iter().filter_map(Value::as_str));
+    }
+    if let Some(variants) = schema["oneOf"].as_array() {
+        let tags = variants
+            .iter()
+            .filter_map(|v| v["properties"]["type"]["const"].as_str());
+        let joined = join_values(tags);
+        if !joined.is_empty() {
+            return joined;
+        }
+    }
+    // a `$ref` carries no type of its own; the definition it points at does
+    if schema["$ref"].is_string() {
+        return resolve_ref(root, schema).map_or_else(|| "object".to_string(), |def| {
+            type_name_of(root, def)
+        });
+    }
+    schema["type"].as_str().unwrap_or("object").to_string()
+}
+
+fn join_values<'a>(values: impl Iterator<Item = &'a str>) -> String {
+    values.collect::<Vec<_>>().join(" | ")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn component(kind: &str) -> ComponentDoc {
+        match all_components().into_iter().find(|c| c.kind == kind) {
+            Some(c) => c,
+            None => panic!("no component documented for '{kind}'"),
+        }
+    }
+
+    fn field<'a>(component: &'a ComponentDoc, name: &str) -> &'a FieldDoc {
+        match component.fields.iter().find(|f| f.name == name) {
+            Some(f) => f,
+            None => panic!("'{}' has no field '{name}'", component.kind),
+        }
+    }
+
+    fn field_names(component: &ComponentDoc) -> Vec<&str> {
+        component.fields.iter().map(|f| f.name.as_str()).collect()
+    }
+
+    /// The reflection walks `oneOf` and can silently drop a variant it doesn't
+    /// understand, which would quietly undocument a component.
+    #[test]
+    fn every_declared_component_is_documented() {
+        let declared: Vec<String> = [
+            json_schema_of_input(),
+            json_schema_of_transform(),
+            json_schema_of_output(),
+        ]
+        .iter()
+        .flat_map(|schema| {
+            schema["oneOf"]
+                .as_array()
+                .cloned()
+                .unwrap_or_default()
+                .into_iter()
+                .filter_map(|v| v["properties"]["type"]["const"].as_str().map(String::from))
+        })
+        .collect();
+
+        let documented: Vec<String> = all_components().iter().map(|c| c.kind.clone()).collect();
+        assert_eq!(documented, declared);
+        assert!(!documented.is_empty(), "no components were documented at all");
+    }
+
+    /// The docs are only as good as the doc comments, so an undocumented
+    /// component should fail here rather than render as a blank page.
+    #[test]
+    fn every_component_has_a_description_from_its_doc_comment() {
+        for component in all_components() {
+            assert!(
+                component
+                    .description
+                    .as_ref()
+                    .is_some_and(|d| !d.trim().is_empty()),
+                "component '{}' has no doc comment",
+                component.kind
+            );
+        }
+    }
+
+    #[test]
+    fn required_and_optional_fields_are_distinguished() {
+        let nats = component("nats");
+        assert!(field(&nats, "urls").required);
+        assert!(field(&nats, "subject").required);
+        // `buffer` is an Option, and optional on the wire
+        assert!(!field(&nats, "buffer").required);
+    }
+
+    /// Required first in declaration order, then optional — the order someone
+    /// writing the config would fill them in.
+    #[test]
+    fn required_fields_come_first_in_declaration_order() {
+        assert_eq!(field_names(&component("nats")), ["urls", "subject", "buffer"]);
+    }
+
+    #[test]
+    fn field_descriptions_come_from_field_doc_comments() {
+        let urls = field(&component("nats"), "urls").clone();
+        let description = urls.description.unwrap_or_default();
+        assert!(
+            description.contains("${NAME}"),
+            "expected the field's own doc comment, got: {description}"
+        );
+        // ...and not the (much longer) doc comment on the `Secret` type it uses
+        assert!(
+            !description.contains("wasm"),
+            "the field doc comment should win over its type's: {description}"
+        );
+    }
+
+    /// A field that only accepts certain values should say which, since that's
+    /// exactly what the config file has to contain.
+    #[test]
+    fn a_field_with_a_closed_set_of_values_lists_them() {
+        assert_eq!(
+            field(&component("reducer"), "function").type_name,
+            "sum | avg | min | max"
+        );
+    }
+
+    /// An `Option<T>` is documented as T — the "or null" half is already said by
+    /// the field being optional.
+    #[test]
+    fn an_optional_field_is_named_by_its_inner_type() {
+        assert_eq!(field(&component("dummy"), "buffer").type_name, "static | tumbling");
+    }
+
+    /// `buffer` lives on `InputConfig`, not on any `InputKind`, but every input
+    /// accepts it — so every input has to document it.
+    #[test]
+    fn every_input_documents_the_shared_buffer_option() {
+        let inputs: Vec<ComponentDoc> = all_components()
+            .into_iter()
+            .filter(|c| c.family == Family::Input)
+            .collect();
+        assert!(inputs.len() > 1, "expected several input kinds");
+        for input in inputs {
+            assert!(
+                input.fields.iter().any(|f| f.name == "buffer"),
+                "input '{}' doesn't document the buffer option",
+                input.kind
+            );
+        }
+    }
+
+    /// The `filter` transform's fields depend on which filter it is, so they're
+    /// documented per variant rather than as one flat list.
+    #[test]
+    fn an_enum_shaped_component_documents_its_variants() {
+        let filter = component("filter");
+        assert!(
+            filter.fields.is_empty(),
+            "filter's fields belong to its variants"
+        );
+        let names: Vec<&str> = filter.variants.iter().map(|v| v.name.as_str()).collect();
+        assert_eq!(names, ["Numeric", "String"]);
+
+        let numeric = &filter.variants[0];
+        assert_eq!(
+            numeric.fields.iter().map(|f| f.name.as_str()).collect::<Vec<_>>(),
+            ["field", "operator", "value"]
+        );
+        assert_eq!(numeric.fields[1].type_name, "GreaterThan | LessThan | EqualTo");
+        assert_eq!(numeric.fields[2].type_name, "number");
+    }
+
+    #[test]
+    fn a_component_without_settings_documents_no_fields() {
+        let stdout = component("stdout");
+        assert!(stdout.fields.is_empty() && stdout.variants.is_empty());
+        assert!(stdout.description.is_some(), "it should still be described");
+    }
+
+    /// `Secret` and the operator enums live in `$defs` next to the components;
+    /// documenting them as components would invent things that can't be built.
+    #[test]
+    fn shared_field_types_are_not_mistaken_for_components() {
+        let kinds: Vec<String> = all_components().into_iter().map(|c| c.kind).collect();
+        for not_a_component in ["Secret", "ReduceFnKind", "NumericFilterOperatorKind"] {
+            assert!(
+                !kinds.iter().any(|k| k == not_a_component),
+                "'{not_a_component}' was documented as a component"
+            );
+        }
+    }
+
+    #[test]
+    fn search_matches_a_component_by_kind_family_or_field_name() {
+        let nats = component("nats");
+        assert!(nats.matches("nat"), "should match a partial kind");
+        assert!(nats.matches("NATS"), "should be case-insensitive");
+        assert!(nats.matches("subject"), "should match a field name");
+        assert!(nats.matches("inputs"), "should match the family");
+        assert!(nats.matches(""), "an empty query matches everything");
+        assert!(nats.matches("   "), "a blank query matches everything");
+        assert!(!nats.matches("kafka"));
+    }
+
+    #[test]
+    fn search_matches_a_variant_field_of_an_enum_shaped_component() {
+        let filter = component("filter");
+        assert!(filter.matches("operator"), "should reach into variant fields");
+        assert!(filter.matches("numeric"), "should match a variant name");
+    }
+}

@@ -1,1 +1,3 @@
 /target
+# real secrets, referenced from config files as ${NAME}; see secrets.example.json
+/secrets.json

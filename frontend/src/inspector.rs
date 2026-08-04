@@ -252,7 +252,7 @@ mod tests {
             dummy_input(),
             vec![],
             OutputKind::Nats(NatsOutputConfig {
-                urls: "nats://localhost:4222".to_string(),
+                urls: "nats://localhost:4222".into(),
                 subject: "test.subject".to_string(),
             }),
         ));

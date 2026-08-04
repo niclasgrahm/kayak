@@ -2,43 +2,131 @@ use crate::StreamerId;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
+/// A config value that may *reference* secrets rather than contain them.
+///
+/// On the wire it is an ordinary JSON string, but `${NAME}` placeholders in it
+/// are replaced with real values when the pipeline is built, against whatever
+/// secret store the server was started with:
+///
+/// ```json
+/// { "type": "nats", "urls": "nats://app:${NATS_PASSWORD}@broker:4222" }
+/// ```
+///
+/// The unresolved form is the only one this type ever holds. That is what makes
+/// it safe to commit, safe to hand back from `GET /api/streams` and safe to show
+/// in the UI — a resolved value exists only inside the built runtime component,
+/// never in a `Config`. Resolution deliberately lives in the root crate: this
+/// crate compiles to wasm for the frontend, which must not be able to hold a
+/// resolved secret at all.
+///
+/// A value with no `${...}` in it is passed through untouched, so fields that
+/// hold nothing sensitive need no special handling.
+#[derive(Clone, Debug, Deserialize, Serialize, JsonSchema, PartialEq, Eq)]
+#[serde(transparent)]
+pub struct Secret(String);
+
+impl Secret {
+    #[must_use]
+    pub fn new(template: impl Into<String>) -> Self {
+        Self(template.into())
+    }
+
+    /// The unresolved value, `${NAME}` references and all. This is what gets
+    /// logged, serialised and displayed; use the resolver in the root crate to
+    /// get at the real value.
+    #[must_use]
+    pub fn template(&self) -> &str {
+        &self.0
+    }
+}
+
+impl From<&str> for Secret {
+    fn from(template: &str) -> Self {
+        Self::new(template)
+    }
+}
+
+impl From<String> for Secret {
+    fn from(template: String) -> Self {
+        Self::new(template)
+    }
+}
+
+impl std::fmt::Display for Secret {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+/// Subscribes to a nats subject. Each message is parsed as JSON and emitted as
+/// a batch of one; a payload that isn't JSON is skipped with a warning rather
+/// than taking the pipeline down. The connection is opened on the first read.
 #[derive(Clone, Debug, Deserialize, Serialize, JsonSchema)]
 #[schemars(title = "nats")]
 pub struct NatsConfig {
-    pub urls: String,
+    /// connection url, e.g. `nats://localhost:4222`. May reference secrets as
+    /// `${NAME}` — see "secrets" in the readme.
+    pub urls: Secret,
+    /// the subject to subscribe to
     pub subject: String,
 }
 
+/// Emits one generated message on a fixed interval — a heartbeat for testing a
+/// pipeline without a real source attached.
 #[derive(Clone, Debug, Deserialize, Serialize, JsonSchema)]
 #[schemars(title = "dummy")]
 pub struct DummyConfig {
+    /// seconds between messages
     pub duration: u64,
 }
 
+/// Takes another streamer's output as its input. This is what makes the
+/// pipelines a graph: several streamers can read from the same upstream, and it
+/// fans out to all of them. The upstream must already exist when this streamer
+/// is created, so declare it earlier in the config file.
 #[derive(Clone, Debug, Deserialize, Serialize, JsonSchema)]
 #[schemars(title = "streamer")]
 pub struct StreamerConfig {
+    /// id of the streamer to read from
     pub upstream: StreamerId,
 }
 
+/// Appends each batch to a file as JSON.
+///
+/// Takes no settings yet: the path is currently hardcoded in the
+/// implementation, which makes this output unusable outside its author's
+/// machine. Fixing that means adding a `path` field here.
 #[derive(Clone, Debug, Deserialize, Serialize, JsonSchema)]
 #[schemars(title = "file")]
 pub struct FileOutputConfig {}
 
+/// Publishes every message in the batch to a nats subject, one message per
+/// publish.
 #[derive(Clone, Debug, Deserialize, Serialize, JsonSchema)]
 #[schemars(title = "nats")]
 pub struct NatsOutputConfig {
-    pub urls: String,
+    /// connection url, e.g. `nats://localhost:4222`. May reference secrets as
+    /// `${NAME}` — see "secrets" in the readme.
+    pub urls: Secret,
+    /// the subject to publish to
     pub subject: String,
 }
 
+/// Prints each batch to the server's stdout. Useful while building a pipeline
+/// up; takes no settings.
 #[derive(Clone, Debug, Deserialize, Serialize, JsonSchema)]
 #[schemars(title = "stdout")]
 pub struct StdoutOutputConfig {}
 
+/// Collects messages until it has `size` of them, then emits them as one batch.
+///
+/// Distinct from the `buffer` option on an input: this one sits in the transform
+/// chain and batches what the earlier transforms produced, and it only counts —
+/// the input-level one can also close a batch on a timer.
 #[derive(Clone, Debug, Deserialize, Serialize, JsonSchema)]
 #[schemars(title = "buffer")]
 pub struct BufferTransformConfig {
+    /// how many messages make up a batch
     pub size: usize,
 }
 
@@ -69,6 +157,9 @@ pub enum FilterKind {
         value: String,
     },
 }
+/// Drops messages that don't match a condition, and drops the whole batch if
+/// none of them do. Pick either the `Numeric` or the `String` form — the fields
+/// differ because the comparisons do.
 #[derive(Clone, Debug, Deserialize, Serialize, JsonSchema)]
 #[schemars(title = "filter")]
 pub struct FilterTransformConfig {
@@ -76,10 +167,15 @@ pub struct FilterTransformConfig {
     pub filter: FilterKind,
 }
 
+/// Posts the batch to an http endpoint as a JSON array and replaces it with the
+/// JSON array in the response — so the service on the other end is the
+/// transform.
 #[derive(Clone, Debug, Deserialize, Serialize, JsonSchema)]
 #[schemars(title = "http")]
 pub struct HttpTransformConfig {
+    /// endpoint to send the batch to
     pub url: String,
+    /// http method. Accepted but not honoured yet: every request is a POST.
     pub verb: String,
 }
 #[derive(Clone, Debug, Deserialize, Serialize, JsonSchema)]
@@ -91,17 +187,26 @@ pub enum ReduceFnKind {
     Max,
 }
 
+/// Reduces a whole batch to a single message by aggregating one numeric field
+/// across it. Pair it with a buffer, or it will only ever see one message at a
+/// time.
 #[derive(Clone, Debug, Deserialize, Serialize, JsonSchema)]
 #[schemars(title = "reducer")]
 pub struct ReduceTransformConfig {
+    /// how to aggregate
     pub function: ReduceFnKind,
+    /// the field to aggregate; messages without it are ignored
     pub field: String,
 }
 
-// takes a batch, emits each message as a separate batch
+/// Cuts one batch into several smaller ones — the opposite of `buffer`.
+///
+/// Note the current limitation: messages left over after the last whole chunk
+/// are dropped, so 4 messages with `out_size: 3` emit one batch, not two.
 #[derive(Clone, Debug, Deserialize, Serialize, JsonSchema)]
 #[schemars(title = "splitter")]
 pub struct SplitterTransformConfig {
+    /// how many messages go in each emitted batch
     pub out_size: usize,
 }
 
@@ -124,6 +229,9 @@ pub struct InputConfig {
     #[serde(flatten)]
     pub kind: InputKind,
 
+    /// batch messages from this input before the transforms see them — by
+    /// count (`static`) or by time (`tumbling`). Available on every input kind.
+    /// Not to be confused with the `buffer` transform.
     // omitted rather than emitted as `null` when absent, so a config that comes
     // back out of `GET /api/streams` is byte-identical to the one that went in
     #[serde(default, skip_serializing_if = "Option::is_none")]

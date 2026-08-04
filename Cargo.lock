@@ -970,6 +970,7 @@ dependencies = [
  "leptos",
  "leptos-use",
  "leptos_meta",
+ "leptos_router",
  "serde_json",
  "streamer-core",
  "wasm-bindgen",

@@ -9,6 +9,7 @@ use tracing::Level;
 
 use clap::Parser;
 use streamer::api_router;
+use streamer::secrets::{ChainStore, EnvStore, FileStore, SecretStore};
 use streamer::state::AppState;
 
 #[derive(Parser)]
@@ -17,8 +18,25 @@ struct Args {
     debug: bool,
     #[arg(long)]
     config: Option<PathBuf>,
+    /// JSON file of `"NAME": "value"` pairs that `${NAME}` references in the
+    /// config resolve against. Keep it out of version control; mount it at
+    /// deploy time. Environment variables are always consulted first, so a
+    /// single secret can be overridden for one run without editing the file.
+    #[arg(long)]
+    secrets: Option<PathBuf>,
     #[arg(long, default_value_t = 6767)]
     port: u16,
+}
+
+/// The environment ahead of the secrets file, so an env var wins on a name
+/// collision.
+fn secret_store(path: Option<&PathBuf>) -> anyhow::Result<Arc<dyn SecretStore>> {
+    let mut stores: Vec<Box<dyn SecretStore>> = vec![Box::new(EnvStore)];
+    if let Some(path) = path {
+        tracing::info!("Loading secrets from {}", path.display());
+        stores.push(Box::new(FileStore::from_path(path)?));
+    }
+    Ok(Arc::new(ChainStore::new(stores)))
 }
 
 #[tokio::main]
@@ -39,11 +57,11 @@ async fn main() -> anyhow::Result<()> {
     let addr = format!("0.0.0.0:{}", args.port);
     tracing::info!("Starting server on {}", addr);
 
+    let secrets = secret_store(args.secrets.as_ref()).context("failed to load secrets")?;
     let state = match &args.config {
-        Some(path) => {
-            AppState::from_config(path).context("failed to initialize app state from config")?
-        }
-        None => AppState::new(),
+        Some(path) => AppState::from_config_with_secrets(path, secrets)
+            .context("failed to initialize app state from config")?,
+        None => AppState::with_secrets(secrets),
     };
 
     let conf = get_configuration(None)?;
