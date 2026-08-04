@@ -55,10 +55,59 @@ impl Default for Camera {
 }
 
 /// An edge runs from a parent's bottom edge to its child's top edge.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct Edge {
     pub from: StreamerId,
     pub to: StreamerId,
+}
+
+/// The `stage` a run loop tags a `UiEvent` with when it *receives* a batch.
+/// Matching on it is a string coupling to `src/streamer.rs`, which is why it's
+/// named here rather than spelled out at the call site.
+const INPUT_STAGE: &str = "input";
+
+/// How many ticks an edge stays lit. The visible fade is a CSS transition on
+/// the way out, so this only has to be long enough to be seen starting.
+pub const PULSE_TICKS: u8 = 3;
+/// How long a tick is, in milliseconds. Ticks rather than timestamps because
+/// that keeps the decay a pure function with no clock in it.
+pub const PULSE_TICK_MS: u64 = 50;
+
+/// The edge a UI event lights up, if any.
+///
+/// A batch crossing an edge is observed at the *receiving* end: a downstream
+/// pipeline logging an `input` event has just been handed a batch by the
+/// pipeline above it. An output event is not enough on its own — a streamer
+/// emits to its output whether or not anything is subscribed.
+#[must_use]
+pub fn pulsed_edge(
+    streamer_id: &StreamerId,
+    stage: &str,
+    nodes: &[(StreamerId, Option<StreamerId>)],
+) -> Option<Edge> {
+    if stage != INPUT_STAGE {
+        return None;
+    }
+    // a root's input comes from outside the graph, so no edge lights up
+    let parent = nodes
+        .iter()
+        .find(|(id, _)| id == streamer_id)?
+        .1
+        .as_ref()?;
+    Some(Edge {
+        from: parent.clone(),
+        to: streamer_id.clone(),
+    })
+}
+
+/// Age every pulse by one tick, dropping the ones that have burnt out. Returns
+/// whether anything is still lit — the caller stops ticking when nothing is.
+pub fn tick_pulses(pulses: &mut HashMap<Edge, u8>) -> bool {
+    pulses.retain(|_, remaining| {
+        *remaining = remaining.saturating_sub(1);
+        *remaining > 0
+    });
+    !pulses.is_empty()
 }
 
 /// A streamer's parent in the graph is whatever its `streamer` input names as
@@ -219,7 +268,7 @@ pub fn bounds(placements: &HashMap<StreamerId, CardGeom>) -> (f64, f64) {
     })
 }
 
-/// The SVG path of every edge that has both ends placed, in a stable order.
+/// Every edge that has both ends placed, with its SVG path, in a stable order.
 ///
 /// This is recomputed from `placements`, so it follows cards as they grow: a
 /// card that gets taller moves its own bottom edge and pushes every row below
@@ -228,13 +277,14 @@ pub fn bounds(placements: &HashMap<StreamerId, CardGeom>) -> (f64, f64) {
 pub fn edge_paths(
     nodes: &[(StreamerId, Option<StreamerId>)],
     placements: &HashMap<StreamerId, CardGeom>,
-) -> Vec<String> {
+) -> Vec<(Edge, String)> {
     edges(nodes)
         .into_iter()
         .filter_map(|e| {
             let from = placements.get(&e.from)?;
             let to = placements.get(&e.to)?;
-            Some(edge_path(*from, *to))
+            let path = edge_path(*from, *to);
+            Some((e, path))
         })
         .collect()
 }
@@ -575,6 +625,77 @@ mod tests {
     fn an_edge_to_an_unplaced_card_is_skipped() {
         let nodes = [node("a", None), node("b", Some("a"))];
         assert!(edge_paths(&nodes, &HashMap::new()).is_empty());
+    }
+
+    /// A batch arriving at a downstream pipeline is a batch that crossed the
+    /// edge above it, which is the whole signal the blink is built on.
+    #[test]
+    fn an_input_event_lights_the_edge_from_its_upstream() {
+        let nodes = [node("a", None), node("b", Some("a"))];
+        assert_eq!(
+            pulsed_edge(&"b".to_string(), "input", &nodes),
+            Some(Edge {
+                from: "a".to_string(),
+                to: "b".to_string()
+            })
+        );
+    }
+
+    /// A streamer emits to its output whether or not anything is listening, so
+    /// an output event says nothing about an edge.
+    #[test]
+    fn an_output_event_lights_nothing() {
+        let nodes = [node("a", None), node("b", Some("a"))];
+        assert_eq!(pulsed_edge(&"b".to_string(), "output", &nodes), None);
+    }
+
+    /// A root is fed from outside the graph — NATS, a timer — and has no edge
+    /// coming into it to light up.
+    #[test]
+    fn an_input_event_on_a_root_lights_nothing() {
+        let nodes = [node("a", None), node("b", Some("a"))];
+        assert_eq!(pulsed_edge(&"a".to_string(), "input", &nodes), None);
+        // and a pipeline that isn't on the canvas at all can't light anything
+        assert_eq!(pulsed_edge(&"ghost".to_string(), "input", &nodes), None);
+    }
+
+    /// Pulses have to burn out on their own, or an edge that saw one batch
+    /// stays lit forever.
+    #[test]
+    fn a_pulse_burns_out_after_its_ticks() {
+        let edge = Edge {
+            from: "a".to_string(),
+            to: "b".to_string(),
+        };
+        let mut pulses = HashMap::from([(edge.clone(), PULSE_TICKS)]);
+
+        for tick in 1..PULSE_TICKS {
+            assert!(
+                tick_pulses(&mut pulses),
+                "the pulse went out after {tick} of {PULSE_TICKS} ticks"
+            );
+        }
+        assert!(!tick_pulses(&mut pulses), "the pulse never went out");
+        assert!(pulses.is_empty());
+    }
+
+    /// Each edge decays on its own clock: a busy edge must not keep a quiet one
+    /// alight, and a re-fired pulse restarts.
+    #[test]
+    fn pulses_decay_independently() {
+        let busy = Edge {
+            from: "a".to_string(),
+            to: "busy".to_string(),
+        };
+        let quiet = Edge {
+            from: "a".to_string(),
+            to: "quiet".to_string(),
+        };
+        let mut pulses = HashMap::from([(busy.clone(), PULSE_TICKS), (quiet.clone(), 1)]);
+
+        tick_pulses(&mut pulses);
+        assert!(pulses.contains_key(&busy));
+        assert!(!pulses.contains_key(&quiet), "the quiet edge stayed lit");
     }
 
     /// A long frame — a parked raf loop, a backgrounded tab — must not eat the

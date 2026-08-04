@@ -41,7 +41,7 @@ Three workspace crates:
 
 ### The pipeline model
 
-A **Streamer** is one pipeline: `input → [transforms] → output`. Streamers are identified by `id` (from config, or a random `petname` if omitted) and form a **graph**: the `streamer` input kind subscribes to another streamer's output, so one pipeline can fan out to several downstream ones (see `config.json` — one NATS source feeding three tumbling-window aggregators).
+A **Streamer** is one pipeline: `input → [transforms] → output`. Streamers are identified by `id` (from config, or a random `petname` if omitted) and form a **graph**: the `streamer` input kind subscribes to another streamer's output, so one pipeline can fan out to several downstream ones. `config.json` is the worked example and deliberately covers every component kind bar the `file` output: two roots (a NATS source and a dummy ticker), a fan-out of five under the source, and one node at depth 3. Keep it that way when adding a component — it's what the UI is inspected against, and `tests/graph.rs` builds the whole file.
 
 Data flowing through is always `Arc<MessageBatch>` — a batch of `Arc<serde_json::Value>`. There is no typed schema; everything is untyped JSON, and transforms address fields by name.
 

@@ -97,6 +97,30 @@ body {
     stroke: var(--text-dim);
     stroke-width: 2;
     stroke-linecap: round;
+
+    // A batch crossing the edge lights it up. Asymmetric on purpose: it comes
+    // up quickly enough to register as an event, then falls off over most of a
+    // second, so a busy graph glows rather than strobes.
+    transition:
+      stroke 700ms ease-out,
+      stroke-width 700ms ease-out;
+
+    &.active {
+      stroke: var(--accent);
+      stroke-width: 3;
+      transition-duration: 120ms;
+    }
+  }
+
+  // A pulse is motion, so it's off for anyone who has asked for less of it.
+  // The edge still exists and still connects the cards.
+  @media (prefers-reduced-motion: reduce) {
+    path,
+    path.active {
+      transition: none;
+      stroke: var(--text-dim);
+      stroke-width: 2;
+    }
   }
 }
 
@@ -140,30 +164,124 @@ body {
   }
 }
 
-.config {
-  margin: 8px;
-  border: 1px solid var(--border);
-  border-radius: var(--radius);
-  background: var(--bg-canvas); // recessed = darker than the panel
+// The config, as a Godot-inspector-ish property list: a tab strip, then rows of
+// dim name / recessed value.
+.inspector {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+}
 
-  pre {
-    margin: 0;
-    padding: 8px;
-    font-family: var(--font-mono);
+.tabs {
+  display: flex;
+  background: var(--bg-titlebar);
+  border-bottom: 1px solid var(--border);
+
+  .tab {
+    flex: 1;
+    // buttons come with their own everything; none of it is wanted here
+    appearance: none;
+    background: transparent;
+    border: none;
+    border-right: 1px solid var(--border);
+    // reserved on every tab, painted on the active one, so switching tabs
+    // doesn't shift the row by 2px
+    border-top: 2px solid transparent;
+    color: var(--text-dim);
+    font: inherit;
     font-size: 11px;
-    overflow: auto;
-    max-height: 160px;
+    padding: 4px 6px;
+    cursor: pointer;
+
+    &:last-child {
+      border-right: none;
+    }
+    &:hover {
+      color: var(--text);
+      background: var(--bg-hover);
+    }
+    &.active {
+      background: var(--bg-panel);
+      border-top-color: var(--accent);
+      color: var(--text);
+    }
   }
 }
+
+.pane {
+  padding: 6px;
+  // tall enough that switching tabs doesn't resize the card much, capped so a
+  // long transform chain scrolls instead of dominating the graph
+  min-height: 92px;
+  max-height: 180px;
+  overflow-y: auto;
+}
+
+.section + .section {
+  margin-top: 6px;
+}
+
+.section-kind {
+  background: var(--bg-hover);
+  border-radius: 2px;
+  padding: 2px 6px;
+  margin-bottom: 4px;
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+
+.property {
+  display: grid;
+  // the name column is fixed so values line up down the whole pane
+  grid-template-columns: 40% 1fr;
+  gap: 6px;
+  align-items: center;
+  padding: 1px 2px;
+
+  .name {
+    color: var(--text-dim);
+    font-size: 11px;
+  }
+  .value {
+    background: var(--bg-canvas); // recessed = darker than the panel
+    border: 1px solid var(--border);
+    border-radius: 2px;
+    padding: 1px 5px;
+    font-family: var(--font-mono);
+    font-size: 11px;
+  }
+  // both columns truncate rather than wrap: a card is a fixed width, and a
+  // wrapping url would change the card's height
+  .name,
+  .value {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+}
+
+.empty {
+  color: var(--text-dim);
+  font-size: 11px;
+  font-style: italic;
+  padding: 2px;
+}
 .messages {
-  margin: 0 8px 8px;
+  // the log is a different thing from the config above it, and reads as one
+  // without a rule between them
+  border-top: 1px solid var(--border);
+  padding: 4px 8px;
   font-family: var(--font-mono);
   font-size: 11px;
+  // exactly five rows: any padding on the rows themselves would leave a sliced
+  // sixth line peeking out of the top
   max-height: calc(5 * 1.6em);
   overflow-y: auto;
 
   > div {
-    padding: 1px 6px;
+    padding: 0 6px;
     line-height: 1.6;
     color: var(--text-dim);
     &:last-child {

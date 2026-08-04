@@ -1,6 +1,7 @@
 pub mod api_client;
 pub mod app;
 pub mod graph;
+pub mod inspector;
 
 #[cfg(feature = "hydrate")]
 #[wasm_bindgen::prelude::wasm_bindgen]

@@ -6,7 +6,7 @@ use std::time::Duration;
 
 use serde_json::json;
 use streamer::state::{AppState, StreamerError};
-use streamer_core::config::Config;
+use streamer_core::config::{Config, InputKind};
 
 /// A pipeline that sits idle — the dummy input only ticks once an hour, so
 /// nothing is emitted while the test runs.
@@ -145,22 +145,36 @@ async fn deleting_a_streamer_cancels_its_run_loop() -> anyhow::Result<()> {
 }
 
 /// Loading the whole of `config.json` exercises the multi-streamer graph in one
-/// go: pipeline1 must be registered before the aggregators that name it, or
+/// go: every upstream must be registered before the pipelines that name it, or
 /// building them fails.
+///
+/// The expectation is derived from the file rather than hardcoded — the file is
+/// the UI's example config and is meant to grow — so what's actually pinned is
+/// that *everything declared gets built*, and that it stays a graph rather than
+/// a flat list of roots.
 #[tokio::test]
 async fn the_repository_config_file_starts_a_working_graph() -> anyhow::Result<()> {
+    let declared: Vec<Config> = serde_json::from_str(&std::fs::read_to_string("config.json")?)?;
     let state = AppState::from_config(std::path::Path::new("config.json"))?;
+
+    let mut expected: Vec<String> = declared
+        .iter()
+        .map(|c| {
+            c.id.clone()
+                .ok_or_else(|| anyhow::anyhow!("config.json entries should all name themselves"))
+        })
+        .collect::<anyhow::Result<_>>()?;
+    expected.sort_unstable();
 
     let mut ids = state.get_streamer_ids();
     ids.sort_unstable();
-    assert_eq!(
-        ids,
-        vec![
-            "10second_aggregator".to_string(),
-            "5second_aggregator".to_string(),
-            "60second_aggregator".to_string(),
-            "pipeline1".to_string(),
-        ]
+    assert_eq!(ids, expected);
+
+    assert!(
+        declared
+            .iter()
+            .any(|c| matches!(c.input.kind, InputKind::Streamer(_))),
+        "config.json has no `streamer` input left, so it no longer exercises upstream wiring"
     );
     Ok(())
 }

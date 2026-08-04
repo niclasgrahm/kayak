@@ -1,17 +1,19 @@
 use leptos::prelude::*;
 use leptos_meta::*;
 use leptos_use::{
-    UseElementSizeOptions, UseElementSizeReturn, UseEventSourceReturn, UseRafFnCallbackArgs,
-    UseRafFnOptions, use_element_size, use_element_size_with_options, use_event_source,
-    use_raf_fn_with_options,
+    UseElementSizeOptions, UseElementSizeReturn, UseEventSourceReturn, UseIntervalFnOptions,
+    UseRafFnCallbackArgs, UseRafFnOptions, use_element_size, use_element_size_with_options,
+    use_event_source, use_interval_fn_with_options, use_raf_fn_with_options,
 };
 use std::collections::{HashMap, VecDeque};
 use streamer_core::{StreamerDto, StreamerId, UiEvent, config::Config};
 
 use crate::api_client::{ApiClient, ApiError};
+use crate::inspector;
 use crate::graph::{
-    CardGeom, Camera, FALLBACK_CARD_HEIGHT, approach, bounds, edge_paths, focus_camera, layout,
-    nodes_from, wheel_delta_pixels, zoom_at,
+    CardGeom, Camera, Edge, FALLBACK_CARD_HEIGHT, PULSE_TICK_MS, PULSE_TICKS, approach, bounds,
+    edge_paths, focus_camera, layout, nodes_from, pulsed_edge, tick_pulses, wheel_delta_pixels,
+    zoom_at,
 };
 
 /// How hard the wheel zooms. Small, because the factor is exponential in the
@@ -335,19 +337,62 @@ fn canvas_offset(canvas: &NodeRef<leptos::html::Div>, client_x: i32, client_y: i
 /// The lines between cards. One SVG for the whole graph, inside the scaled
 /// surface so the edges zoom and pan with the cards; it has no size of its own
 /// and simply overflows, which keeps it out of the way of pointer events.
+///
+/// An edge lights up for a moment when a batch crosses it. The pulse is held
+/// here as a tick count per edge; the fade itself is a CSS transition, so this
+/// only has to say *when* an edge is lit, not how bright it is.
 #[component]
 pub fn Edges(streamers: Vec<StreamerDto>) -> impl IntoView {
     let state = expect_context::<AppState>();
-    let paths = Memo::new(move |_| {
-        let pairs: Vec<(StreamerId, Config)> = streamers
+
+    // the graph shape only changes when the pipeline list does, which is the
+    // one thing this component is rebuilt for
+    let nodes = nodes_from(
+        &streamers
             .iter()
             .map(|s| (s.id.clone(), s.config.clone()))
-            .collect();
-        edge_paths(&nodes_from(&pairs), &state.canvas_state.placements.get())
-    });
+            .collect::<Vec<(StreamerId, Config)>>(),
+    );
 
+    let paths = {
+        let nodes = nodes.clone();
+        Memo::new(move |_| edge_paths(&nodes, &state.canvas_state.placements.get()))
+    };
     // a zero-sized svg is never painted, so it has to span the whole graph
     let size = Memo::new(move |_| bounds(&state.canvas_state.placements.get()));
+
+    let pulses = RwSignal::new(HashMap::<Edge, u8>::new());
+
+    // a downstream receiving a batch is a batch having crossed the edge above it
+    Effect::new(move |_| {
+        let Some(event) = state.events.get() else {
+            return;
+        };
+        let Some(edge) = pulsed_edge(&event.streamer_id, &event.stage, &nodes) else {
+            return;
+        };
+        pulses.update(|p| {
+            // a re-fired pulse restarts rather than stacking
+            p.insert(edge, PULSE_TICKS);
+        });
+    });
+
+    // Decay, ticking only while something is actually lit — on an idle graph
+    // this costs nothing.
+    let decay = use_interval_fn_with_options(
+        // the "anything still lit" answer is read off the signal below instead
+        move || pulses.update(|p| _ = tick_pulses(p)),
+        PULSE_TICK_MS,
+        UseIntervalFnOptions::default().immediate(false),
+    );
+    let (resume, pause) = (decay.resume.clone(), decay.pause.clone());
+    Effect::new(move |_| {
+        if pulses.with(HashMap::is_empty) {
+            pause();
+        } else {
+            resume();
+        }
+    });
 
     view! {
         <svg
@@ -358,7 +403,20 @@ pub fn Edges(streamers: Vec<StreamerDto>) -> impl IntoView {
             // Rebuilt whole whenever the layout moves. Not a keyed `For`: the
             // natural key is the pair of ids it connects, which is exactly what
             // *doesn't* change when a card grows, so the old `d` would stick.
-            {move || paths.get().into_iter().map(|d| view! { <path d=d /> }).collect_view()}
+            {move || {
+                paths
+                    .get()
+                    .into_iter()
+                    .map(|(edge, d)| {
+                        view! {
+                            <path
+                                d=d
+                                class:active=move || pulses.with(|p| p.contains_key(&edge))
+                            />
+                        }
+                    })
+                    .collect_view()
+            }}
         </svg>
     }
 }
@@ -406,6 +464,116 @@ pub fn Navbar() -> impl IntoView {
                 {zoom}
             </div>
         </aside>
+    }
+}
+
+/// The three stages of a pipeline, which are also the inspector's tabs.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Tab {
+    Inputs,
+    Transforms,
+    Outputs,
+}
+
+/// A card's config, as a tabbed property list rather than raw JSON.
+///
+/// The config of a running streamer never changes, so all three tabs are built
+/// once and only the selected one is rendered.
+#[component]
+fn Inspector(config: Config) -> impl IntoView {
+    let input = inspector::input_section(&config);
+    let output = inspector::output_section(&config);
+    let transforms = inspector::transform_sections(&config);
+
+    // the count belongs on the tab: a chain is the one part of a pipeline that
+    // can be empty or long, and that's worth seeing without clicking
+    let tabs = [
+        (Tab::Inputs, "inputs".to_string()),
+        (
+            Tab::Transforms,
+            format!("transforms ({})", transforms.len()),
+        ),
+        (Tab::Outputs, "outputs".to_string()),
+    ];
+
+    let tab = RwSignal::new(Tab::Inputs);
+
+    view! {
+        <div class="inspector">
+            <div class="tabs">
+                {tabs
+                    .into_iter()
+                    .map(|(which, label)| {
+                        view! {
+                            <button
+                                class="tab"
+                                class:active=move || tab.get() == which
+                                on:click=move |_| tab.set(which)
+                            >
+                                {label}
+                            </button>
+                        }
+                    })
+                    .collect_view()}
+            </div>
+            <div class="pane">
+                {move || match tab.get() {
+                    Tab::Inputs => view! { <SectionView section=input.clone() /> }.into_any(),
+                    Tab::Outputs => view! { <SectionView section=output.clone() /> }.into_any(),
+                    Tab::Transforms if transforms.is_empty() => {
+                        view! { <div class="empty">"no transforms"</div> }.into_any()
+                    }
+                    Tab::Transforms => {
+                        transforms
+                            .iter()
+                            .cloned()
+                            .enumerate()
+                            .map(|(i, section)| view! { <SectionView section ordinal=i + 1 /> })
+                            .collect_view()
+                            .into_any()
+                    }
+                }}
+            </div>
+        </div>
+    }
+}
+
+/// One component: a kind heading and its settings. `ordinal` numbers a
+/// transform by its place in the chain — order is behaviour there.
+#[component]
+fn SectionView(
+    section: inspector::Section,
+    #[prop(optional, into)] ordinal: Option<usize>,
+) -> impl IntoView {
+    let heading = ordinal.map_or_else(
+        || section.kind.clone(),
+        |n| format!("{n}. {kind}", kind = section.kind),
+    );
+    let properties = section.properties;
+
+    view! {
+        <div class="section">
+            <div class="section-kind">{heading}</div>
+            {if properties.is_empty() {
+                view! { <div class="empty">"no settings"</div> }.into_any()
+            } else {
+                properties
+                    .into_iter()
+                    .map(|p| {
+                        let (name, value) = (p.name.clone(), p.value.clone());
+                        view! {
+                            <div class="property">
+                                <span class="name" title=p.name>{name}</span>
+                                // the full value on hover: a url or a subject
+                                // will not fit in half a card
+                                <span class="value" title=p.value>{value}</span>
+                            </div>
+                        }
+                    })
+                    .collect_view()
+                    .into_any()
+            }}
+        </div>
     }
 }
 
@@ -490,9 +658,6 @@ pub fn Card(
             })
     });
 
-    // an empty pane would look like "no config"; show why it's missing instead
-    let json = serde_json::to_string_pretty(&config)
-        .unwrap_or_else(|e| format!("<could not render config: {e}>"));
     view! {
         <div
             class="card"
@@ -501,9 +666,7 @@ pub fn Card(
             style:top=move || format!("{}px", position.get().y)
         >
             <header>{streamer_id.clone()}</header>
-            <div class="config">
-                <pre>{json}</pre>
-            </div>
+            <Inspector config=config />
             <div class="messages" node_ref=log_ref>
                 <For each=move || messages.get() key=|(i, _)| *i let:entry>
                     <div>{entry.1}</div>

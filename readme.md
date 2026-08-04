@@ -7,16 +7,30 @@ input makes its pipeline a child of the one it names as upstream — with curved
 edges from each parent's bottom edge to its child's top edge. Positions are
 computed, not stored: there is no card dragging yet.
 
+An edge lights up when a batch crosses it and fades back over ~700ms, so a busy
+graph glows rather than strobes (and doesn't animate at all under
+`prefers-reduced-motion`). The signal is the *downstream's* `input` UI event,
+which means a pipeline whose input is buffered blinks once per closed window
+rather than once per message — its upstream is feeding it continuously, but
+nothing observable happens until the buffer closes.
+
 | gesture | does |
 | --- | --- |
 | wheel / trackpad scroll | zoom about the cursor, 20%–250% (shown in the navbar) |
 | drag empty canvas | pan (dragging *on* a card selects its text instead) |
 | click a name in the sidebar | glide the camera to centre that node |
 
+Each card shows its config as a tabbed property list — inputs / transforms /
+outputs — over a live message log. `frontend/src/inspector.rs` builds those rows
+from `serde_json::Value` rather than by matching on the config enums, so a new
+component kind or a new field shows up without touching the frontend; the row
+names are the wire names.
+
 All the geometry — layout, edge paths, zoom anchoring, the camera glide — lives
-in `frontend/src/graph.rs` as pure functions with unit tests. Keep it that way:
-the Leptos components should only feed those functions and render the result,
-since anything inside a component can't be tested without a browser.
+in `frontend/src/graph.rs` as pure functions with unit tests, and the same goes
+for the inspector rows. Keep it that way: the Leptos components should only feed
+those functions and render the result, since anything inside a component can't
+be tested without a browser.
 
 ## testing
 
@@ -69,7 +83,8 @@ HTTP transform, which are thin wrappers over their clients — they need
 - [x] deal with all unwraps -- this will bite us in the ass soon otherwise
       (done 2026-08-03: no unwrap/expect left in src/; see "known issues" below
       for the things that pass turned up but didn't change)
-- [ ] show config in the "cards" in the web ui
+- [x] show config in the "cards" in the web ui
+      (done 2026-08-04: tabbed property list, see "the canvas" above)
 - [ ] give streamer ability to have multiple inputs
 - [ ] new transform (i guess?): wait_for_condition (should it be called buffer_until_condition? or perhaps both are needed?)
       for example, we need to wait for x: a and z: b. for this, we also need the multiple input thing
