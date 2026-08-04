@@ -1,9 +1,10 @@
 lint:
-  cargo clippy --all-targets -- -D warnings
+  cargo clippy --workspace --all-targets -- -D warnings
 
 # unit + integration tests; no network, no NATS, no running server needed
+# --workspace so the frontend's canvas-geometry tests run too
 test:
-  cargo test --all-targets
+  cargo test --workspace --all-targets
 
 # what CI runs — run this before pushing
 ci: lint test

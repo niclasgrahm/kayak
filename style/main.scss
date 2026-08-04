@@ -37,6 +37,18 @@ body {
   border-bottom: 1px solid var(--border);
   padding: 4px 10px;
   font-size: 12px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+
+  .zoom-level {
+    font-family: var(--font-mono);
+    color: var(--text-dim);
+    font-size: 11px;
+    // fixed width so the navbar doesn't twitch while zooming
+    min-width: 4ch;
+    text-align: right;
+  }
 }
 .main-content {
   flex: 1;
@@ -56,11 +68,36 @@ body {
   flex: 1;
   position: relative;
   overflow: hidden;
+  cursor: grab;
   background-color: var(--bg-canvas);
   background-image:
     linear-gradient(rgba(255, 255, 255, 0.045) 1px, transparent 1px),
     linear-gradient(90deg, rgba(255, 255, 255, 0.045) 1px, transparent 1px);
   background-size: 24px 24px;
+
+  &.panning {
+    cursor: grabbing;
+    // text selection while dragging the canvas looks broken
+    user-select: none;
+  }
+}
+
+// One svg for the whole graph, drawn in surface coordinates so it needs no
+// viewBox. Its width/height are set from the graph's bounds in `Edges` — a
+// zero-sized svg isn't painted at all — and it never intercepts a click.
+.edges {
+  position: absolute;
+  left: 0;
+  top: 0;
+  overflow: visible;
+  pointer-events: none;
+
+  path {
+    fill: none;
+    stroke: var(--text-dim);
+    stroke-width: 2;
+    stroke-linecap: round;
+  }
 }
 
 .sidebar {

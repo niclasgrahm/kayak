@@ -1,5 +1,23 @@
 # kayak - graph-based stream processing
 
+## the canvas
+
+Cards are laid out automatically as a top-to-bottom hierarchy — a `streamer`
+input makes its pipeline a child of the one it names as upstream — with curved
+edges from each parent's bottom edge to its child's top edge. Positions are
+computed, not stored: there is no card dragging yet.
+
+| gesture | does |
+| --- | --- |
+| wheel / trackpad scroll | zoom about the cursor, 20%–250% (shown in the navbar) |
+| drag empty canvas | pan (dragging *on* a card selects its text instead) |
+| click a name in the sidebar | glide the camera to centre that node |
+
+All the geometry — layout, edge paths, zoom anchoring, the camera glide — lives
+in `frontend/src/graph.rs` as pure functions with unit tests. Keep it that way:
+the Leptos components should only feed those functions and render the result,
+since anything inside a component can't be tested without a browser.
+
 ## testing
 
 `just ci` (= `just lint` + `just test`) is what has to be green before pushing;
