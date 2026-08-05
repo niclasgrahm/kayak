@@ -13,9 +13,9 @@ cargo check                         # fast type check of the whole workspace
 just ci                             # lint + test — what GitHub Actions runs
 just test                           # cargo test --all-targets (offline: no NATS, no server)
 just lint                           # cargo clippy --all-targets -- -D warnings
-cargo run -- --config config.json --debug --port 6767   # run server binary directly (no WASM rebuild)
+cargo run -- --config config.json --secrets ./secrets.json --debug   # run server binary directly (no WASM rebuild)
 
-docker compose up                   # NATS on :4222 + a publisher spamming test.subject once/sec
+docker compose up                   # NATS :4222 + publisher on test.subject, kafka :9092 + publisher on test.events, postgres :5432
 just test-http                      # hurl --test hurl/tests/*.hurl (needs the server running)
 just start-baseline                 # hurl hurl/create_baseline.hurl — creates a sample pipeline
 ```
@@ -41,13 +41,13 @@ Three workspace crates:
 
 ### The pipeline model
 
-A **Streamer** is one pipeline: `input → [transforms] → output`. Streamers are identified by `id` (from config, or a random `petname` if omitted) and form a **graph**: the `streamer` input kind subscribes to another streamer's output, so one pipeline can fan out to several downstream ones. `config.json` is the worked example and deliberately covers every component kind bar the `file` output: two roots (a NATS source and a dummy ticker), a fan-out of five under the source, and one node at depth 3. Keep it that way when adding a component — it's what the UI is inspected against, and `tests/graph.rs` builds the whole file.
+A **Streamer** is one pipeline: `inputs → [transforms] → outputs`. A pipeline may have several inputs (merged into one stream) and several outputs (each gets every batch); `inputs` and `outputs` are JSON arrays, and there is no singular form. Streamers are identified by `id` (from config, or a random `petname` if omitted) and form a **graph**: the `streamer` input kind subscribes to another streamer's output, so one pipeline can fan out to several downstream ones. `config.json` is the worked example and deliberately covers every component kind bar the `file` output: two roots (a NATS source and a dummy ticker), a fan-out of seven under the source, one node (`everything`) fed by three inputs — two upstreams and a nats subject another node publishes to — one node with two outputs of different kinds, and one node at depth 3. Keep it that way when adding a component — it's what the UI is inspected against, and `tests/graph.rs` builds the whole file.
 
 Data flowing through is always `Arc<MessageBatch>` — a batch of `Arc<serde_json::Value>`. There is no typed schema; everything is untyped JSON, and transforms address fields by name.
 
 Three object-safe traits define the plugin points, all in the root crate:
 
-- `inputs::InputSource` — `async fn next() -> Result<Arc<MessageBatch>>`
+- `inputs::InputSource` — `async fn next() -> Result<Arc<MessageBatch>>`. Several of them are merged by `inputs::merge` into an `inputs::Merged`, which runs a pump task per input rather than `select!`ing over them — selecting would cancel a losing `next()` and starve any input that waits on a timer. One input failing is reported and survived; the run loop only stops when the last one is gone.
 - `transforms::Transform` — `async fn apply(batch) -> Result<Vec<Arc<MessageBatch>>>` (one batch in, N batches out — that's how `splitter` works)
 - `outputs::OutputDestination` — `async fn init()` + `async fn emit(batch)`
 

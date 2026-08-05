@@ -1,95 +1,323 @@
 [
   {
     "id": "sensors",
-    "input": {
-      "type": "nats",
-      "urls": "nats://localhost:4222",
-      "subject": "test.subject"
-    },
+    "inputs": [
+      {
+        "type": "nats",
+        "urls": "nats://localhost:4222",
+        "subject": "test.subject"
+      }
+    ],
     "transforms": [],
-    "output": { "type": "stdout" }
+    "outputs": [
+      {
+        "type": "stdout"
+      }
+    ]
   },
   {
     "id": "heartbeat",
-    "input": { "type": "dummy", "duration": 1 },
+    "inputs": [
+      {
+        "type": "dummy",
+        "duration": 1
+      }
+    ],
     "transforms": [],
-    "output": { "type": "stdout" }
+    "outputs": [
+      {
+        "type": "stdout"
+      }
+    ]
   },
   {
     "id": "sensors_60s_sum",
-    "input": {
-      "type": "streamer",
-      "upstream": "sensors",
-      "buffer": { "type": "tumbling", "window_seconds": 60 }
-    },
-    "transforms": [{ "type": "reducer", "function": "sum", "field": "value" }],
-    "output": { "type": "stdout" }
+    "inputs": [
+      {
+        "type": "streamer",
+        "upstream": "sensors",
+        "buffer": {
+          "type": "tumbling",
+          "window_seconds": 60
+        }
+      }
+    ],
+    "transforms": [
+      {
+        "type": "reducer",
+        "function": "sum",
+        "field": "value"
+      }
+    ],
+    "outputs": [
+      {
+        "type": "postgres",
+        "host": "localhost",
+        "port": 5432,
+        "database": "kayak",
+        "user": "kayak",
+        "password": "${POSTGRES_PASSWORD}",
+        "table": "sensor_sums"
+      }
+    ]
   },
   {
     "id": "sensors_10s_avg",
-    "input": {
-      "type": "streamer",
-      "upstream": "sensors",
-      "buffer": { "type": "tumbling", "window_seconds": 10 }
-    },
-    "transforms": [{ "type": "reducer", "function": "avg", "field": "value" }],
-    "output": { "type": "stdout" }
+    "inputs": [
+      {
+        "type": "streamer",
+        "upstream": "sensors",
+        "buffer": {
+          "type": "tumbling",
+          "window_seconds": 10
+        }
+      }
+    ],
+    "transforms": [
+      {
+        "type": "reducer",
+        "function": "avg",
+        "field": "value"
+      }
+    ],
+    "outputs": [
+      {
+        "type": "stdout"
+      }
+    ]
   },
   {
     "id": "sensors_100_max",
-    "input": {
-      "type": "streamer",
-      "upstream": "sensors",
-      "buffer": { "type": "static", "size": 100 }
-    },
-    "transforms": [{ "type": "reducer", "function": "max", "field": "value" }],
-    "output": {
-      "type": "nats",
-      "urls": "nats://localhost:4222",
-      "subject": "test.aggregated.max"
-    }
+    "inputs": [
+      {
+        "type": "streamer",
+        "upstream": "sensors",
+        "buffer": {
+          "type": "static",
+          "size": 100
+        }
+      }
+    ],
+    "transforms": [
+      {
+        "type": "reducer",
+        "function": "max",
+        "field": "value"
+      }
+    ],
+    "outputs": [
+      {
+        "type": "nats",
+        "urls": "nats://localhost:4222",
+        "subject": "test.aggregated.max"
+      }
+    ]
   },
   {
     "id": "hot_readings",
-    "input": { "type": "streamer", "upstream": "sensors" },
+    "inputs": [
+      {
+        "type": "streamer",
+        "upstream": "sensors"
+      }
+    ],
     "transforms": [
       {
         "type": "filter",
-        "Numeric": { "field": "value", "operator": "GreaterThan", "value": 90.0 }
+        "Numeric": {
+          "field": "value",
+          "operator": "GreaterThan",
+          "value": 90.0
+        }
       }
     ],
-    "output": { "type": "stdout" }
+    "outputs": [
+      {
+        "type": "postgres",
+        "host": "localhost",
+        "port": 5432,
+        "database": "kayak",
+        "user": "kayak",
+        "password": "${POSTGRES_PASSWORD}",
+        "table": "hot_readings"
+      }
+    ]
   },
   {
     "id": "tagged_readings",
-    "input": { "type": "streamer", "upstream": "sensors" },
+    "inputs": [
+      {
+        "type": "streamer",
+        "upstream": "sensors"
+      }
+    ],
     "transforms": [
       {
         "type": "filter",
-        "String": { "field": "ts", "operator": "Contains", "value": "T08:" }
+        "String": {
+          "field": "ts",
+          "operator": "Contains",
+          "value": "T08:"
+        }
       }
     ],
-    "output": { "type": "stdout" }
+    "outputs": [
+      {
+        "type": "stdout"
+      }
+    ]
   },
   {
     "id": "hot_alerts",
-    "input": {
-      "type": "streamer",
-      "upstream": "hot_readings",
-      "buffer": { "type": "tumbling", "window_seconds": 60 }
-    },
-    "transforms": [
-      { "type": "http", "url": "http://localhost:8080/alerts", "verb": "POST" }
+    "inputs": [
+      {
+        "type": "streamer",
+        "upstream": "hot_readings",
+        "buffer": {
+          "type": "tumbling",
+          "window_seconds": 60
+        }
+      }
     ],
-    "output": { "type": "stdout" }
+    "transforms": [
+      {
+        "type": "http",
+        "url": "http://localhost:8080/alerts",
+        "verb": "POST"
+      }
+    ],
+    "outputs": [
+      {
+        "type": "stdout"
+      }
+    ]
+  },
+  {
+    "id": "sensors_archive",
+    "inputs": [
+      {
+        "type": "streamer",
+        "upstream": "sensors",
+        "buffer": {
+          "type": "static",
+          "size": 10
+        }
+      }
+    ],
+    "transforms": [],
+    "outputs": [
+      {
+        "type": "postgres",
+        "host": "localhost",
+        "port": 5432,
+        "database": "kayak",
+        "user": "kayak",
+        "password": "${POSTGRES_PASSWORD}",
+        "table": "readings"
+      },
+      {
+        "type": "stdout"
+      }
+    ]
+  },
+  {
+    "id": "everything",
+    "inputs": [
+      {
+        "type": "streamer",
+        "upstream": "sensors"
+      },
+      {
+        "type": "streamer",
+        "upstream": "heartbeat"
+      },
+      {
+        "type": "nats",
+        "urls": "nats://localhost:4222",
+        "subject": "test.aggregated.max"
+      }
+    ],
+    "transforms": [],
+    "outputs": [
+      {
+        "type": "stdout"
+      },
+      {
+        "type": "nats",
+        "urls": "nats://localhost:4222",
+        "subject": "test.everything"
+      }
+    ]
+  },
+  {
+    "id": "kafka_events",
+    "inputs": [
+      {
+        "type": "kafka",
+        "brokers": "localhost:9092",
+        "topic": "test.events",
+        "group": "kayak-sample",
+        "start_at": "latest"
+      }
+    ],
+    "transforms": [],
+    "outputs": [
+      {
+        "type": "stdout"
+      }
+    ]
+  },
+  {
+    "id": "slow_requests",
+    "inputs": [
+      {
+        "type": "streamer",
+        "upstream": "kafka_events"
+      }
+    ],
+    "transforms": [
+      {
+        "type": "filter",
+        "Numeric": {
+          "field": "latency_ms",
+          "operator": "GreaterThan",
+          "value": 400.0
+        }
+      }
+    ],
+    "outputs": [
+      {
+        "type": "kafka",
+        "brokers": "localhost:9092",
+        "topic": "test.slow"
+      },
+      {
+        "type": "stdout"
+      }
+    ]
   },
   {
     "id": "heartbeat_pairs",
-    "input": { "type": "streamer", "upstream": "heartbeat" },
-    "transforms": [
-      { "type": "buffer", "size": 6 },
-      { "type": "splitter", "out_size": 2 }
+    "inputs": [
+      {
+        "type": "streamer",
+        "upstream": "heartbeat"
+      }
     ],
-    "output": { "type": "stdout" }
+    "transforms": [
+      {
+        "type": "buffer",
+        "size": 6
+      },
+      {
+        "type": "splitter",
+        "out_size": 2
+      }
+    ],
+    "outputs": [
+      {
+        "type": "stdout"
+      }
+    ]
   }
 ]

@@ -6,6 +6,7 @@ use std::time::Duration;
 
 use serde_json::json;
 use streamer::state::{AppState, StreamerError};
+use streamer::testing::MapSecretStore;
 use streamer_core::config::{Config, InputKind};
 
 /// A pipeline that sits idle — the dummy input only ticks once an hour, so
@@ -13,9 +14,9 @@ use streamer_core::config::{Config, InputKind};
 fn idle(id: &str) -> anyhow::Result<Config> {
     Ok(serde_json::from_value(json!({
         "id": id,
-        "input": { "type": "dummy", "duration": 3600 },
+        "inputs": [{ "type": "dummy", "duration": 3600 }],
         "transforms": [],
-        "output": { "type": "stdout" }
+        "outputs": [{ "type": "stdout" }]
     }))?)
 }
 
@@ -23,18 +24,18 @@ fn idle(id: &str) -> anyhow::Result<Config> {
 fn chatty(id: &str) -> anyhow::Result<Config> {
     Ok(serde_json::from_value(json!({
         "id": id,
-        "input": { "type": "dummy", "duration": 0 },
+        "inputs": [{ "type": "dummy", "duration": 0 }],
         "transforms": [],
-        "output": { "type": "stdout" }
+        "outputs": [{ "type": "stdout" }]
     }))?)
 }
 
 fn downstream_of(id: &str, upstream: &str) -> anyhow::Result<Config> {
     Ok(serde_json::from_value(json!({
         "id": id,
-        "input": { "type": "streamer", "upstream": upstream },
+        "inputs": [{ "type": "streamer", "upstream": upstream }],
         "transforms": [],
-        "output": { "type": "stdout" }
+        "outputs": [{ "type": "stdout" }]
     }))?)
 }
 
@@ -155,7 +156,15 @@ async fn deleting_a_streamer_cancels_its_run_loop() -> anyhow::Result<()> {
 #[tokio::test]
 async fn the_repository_config_file_starts_a_working_graph() -> anyhow::Result<()> {
     let declared: Vec<Config> = serde_json::from_str(&std::fs::read_to_string("config.json")?)?;
-    let state = AppState::from_config(std::path::Path::new("config.json"))?;
+    // config.json references secrets, so it needs a store; the environment is
+    // not something a test should depend on or write to
+    let state = AppState::from_config_with_secrets(
+        std::path::Path::new("config.json"),
+        std::sync::Arc::new(MapSecretStore::new(
+            "the config.json test store",
+            &[("POSTGRES_PASSWORD", "hunter2")],
+        )),
+    )?;
 
     let mut expected: Vec<String> = declared
         .iter()
@@ -173,7 +182,7 @@ async fn the_repository_config_file_starts_a_working_graph() -> anyhow::Result<(
     assert!(
         declared
             .iter()
-            .any(|c| matches!(c.input.kind, InputKind::Streamer(_))),
+            .any(|c| c.inputs.iter().any(|i| matches!(i.kind, InputKind::Streamer(_)))),
         "config.json has no `streamer` input left, so it no longer exercises upstream wiring"
     );
     Ok(())

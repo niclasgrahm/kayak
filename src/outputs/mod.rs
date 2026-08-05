@@ -4,7 +4,9 @@ use std::sync::Arc;
 use crate::{BuildCtx, inputs::MessageBatch};
 
 pub mod file;
+pub mod kafka;
 pub mod nats;
+pub mod postgres;
 pub mod stdout;
 
 pub trait BuildOutput {

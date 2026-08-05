@@ -57,6 +57,8 @@ frontend = { path = "frontend", features =["ssr"]}
 leptos = { version = "0.8", features = ["ssr"] }
 leptos_axum = "0.8"
 leptos_meta = { version = "0.8", features = ["ssr"]}
+tokio-postgres = { version = "0.7.18", features = ["with-serde_json-1"] }
+rdkafka = { version = "0.39.0", features = ["tokio"] }
 
 [dev-dependencies]
 # lets the integration tests call the axum router in-process, with no socket

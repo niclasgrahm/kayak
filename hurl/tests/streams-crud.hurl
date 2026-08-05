@@ -9,9 +9,9 @@ POST http://localhost:6767/api/streams
 Content-Type: application/json
 {
     "id": "hurl-smoke-test",
-    "input": { "type": "dummy", "duration": 3600 },
+    "inputs": [{ "type": "dummy", "duration": 3600 }],
     "transforms": [{ "type": "buffer", "size": 10 }],
-    "output": { "type": "stdout" }
+    "outputs": [{ "type": "stdout" }]
 }
 
 HTTP 201
@@ -34,9 +34,9 @@ POST http://localhost:6767/api/streams
 Content-Type: application/json
 {
     "id": "hurl-smoke-test",
-    "input": { "type": "dummy", "duration": 3600 },
+    "inputs": [{ "type": "dummy", "duration": 3600 }],
     "transforms": [],
-    "output": { "type": "stdout" }
+    "outputs": [{ "type": "stdout" }]
 }
 HTTP 409
 
@@ -46,9 +46,9 @@ POST http://localhost:6767/api/streams
 Content-Type: application/json
 {
     "id": "hurl-orphan",
-    "input": { "type": "streamer", "upstream": "does-not-exist" },
+    "inputs": [{ "type": "streamer", "upstream": "does-not-exist" }],
     "transforms": [],
-    "output": { "type": "stdout" }
+    "outputs": [{ "type": "stdout" }]
 }
 HTTP 422
 

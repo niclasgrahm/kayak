@@ -25,6 +25,7 @@ impl BuildInputConfig for InputKind {
     fn build(self, ctx: &mut BuildCtx) -> Result<Box<dyn InputSource>> {
         match self {
             InputKind::Dummy(c) => c.build(ctx),
+            InputKind::Kafka(c) => c.build(ctx),
             InputKind::Nats(c) => c.build(ctx),
             InputKind::Streamer(c) => c.build(ctx),
         }
@@ -72,7 +73,9 @@ impl BuildOutputConfig for OutputConfig {
         match self.kind {
             OutputKind::Stdout(c) => c.build(ctx),
             OutputKind::File(c) => c.build(ctx),
+            OutputKind::Kafka(c) => c.build(ctx),
             OutputKind::Nats(c) => c.build(ctx),
+            OutputKind::Postgres(c) => c.build(ctx),
         }
     }
 }

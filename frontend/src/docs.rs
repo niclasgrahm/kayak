@@ -161,21 +161,27 @@ mod tests {
         assert_eq!(matched.len(), 1);
         assert_eq!(matched[0].family, Family::Transform);
 
-        let nothing = groups(&all_components(), "kafka");
+        // a term no component kind, field or description contains
+        let nothing = groups(&all_components(), "quicksilver");
         assert!(nothing.is_empty());
         assert_eq!(total(&nothing), 0);
     }
 
     /// `nats` is both an input and an output, so a search for it has to find
     /// both — and they need different anchors.
+    ///
+    /// Other components can match too (a description mentioning nats is a hit),
+    /// which is the search working; what is pinned here is that the kind itself
+    /// appears once per family.
     #[test]
     fn a_kind_that_exists_in_two_families_is_listed_in_both() {
         let groups = groups(&all_components(), "nats");
-        assert_eq!(kinds(&groups), ["nats", "nats"]);
 
         let anchors: Vec<String> = groups
             .iter()
-            .flat_map(|g| g.components.iter().map(anchor_id))
+            .flat_map(|g| g.components.iter())
+            .filter(|c| c.kind == "nats")
+            .map(anchor_id)
             .collect();
         assert_eq!(anchors, ["input-nats", "output-nats"]);
     }

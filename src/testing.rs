@@ -111,6 +111,31 @@ impl InputSource for ScriptedInput {
     }
 }
 
+/// An input that yields the same message on a fixed interval, forever.
+///
+/// The point of it is the *waiting*: unlike [`ScriptedInput`], its `next()`
+/// spends most of its life pending on a timer, which is what makes it useful
+/// for testing that merging several inputs doesn't starve a slow one.
+pub struct Ticking {
+    interval: std::time::Duration,
+    message: serde_json::Value,
+}
+
+impl Ticking {
+    #[must_use]
+    pub fn new(interval: std::time::Duration, message: serde_json::Value) -> Self {
+        Self { interval, message }
+    }
+}
+
+#[async_trait::async_trait]
+impl InputSource for Ticking {
+    async fn next(&mut self) -> Result<Arc<MessageBatch>> {
+        tokio::time::sleep(self.interval).await;
+        Ok(Arc::new(vec![Arc::new(self.message.clone())]))
+    }
+}
+
 /// Everything a [`CollectingOutput`] saw, shared with the test that spawned it.
 #[derive(Clone, Default)]
 pub struct Emitted(Arc<Mutex<Vec<Arc<MessageBatch>>>>);
@@ -250,13 +275,13 @@ impl Transform for FailOnNth {
 pub fn stub_config(id: &str) -> Config {
     Config {
         id: Some(id.to_string()),
-        input: InputConfig {
+        inputs: vec![InputConfig {
             kind: InputKind::Dummy(DummyConfig { duration: 3600 }),
             buffer: None,
-        },
+        }],
         transforms: Vec::<TransformConfig>::new(),
-        output: OutputConfig {
+        outputs: vec![OutputConfig {
             kind: OutputKind::Stdout(StdoutOutputConfig {}),
-        },
+        }],
     }
 }

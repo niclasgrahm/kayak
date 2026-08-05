@@ -5,6 +5,7 @@ use crate::inputs::MessageBatch;
 use crate::outputs::OutputDestination;
 use crate::state::StreamerId;
 use crate::state::UiEvent;
+use streamer_core::stage;
 use crate::transforms::Transform;
 use anyhow::Context;
 use anyhow::Result;
@@ -48,10 +49,21 @@ async fn next_input_message(input: &mut Box<dyn InputSource>) -> Result<Arc<Mess
     input.next().await
 }
 
+/// Publish to the UI feed. Nothing is built or sent when no one is watching —
+/// errors reach the server log either way, and this keeps a headless run from
+/// paying to describe them. A free function rather than a method so it can be
+/// called from inside a loop that already holds `&mut self.transforms`.
+fn publish(events: &broadcast::Sender<UiEvent>, event: impl FnOnce() -> UiEvent) {
+    if events.receiver_count() > 0 {
+        let _ = events.send(event());
+    }
+}
+
 pub struct StreamerRuntime {
+    /// Every configured input, merged into one — see [`crate::inputs::merge`].
     input: Box<dyn InputSource>,
     transforms: Vec<Box<dyn Transform>>,
-    output: Box<dyn OutputDestination>,
+    outputs: Vec<Box<dyn OutputDestination>>,
     shared: Arc<Streamer>,
     events: broadcast::Sender<UiEvent>,
 }
@@ -62,24 +74,34 @@ impl StreamerRuntime {
     /// scripted inputs and collecting outputs; production code goes through
     /// [`Streamer::start`].
     pub fn from_parts(
-        input: Box<dyn InputSource>,
+        inputs: Vec<Box<dyn InputSource>>,
         transforms: Vec<Box<dyn Transform>>,
-        output: Box<dyn OutputDestination>,
+        outputs: Vec<Box<dyn OutputDestination>>,
         shared: Arc<Streamer>,
         events: broadcast::Sender<UiEvent>,
-    ) -> Self {
-        Self {
-            input,
+    ) -> Result<Self> {
+        Ok(Self {
+            input: crate::inputs::merge(inputs, shared.id.clone(), events.clone())?,
             transforms,
-            output,
+            outputs,
             shared,
             events,
-        }
+        })
     }
 
     /// Run until the input errors or the streamer is cancelled.
     pub async fn run(mut self) -> anyhow::Result<()> {
-        self.output.init().await?;
+        // an output that can't be initialised is fatal: it would never accept a
+        // batch, and a pipeline half-writing its outputs is worse than one that
+        // says why it didn't start
+        for output in &mut self.outputs {
+            if let Err(e) = output.init().await {
+                publish(&self.events, || {
+                    UiEvent::error(self.shared.id.clone(), stage::OUTPUT, &e)
+                });
+                return Err(e);
+            }
+        }
         loop {
             let next_msg = match select! {
                 () = self.shared.cancellation_token.cancelled() => break,
@@ -88,17 +110,18 @@ impl StreamerRuntime {
                 Ok(msg) => msg,
                 Err(e) => {
                     error!("[{}]\t input error, stopping streamer: {:?}", self.shared.id, e);
+                    publish(&self.events, || UiEvent::error(self.shared.id.clone(), stage::INPUT, &e));
                     break;
                 }
             };
             // NOTE this is temporary! Send input to web client
-            if self.events.receiver_count() > 0 {
-                let _ = self.events.send(UiEvent {
-                    streamer_id: self.shared.id.clone(),
-                    stage: "input".to_string(),
-                    batch: Arc::clone(&next_msg),
-                });
-            }
+            publish(&self.events, || {
+                UiEvent::batch(
+                    self.shared.id.clone(),
+                    stage::INPUT,
+                    Arc::clone(&next_msg),
+                )
+            });
             // END NOTE this is temporary! Send input to web client
             let mut batches = vec![next_msg];
             for t in &mut self.transforms {
@@ -108,29 +131,36 @@ impl StreamerRuntime {
                         Ok(b) => next.extend(b),
                         // the batch is dropped and the loop moves on to the
                         // next one — one bad batch must not stop the pipeline
-                        Err(e) => error!("[{}]\t transform error: {:?}", self.shared.id, e),
+                        Err(e) => {
+                            error!("[{}]\t transform error: {:?}", self.shared.id, e);
+                            publish(&self.events, || {
+                                UiEvent::error(self.shared.id.clone(), stage::TRANSFORM, &e)
+                            });
+                        }
                     }
                 }
                 batches = next;
             }
 
             // NOTE this is temporary! Send output to web client
-            if self.events.receiver_count() > 0 {
-                for b in &batches {
-                    let _ = self.events.send(UiEvent {
-                        streamer_id: self.shared.id.clone(),
-                        stage: "output".to_string(),
-                        batch: Arc::clone(b),
-                    });
-                }
+            for b in &batches {
+                publish(&self.events, || {
+                    UiEvent::batch(self.shared.id.clone(), stage::OUTPUT, Arc::clone(b))
+                });
             }
             // END NOTE this is temporary! Send output to web client
 
             for b in &batches {
-                // a failing output shouldn't tear the pipeline down — downstream
-                // streamers are still fed, same as we do for transform errors
-                if let Err(e) = self.output.emit(b.clone()).await {
-                    error!("[{}]\t output error: {:?}", self.shared.id, e);
+                // every output gets every batch. a failing one shouldn't tear
+                // the pipeline down — its siblings and the downstream streamers
+                // are still fed, same as we do for transform errors
+                for output in &mut self.outputs {
+                    if let Err(e) = output.emit(b.clone()).await {
+                        error!("[{}]\t output error: {:?}", self.shared.id, e);
+                        publish(&self.events, || {
+                            UiEvent::error(self.shared.id.clone(), stage::OUTPUT, &e)
+                        });
+                    }
                 }
                 let senders = self.shared.downstream_senders();
                 for tx in &senders {
@@ -167,13 +197,25 @@ impl Streamer {
         for t in self.config.transforms.iter().cloned() {
             transforms.push(t.build(&mut ctx)?);
         }
-        Ok(StreamerRuntime {
-            input: self.config.input.clone().build(&mut ctx)?,
+        // inputs first: a `streamer` input registers itself on its upstream as
+        // it builds, and an output that fails to build shouldn't leave half a
+        // subscription behind — building it last keeps that window as small as
+        // the old single-input code had it
+        let mut inputs = Vec::with_capacity(self.config.inputs.len());
+        for i in self.config.inputs.iter().cloned() {
+            inputs.push(i.build(&mut ctx)?);
+        }
+        let mut outputs = Vec::with_capacity(self.config.outputs.len());
+        for o in self.config.outputs.iter().cloned() {
+            outputs.push(o.build(&mut ctx)?);
+        }
+        StreamerRuntime::from_parts(
+            inputs,
             transforms,
-            output: self.config.output.clone().build(&mut ctx)?,
-            shared: Arc::clone(self),
-            events: ctx.events.clone(),
-        })
+            outputs,
+            Arc::clone(self),
+            ctx.events.clone(),
+        )
     }
     pub fn start(self: &Arc<Self>, ctx: BuildCtx) -> anyhow::Result<tokio::task::JoinHandle<()>> {
         let runtime = self.create_runtime(ctx)?;

@@ -14,9 +14,10 @@ use streamer_core::{StreamerDto, StreamerId, UiEvent, config::Config};
 use crate::api_client::{ApiClient, ApiError};
 use crate::docs;
 use crate::inspector;
+use crate::log;
 use crate::graph::{
     CardGeom, Camera, Edge, FALLBACK_CARD_HEIGHT, PULSE_TICK_MS, PULSE_TICKS, approach, bounds,
-    edge_paths, focus_camera, layout, nodes_from, pulsed_edge, tick_pulses, wheel_delta_pixels,
+    edge_paths, focus_camera, layout, nodes_from, pulsed_edges, tick_pulses, wheel_delta_pixels,
     zoom_at,
 };
 
@@ -388,12 +389,15 @@ pub fn Edges(streamers: Vec<StreamerDto>) -> impl IntoView {
         let Some(event) = state.events.get() else {
             return;
         };
-        let Some(edge) = pulsed_edge(&event.streamer_id, &event.stage, &nodes) else {
+        let lit = pulsed_edges(&event, &nodes);
+        if lit.is_empty() {
             return;
-        };
+        }
         pulses.update(|p| {
-            // a re-fired pulse restarts rather than stacking
-            p.insert(edge, PULSE_TICKS);
+            for edge in lit {
+                // a re-fired pulse restarts rather than stacking
+                p.insert(edge, PULSE_TICKS);
+            }
         });
     });
 
@@ -737,19 +741,19 @@ enum Tab {
 /// once and only the selected one is rendered.
 #[component]
 fn Inspector(config: Config) -> impl IntoView {
-    let input = inspector::input_section(&config);
-    let output = inspector::output_section(&config);
+    let inputs = inspector::input_sections(&config);
+    let outputs = inspector::output_sections(&config);
     let transforms = inspector::transform_sections(&config);
 
-    // the count belongs on the tab: a chain is the one part of a pipeline that
-    // can be empty or long, and that's worth seeing without clicking
+    // the count belongs on the tab: any of the three stages can now hold more
+    // than one component, and how many is worth seeing without clicking
     let tabs = [
-        (Tab::Inputs, "inputs".to_string()),
+        (Tab::Inputs, inspector::tab_label("inputs", inputs.len())),
         (
             Tab::Transforms,
-            format!("transforms ({})", transforms.len()),
+            inspector::tab_label("transforms", transforms.len()),
         ),
-        (Tab::Outputs, "outputs".to_string()),
+        (Tab::Outputs, inspector::tab_label("outputs", outputs.len())),
     ];
 
     let tab = RwSignal::new(Tab::Inputs);
@@ -774,24 +778,41 @@ fn Inspector(config: Config) -> impl IntoView {
             </div>
             <div class="pane">
                 {move || match tab.get() {
-                    Tab::Inputs => view! { <SectionView section=input.clone() /> }.into_any(),
-                    Tab::Outputs => view! { <SectionView section=output.clone() /> }.into_any(),
-                    Tab::Transforms if transforms.is_empty() => {
-                        view! { <div class="empty">"no transforms"</div> }.into_any()
-                    }
-                    Tab::Transforms => {
-                        transforms
-                            .iter()
-                            .cloned()
-                            .enumerate()
-                            .map(|(i, section)| view! { <SectionView section ordinal=i + 1 /> })
-                            .collect_view()
-                            .into_any()
-                    }
+                    // no ordinals on inputs and outputs: they are a set, not a
+                    // chain — every input is merged and every output gets every
+                    // batch, so numbering them would imply an order that isn't
+                    // there. a transform's position *is* behaviour, so it keeps
+                    // its number.
+                    Tab::Inputs => sections(&inputs, "no inputs", false),
+                    Tab::Outputs => sections(&outputs, "no outputs", false),
+                    Tab::Transforms => sections(&transforms, "no transforms", true),
                 }}
             </div>
         </div>
     }
+}
+
+/// One tab's worth of sections, or a placeholder if the stage is empty. Empty
+/// is a real state for all three now: a pipeline can have no transforms and no
+/// outputs, and a config that somehow arrives with no inputs should say so
+/// rather than render a blank pane.
+fn sections(sections: &[inspector::Section], empty: &'static str, numbered: bool) -> AnyView {
+    if sections.is_empty() {
+        return view! { <div class="empty">{empty}</div> }.into_any();
+    }
+    sections
+        .iter()
+        .cloned()
+        .enumerate()
+        .map(|(i, section)| {
+            if numbered {
+                view! { <SectionView section ordinal=i + 1 /> }.into_any()
+            } else {
+                view! { <SectionView section /> }.into_any()
+            }
+        })
+        .collect_view()
+        .into_any()
 }
 
 /// One component: a kind heading and its settings. `ordinal` numbers a
@@ -841,7 +862,8 @@ pub fn Card(
 ) -> impl IntoView {
     let state = expect_context::<AppState>();
     let canvas = state.canvas_state;
-    let messages = RwSignal::new(VecDeque::<(u64, String)>::with_capacity(10));
+    let messages =
+        RwSignal::new(VecDeque::<(u64, log::Line)>::with_capacity(log::LOG_CAPACITY));
     let next_id = RwSignal::new(0u64);
     let id = streamer_id.clone();
 
@@ -849,16 +871,10 @@ pub fn Card(
         if let Some(ev) = events.get()
             && ev.streamer_id == id
         {
-            messages.update(|log| {
-                for msg in ev.batch.iter() {
-                    if log.len() == 10 {
-                        log.pop_front();
-                    }
-                    let id = next_id.get_untracked();
-                    next_id.set(id + 1);
-                    log.push_back((id, msg.to_string()));
-                }
-            });
+            let lines = log::lines_for(&ev);
+            let mut id = next_id.get_untracked();
+            messages.update(|entries| log::append(entries, &mut id, lines));
+            next_id.set(id);
         }
     });
     let log_ref = NodeRef::<leptos::html::Div>::new();
@@ -925,7 +941,7 @@ pub fn Card(
             <Inspector config=config />
             <div class="messages" node_ref=log_ref>
                 <For each=move || messages.get() key=|(i, _)| *i let:entry>
-                    <div>{entry.1}</div>
+                    <div class:error=entry.1.error>{entry.1.text}</div>
                 </For>
             </div>
         </div>

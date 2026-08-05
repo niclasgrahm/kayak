@@ -13,7 +13,16 @@ use std::collections::BTreeSet;
 
 use schemars::schema_for;
 use serde_json::{Value, json};
-use streamer_core::config::{Config, InputKind, OutputKind, TransformKind};
+use streamer_core::config::{Config, InputConfig, InputKind, OutputKind, TransformKind};
+
+/// These samples all declare exactly one input; reach for it without a panic
+/// path at every call site.
+fn only_input(config: &Config) -> &InputConfig {
+    match config.inputs.as_slice() {
+        [input] => input,
+        other => panic!("expected exactly one input, got {}", other.len()),
+    }
+}
 
 fn input_samples() -> Vec<(&'static str, Value)> {
     vec![
@@ -23,6 +32,16 @@ fn input_samples() -> Vec<(&'static str, Value)> {
             json!({"type": "nats", "urls": "nats://localhost:4222", "subject": "test.subject"}),
         ),
         ("streamer", json!({"type": "streamer", "upstream": "p1"})),
+        (
+            "kafka",
+            json!({
+                "type": "kafka",
+                "brokers": "localhost:9092",
+                "topic": "test.events",
+                "group": "kayak",
+                "start_at": "latest"
+            }),
+        ),
     ]
 }
 
@@ -55,6 +74,22 @@ fn output_samples() -> Vec<(&'static str, Value)> {
         (
             "nats",
             json!({"type": "nats", "urls": "nats://localhost:4222", "subject": "out.subject"}),
+        ),
+        (
+            "kafka",
+            json!({"type": "kafka", "brokers": "localhost:9092", "topic": "out.events"}),
+        ),
+        (
+            "postgres",
+            json!({
+                "type": "postgres",
+                "host": "localhost",
+                "port": 5432,
+                "database": "kayak",
+                "user": "kayak",
+                "password": "${POSTGRES_PASSWORD}",
+                "table": "readings"
+            }),
         ),
     ]
 }
@@ -112,16 +147,16 @@ fn every_component_kind_has_a_wire_format_sample() -> anyhow::Result<()> {
 #[test]
 fn every_component_sample_round_trips_unchanged() -> anyhow::Result<()> {
     for (tag, input) in input_samples() {
-        let config = json!({"id": "x", "input": input, "transforms": [], "output": {"type": "stdout"}});
+        let config = json!({"id": "x", "inputs": [input], "transforms": [], "outputs": [{"type": "stdout"}]});
         let parsed: Config = serde_json::from_value(config.clone())?;
         assert_eq!(serde_json::to_value(&parsed)?, config, "input '{tag}' changed shape");
     }
     for (tag, transform) in transform_samples() {
         let config = json!({
             "id": "x",
-            "input": {"type": "dummy", "duration": 1},
+            "inputs": [{"type": "dummy", "duration": 1}],
             "transforms": [transform],
-            "output": {"type": "stdout"}
+            "outputs": [{"type": "stdout"}]
         });
         let parsed: Config = serde_json::from_value(config.clone())?;
         assert_eq!(serde_json::to_value(&parsed)?, config, "transform '{tag}' changed shape");
@@ -129,9 +164,9 @@ fn every_component_sample_round_trips_unchanged() -> anyhow::Result<()> {
     for (tag, output) in output_samples() {
         let config = json!({
             "id": "x",
-            "input": {"type": "dummy", "duration": 1},
+            "inputs": [{"type": "dummy", "duration": 1}],
             "transforms": [],
-            "output": output
+            "outputs": [output]
         });
         let parsed: Config = serde_json::from_value(config.clone())?;
         assert_eq!(serde_json::to_value(&parsed)?, config, "output '{tag}' changed shape");
@@ -145,17 +180,18 @@ fn every_component_sample_round_trips_unchanged() -> anyhow::Result<()> {
 fn an_input_buffer_parses_alongside_the_input_fields() -> anyhow::Result<()> {
     let config: Config = serde_json::from_value(json!({
         "id": "x",
-        "input": {
+        "inputs": [{
             "type": "streamer",
             "upstream": "p1",
             "buffer": { "type": "tumbling", "window_seconds": 60 }
-        },
+        }],
         "transforms": [],
-        "output": {"type": "stdout"}
+        "outputs": [{"type": "stdout"}]
     }))?;
 
-    assert!(config.input.buffer.is_some(), "buffer config was dropped");
-    assert!(matches!(config.input.kind, InputKind::Streamer(_)));
+    let input = only_input(&config);
+    assert!(input.buffer.is_some(), "buffer config was dropped");
+    assert!(matches!(input.kind, InputKind::Streamer(_)));
     Ok(())
 }
 
@@ -163,11 +199,11 @@ fn an_input_buffer_parses_alongside_the_input_fields() -> anyhow::Result<()> {
 fn an_input_without_a_buffer_is_valid() -> anyhow::Result<()> {
     let config: Config = serde_json::from_value(json!({
         "id": "x",
-        "input": {"type": "dummy", "duration": 1},
+        "inputs": [{"type": "dummy", "duration": 1}],
         "transforms": [],
-        "output": {"type": "stdout"}
+        "outputs": [{"type": "stdout"}]
     }))?;
-    assert!(config.input.buffer.is_none());
+    assert!(only_input(&config).buffer.is_none());
     Ok(())
 }
 
@@ -176,9 +212,9 @@ fn an_input_without_a_buffer_is_valid() -> anyhow::Result<()> {
 #[test]
 fn unknown_component_types_are_rejected() {
     let cases = [
-        json!({"id": "x", "input": {"type": "kafka"}, "transforms": [], "output": {"type": "stdout"}}),
-        json!({"id": "x", "input": {"type": "dummy", "duration": 1}, "transforms": [{"type": "map"}], "output": {"type": "stdout"}}),
-        json!({"id": "x", "input": {"type": "dummy", "duration": 1}, "transforms": [], "output": {"type": "s3"}}),
+        json!({"id": "x", "inputs": [{"type": "kafka"}], "transforms": [], "outputs": [{"type": "stdout"}]}),
+        json!({"id": "x", "inputs": [{"type": "dummy", "duration": 1}], "transforms": [{"type": "map"}], "outputs": [{"type": "stdout"}]}),
+        json!({"id": "x", "inputs": [{"type": "dummy", "duration": 1}], "transforms": [], "outputs": [{"type": "s3"}]}),
     ];
     for case in cases {
         assert!(

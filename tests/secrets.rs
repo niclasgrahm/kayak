@@ -21,13 +21,13 @@ fn store(values: &[(&str, &str)]) -> MapSecretStore {
 fn config_referencing_a_secret(id: &str) -> anyhow::Result<Config> {
     Ok(serde_json::from_value(serde_json::json!({
         "id": id,
-        "input": {
+        "inputs": [{
             "type": "nats",
             "urls": "nats://app:${NATS_PASSWORD}@broker:4222",
             "subject": "test.subject"
-        },
+        }],
         "transforms": [],
-        "output": {"type": "stdout"}
+        "outputs": [{"type": "stdout"}]
     }))?)
 }
 
@@ -171,11 +171,11 @@ fn a_config_that_references_a_secret_round_trips_unchanged() -> anyhow::Result<(
     let config = config_referencing_a_secret("x")?;
     let json = serde_json::to_value(&config)?;
     assert_eq!(
-        json["input"]["urls"],
+        json["inputs"][0]["urls"],
         serde_json::json!("nats://app:${NATS_PASSWORD}@broker:4222")
     );
     // and a Secret is a plain JSON string on the wire, not a wrapper object
-    assert!(json["input"]["urls"].is_string());
+    assert!(json["inputs"][0]["urls"].is_string());
     Ok(())
 }
 

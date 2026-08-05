@@ -158,7 +158,12 @@ impl AppState {
         if app.contains_key(id.as_str()) {
             return Err(StreamerError::DuplicateId(id));
         }
-        let ctx = BuildCtx::with_secrets(&mut app, self.events.clone(), Arc::clone(&self.secrets));
+        let ctx = BuildCtx::with_secrets(
+            &mut app,
+            id.clone(),
+            self.events.clone(),
+            Arc::clone(&self.secrets),
+        );
         // building the runtime only fails on things the config got wrong
         // (unknown upstream, unbuildable component)
         let join_handle = streamer.start(ctx).map_err(|e| {

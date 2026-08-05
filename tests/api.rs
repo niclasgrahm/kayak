@@ -24,9 +24,9 @@ fn app() -> Router {
 fn idle_config(id: &str) -> Value {
     json!({
         "id": id,
-        "input": { "type": "dummy", "duration": 3600 },
+        "inputs": [{ "type": "dummy", "duration": 3600 }],
         "transforms": [],
-        "output": { "type": "stdout" }
+        "outputs": [{ "type": "stdout" }]
     })
 }
 
@@ -76,7 +76,7 @@ async fn creating_a_stream_returns_201_and_the_created_streamer() -> anyhow::Res
 
     assert_eq!(status, StatusCode::CREATED);
     assert_eq!(body["id"], json!("p1"));
-    assert_eq!(body["config"]["input"]["type"], json!("dummy"));
+    assert_eq!(body["config"]["inputs"][0]["type"], json!("dummy"));
     Ok(())
 }
 
@@ -143,9 +143,9 @@ async fn a_duplicate_id_is_rejected_with_409() -> anyhow::Result<()> {
 async fn an_unbuildable_config_is_rejected_with_422() -> anyhow::Result<()> {
     let config = json!({
         "id": "downstream",
-        "input": { "type": "streamer", "upstream": "does-not-exist" },
+        "inputs": [{ "type": "streamer", "upstream": "does-not-exist" }],
         "transforms": [],
-        "output": { "type": "stdout" }
+        "outputs": [{ "type": "stdout" }]
     });
 
     let (status, body) = post_stream(&app(), &config).await?;
@@ -167,8 +167,8 @@ async fn a_body_that_is_not_a_valid_config_is_rejected() -> anyhow::Result<()> {
     let app = app();
     let cases = [
         json!({ "nonsense": true }),
-        json!({ "id": "x", "input": { "type": "no-such-input" }, "transforms": [], "output": { "type": "stdout" } }),
-        json!({ "id": "x", "input": { "type": "dummy", "duration": 1 }, "transforms": [] }),
+        json!({ "id": "x", "inputs": [{ "type": "no-such-input" }], "transforms": [], "outputs": [{ "type": "stdout" }] }),
+        json!({ "id": "x", "inputs": [{ "type": "dummy", "duration": 1 }], "transforms": [] }),
     ];
     for case in cases {
         let (status, _) = post_stream(&app, &case).await?;

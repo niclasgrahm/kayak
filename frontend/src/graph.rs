@@ -9,7 +9,9 @@
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 
-use streamer_core::{StreamerId, config::Config, config::InputKind};
+use streamer_core::{
+    EventPayload, StreamerId, UiEvent, config::Config, config::InputKind, stage,
+};
 
 /// Cards are a fixed width; only their height varies with the config they show.
 pub const CARD_WIDTH: f64 = 340.0;
@@ -61,11 +63,6 @@ pub struct Edge {
     pub to: StreamerId,
 }
 
-/// The `stage` a run loop tags a `UiEvent` with when it *receives* a batch.
-/// Matching on it is a string coupling to `src/streamer.rs`, which is why it's
-/// named here rather than spelled out at the call site.
-const INPUT_STAGE: &str = "input";
-
 /// How many ticks an edge stays lit. The visible fade is a CSS transition on
 /// the way out, so this only has to be long enough to be seen starting.
 pub const PULSE_TICKS: u8 = 3;
@@ -73,31 +70,37 @@ pub const PULSE_TICKS: u8 = 3;
 /// that keeps the decay a pure function with no clock in it.
 pub const PULSE_TICK_MS: u64 = 50;
 
-/// The edge a UI event lights up, if any.
+/// The edges a UI event lights up.
 ///
 /// A batch crossing an edge is observed at the *receiving* end: a downstream
 /// pipeline logging an `input` event has just been handed a batch by the
 /// pipeline above it. An output event is not enough on its own — a streamer
-/// emits to its output whether or not anything is subscribed.
+/// emits to its output whether or not anything is subscribed. A failure moves
+/// no data and so lights nothing, whatever stage it came from.
+///
+/// A node with several upstreams lights *all* of its incoming edges, because
+/// the event says a batch arrived and not which input carried it. Attributing
+/// it would need the input's index on the event; until then over-lighting beats
+/// picking one edge and being wrong about it.
 #[must_use]
-pub fn pulsed_edge(
-    streamer_id: &StreamerId,
-    stage: &str,
-    nodes: &[(StreamerId, Option<StreamerId>)],
-) -> Option<Edge> {
-    if stage != INPUT_STAGE {
-        return None;
+pub fn pulsed_edges(event: &UiEvent, nodes: &[(StreamerId, Vec<StreamerId>)]) -> Vec<Edge> {
+    if event.stage != stage::INPUT || !matches!(event.payload, EventPayload::Batch(_)) {
+        return Vec::new();
     }
-    // a root's input comes from outside the graph, so no edge lights up
-    let parent = nodes
+    // a root's inputs come from outside the graph, so no edge lights up
+    nodes
         .iter()
-        .find(|(id, _)| id == streamer_id)?
-        .1
-        .as_ref()?;
-    Some(Edge {
-        from: parent.clone(),
-        to: streamer_id.clone(),
-    })
+        .find(|(id, _)| *id == event.streamer_id)
+        .map(|(_, parents)| {
+            parents
+                .iter()
+                .map(|parent| Edge {
+                    from: parent.clone(),
+                    to: event.streamer_id.clone(),
+                })
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 /// Age every pulse by one tick, dropping the ones that have burnt out. Returns
@@ -110,66 +113,86 @@ pub fn tick_pulses(pulses: &mut HashMap<Edge, u8>) -> bool {
     !pulses.is_empty()
 }
 
-/// A streamer's parent in the graph is whatever its `streamer` input names as
-/// upstream. Every other input kind is a root.
+/// A streamer's parents in the graph are whatever its `streamer` inputs name as
+/// upstream. A pipeline with none of those is a root; a pipeline can also mix
+/// them, being fed by another pipeline *and* by NATS.
 #[must_use]
-pub fn upstream_of(config: &Config) -> Option<&StreamerId> {
-    match &config.input.kind {
-        InputKind::Streamer(c) => Some(&c.upstream),
-        InputKind::Dummy(_) | InputKind::Nats(_) => None,
-    }
-}
-
-/// `(id, upstream)` pairs — the only thing the layout needs to know about a
-/// pipeline. An upstream that isn't in the list is ignored, so a dangling
-/// reference lays out as a root rather than vanishing.
-#[must_use]
-pub fn nodes_from(streamers: &[(StreamerId, Config)]) -> Vec<(StreamerId, Option<StreamerId>)> {
-    let known: HashSet<&StreamerId> = streamers.iter().map(|(id, _)| id).collect();
-    streamers
+pub fn upstreams_of(config: &Config) -> Vec<&StreamerId> {
+    config
+        .inputs
         .iter()
-        .map(|(id, config)| {
-            let parent = upstream_of(config)
-                .filter(|up| known.contains(up))
-                .cloned();
-            (id.clone(), parent)
+        .filter_map(|input| match &input.kind {
+            InputKind::Streamer(c) => Some(&c.upstream),
+            InputKind::Dummy(_) | InputKind::Kafka(_) | InputKind::Nats(_) => None,
         })
         .collect()
 }
 
-/// Depth of every node, where a root is 0. A node whose parent is missing —
-/// or that sits in a cycle, which the server shouldn't allow but we don't get
-/// to assume — is treated as a root rather than recursing forever.
-fn depths(nodes: &[(StreamerId, Option<StreamerId>)]) -> HashMap<StreamerId, usize> {
-    let parents: HashMap<&StreamerId, &Option<StreamerId>> =
-        nodes.iter().map(|(id, parent)| (id, parent)).collect();
+/// `(id, upstreams)` pairs — the only thing the layout needs to know about a
+/// pipeline. An upstream that isn't in the list is dropped, so a dangling
+/// reference lays out as a root rather than vanishing; a node naming the same
+/// upstream twice gets one edge, not two.
+#[must_use]
+pub fn nodes_from(streamers: &[(StreamerId, Config)]) -> Vec<(StreamerId, Vec<StreamerId>)> {
+    let known: HashSet<&StreamerId> = streamers.iter().map(|(id, _)| id).collect();
+    streamers
+        .iter()
+        .map(|(id, config)| {
+            let mut seen = HashSet::new();
+            let parents = upstreams_of(config)
+                .into_iter()
+                .filter(|up| known.contains(up))
+                .filter(|up| seen.insert((*up).clone()))
+                .cloned()
+                .collect();
+            (id.clone(), parents)
+        })
+        .collect()
+}
 
-    let mut depths = HashMap::new();
-    for (id, _) in nodes {
-        let mut chain = vec![id];
-        let mut seen: HashSet<&StreamerId> = HashSet::from([id]);
-        let mut cursor = id;
+/// Depth of every node, where a root is 0 and a node with parents sits one row
+/// below its *deepest* parent — so every edge points downwards, which is what
+/// makes the drawing readable once a node can have several parents.
+///
+/// A node with no parents, or one sitting in a cycle (which the server
+/// shouldn't allow, but we don't get to assume), is treated as a root rather
+/// than recursing forever.
+fn depths(nodes: &[(StreamerId, Vec<StreamerId>)]) -> HashMap<StreamerId, usize> {
+    let parents: HashMap<&StreamerId, &Vec<StreamerId>> =
+        nodes.iter().map(|(id, parents)| (id, parents)).collect();
 
-        // walk up to a root (or to something already resolved), then unwind
-        let base = loop {
-            match parents.get(cursor).and_then(|p| p.as_ref()) {
-                Some(parent) if !seen.insert(parent) => break 0, // cycle
-                Some(parent) => {
-                    if let Some(known) = depths.get(parent) {
-                        break known + 1;
-                    }
-                    chain.push(parent);
-                    cursor = parent;
-                }
-                None => break 0,
-            }
-        };
-
-        for (steps_up, node) in chain.iter().enumerate() {
-            depths.insert((*node).clone(), base + (chain.len() - 1 - steps_up));
+    fn depth_of<'a>(
+        id: &'a StreamerId,
+        parents: &HashMap<&'a StreamerId, &'a Vec<StreamerId>>,
+        resolved: &mut HashMap<StreamerId, usize>,
+        // the path being walked right now; a node reappearing on it is a cycle
+        on_path: &mut HashSet<StreamerId>,
+    ) -> usize {
+        if let Some(known) = resolved.get(id) {
+            return *known;
         }
+        if !on_path.insert(id.clone()) {
+            return 0;
+        }
+        let depth = parents
+            .get(id)
+            .map(|ps| {
+                ps.iter()
+                    .map(|p| depth_of(p, parents, resolved, on_path) + 1)
+                    .max()
+                    .unwrap_or(0)
+            })
+            .unwrap_or(0);
+        on_path.remove(id);
+        resolved.insert(id.clone(), depth);
+        depth
     }
-    depths
+
+    let mut resolved = HashMap::new();
+    for (id, _) in nodes {
+        depth_of(id, &parents, &mut resolved, &mut HashSet::new());
+    }
+    resolved
 }
 
 /// Lay the graph out top-to-bottom: one row per depth, rows ordered so that
@@ -181,7 +204,7 @@ fn depths(nodes: &[(StreamerId, Option<StreamerId>)]) -> HashMap<StreamerId, usi
 /// once the cards report their real size.
 #[must_use]
 pub fn layout(
-    nodes: &[(StreamerId, Option<StreamerId>)],
+    nodes: &[(StreamerId, Vec<StreamerId>)],
     heights: &HashMap<StreamerId, f64>,
 ) -> HashMap<StreamerId, CardGeom> {
     let depths = depths(nodes);
@@ -192,8 +215,8 @@ pub fn layout(
         rows.entry(depth).or_default().push(id.clone());
     }
 
-    let parents: HashMap<&StreamerId, &Option<StreamerId>> =
-        nodes.iter().map(|(id, parent)| (id, parent)).collect();
+    let parents: HashMap<&StreamerId, &Vec<StreamerId>> =
+        nodes.iter().map(|(id, parents)| (id, parents)).collect();
 
     // position within its own row, used to order the row below
     let mut order: HashMap<StreamerId, usize> = HashMap::new();
@@ -201,11 +224,12 @@ pub fn layout(
 
     for (depth, ids) in &mut rows {
         ids.sort_by(|a, b| {
+            // a node with several parents sits under the leftmost of them,
+            // which keeps its edges from crossing the whole row
             let key = |id: &StreamerId| {
                 parents
                     .get(id)
-                    .and_then(|p| p.as_ref())
-                    .and_then(|p| order.get(p))
+                    .and_then(|ps| ps.iter().filter_map(|p| order.get(p)).min())
                     .copied()
                     // roots sort after placed children, then by id so the
                     // layout is stable no matter what order the API returned
@@ -275,7 +299,7 @@ pub fn bounds(placements: &HashMap<StreamerId, CardGeom>) -> (f64, f64) {
 /// it down, and both ends of the affected edges have to move with it.
 #[must_use]
 pub fn edge_paths(
-    nodes: &[(StreamerId, Option<StreamerId>)],
+    nodes: &[(StreamerId, Vec<StreamerId>)],
     placements: &HashMap<StreamerId, CardGeom>,
 ) -> Vec<(Edge, String)> {
     edges(nodes)
@@ -291,11 +315,11 @@ pub fn edge_paths(
 
 /// Parent → child pairs, in a stable order.
 #[must_use]
-pub fn edges(nodes: &[(StreamerId, Option<StreamerId>)]) -> Vec<Edge> {
+pub fn edges(nodes: &[(StreamerId, Vec<StreamerId>)]) -> Vec<Edge> {
     let mut edges: Vec<Edge> = nodes
         .iter()
-        .filter_map(|(id, parent)| {
-            parent.as_ref().map(|p| Edge {
+        .flat_map(|(id, parents)| {
+            parents.iter().map(|p| Edge {
                 from: p.clone(),
                 to: id.clone(),
             })
@@ -395,8 +419,19 @@ pub fn approach(camera: Camera, target: Camera, delta_ms: f64) -> (Camera, bool)
 mod tests {
     use super::*;
 
-    fn node(id: &str, parent: Option<&str>) -> (StreamerId, Option<StreamerId>) {
-        (id.to_string(), parent.map(ToString::to_string))
+    fn node(id: &str, parent: Option<&str>) -> (StreamerId, Vec<StreamerId>) {
+        (
+            id.to_string(),
+            parent.map(ToString::to_string).into_iter().collect(),
+        )
+    }
+
+    /// A node fed by several upstreams at once.
+    fn node_with(id: &str, parents: &[&str]) -> (StreamerId, Vec<StreamerId>) {
+        (
+            id.to_string(),
+            parents.iter().map(ToString::to_string).collect(),
+        )
     }
 
     fn no_heights() -> HashMap<StreamerId, f64> {
@@ -509,13 +544,58 @@ mod tests {
     fn an_unknown_upstream_lays_out_as_a_root() {
         let streamers = vec![(
             "orphan".to_string(),
-            config_with_upstream("was-deleted"),
+            config_of(vec![upstream_input("was-deleted")]),
         )];
         let nodes = nodes_from(&streamers);
         assert_eq!(nodes, vec![node("orphan", None)]);
 
         let placed = layout(&nodes, &no_heights());
         assert_eq!(geom(&placed, "orphan").y, 0.0);
+    }
+
+    /// With several parents a node has to sit below the deepest of them, or an
+    /// edge would run upwards from a parent in a lower row.
+    #[test]
+    fn a_node_sits_below_its_deepest_parent() {
+        let nodes = [
+            node("root", None),
+            node("mid", Some("root")),
+            // fed by both the root and the row below it
+            node_with("joined", &["root", "mid"]),
+        ];
+        let placed = layout(&nodes, &no_heights());
+
+        let (root_y, mid_y, joined_y) = (
+            geom(&placed, "root").y,
+            geom(&placed, "mid").y,
+            geom(&placed, "joined").y,
+        );
+        assert!(mid_y > root_y, "mid should be a row below root");
+        assert!(
+            joined_y > mid_y,
+            "a node fed by root and mid should sit below mid, not beside it"
+        );
+    }
+
+    /// Both edges into a join have to be drawn; only drawing the first would
+    /// hide half the graph's shape.
+    #[test]
+    fn a_join_draws_one_edge_per_parent() {
+        let nodes = [node("a", None), node("b", None), node_with("c", &["a", "b"])];
+        assert_eq!(
+            edges(&nodes),
+            vec![
+                Edge {
+                    from: "a".to_string(),
+                    to: "c".to_string()
+                },
+                Edge {
+                    from: "b".to_string(),
+                    to: "c".to_string()
+                },
+            ]
+        );
+        assert_eq!(edge_paths(&nodes, &layout(&nodes, &no_heights())).len(), 2);
     }
 
     /// The server shouldn't be able to produce a cycle, but the layout runs on
@@ -627,17 +707,49 @@ mod tests {
         assert!(edge_paths(&nodes, &HashMap::new()).is_empty());
     }
 
+    fn batch_event(streamer_id: &str, stage: &str) -> UiEvent {
+        UiEvent::batch(
+            streamer_id.to_string(),
+            stage,
+            std::sync::Arc::new(Vec::new()),
+        )
+    }
+
     /// A batch arriving at a downstream pipeline is a batch that crossed the
     /// edge above it, which is the whole signal the blink is built on.
     #[test]
     fn an_input_event_lights_the_edge_from_its_upstream() {
         let nodes = [node("a", None), node("b", Some("a"))];
         assert_eq!(
-            pulsed_edge(&"b".to_string(), "input", &nodes),
-            Some(Edge {
+            pulsed_edges(&batch_event("b", stage::INPUT), &nodes),
+            vec![Edge {
                 from: "a".to_string(),
                 to: "b".to_string()
-            })
+            }]
+        );
+    }
+
+    /// The event says a batch arrived, not which input brought it, so a node
+    /// with two upstreams lights both edges rather than guessing.
+    #[test]
+    fn an_input_event_lights_every_incoming_edge() {
+        let nodes = [
+            node("a", None),
+            node("b", None),
+            node_with("c", &["a", "b"]),
+        ];
+        assert_eq!(
+            pulsed_edges(&batch_event("c", stage::INPUT), &nodes),
+            vec![
+                Edge {
+                    from: "a".to_string(),
+                    to: "c".to_string()
+                },
+                Edge {
+                    from: "b".to_string(),
+                    to: "c".to_string()
+                },
+            ]
         );
     }
 
@@ -646,7 +758,16 @@ mod tests {
     #[test]
     fn an_output_event_lights_nothing() {
         let nodes = [node("a", None), node("b", Some("a"))];
-        assert_eq!(pulsed_edge(&"b".to_string(), "output", &nodes), None);
+        assert!(pulsed_edges(&batch_event("b", stage::OUTPUT), &nodes).is_empty());
+    }
+
+    /// A failure at the input stage is the *absence* of a batch, so it must not
+    /// light the edge an arriving batch would have.
+    #[test]
+    fn an_error_event_lights_nothing() {
+        let nodes = [node("a", None), node("b", Some("a"))];
+        let failed = UiEvent::error("b".to_string(), stage::INPUT, &"upstream went away");
+        assert!(pulsed_edges(&failed, &nodes).is_empty());
     }
 
     /// A root is fed from outside the graph — NATS, a timer — and has no edge
@@ -654,9 +775,9 @@ mod tests {
     #[test]
     fn an_input_event_on_a_root_lights_nothing() {
         let nodes = [node("a", None), node("b", Some("a"))];
-        assert_eq!(pulsed_edge(&"a".to_string(), "input", &nodes), None);
+        assert!(pulsed_edges(&batch_event("a", stage::INPUT), &nodes).is_empty());
         // and a pipeline that isn't on the canvas at all can't light anything
-        assert_eq!(pulsed_edge(&"ghost".to_string(), "input", &nodes), None);
+        assert!(pulsed_edges(&batch_event("ghost", stage::INPUT), &nodes).is_empty());
     }
 
     /// Pulses have to burn out on their own, or an edge that saw one batch
@@ -846,45 +967,76 @@ mod tests {
     #[test]
     fn a_streamer_input_is_the_only_kind_with_an_upstream() {
         assert_eq!(
-            upstream_of(&config_with_upstream("p1")),
-            Some(&"p1".to_string())
+            upstreams_of(&config_of(vec![upstream_input("p1")])),
+            vec![&"p1".to_string()]
         );
-        assert_eq!(upstream_of(&dummy_config()), None);
+        assert!(upstreams_of(&config_of(vec![dummy_input()])).is_empty());
     }
 
-    fn config_with_upstream(upstream: &str) -> Config {
-        use streamer_core::config::{
-            OutputConfig, OutputKind, StdoutOutputConfig, StreamerConfig,
-        };
-        Config {
-            id: None,
-            input: streamer_core::config::InputConfig {
-                kind: InputKind::Streamer(StreamerConfig {
-                    upstream: upstream.to_string(),
-                }),
-                buffer: None,
-            },
-            transforms: vec![],
-            output: OutputConfig {
-                kind: OutputKind::Stdout(StdoutOutputConfig {}),
-            },
+    /// A pipeline fed by two others has two parents; one fed by another pipeline
+    /// *and* by NATS has one, because only the pipeline is on the canvas.
+    #[test]
+    fn a_pipeline_reports_every_upstream_it_names() {
+        assert_eq!(
+            upstreams_of(&config_of(vec![
+                upstream_input("p1"),
+                upstream_input("p2"),
+            ])),
+            vec![&"p1".to_string(), &"p2".to_string()]
+        );
+        assert_eq!(
+            upstreams_of(&config_of(vec![upstream_input("p1"), dummy_input()])),
+            vec![&"p1".to_string()]
+        );
+    }
+
+    /// Two inputs naming the same upstream are one relationship, and the canvas
+    /// would otherwise draw the edge twice and pulse it twice.
+    #[test]
+    fn the_same_upstream_named_twice_yields_one_edge() {
+        let streamers = vec![
+            ("p1".to_string(), config_of(vec![dummy_input()])),
+            (
+                "child".to_string(),
+                config_of(vec![upstream_input("p1"), upstream_input("p1")]),
+            ),
+        ];
+        assert_eq!(
+            nodes_from(&streamers),
+            vec![
+                ("p1".to_string(), vec![]),
+                ("child".to_string(), vec!["p1".to_string()]),
+            ]
+        );
+    }
+
+    fn upstream_input(upstream: &str) -> streamer_core::config::InputConfig {
+        use streamer_core::config::StreamerConfig;
+        streamer_core::config::InputConfig {
+            kind: InputKind::Streamer(StreamerConfig {
+                upstream: upstream.to_string(),
+            }),
+            buffer: None,
         }
     }
 
-    fn dummy_config() -> Config {
-        use streamer_core::config::{
-            DummyConfig, OutputConfig, OutputKind, StdoutOutputConfig,
-        };
+    fn dummy_input() -> streamer_core::config::InputConfig {
+        use streamer_core::config::DummyConfig;
+        streamer_core::config::InputConfig {
+            kind: InputKind::Dummy(DummyConfig { duration: 1 }),
+            buffer: None,
+        }
+    }
+
+    fn config_of(inputs: Vec<streamer_core::config::InputConfig>) -> Config {
+        use streamer_core::config::{OutputConfig, OutputKind, StdoutOutputConfig};
         Config {
             id: None,
-            input: streamer_core::config::InputConfig {
-                kind: InputKind::Dummy(DummyConfig { duration: 1 }),
-                buffer: None,
-            },
+            inputs,
             transforms: vec![],
-            output: OutputConfig {
+            outputs: vec![OutputConfig {
                 kind: OutputKind::Stdout(StdoutOutputConfig {}),
-            },
+            }],
         }
     }
 }

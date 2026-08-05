@@ -7,12 +7,18 @@ input makes its pipeline a child of the one it names as upstream — with curved
 edges from each parent's bottom edge to its child's top edge. Positions are
 computed, not stored: there is no card dragging yet.
 
+It is a DAG rather than a tree: a pipeline with several `streamer` inputs has
+several parents, and sits one row below the deepest of them so that every edge
+still points downwards.
+
 An edge lights up when a batch crosses it and fades back over ~700ms, so a busy
 graph glows rather than strobes (and doesn't animate at all under
 `prefers-reduced-motion`). The signal is the *downstream's* `input` UI event,
 which means a pipeline whose input is buffered blinks once per closed window
 rather than once per message — its upstream is feeding it continuously, but
-nothing observable happens until the buffer closes.
+nothing observable happens until the buffer closes. A node with several
+upstreams lights *all* its incoming edges: the event says a batch arrived, not
+which input carried it.
 
 | gesture | does |
 | --- | --- |
@@ -21,7 +27,14 @@ nothing observable happens until the buffer closes.
 | click a name in the sidebar | glide the camera to centre that node |
 
 Each card shows its config as a tabbed property list — inputs / transforms /
-outputs — over a live message log. `frontend/src/inspector.rs` builds those rows
+outputs — over a live message log. The log carries failures as well as messages:
+a `UiEvent` is either a `batch` or an `error`, and an error is logged in red as
+`<stage> error: <cause>` on the card of the streamer it happened in. That covers
+the three places the run loop tolerates a failure — a transform that threw, an
+output that couldn't emit, an input that died — and it's the same text the
+server log shows, so a card no longer just goes quiet for reasons only visible
+in the terminal. `frontend/src/log.rs` turns an event into log lines and is unit
+tested; `frontend/src/inspector.rs` builds those rows
 from `serde_json::Value` rather than by matching on the config enums, so a new
 component kind or a new field shows up without touching the frontend; the row
 names are the wire names.
@@ -53,11 +66,37 @@ The same data is served as JSON at `GET /api/docs` for anything that isn't a
 browser. The arranging logic is pure and unit-tested in `frontend/src/docs.rs`,
 same as `graph` and `inspector`.
 
+## pipelines
+
+A pipeline is `inputs → [transforms] → outputs`, and all three are arrays.
+
+Every input is **merged** into one stream: the transform chain runs once per
+batch, whichever input produced it, and there is no ordering between two
+different inputs. Every output then receives **every** batch. So "archive to
+postgres and watch it on stdout" is one pipeline with two outputs, not two
+pipelines.
+
+At least one input is required — a pipeline with none could never produce
+anything, so it's rejected at build time. Zero outputs is fine: such a pipeline
+exists to feed the ones downstream of it, and still fans out to them.
+
+The failure rules follow from that. One input dying is reported on the card and
+survived, because the others are still feeding the pipeline; only the last one
+going takes the run loop with it. One output failing is reported and skipped for
+that batch, and its siblings and the downstream pipelines still get theirs. An
+output that can't `init()` at all is fatal, since it would never accept anything.
+
+Merging runs a pump task per input (`inputs::merge`) rather than `select!`ing
+over them. Selecting drops the losing futures on every iteration, and an input
+that waits on a timer would have its timer restarted every time a chattier
+sibling produced — starving it forever. There's a test for exactly that.
+
 ## secrets
 
 Config files are meant to be version controlled, so they carry *references* to
 secrets rather than the secrets themselves. Any field typed `Secret` — currently
-the `urls` of the nats input and output — accepts `${NAME}` placeholders:
+the `urls` of the nats input and output, and the `password` of the postgres
+output — accepts `${NAME}` placeholders:
 
 ```json
 { "type": "nats", "urls": "nats://app:${NATS_PASSWORD}@broker:4222", "subject": "s" }
@@ -123,9 +162,39 @@ Two things to know when adding a component:
 Timing-dependent tests use `#[tokio::test(start_paused = true)]` so a 10-second
 window costs no wall time.
 
-Not covered by `just test`, and deliberately so: the NATS input/output and the
-HTTP transform, which are thin wrappers over their clients — they need
-`docker compose up` and are exercised by `just start-baseline` / `just test-http`.
+Not covered by `just test`, and deliberately so: the NATS and kafka
+input/outputs, the HTTP transform and the postgres output, which are thin
+wrappers over their clients — they need `docker compose up` and are exercised by
+`just start-baseline` / `just test-http`. What *is* tested offline for postgres is the part with a
+decision in it: `Table::parse` in `src/outputs/postgres.rs`, which validates the
+configured table name and builds the two statements. The table name cannot be a
+bind parameter, so it is interpolated into the SQL text, and that check is the
+only thing standing between `config.json` and an arbitrary statement.
+
+`docker compose up` also brings up a single-node kafka (KRaft, no zookeeper) on
+:9092 with a publisher putting one JSON line a second on `test.events`, which
+the `kafka_events` pipeline consumes and `slow_requests` filters back out to
+`test.slow`. The broker advertises two listeners — `localhost:9092` for the
+server running on the host, `kafka:29092` for the other containers — because
+they can't both reach it by the same name.
+
+Two things worth knowing when playing with the kafka input. It joins a consumer
+group, so **two servers running the same config share the topic**: with a
+one-partition topic only one of them gets an assignment and the other looks
+broken. And leaving a group takes a session timeout to notice, so after killing
+a server the next one can sit idle for ~45s before kafka rebalances the
+partition onto it. Both of those cost me a confusing ten minutes; they are kafka
+working as designed, not the pipeline being wrong.
+
+`docker compose up` also brings up postgres on :5432 (database `kayak`, role
+`kayak`, password `hunter2`), which is where the `sensors_archive` pipeline in
+`config.json` writes. Because that pipeline's password is a `${POSTGRES_PASSWORD}`
+reference, running the server against the sample config now needs a secret:
+
+```bash
+cp secrets.example.json secrets.json
+cargo run -- --config config.json --secrets ./secrets.json
+```
 
 ## currently working on
 
@@ -148,7 +217,10 @@ HTTP transform, which are thin wrappers over their clients — they need
       for the things that pass turned up but didn't change)
 - [x] show config in the "cards" in the web ui
       (done 2026-08-04: tabbed property list, see "the canvas" above)
-- [ ] give streamer ability to have multiple inputs
+- [x] give streamer ability to have multiple inputs
+      (done 2026-08-04: and multiple outputs. `inputs` and `outputs` are arrays
+      in the config now — a breaking wire-format change, the singular `input`
+      and `output` keys are gone. See "pipelines" below.)
 - [ ] new transform (i guess?): wait_for_condition (should it be called buffer_until_condition? or perhaps both are needed?)
       for example, we need to wait for x: a and z: b. for this, we also need the multiple input thing
 

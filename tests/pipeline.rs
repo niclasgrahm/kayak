@@ -13,15 +13,33 @@ use streamer::BuildCtx;
 use streamer::config::BuildTransformConfig;
 use streamer::inputs::{BufferKind, Buffered, InputSource, MessageBatch};
 use streamer::state::UiEvent;
+use streamer_core::EventPayload;
 use streamer::streamer::{Streamer, StreamerRuntime};
 use streamer::testing::{
-    CollectingOutput, Emitted, FailOnNth, ScriptedInput, WhenExhausted, batch, stub_config,
+    CollectingOutput, Emitted, FailOnNth, ScriptedInput, Ticking, WhenExhausted, batch,
+    stub_config,
 };
+use streamer::outputs::OutputDestination;
 use streamer::transforms::Transform;
 use streamer_core::config::{
     ReduceFnKind, ReduceTransformConfig, SplitterTransformConfig, TransformConfig, TransformKind,
 };
 use tokio::sync::{broadcast, mpsc};
+
+/// `StreamerRuntime::from_parts` only fails when a pipeline has no inputs at
+/// all, which is its own test — everything else here wires up at least one.
+fn runtime(
+    inputs: Vec<Box<dyn InputSource>>,
+    transforms: Vec<Box<dyn Transform>>,
+    outputs: Vec<Box<dyn OutputDestination>>,
+    shared: Arc<Streamer>,
+    events: broadcast::Sender<UiEvent>,
+) -> StreamerRuntime {
+    match StreamerRuntime::from_parts(inputs, transforms, outputs, shared, events) {
+        Ok(r) => r,
+        Err(e) => panic!("building the runtime: {e:#}"),
+    }
+}
 
 fn streamer(id: &str) -> Arc<Streamer> {
     match Streamer::new(stub_config(id)) {
@@ -35,7 +53,7 @@ fn streamer(id: &str) -> Arc<Streamer> {
 fn transform_from_config(kind: TransformKind) -> anyhow::Result<Box<dyn Transform>> {
     let mut streamers = HashMap::new();
     let (events, _rx) = broadcast::channel(16);
-    let mut ctx = BuildCtx::new(&mut streamers, events);
+    let mut ctx = BuildCtx::new(&mut streamers, "test".to_string(), events);
     TransformConfig { kind }.build(&mut ctx)
 }
 
@@ -48,10 +66,10 @@ async fn run_to_completion(
 ) -> Emitted {
     let emitted = output.emitted();
     let (events, _rx) = broadcast::channel(16);
-    let runtime = StreamerRuntime::from_parts(
-        Box::new(ScriptedInput::new(input, WhenExhausted::Fail)),
+    let runtime = runtime(
+        vec![Box::new(ScriptedInput::new(input, WhenExhausted::Fail))],
         transforms,
-        Box::new(output),
+        vec![Box::new(output)],
         streamer("test"),
         events,
     );
@@ -142,13 +160,13 @@ async fn an_output_error_does_not_stop_downstream_delivery() {
     shared.subscribe(tx);
 
     let (events, _events_rx) = broadcast::channel(16);
-    let runtime = StreamerRuntime::from_parts(
-        Box::new(ScriptedInput::new(
+    let runtime = runtime(
+        vec![Box::new(ScriptedInput::new(
             vec![batch(vec![json!({"n": 1})]), batch(vec![json!({"n": 2})])],
             WhenExhausted::Fail,
-        )),
+        ))],
         vec![],
-        Box::new(CollectingOutput::failing()),
+        vec![Box::new(CollectingOutput::failing())],
         Arc::clone(&shared),
         events,
     );
@@ -178,13 +196,13 @@ async fn a_batch_reaches_the_output_and_all_downstreams() {
     let output = CollectingOutput::new();
     let emitted = output.emitted();
     let (events, _events_rx) = broadcast::channel(16);
-    let runtime = StreamerRuntime::from_parts(
-        Box::new(ScriptedInput::new(
+    let runtime = runtime(
+        vec![Box::new(ScriptedInput::new(
             vec![batch(vec![json!({"n": 1})])],
             WhenExhausted::Fail,
-        )),
+        ))],
         vec![],
-        Box::new(output),
+        vec![Box::new(output)],
         Arc::clone(&shared),
         events,
     );
@@ -201,14 +219,14 @@ async fn a_batch_reaches_the_output_and_all_downstreams() {
 async fn cancelling_the_token_stops_a_running_pipeline() {
     let shared = streamer("cancel-me");
     let (events, _events_rx) = broadcast::channel(16);
-    let runtime = StreamerRuntime::from_parts(
-        // never resolves again after the first batch
+    let runtime = runtime(
+        vec![// never resolves again after the first batch
         Box::new(ScriptedInput::new(
             vec![batch(vec![json!({"n": 1})])],
             WhenExhausted::Pend,
-        )),
+        ))],
         vec![],
-        Box::new(CollectingOutput::new()),
+        vec![Box::new(CollectingOutput::new())],
         Arc::clone(&shared),
         events,
     );
@@ -223,13 +241,13 @@ async fn cancelling_the_token_stops_a_running_pipeline() {
 #[tokio::test]
 async fn ui_events_are_published_for_the_input_and_output_stages() {
     let (events, mut rx) = broadcast::channel::<UiEvent>(16);
-    let runtime = StreamerRuntime::from_parts(
-        Box::new(ScriptedInput::new(
+    let runtime = runtime(
+        vec![Box::new(ScriptedInput::new(
             vec![batch(vec![json!({"n": 1})])],
             WhenExhausted::Fail,
-        )),
+        ))],
         vec![],
-        Box::new(CollectingOutput::new()),
+        vec![Box::new(CollectingOutput::new())],
         streamer("events"),
         events,
     );
@@ -238,9 +256,102 @@ async fn ui_events_are_published_for_the_input_and_output_stages() {
     let mut stages = Vec::new();
     while let Ok(ev) = rx.try_recv() {
         assert_eq!(ev.streamer_id, "events");
-        stages.push(ev.stage);
+        if matches!(ev.payload, EventPayload::Batch(_)) {
+            stages.push(ev.stage);
+        }
     }
     assert_eq!(stages, vec!["input".to_string(), "output".to_string()]);
+}
+
+/// Errors are the reason a card stops updating, so the UI feed has to carry
+/// them — the server log is not visible from the canvas.
+#[tokio::test]
+async fn a_failing_transform_publishes_an_error_event_for_that_stage() {
+    let (events, mut rx) = broadcast::channel::<UiEvent>(16);
+    let runtime = runtime(
+        vec![Box::new(ScriptedInput::new(
+            vec![batch(vec![json!({"n": 1})])],
+            WhenExhausted::Fail,
+        ))],
+        vec![Box::new(FailOnNth::new(0))],
+        vec![Box::new(CollectingOutput::new())],
+        streamer("events"),
+        events,
+    );
+    let _ = runtime.run().await;
+
+    // the trailing error is the script running out, which the run loop reports
+    // as an input failure like any other
+    let errors = collect_errors(&mut rx);
+    let first = errors.first().unwrap_or_else(|| panic!("no error was published"));
+    assert_eq!(first.0, "transform");
+    assert!(
+        first.1.contains("transform failed on batch 0"),
+        "the event should carry the cause: {}",
+        first.1
+    );
+}
+
+/// Same for an output that can't emit — a NATS connection that dropped, or the
+/// http transform's url being wrong.
+#[tokio::test]
+async fn a_failing_output_publishes_an_error_event_for_that_stage() {
+    let (events, mut rx) = broadcast::channel::<UiEvent>(16);
+    let runtime = runtime(
+        vec![Box::new(ScriptedInput::new(
+            vec![batch(vec![json!({"n": 1})])],
+            WhenExhausted::Fail,
+        ))],
+        vec![],
+        vec![Box::new(CollectingOutput::failing())],
+        streamer("events"),
+        events,
+    );
+    let _ = runtime.run().await;
+
+    let errors = collect_errors(&mut rx);
+    let first = errors.first().unwrap_or_else(|| panic!("no error was published"));
+    assert_eq!(first.0, "output");
+    assert!(
+        first.1.contains("collecting output was told to fail"),
+        "the event should carry the cause: {}",
+        first.1
+    );
+}
+
+/// An input that dies takes the streamer with it, which is the case where the
+/// card most needs to say why it went quiet.
+#[tokio::test]
+async fn a_failing_input_publishes_an_error_event_before_the_loop_ends() {
+    let (events, mut rx) = broadcast::channel::<UiEvent>(16);
+    let runtime = runtime(
+        vec![Box::new(ScriptedInput::new(vec![], WhenExhausted::Fail))],
+        vec![],
+        vec![Box::new(CollectingOutput::new())],
+        streamer("events"),
+        events,
+    );
+    let _ = runtime.run().await;
+
+    let errors = collect_errors(&mut rx);
+    assert_eq!(errors.len(), 1, "expected one input error, got {errors:?}");
+    assert_eq!(errors[0].0, "input");
+    assert!(
+        errors[0].1.contains("scripted input exhausted"),
+        "the event should carry the cause: {}",
+        errors[0].1
+    );
+}
+
+/// Drain the feed down to the error events, as `(stage, message)`.
+fn collect_errors(rx: &mut broadcast::Receiver<UiEvent>) -> Vec<(String, String)> {
+    let mut errors = Vec::new();
+    while let Ok(ev) = rx.try_recv() {
+        if let EventPayload::Error(message) = ev.payload {
+            errors.push((ev.stage, message));
+        }
+    }
+    errors
 }
 
 /// `init()` runs once, before anything is emitted — an output that emitted
@@ -262,10 +373,10 @@ async fn the_output_is_initialised_once_before_the_first_emit() {
 #[tokio::test]
 async fn an_input_error_ends_the_run_loop() {
     let (events, _rx) = broadcast::channel(16);
-    let runtime = StreamerRuntime::from_parts(
-        Box::new(ScriptedInput::new(vec![], WhenExhausted::Fail)),
+    let runtime = runtime(
+        vec![Box::new(ScriptedInput::new(vec![], WhenExhausted::Fail))],
         vec![],
-        Box::new(CollectingOutput::new()),
+        vec![Box::new(CollectingOutput::new())],
         streamer("dies"),
         events,
     );
@@ -314,4 +425,207 @@ async fn a_tumbling_buffer_closes_when_the_window_elapses() -> anyhow::Result<()
     let values: Vec<_> = out.iter().map(|m| (**m).clone()).collect();
     assert_eq!(values, vec![json!({"n": 1})]);
     Ok(())
+}
+
+/// Several inputs are merged into one stream: the pipeline sees every batch
+/// from every input, whichever produced it.
+#[tokio::test]
+async fn every_input_feeds_the_same_transform_chain_and_output() {
+    let output = CollectingOutput::new();
+    let emitted = output.emitted();
+    let (events, _events_rx) = broadcast::channel(16);
+    let runtime = runtime(
+        vec![
+            // both scripts end, so the run loop stops on its own once the
+            // second one runs out
+            Box::new(ScriptedInput::new(
+                vec![batch(vec![json!({"from": "a"})])],
+                WhenExhausted::Fail,
+            )),
+            Box::new(ScriptedInput::new(
+                vec![batch(vec![json!({"from": "b"})])],
+                WhenExhausted::Fail,
+            )),
+        ],
+        vec![],
+        vec![Box::new(output)],
+        streamer("merged"),
+        events,
+    );
+    let _ = tokio::time::timeout(Duration::from_secs(5), runtime.run()).await;
+
+    // the interleaving is a race, so assert on the set rather than the order
+    let mut seen: Vec<_> = emitted.values().into_iter().flatten().collect();
+    seen.sort_by_key(ToString::to_string);
+    assert_eq!(seen, vec![json!({"from": "a"}), json!({"from": "b"})]);
+}
+
+/// A slow input must not be starved by a fast one. The dummy-style input here
+/// only yields after a delay; a merge that cancelled and restarted its pending
+/// `next()` on every sibling batch would never let it through.
+#[tokio::test(start_paused = true)]
+async fn a_slow_input_is_not_starved_by_a_chatty_one() {
+    let output = CollectingOutput::new();
+    let emitted = output.emitted();
+    let (events, _events_rx) = broadcast::channel(16);
+    let runtime = runtime(
+        vec![
+            Box::new(Ticking::new(Duration::from_mins(1), json!({"slow": true}))),
+            Box::new(Ticking::new(
+                Duration::from_millis(1),
+                json!({"slow": false}),
+            )),
+        ],
+        vec![],
+        vec![Box::new(output)],
+        streamer("starved"),
+        events,
+    );
+    let handle = tokio::spawn(runtime.run());
+
+    // long enough for the slow input's first tick to be due many times over
+    tokio::time::sleep(Duration::from_mins(10)).await;
+    handle.abort();
+
+    let saw_slow = emitted
+        .values()
+        .into_iter()
+        .flatten()
+        .any(|m| m == json!({"slow": true}));
+    assert!(saw_slow, "the one-minute input never got through in ten minutes");
+}
+
+/// Every output receives every batch — that's the whole point of allowing more
+/// than one, and it's what makes "archive to postgres *and* watch on stdout"
+/// a single pipeline rather than two.
+#[tokio::test]
+async fn every_output_receives_every_batch() {
+    let (first, second) = (CollectingOutput::new(), CollectingOutput::new());
+    let (a, b) = (first.emitted(), second.emitted());
+    let (events, _events_rx) = broadcast::channel(16);
+    let runtime = runtime(
+        vec![Box::new(ScriptedInput::new(
+            vec![batch(vec![json!({"n": 1})]), batch(vec![json!({"n": 2})])],
+            WhenExhausted::Fail,
+        ))],
+        vec![],
+        vec![Box::new(first), Box::new(second)],
+        streamer("tee"),
+        events,
+    );
+    let _ = runtime.run().await;
+
+    let expected = vec![vec![json!({"n": 1})], vec![json!({"n": 2})]];
+    assert_eq!(a.values(), expected);
+    assert_eq!(b.values(), expected, "the second output was skipped");
+}
+
+/// One broken output must not cost the others their batches — the same rule
+/// that already keeps a broken output from stopping downstream delivery.
+#[tokio::test]
+async fn a_failing_output_does_not_stop_its_siblings() {
+    let healthy = CollectingOutput::new();
+    let seen = healthy.emitted();
+    let (events, _events_rx) = broadcast::channel(16);
+    let runtime = runtime(
+        vec![Box::new(ScriptedInput::new(
+            vec![batch(vec![json!({"n": 1})])],
+            WhenExhausted::Fail,
+        ))],
+        vec![],
+        // the broken one first, so a short-circuit would be visible
+        vec![Box::new(CollectingOutput::failing()), Box::new(healthy)],
+        streamer("half-broken"),
+        events,
+    );
+    let _ = runtime.run().await;
+
+    assert_eq!(seen.values(), vec![vec![json!({"n": 1})]]);
+}
+
+/// A pipeline with no inputs can never produce anything, so it's a config
+/// error rather than a streamer that sits there looking healthy.
+#[tokio::test]
+async fn a_pipeline_with_no_inputs_is_rejected() {
+    let (events, _events_rx) = broadcast::channel(16);
+    let built = StreamerRuntime::from_parts(
+        vec![],
+        vec![],
+        vec![Box::new(CollectingOutput::new())],
+        streamer("empty"),
+        events,
+    );
+    let err = match built {
+        Ok(_) => panic!("a runtime with no inputs should not build"),
+        Err(e) => format!("{e:#}"),
+    };
+    assert!(err.contains("at least one input"), "unhelpful error: {err}");
+}
+
+/// No outputs is legal, not an error: such a pipeline exists to feed the ones
+/// below it, and must still run and fan out.
+#[tokio::test]
+async fn a_pipeline_with_no_outputs_still_feeds_its_downstreams() {
+    let shared = streamer("relay");
+    let (tx, mut rx) = mpsc::channel(8);
+    shared.subscribe(tx);
+
+    let (events, _events_rx) = broadcast::channel(16);
+    let runtime = runtime(
+        vec![Box::new(ScriptedInput::new(
+            vec![batch(vec![json!({"n": 1})])],
+            WhenExhausted::Fail,
+        ))],
+        vec![],
+        vec![],
+        Arc::clone(&shared),
+        events,
+    );
+    let _ = runtime.run().await;
+
+    assert!(rx.try_recv().is_ok(), "downstream got nothing");
+}
+
+/// One input dying must not take the pipeline with it — the others are still
+/// feeding it. The failure is reported, and only the *last* input's failure
+/// ends the run loop.
+#[tokio::test(start_paused = true)]
+async fn one_input_failing_does_not_stop_the_others() {
+    let output = CollectingOutput::new();
+    let emitted = output.emitted();
+    let (events, mut rx) = broadcast::channel::<UiEvent>(64);
+    let runtime = runtime(
+        vec![
+            // fails immediately
+            Box::new(ScriptedInput::new(vec![], WhenExhausted::Fail)),
+            Box::new(Ticking::new(Duration::from_secs(1), json!({"alive": true}))),
+        ],
+        vec![],
+        vec![Box::new(output)],
+        streamer("survivor"),
+        events,
+    );
+    let handle = tokio::spawn(runtime.run());
+
+    tokio::time::sleep(Duration::from_secs(5)).await;
+    let still_running = !handle.is_finished();
+    handle.abort();
+
+    assert!(
+        still_running,
+        "the run loop stopped when only one of two inputs failed"
+    );
+    assert!(
+        !emitted.values().is_empty(),
+        "the surviving input never reached the output"
+    );
+
+    let errors = collect_errors(&mut rx);
+    assert_eq!(errors.len(), 1, "expected the dead input to be reported once");
+    assert_eq!(errors[0].0, "input");
+    assert!(
+        errors[0].1.contains("scripted input exhausted"),
+        "the event should carry the cause: {}",
+        errors[0].1
+    );
 }

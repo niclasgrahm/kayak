@@ -35,10 +35,12 @@ use streamer_core::config::Secret;
 
 /// Threaded through every `build()` call. It carries the streamer map — needed
 /// so a `streamer` input can look up its upstream and register an mpsc sender
-/// on it — the UI event channel, and the store that `${NAME}` references in the
-/// config resolve against.
+/// on it — the id of the streamer being built (components that label their
+/// output want it), the UI event channel, and the store that `${NAME}`
+/// references in the config resolve against.
 pub struct BuildCtx<'a> {
     pub streamers: &'a mut HashMap<StreamerId, StreamerHandle>,
+    pub streamer_id: StreamerId,
     pub events: broadcast::Sender<UiEvent>,
     pub secrets: Arc<dyn SecretStore>,
 }
@@ -49,18 +51,21 @@ impl<'a> BuildCtx<'a> {
     /// about secrets; use [`BuildCtx::with_secrets`] for anything else.
     pub fn new(
         streamers: &'a mut HashMap<StreamerId, StreamerHandle>,
+        streamer_id: StreamerId,
         events: broadcast::Sender<UiEvent>,
     ) -> Self {
-        Self::with_secrets(streamers, events, Arc::new(EnvStore))
+        Self::with_secrets(streamers, streamer_id, events, Arc::new(EnvStore))
     }
 
     pub fn with_secrets(
         streamers: &'a mut HashMap<StreamerId, StreamerHandle>,
+        streamer_id: StreamerId,
         events: broadcast::Sender<UiEvent>,
         secrets: Arc<dyn SecretStore>,
     ) -> Self {
         Self {
             streamers,
+            streamer_id,
             events,
             secrets,
         }

@@ -71,6 +71,38 @@ pub struct NatsConfig {
     pub subject: String,
 }
 
+/// Consumes JSON messages from a kafka topic, each emitted as a batch of one.
+///
+/// A payload that isn't JSON is skipped with a warning rather than taking the
+/// pipeline down, same as the nats input. The consumer connects on the first
+/// read and joins a consumer group, so kafka remembers where this pipeline got
+/// to between restarts.
+#[derive(Clone, Debug, Deserialize, Serialize, JsonSchema)]
+#[schemars(title = "kafka")]
+pub struct KafkaConfig {
+    /// comma-separated broker list, e.g. `localhost:9092`. May reference
+    /// secrets as `${NAME}` — see "secrets" in the readme.
+    pub brokers: Secret,
+    /// the topic to consume from
+    pub topic: String,
+    /// consumer group id. Kafka tracks the read position per group, so two
+    /// pipelines sharing a group split the topic between them, and two with
+    /// different groups each get every message.
+    pub group: String,
+    /// where to start when the group has no committed position yet: `earliest`
+    /// replays the topic from the beginning, `latest` only sees new messages.
+    /// Defaults to `latest`.
+    pub start_at: Option<KafkaStartAt>,
+}
+
+/// Where a new consumer group starts reading.
+#[derive(Clone, Debug, Deserialize, Serialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum KafkaStartAt {
+    Earliest,
+    Latest,
+}
+
 /// Emits one generated message on a fixed interval — a heartbeat for testing a
 /// pipeline without a real source attached.
 #[derive(Clone, Debug, Deserialize, Serialize, JsonSchema)]
@@ -110,6 +142,45 @@ pub struct NatsOutputConfig {
     pub urls: Secret,
     /// the subject to publish to
     pub subject: String,
+}
+
+/// Inserts every message in the batch into a postgres table, one row per
+/// message.
+///
+/// The table is created on connect if it isn't there, with a `jsonb` column
+/// holding the whole message. Mapping fields out into real columns and types is
+/// not supported yet.
+#[derive(Clone, Debug, Deserialize, Serialize, JsonSchema)]
+#[schemars(title = "postgres")]
+pub struct PostgresOutputConfig {
+    /// server hostname, e.g. `localhost`
+    pub host: String,
+    /// the database to connect to
+    pub database: String,
+    /// the role to connect as
+    pub user: String,
+    /// that role's password. May reference secrets as `${NAME}` — see
+    /// "secrets" in the readme, and prefer a reference to a literal here.
+    pub password: Secret,
+    /// the table to insert into, created if it does not exist. Optionally
+    /// schema-qualified (`analytics.readings`); letters, digits and underscores
+    /// only, since it cannot be sent as a query parameter.
+    pub table: String,
+    /// server port. Defaults to 5432.
+    pub port: Option<u16>,
+}
+
+/// Publishes every message in the batch to a kafka topic, one message per
+/// record. Records are sent without a key, so they round-robin across the
+/// topic's partitions.
+#[derive(Clone, Debug, Deserialize, Serialize, JsonSchema)]
+#[schemars(title = "kafka")]
+pub struct KafkaOutputConfig {
+    /// comma-separated broker list, e.g. `localhost:9092`. May reference
+    /// secrets as `${NAME}` — see "secrets" in the readme.
+    pub brokers: Secret,
+    /// the topic to publish to
+    pub topic: String,
 }
 
 /// Prints each batch to the server's stdout. Useful while building a pipeline
@@ -214,6 +285,7 @@ pub struct SplitterTransformConfig {
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum InputKind {
     Dummy(DummyConfig),
+    Kafka(KafkaConfig),
     Nats(NatsConfig),
     Streamer(StreamerConfig),
 }
@@ -259,7 +331,9 @@ pub struct TransformConfig {
 pub enum OutputKind {
     Stdout(StdoutOutputConfig),
     File(FileOutputConfig),
+    Kafka(KafkaOutputConfig),
     Nats(NatsOutputConfig),
+    Postgres(PostgresOutputConfig),
 }
 #[derive(Clone, Debug, Deserialize, Serialize, JsonSchema)]
 pub struct OutputConfig {
@@ -267,10 +341,17 @@ pub struct OutputConfig {
     pub kind: OutputKind,
 }
 
+/// One pipeline: every input is merged into one stream, that stream runs
+/// through the transform chain in order, and each resulting batch goes to every
+/// output.
 #[derive(Clone, Debug, Deserialize, Serialize, JsonSchema)]
 pub struct Config {
     pub id: Option<String>,
-    pub input: InputConfig,
+    /// at least one. Batches arrive interleaved in the order the inputs produce
+    /// them; there is no ordering between two different inputs.
+    pub inputs: Vec<InputConfig>,
     pub transforms: Vec<TransformConfig>,
-    pub output: OutputConfig,
+    /// may be empty — a pipeline that only feeds downstream pipelines needs no
+    /// output of its own.
+    pub outputs: Vec<OutputConfig>,
 }

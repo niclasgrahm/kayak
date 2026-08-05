@@ -35,14 +35,37 @@ pub struct Section {
     pub properties: Vec<Property>,
 }
 
+/// An inspector tab's label: the stage and how many components it holds.
+///
+/// Every tab is counted, including the ones that can only hold one today — a
+/// count that appears on some tabs and not others reads as a property of the
+/// pipeline rather than of the tab.
 #[must_use]
-pub fn input_section(config: &Config) -> Section {
-    section_of(serde_json::to_value(&config.input))
+pub fn tab_label(stage: &str, count: usize) -> String {
+    format!("{stage} ({count})")
 }
 
+/// One section per input. Order is the configured order, which says nothing
+/// about the order batches arrive in — inputs are merged, not chained — but is
+/// at least stable between renders.
 #[must_use]
-pub fn output_section(config: &Config) -> Section {
-    section_of(serde_json::to_value(&config.output))
+pub fn input_sections(config: &Config) -> Vec<Section> {
+    config
+        .inputs
+        .iter()
+        .map(|i| section_of(serde_json::to_value(i)))
+        .collect()
+}
+
+/// One section per output. Every output receives every batch, so this order is
+/// presentational too.
+#[must_use]
+pub fn output_sections(config: &Config) -> Vec<Section> {
+    config
+        .outputs
+        .iter()
+        .map(|o| section_of(serde_json::to_value(o)))
+        .collect()
 }
 
 /// One section per transform, in the order they run — which is the order the
@@ -139,13 +162,30 @@ mod tests {
     fn config(input: InputConfig, transforms: Vec<TransformKind>, output: OutputKind) -> Config {
         Config {
             id: None,
-            input,
+            inputs: vec![input],
             transforms: transforms
                 .into_iter()
                 .map(|kind| TransformConfig { kind })
                 .collect(),
-            output: OutputConfig { kind: output },
+            outputs: vec![OutputConfig { kind: output }],
         }
+    }
+
+    /// Most of these tests build a config with exactly one input and one
+    /// output and are about what that one section looks like.
+    fn only(sections: Vec<Section>) -> Section {
+        match <[Section; 1]>::try_from(sections) {
+            Ok([section]) => section,
+            Err(sections) => panic!("expected exactly one section, got {}", sections.len()),
+        }
+    }
+
+    fn input_section(config: &Config) -> Section {
+        only(input_sections(config))
+    }
+
+    fn output_section(config: &Config) -> Section {
+        only(output_sections(config))
     }
 
     fn dummy_input() -> InputConfig {
@@ -153,6 +193,71 @@ mod tests {
             kind: InputKind::Dummy(DummyConfig { duration: 5 }),
             buffer: None,
         }
+    }
+
+    /// The three tabs are read side by side, so they have to be counted the
+    /// same way — including an empty chain, which is a fact about the pipeline
+    /// and not a reason to drop the count.
+    #[test]
+    fn every_tab_label_carries_its_count() {
+        assert_eq!(tab_label("inputs", 1), "inputs (1)");
+        assert_eq!(tab_label("outputs", 1), "outputs (1)");
+        assert_eq!(tab_label("transforms", 2), "transforms (2)");
+        assert_eq!(tab_label("transforms", 0), "transforms (0)");
+    }
+
+    /// A stage with several components shows one section each, in configured
+    /// order — the card is the only place you can see that a pipeline reads
+    /// from two places or writes to two.
+    #[test]
+    fn every_input_and_output_gets_its_own_section() {
+        let config = Config {
+            id: None,
+            inputs: vec![
+                dummy_input(),
+                InputConfig {
+                    kind: InputKind::Dummy(DummyConfig { duration: 9 }),
+                    buffer: None,
+                },
+            ],
+            transforms: vec![],
+            outputs: vec![
+                OutputConfig {
+                    kind: OutputKind::Stdout(StdoutOutputConfig {}),
+                },
+                OutputConfig {
+                    kind: OutputKind::Nats(NatsOutputConfig {
+                        urls: "nats://localhost:4222".into(),
+                        subject: "out".to_string(),
+                    }),
+                },
+            ],
+        };
+
+        let inputs = input_sections(&config);
+        assert_eq!(inputs.len(), 2);
+        assert_eq!(value_of(&inputs[0], "duration"), "5");
+        assert_eq!(value_of(&inputs[1], "duration"), "9");
+
+        let outputs = output_sections(&config);
+        assert_eq!(
+            outputs.iter().map(|s| s.kind.as_str()).collect::<Vec<_>>(),
+            vec!["stdout", "nats"]
+        );
+    }
+
+    /// An output-less pipeline is legal — it exists to feed its children — and
+    /// the tab has to be able to say so.
+    #[test]
+    fn a_stage_with_nothing_in_it_has_no_sections() {
+        let config = Config {
+            id: None,
+            inputs: vec![dummy_input()],
+            transforms: vec![],
+            outputs: vec![],
+        };
+        assert!(output_sections(&config).is_empty());
+        assert_eq!(tab_label("outputs", output_sections(&config).len()), "outputs (0)");
     }
 
     fn value_of(section: &Section, name: &str) -> String {
