@@ -16,6 +16,7 @@ pub mod config;
 pub mod handlers;
 pub mod inputs;
 pub mod outputs;
+pub mod persist;
 pub mod secrets;
 pub mod state;
 pub mod streamer;
@@ -25,6 +26,7 @@ pub mod transforms;
 use crate::handlers::{
     rest::{
         docs::get_docs,
+        settings::{get_settings, revert_config, save_config},
         streamer::{create_stream, delete_stream, get_streams},
     },
     ui::ui::events_handler,
@@ -86,6 +88,11 @@ pub fn api_router(state: Arc<AppState>) -> Router {
     Router::new()
         // the /docs *page* is a Leptos route; this is the same data as JSON
         .route("/api/docs", get(get_docs))
+        .route("/api/settings", get(get_settings))
+        // the config file is written only here, never as a side effect of an
+        // edit — see `persist`
+        .route("/api/config/save", post(save_config))
+        .route("/api/config/revert", post(revert_config))
         .route("/events", get(events_handler))
         .route("/api/streams", post(create_stream))
         .route("/api/streams", get(get_streams))

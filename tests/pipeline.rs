@@ -384,6 +384,66 @@ async fn an_input_error_ends_the_run_loop() {
     assert!(finished.is_ok(), "run loop hung on a failing input");
 }
 
+/// An input that fails *because we cancelled the streamer* is not a pipeline
+/// failure and must not be reported as one.
+///
+/// This is the shape of a real bug: tearing the graph down cancels every
+/// streamer and then drops the upstreams, so a downstream wakes with both its
+/// cancellation and an "upstream is gone" ready at once. Reporting the latter
+/// put a red error on a card — and on a revert, on the card of the *new*
+/// streamer that had just inherited the id, which read as the fresh pipeline
+/// being broken.
+/// Repeated because the bug was a coin toss: `select!` chooses randomly between
+/// two ready branches, so one run reproduced it only about a third of the time.
+/// Twenty makes a regression essentially certain to be caught rather than
+/// noticed three CI runs later.
+#[tokio::test]
+async fn a_cancelled_streamer_does_not_report_its_input_dying() {
+    for attempt in 0..20 {
+        let (events, mut rx) = broadcast::channel(16);
+        let shared = streamer("going-away");
+        // cancelled before it ever runs, so the very first iteration has both
+        // the cancellation and the input failure ready — the exact tie
+        shared.cancellation_token.cancel();
+
+        let runtime = runtime(
+            vec![Box::new(ScriptedInput::new(vec![], WhenExhausted::Fail))],
+            vec![],
+            vec![Box::new(CollectingOutput::new())],
+            Arc::clone(&shared),
+            events,
+        );
+        let finished = tokio::time::timeout(Duration::from_secs(5), runtime.run()).await;
+        assert!(finished.is_ok(), "a cancelled run loop should exit");
+
+        let errors = collect_errors(&mut rx);
+        assert!(
+            errors.is_empty(),
+            "attempt {attempt}: shutting a streamer down reported itself as a failure: {errors:?}"
+        );
+    }
+}
+
+/// The other half of the rule: an input that dies on its own, while the
+/// streamer is very much alive, still has to be reported. The check above is
+/// "was *I* cancelled", not "did something go quiet".
+#[tokio::test]
+async fn a_running_streamer_still_reports_its_input_dying() {
+    let (events, mut rx) = broadcast::channel(16);
+    let runtime = runtime(
+        vec![Box::new(ScriptedInput::new(vec![], WhenExhausted::Fail))],
+        vec![],
+        vec![Box::new(CollectingOutput::new())],
+        streamer("still-here"),
+        events,
+    );
+    let _ = tokio::time::timeout(Duration::from_secs(5), runtime.run()).await;
+
+    let errors = collect_errors(&mut rx);
+    assert_eq!(errors.len(), 1, "expected the failure to be reported: {errors:?}");
+    assert_eq!(errors[0].0, "input");
+}
+
 /// The `Buffered` input decorator collects `size` upstream batches into one.
 #[tokio::test]
 async fn a_static_buffer_merges_upstream_batches() -> anyhow::Result<()> {

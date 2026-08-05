@@ -104,11 +104,30 @@ impl StreamerRuntime {
         }
         loop {
             let next_msg = match select! {
+                // `biased` so cancellation always wins a tie. Tearing the graph
+                // down cancels every streamer and *then* drops the upstreams,
+                // so a downstream is woken with both its cancellation and an
+                // "upstream is gone" ready at once — and a random pick would
+                // report our own shutdown as a pipeline failure half the time.
+                biased;
                 () = self.shared.cancellation_token.cancelled() => break,
                 msg = next_input_message(&mut self.input) => msg,
             } {
                 Ok(msg) => msg,
                 Err(e) => {
+                    // Same reasoning one step later: the error may have been
+                    // produced before we were cancelled but read after. An
+                    // input dying because we asked it to is not news, and
+                    // reporting it would put a red line on a card that is on
+                    // its way out — or, after a revert, on the card of the
+                    // freshly built streamer that inherited its id.
+                    if self.shared.cancellation_token.is_cancelled() {
+                        debug!(
+                            "[{}]\t input stopped while shutting down: {:#}",
+                            self.shared.id, e
+                        );
+                        break;
+                    }
                     error!("[{}]\t input error, stopping streamer: {:?}", self.shared.id, e);
                     publish(&self.events, || UiEvent::error(self.shared.id.clone(), stage::INPUT, &e));
                     break;

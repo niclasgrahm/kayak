@@ -1,0 +1,385 @@
+//! Writing the running pipelines out as a config file.
+//!
+//! The `--config` file is a load source and a save target, never a mirror:
+//! editing the graph changes what the server is *running*, and only an explicit
+//! save writes anything to disk. The workflow that buys is the one worth
+//! having — build the graph in the UI, save it, commit the file — without the
+//! server quietly rewriting a file nobody asked it to touch.
+//!
+//! That goal is what dictates the two rules here:
+//!
+//! - **The order is derived, not remembered.** A `streamer` input can only be
+//!   built once its upstream exists, so the file has to declare parents before
+//!   children; [`ordered`] topologically sorts them and breaks every tie by id.
+//!   Nothing depends on the order pipelines happened to be created in, and the
+//!   same graph always renders byte-for-byte the same file — a diff means the
+//!   graph changed, not that a `HashMap` was iterated twice.
+//! - **The write is atomic.** A crash halfway through must not leave a
+//!   truncated config where a working one was, so [`write`] renders the whole
+//!   file first and renames it into place.
+//!
+//! Secrets are safe here for the reason they're safe on the wire: a `Config`
+//! only ever holds the unresolved `${NAME}` template.
+
+use std::collections::{BTreeMap, BTreeSet, HashSet};
+use std::path::Path;
+
+use anyhow::Context;
+use streamer_core::config::Config;
+use streamer_core::StreamerId;
+
+/// The pipelines in an order the config file can be replayed in: every pipeline
+/// after all of the ones it names as upstream, and alphabetical among the ones
+/// that are equally free to go.
+///
+/// Configs without an `id` sort as if their id were empty. In practice they
+/// don't occur — the writer fills the generated id in first, precisely so that
+/// a downstream's `upstream` reference still resolves on the next start.
+///
+/// A cycle can't be built at runtime (an upstream has to exist already), but a
+/// hand-edited file could describe one. Rather than dropping those pipelines,
+/// whatever is left over is appended in id order: the file stays a complete
+/// record of the graph, and the next start reports the unbuildable pipeline.
+#[must_use]
+pub fn ordered(configs: Vec<Config>) -> Vec<Config> {
+    let empty = String::new();
+    let id_of = |c: &Config| c.id.clone().unwrap_or_else(|| empty.clone());
+
+    let mut remaining: BTreeMap<StreamerId, Config> =
+        configs.into_iter().map(|c| (id_of(&c), c)).collect();
+    let mut placed: HashSet<StreamerId> = HashSet::new();
+    let mut out: Vec<Config> = Vec::with_capacity(remaining.len());
+
+    // Kahn's algorithm over a BTreeMap, so "the ones that are ready" is always
+    // considered in id order and the output is fully determined by the graph.
+    loop {
+        let ready: Vec<StreamerId> = remaining
+            .iter()
+            .filter(|(_, config)| {
+                config.upstreams().into_iter().all(|up| {
+                    // an upstream that isn't in this set is dangling, not
+                    // pending — it can never become ready, so don't wait for it
+                    placed.contains(up) || !remaining.contains_key(up)
+                })
+            })
+            .map(|(id, _)| id.clone())
+            .collect();
+        if ready.is_empty() {
+            break;
+        }
+        for id in ready {
+            if let Some(config) = remaining.remove(&id) {
+                placed.insert(id);
+                out.push(config);
+            }
+        }
+    }
+
+    // only reachable through a cycle; see the doc comment
+    out.extend(remaining.into_values());
+    out
+}
+
+/// The file's contents: the pipelines as a JSON array, in [`ordered`] order.
+///
+/// Pretty-printed with a trailing newline, because the file is meant to be
+/// read and diffed by a human rather than only by `serde`.
+pub fn render(configs: Vec<Config>) -> anyhow::Result<String> {
+    let mut json = serde_json::to_string_pretty(&ordered(configs))
+        .context("failed to serialize the pipelines")?;
+    json.push('\n');
+    Ok(json)
+}
+
+/// Replace `path` with the given pipelines. Callers taking a path from a
+/// request must put it through [`save_path`] first.
+///
+/// Rendered in full and renamed into place, so a failure partway through leaves
+/// the previous file untouched rather than a half-written one. The temporary
+/// sits next to the target because a rename across filesystems isn't atomic
+/// (and on some platforms isn't allowed at all).
+pub fn write(path: &Path, configs: Vec<Config>) -> anyhow::Result<()> {
+    let contents = render(configs)?;
+    let temporary = temporary_path(path);
+    std::fs::write(&temporary, contents)
+        .with_context(|| format!("failed to write {}", temporary.display()))?;
+    std::fs::rename(&temporary, path).with_context(|| {
+        format!(
+            "failed to move {} into place at {}",
+            temporary.display(),
+            path.display()
+        )
+    })
+}
+
+/// A sibling of the target to stage the new contents in. The name is derived
+/// from the target's, so two servers writing two different config files in one
+/// directory don't collide.
+fn temporary_path(path: &Path) -> std::path::PathBuf {
+    let name = path
+        .file_name()
+        .map_or_else(|| std::ffi::OsString::from("config"), ToOwned::to_owned);
+    let mut name = name;
+    name.push(".tmp");
+    path.with_file_name(name)
+}
+
+/// Where a "save as" of `name` is allowed to land, given the file the server
+/// was started from.
+///
+/// **This is a security boundary, not a convenience.** The browser cannot write
+/// to the server's disk — the server does, on request — so an unconstrained
+/// path here would let anyone who can reach the UI write JSON anywhere the
+/// process can. Confining saves to the one directory the operator already
+/// pointed at is what keeps a config editor from being an arbitrary-write
+/// primitive.
+///
+/// So `name` must be a bare file name. That is enough for everything the
+/// feature is for, including overwriting the loaded file — pass its own name.
+/// Anything with a separator, a `..`, or a root in it is refused rather than
+/// normalised, because normalising is where these checks go wrong: the rule is
+/// easier to trust when nothing is rewritten to satisfy it.
+pub fn save_path(config_path: &Path, name: &str) -> anyhow::Result<std::path::PathBuf> {
+    let trimmed = name.trim();
+    anyhow::ensure!(!trimmed.is_empty(), "a file name is required");
+    anyhow::ensure!(
+        !trimmed.contains(['/', '\\']),
+        "'{trimmed}' is not a file name: a config can only be saved beside the one the server was started with, so it cannot contain a path"
+    );
+    // `.` and `..` pass the separator check but name directories, not files
+    anyhow::ensure!(
+        !trimmed.chars().all(|c| c == '.'),
+        "'{trimmed}' is not a file name"
+    );
+    // belt and braces: whatever the string looked like, it has to come out of
+    // `Path` as exactly one ordinary component
+    let mut components = Path::new(trimmed).components();
+    let (Some(std::path::Component::Normal(only)), None) = (components.next(), components.next())
+    else {
+        anyhow::bail!("'{trimmed}' is not a file name");
+    };
+    Ok(config_path.with_file_name(only))
+}
+
+/// The ids named as upstream by any of these pipelines but not declared by any
+/// of them. A file like that can't be started, so the caller can refuse to
+/// write one rather than persisting a graph that won't come back.
+#[must_use]
+pub fn dangling_upstreams(configs: &[Config]) -> Vec<StreamerId> {
+    let known: HashSet<&str> = configs
+        .iter()
+        .filter_map(|c| c.id.as_deref())
+        .collect();
+    let missing: BTreeSet<&StreamerId> = configs
+        .iter()
+        .flat_map(Config::upstreams)
+        .filter(|up| !known.contains(up.as_str()))
+        .collect();
+    missing.into_iter().cloned().collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use streamer_core::config::{
+        DummyConfig, InputConfig, InputKind, StreamerConfig, TransformConfig,
+    };
+
+    fn pipeline(id: &str, upstreams: &[&str]) -> Config {
+        let mut inputs: Vec<InputConfig> = upstreams
+            .iter()
+            .map(|up| InputConfig {
+                kind: InputKind::Streamer(StreamerConfig {
+                    upstream: (*up).to_string(),
+                }),
+                buffer: None,
+            })
+            .collect();
+        if inputs.is_empty() {
+            inputs.push(InputConfig {
+                kind: InputKind::Dummy(DummyConfig { duration: 1 }),
+                buffer: None,
+            });
+        }
+        Config {
+            id: Some(id.to_string()),
+            inputs,
+            transforms: Vec::<TransformConfig>::new(),
+            outputs: Vec::new(),
+        }
+    }
+
+    fn ids(configs: &[Config]) -> Vec<String> {
+        configs
+            .iter()
+            .map(|c| c.id.clone().unwrap_or_default())
+            .collect()
+    }
+
+    /// The whole point of the ordering: a `streamer` input can't be built
+    /// before its upstream exists, so a file that lists them the other way
+    /// round fails to start.
+    #[test]
+    fn a_pipeline_is_written_after_the_ones_it_reads_from() {
+        let out = ordered(vec![
+            pipeline("z-child", &["a-root"]),
+            pipeline("a-root", &[]),
+        ]);
+        assert_eq!(ids(&out), ["a-root", "z-child"]);
+    }
+
+    /// Two hops deep, and the middle one only becomes writable once the root is.
+    #[test]
+    fn a_chain_is_written_root_first() {
+        let out = ordered(vec![
+            pipeline("c", &["b"]),
+            pipeline("b", &["a"]),
+            pipeline("a", &[]),
+        ]);
+        assert_eq!(ids(&out), ["a", "b", "c"]);
+    }
+
+    /// A node with several parents goes after the last of them, not the first.
+    #[test]
+    fn a_pipeline_with_several_upstreams_waits_for_all_of_them() {
+        let out = ordered(vec![
+            pipeline("everything", &["a", "deep"]),
+            pipeline("deep", &["a"]),
+            pipeline("a", &[]),
+        ]);
+        assert_eq!(ids(&out), ["a", "deep", "everything"]);
+    }
+
+    /// The file is version controlled, so the same graph has to render the same
+    /// bytes every time — otherwise every save is a diff.
+    #[test]
+    fn independent_pipelines_are_written_in_id_order() {
+        let out = ordered(vec![
+            pipeline("c", &[]),
+            pipeline("a", &[]),
+            pipeline("b", &[]),
+        ]);
+        assert_eq!(ids(&out), ["a", "b", "c"]);
+    }
+
+    /// ...including when the input order differs, which it will: the pipelines
+    /// come out of a `HashMap`.
+    #[test]
+    fn the_same_graph_renders_the_same_file_whatever_order_it_arrives_in() -> anyhow::Result<()> {
+        let one = render(vec![
+            pipeline("child", &["root"]),
+            pipeline("other", &["root"]),
+            pipeline("root", &[]),
+        ])?;
+        let two = render(vec![
+            pipeline("other", &["root"]),
+            pipeline("root", &[]),
+            pipeline("child", &["root"]),
+        ])?;
+        assert_eq!(one, two);
+        Ok(())
+    }
+
+    /// An upstream that was deleted leaves a pipeline that can't be built, but
+    /// dropping it from the file would lose the user's work silently. It is
+    /// written, and reported separately.
+    #[test]
+    fn a_pipeline_naming_an_unknown_upstream_is_still_written() {
+        let configs = vec![pipeline("orphan", &["was-deleted"]), pipeline("a", &[])];
+        assert_eq!(dangling_upstreams(&configs), ["was-deleted"]);
+        assert_eq!(ids(&ordered(configs)), ["a", "orphan"]);
+    }
+
+    #[test]
+    fn a_graph_with_every_upstream_present_has_no_dangling_references() {
+        assert!(dangling_upstreams(&[pipeline("root", &[]), pipeline("child", &["root"])]).is_empty());
+    }
+
+    /// A cycle can't be created through the API, but a hand-edited file can
+    /// describe one. Losing those pipelines on the next save would be worse
+    /// than writing a file that reports itself as broken on the next start.
+    #[test]
+    fn a_cycle_is_written_rather_than_dropped() {
+        let out = ordered(vec![pipeline("a", &["b"]), pipeline("b", &["a"])]);
+        assert_eq!(ids(&out), ["a", "b"]);
+    }
+
+    #[test]
+    fn the_rendered_file_is_a_json_array_ending_in_a_newline() -> anyhow::Result<()> {
+        let rendered = render(vec![pipeline("a", &[])])?;
+        assert!(rendered.ends_with("]\n"), "got: {rendered}");
+        let parsed: Vec<Config> = serde_json::from_str(&rendered)?;
+        assert_eq!(ids(&parsed), ["a"]);
+        Ok(())
+    }
+
+    #[test]
+    fn a_save_lands_beside_the_file_the_server_was_started_from() -> anyhow::Result<()> {
+        let config = Path::new("/srv/kayak/config.json");
+        assert_eq!(
+            save_path(config, "other.json")?,
+            Path::new("/srv/kayak/other.json")
+        );
+        // saving over the loaded file is the ordinary "save" case
+        assert_eq!(save_path(config, "config.json")?, config);
+        // surrounding whitespace is a typing artefact, not part of a name
+        assert_eq!(
+            save_path(config, "  spaced.json  ")?,
+            Path::new("/srv/kayak/spaced.json")
+        );
+        Ok(())
+    }
+
+    /// The one that matters: this path comes from an HTTP request, so anything
+    /// that escapes the config directory is an arbitrary file write. Each of
+    /// these is a way out, and none of them may be normalised into something
+    /// acceptable — they are refused.
+    #[test]
+    fn a_save_cannot_escape_the_config_directory() {
+        let config = Path::new("/srv/kayak/config.json");
+        for escape in [
+            "../outside.json",
+            "../../etc/cron.d/kayak",
+            "sub/dir.json",
+            "/etc/passwd",
+            "/srv/kayak/config.json", // absolute, even to the right place
+            "..",
+            ".",
+            "",
+            "   ",
+            r"..\windows.json",
+            r"C:\windows\system32\x.json",
+        ] {
+            let result = save_path(config, escape);
+            assert!(
+                result.is_err(),
+                "'{escape}' was accepted as {:?}",
+                result.ok()
+            );
+        }
+    }
+
+    /// The staging file has to be a sibling: renaming across filesystems isn't
+    /// atomic, which is the only reason the temporary exists.
+    #[test]
+    fn the_temporary_is_written_next_to_the_target() {
+        let path = Path::new("/etc/kayak/config.json");
+        let temporary = temporary_path(path);
+        assert_eq!(temporary.parent(), path.parent());
+        assert_ne!(temporary, path);
+    }
+
+    #[test]
+    fn writing_replaces_the_file_and_leaves_no_temporary_behind() -> anyhow::Result<()> {
+        let dir = tempfile::tempdir()?;
+        let path = dir.path().join("config.json");
+        std::fs::write(&path, "[]")?;
+
+        write(&path, vec![pipeline("child", &["root"]), pipeline("root", &[])])?;
+
+        let reloaded: Vec<Config> = serde_json::from_str(&std::fs::read_to_string(&path)?)?;
+        assert_eq!(ids(&reloaded), ["root", "child"]);
+        assert!(!temporary_path(&path).exists(), "the staging file was left behind");
+        Ok(())
+    }
+}

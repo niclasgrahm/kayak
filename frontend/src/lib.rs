@@ -7,6 +7,7 @@
 pub mod api_client;
 pub mod app;
 pub mod docs;
+pub mod form;
 pub mod graph;
 pub mod inspector;
 pub mod log;

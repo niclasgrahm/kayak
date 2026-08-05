@@ -6,7 +6,7 @@ use crate::secrets::{EnvStore, SecretStore};
 use crate::streamer::Streamer;
 use crate::BuildCtx;
 use std::collections::HashMap;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, MutexGuard};
 use streamer_core::config::Config;
 pub use streamer_core::{StreamerId, UiEvent};
@@ -66,6 +66,11 @@ impl From<serde_json::Error> for StreamerError {
     }
 }
 
+/// How long a revert waits for the old run loops to finish before rebuilding on
+/// top of them. Only an output stuck mid-`emit()` can take this long; anything
+/// else notices its cancellation on the next loop iteration.
+const TEARDOWN_GRACE: std::time::Duration = std::time::Duration::from_secs(5);
+
 pub struct AppState {
     streamers: Mutex<HashMap<StreamerId, StreamerHandle>>,
     events: broadcast::Sender<UiEvent>,
@@ -74,6 +79,19 @@ pub struct AppState {
     /// pipeline posted to `/api/streams` gets the same secrets as one loaded
     /// from the config file.
     secrets: Arc<dyn SecretStore>,
+    /// The `--config` file, when the server was started with one.
+    ///
+    /// It is a *load source and a save target*, not a mirror: nothing here
+    /// writes to it except an explicit save. Its directory also bounds where a
+    /// save is allowed to write. See [`crate::persist`].
+    config_path: Option<PathBuf>,
+    /// The rendered form of the graph as last loaded or saved, which is what
+    /// "unsaved changes" is measured against.
+    ///
+    /// A snapshot rather than a re-read of the file, because the two questions
+    /// differ: someone editing the file by hand hasn't made the *running* graph
+    /// stale. `None` when there's no file to be in sync with.
+    saved: Mutex<Option<String>>,
 }
 
 impl Default for AppState {
@@ -96,6 +114,8 @@ impl AppState {
             streamers: Mutex::new(HashMap::new()),
             events,
             secrets,
+            config_path: None,
+            saved: Mutex::new(None),
         }
     }
 
@@ -109,24 +129,105 @@ impl AppState {
         Self::from_config_with_secrets(path, Arc::new(EnvStore))
     }
 
+    /// Load the pipelines from `path` and remember it as the default save
+    /// target.
+    ///
+    /// Loading never writes. The file is what the server *started from*; what
+    /// it is running diverges from it the moment anything is created or
+    /// deleted, and only an explicit save brings the two back together. See
+    /// [`crate::persist`].
     pub fn from_config_with_secrets(
         path: &Path,
         secrets: Arc<dyn SecretStore>,
     ) -> anyhow::Result<Self> {
-        let new_state = AppState::with_secrets(secrets);
-        tracing::debug!("Loading initial configuration from {}...", path.display());
+        let mut new_state = AppState::with_secrets(secrets);
+        new_state.config_path = Some(path.to_path_buf());
+        new_state.load_from_config_file()?;
+        Ok(new_state)
+    }
+
+    /// Read the config file and start everything in it. Shared by startup and
+    /// by [`AppState::revert`], which is the same operation done twice.
+    fn load_from_config_file(&self) -> anyhow::Result<()> {
+        let Some(path) = &self.config_path else {
+            anyhow::bail!("the server was not started with a --config file");
+        };
+        tracing::debug!("Loading configuration from {}...", path.display());
         let file = std::fs::File::open(path)
             .with_context(|| format!("failed to open config file {}", path.display()))?;
         let configs: Vec<Config> = serde_json::from_reader(file)
             .with_context(|| format!("failed to parse config file {}", path.display()))?;
+
+        let mut app = self.lock_streamers();
         for c in configs {
             let id = c.id.clone().unwrap_or_else(|| "<generated>".to_string());
-            new_state
-                .create_streamer(c)
+            Self::create_locked(self, &mut app, c)
                 .with_context(|| format!("failed to start streamer '{id}' from config"))?;
         }
+        // what came off disk is, by definition, in sync with disk
+        self.mark_saved(&app);
+        Ok(())
+    }
 
-        Ok(new_state)
+    /// Throw away the running graph and start again from the config file.
+    ///
+    /// This is the undo that the file being read-only otherwise takes away:
+    /// edits apply to the runtime immediately, so reloading is the only way
+    /// back to a known state.
+    ///
+    /// The file is parsed *before* anything is torn down, so the common failure
+    /// — a file that has since been broken by hand — leaves the running graph
+    /// alone. A pipeline that parses but won't build still can't be caught that
+    /// way; that one fails partway through, and the error says so.
+    ///
+    /// The old graph is stopped *completely* before the new one is built. That
+    /// matters beyond tidiness: two run loops for the same pipeline would
+    /// briefly share a kafka consumer group or a nats subscription, and both
+    /// would write to the same outputs.
+    pub async fn revert(&self) -> anyhow::Result<()> {
+        let Some(path) = &self.config_path else {
+            anyhow::bail!("the server was not started with a --config file, so there is nothing to revert to");
+        };
+        // parse first: it costs one read and saves tearing down a working graph
+        // for a file that was never going to load
+        let file = std::fs::File::open(path)
+            .with_context(|| format!("failed to open config file {}", path.display()))?;
+        let _: Vec<Config> = serde_json::from_reader(file)
+            .with_context(|| format!("failed to parse config file {}", path.display()))?;
+
+        // Cancel everything and take the join handles out, then drop the guard:
+        // this is a `std::sync::Mutex` and must not be held across an await.
+        let waiting: Vec<tokio::task::JoinHandle<()>> = {
+            let mut app = self.lock_streamers();
+            app.drain()
+                .map(|(_, handle)| {
+                    handle.shared.cancellation_token.cancel();
+                    handle.join_handle
+                })
+                .collect()
+        };
+
+        // A run loop checks its cancellation on every iteration, so this is
+        // normally immediate. The bound is for the one thing that can't be
+        // cancelled — an output already inside `emit()`, waiting on a socket.
+        // Timing out is not fatal: the stragglers are cancelled and will exit
+        // on their own, and rebuilding on top of them is still better than
+        // refusing to revert.
+        let stopped = tokio::time::timeout(TEARDOWN_GRACE, async {
+            for handle in waiting {
+                let _ = handle.await;
+            }
+        })
+        .await;
+        if stopped.is_err() {
+            tracing::warn!(
+                "some pipelines were still shutting down after {}s; reloading anyway",
+                TEARDOWN_GRACE.as_secs()
+            );
+        }
+
+        self.load_from_config_file()
+            .context("the running pipelines were stopped, but the config file could not be reloaded")
     }
 
     /// A poisoned lock means another thread panicked while holding it. None of
@@ -143,6 +244,102 @@ impl AppState {
         self.lock_streamers().keys().cloned().collect()
     }
 
+    /// The name of the file the server was started from, if any. The UI offers
+    /// it as the default save target, and its directory is the only place a
+    /// save is allowed to write.
+    #[must_use]
+    pub fn config_file_name(&self) -> Option<String> {
+        self.config_path
+            .as_ref()
+            .and_then(|p| p.file_name())
+            .map(|name| name.to_string_lossy().into_owned())
+    }
+
+    /// Whether the running graph has diverged from what was last loaded or
+    /// saved.
+    ///
+    /// Rendering both sides and comparing is exact rather than a heuristic,
+    /// because [`crate::persist::render`] is deterministic: the same graph
+    /// always produces the same bytes, so a difference *is* a change. Always
+    /// false without a config file — there is nothing to be out of sync with.
+    #[must_use]
+    pub fn has_unsaved_changes(&self) -> bool {
+        if self.config_path.is_none() {
+            return false;
+        }
+        let app = self.lock_streamers();
+        let current = crate::persist::render(Self::configs_of(&app)).ok();
+        let saved = self.lock_saved();
+        match (&current, &*saved) {
+            (Some(current), Some(saved)) => current != saved,
+            // a render that failed says nothing either way; claiming "unsaved"
+            // is the answer that can't cost someone their work
+            _ => true,
+        }
+    }
+
+    fn lock_saved(&self) -> MutexGuard<'_, Option<String>> {
+        self.saved.lock().unwrap_or_else(|poisoned| {
+            tracing::warn!("saved-snapshot lock was poisoned; recovering");
+            poisoned.into_inner()
+        })
+    }
+
+    /// Record the current graph as the one on disk. Takes the held guard so the
+    /// snapshot can't be of a map that changed in between.
+    fn mark_saved(&self, app: &HashMap<StreamerId, StreamerHandle>) {
+        *self.lock_saved() = crate::persist::render(Self::configs_of(app)).ok();
+    }
+
+    /// Write the running graph to `name`, a file beside the one the server was
+    /// started from, and treat that as the new baseline.
+    ///
+    /// Only a bare file name is accepted: this is a write to the server's disk
+    /// driven by an HTTP request, and confining it to one known directory is
+    /// what keeps that from being an arbitrary-write primitive. Passing the
+    /// current file's own name is how you overwrite it.
+    pub fn save_config_as(&self, name: &str) -> Result<PathBuf, StreamerError> {
+        let Some(config_path) = &self.config_path else {
+            return Err(StreamerError::InvalidConfig(anyhow::anyhow!(
+                "the server was not started with a --config file, so there is nowhere to save"
+            )));
+        };
+        let target = crate::persist::save_path(config_path, name)
+            .map_err(StreamerError::InvalidConfig)?;
+
+        let app = self.lock_streamers();
+        let configs = Self::configs_of(&app);
+        // saved anyway — refusing would strand the user's work — but the file
+        // won't start as it is, so it can't pass silently
+        let dangling = crate::persist::dangling_upstreams(&configs);
+        if !dangling.is_empty() {
+            tracing::warn!(
+                "saving {} with upstreams that no longer exist: {}; those pipelines will not start",
+                target.display(),
+                dangling.join(", ")
+            );
+        }
+        crate::persist::write(&target, configs)
+            .with_context(|| format!("failed to save the config to {}", target.display()))?;
+        self.mark_saved(&app);
+        tracing::info!("config saved to {}", target.display());
+        Ok(target)
+    }
+
+    /// Every running pipeline's config, with the id filled in.
+    ///
+    /// A config posted without an `id` got a random petname, and that name is
+    /// the only thing a downstream pipeline's `upstream` reference can point
+    /// at — so the *resolved* id is what gets written, not the absent one.
+    fn configs_of(app: &HashMap<StreamerId, StreamerHandle>) -> Vec<Config> {
+        app.values()
+            .map(|handle| Config {
+                id: Some(handle.shared.id.clone()),
+                ..handle.shared.config.clone()
+            })
+            .collect()
+    }
+
     pub fn get_streamers(&self) -> anyhow::Result<serde_json::Value> {
         // the views borrow from the handles, so the guard has to outlive them
         let app = self.lock_streamers();
@@ -151,15 +348,26 @@ impl AppState {
     }
 
     pub fn create_streamer(&self, config: Config) -> Result<Arc<Streamer>, StreamerError> {
-        let streamer = Arc::new(Streamer::new(config)?);
         let mut app = self.lock_streamers();
+        Self::create_locked(self, &mut app, config)
+    }
+
+    /// The body of [`AppState::create_streamer`], against a guard the caller
+    /// already holds. Loading a whole config file is a run of these under one
+    /// lock, so it can't interleave with a request halfway through.
+    fn create_locked(
+        &self,
+        app: &mut HashMap<StreamerId, StreamerHandle>,
+        config: Config,
+    ) -> Result<Arc<Streamer>, StreamerError> {
+        let streamer = Arc::new(Streamer::new(config)?);
         let id = streamer.id.clone();
         // we require unique ids, so if this id already exists we should error out
         if app.contains_key(id.as_str()) {
             return Err(StreamerError::DuplicateId(id));
         }
         let ctx = BuildCtx::with_secrets(
-            &mut app,
+            app,
             id.clone(),
             self.events.clone(),
             Arc::clone(&self.secrets),

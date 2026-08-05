@@ -5,14 +5,16 @@ use leptos_router::path;
 use leptos_use::{
     UseElementSizeOptions, UseElementSizeReturn, UseEventSourceReturn, UseIntervalFnOptions,
     UseRafFnCallbackArgs, UseRafFnOptions, use_element_size, use_element_size_with_options,
-    use_event_source, use_interval_fn_with_options, use_raf_fn_with_options,
+    use_event_listener, use_event_source, use_interval_fn_with_options, use_raf_fn_with_options,
+    use_window,
 };
 use std::collections::{HashMap, VecDeque};
-use streamer_core::docs::all_components;
+use streamer_core::docs::{Family, FieldType, all_components};
 use streamer_core::{StreamerDto, StreamerId, UiEvent, config::Config};
 
 use crate::api_client::{ApiClient, ApiError};
 use crate::docs;
+use crate::form;
 use crate::inspector;
 use crate::log;
 use crate::graph::{
@@ -44,11 +46,58 @@ pub fn shell(options: LeptosOptions) -> impl IntoView {
     }
 }
 
+/// What the canvas lets you do.
+///
+/// Read-only is the default and the reason the mode exists at all: the canvas
+/// is a live window onto a running system, and a window should not have a
+/// delete button one click from the pipeline list. Editing is a thing you opt
+/// into.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum Mode {
+    ReadOnly,
+    Edit,
+}
+
+impl Mode {
+    fn is_edit(self) -> bool {
+        self == Self::Edit
+    }
+}
+
 #[derive(Clone, Copy)]
 pub struct AppState {
     pub streams: LocalResource<Result<Vec<StreamerDto>, ApiError>>,
     pub events: Signal<Option<UiEvent>>,
     pub canvas_state: CanvasState,
+    /// Bumped after a pipeline is created or deleted. `streams` and `settings`
+    /// both read it, so bumping it re-fetches them — there is no `refetch()` on
+    /// a `LocalResource`, and re-reading the server beats patching a local copy
+    /// that could disagree with it.
+    pub reload: RwSignal<u32>,
+    /// Name of the file the server was started from, if any. `None` also means
+    /// there is nowhere to save, so the edit controls say so rather than
+    /// offering a button that can only fail.
+    pub config_file: Signal<Option<String>>,
+    /// The running graph has diverged from that file. Edits are live and the
+    /// file is left alone, so this is the only thing standing between an
+    /// afternoon's work and a restart.
+    pub unsaved: Signal<bool>,
+    pub mode: RwSignal<Mode>,
+    /// Whether the "add node" modal is open.
+    pub adding: RwSignal<bool>,
+    /// Whether the "save as" modal is open.
+    pub saving: RwSignal<bool>,
+}
+
+impl AppState {
+    /// Re-read the pipeline list and the save state from the server.
+    pub fn refresh(&self) {
+        self.reload.update(|n| *n = n.wrapping_add(1));
+    }
+
+    fn editing(&self) -> bool {
+        self.mode.get().is_edit()
+    }
 }
 
 /// Everything the canvas needs to draw itself. All of it is derived state
@@ -113,21 +162,70 @@ pub fn App() -> impl IntoView {
 /// zoomable canvas of cards.
 #[component]
 pub fn CanvasPage() -> impl IntoView {
-    let streams = LocalResource::new(|| async move {
-        ApiClient {
-            base: String::new(),
+    // read *before* the async block so the resource depends on it: bumping it
+    // is how an edit gets the list re-fetched
+    let reload = RwSignal::new(0u32);
+    let streams = LocalResource::new(move || {
+        reload.track();
+        async move {
+            ApiClient {
+                base: String::new(),
+            }
+            .list_streams()
+            .await
         }
-        .list_streams()
-        .await
+    });
+    // re-fetched on the same trigger as the list: an edit is exactly what can
+    // change whether there are unsaved changes
+    let settings = LocalResource::new(move || {
+        reload.track();
+        async move {
+            ApiClient {
+                base: String::new(),
+            }
+            .settings()
+            .await
+        }
+    });
+    let config_file = Signal::derive(move || {
+        settings
+            .get()
+            .and_then(|res| res.as_ref().ok().and_then(|s| s.config_file.clone()))
+    });
+    // false until the answer arrives — a "unsaved changes" warning that flashes
+    // up on every load would train people to ignore it
+    let unsaved = Signal::derive(move || {
+        settings
+            .get()
+            .and_then(|res| res.as_ref().ok().map(|s| s.unsaved_changes))
+            .unwrap_or(false)
     });
     let UseEventSourceReturn { data, .. } =
         use_event_source::<UiEvent, codee::string::JsonSerdeCodec>("/events");
 
     let canvas_state = CanvasState::new();
-    provide_context(AppState {
+    let state = AppState {
         streams,
         events: data,
         canvas_state,
+        reload,
+        config_file,
+        unsaved,
+        mode: RwSignal::new(Mode::ReadOnly),
+        adding: RwSignal::new(false),
+        saving: RwSignal::new(false),
+    };
+    provide_context(state);
+
+    // Leaving edit mode with work that only exists in the server's memory is
+    // the one way to lose it by accident, so the browser asks. It can only be a
+    // generic prompt — browsers ignore the message — but the interruption is
+    // the point.
+    let _ = use_event_listener(use_window(), leptos::ev::beforeunload, move |ev| {
+        if state.unsaved.get_untracked() {
+            ev.prevent_default();
+            ev.set_return_value("");
+        }
     });
 
     let canvas_ref = NodeRef::<leptos::html::Div>::new();
@@ -325,6 +423,12 @@ pub fn CanvasPage() -> impl IntoView {
                     }}
                 </div>
             </div>
+            <Show when=move || state.adding.get()>
+                <AddNodeModal />
+            </Show>
+            <Show when=move || state.saving.get()>
+                <SaveAsModal />
+            </Show>
         </Suspense>
     }
 }
@@ -445,11 +549,52 @@ pub fn Edges(streamers: Vec<StreamerDto>) -> impl IntoView {
     }
 }
 
+/// The pipeline list, and the two ways to change it: the `+` that opens the
+/// "add node" modal, and a delete on each row.
 #[component]
 pub fn Sidebar() -> impl IntoView {
     let state = expect_context::<AppState>();
+    // Deleting stops a running pipeline and can't be undone, so the button
+    // arms rather than fires. One row at a time: arming a second disarms the
+    // first, and clicking anywhere else in the list disarms it too.
+    let armed = RwSignal::new(Option::<StreamerId>::None);
+    let failure = RwSignal::new(Option::<String>::None);
+
+    let delete = move |id: StreamerId| {
+        armed.set(None);
+        failure.set(None);
+        leptos::task::spawn_local(async move {
+            let result = ApiClient {
+                base: String::new(),
+            }
+            .delete_stream(&id)
+            .await;
+            match result {
+                Ok(()) => state.refresh(),
+                Err(err) => failure.set(Some(err.to_string())),
+            }
+        });
+    };
+
     view! {
         <div class="sidebar">
+            <div class="sidebar-header">
+                <span class="sidebar-title">"pipelines"</span>
+                <Show when=move || state.editing()>
+                    <button
+                        class="icon-button"
+                        title="add node"
+                        on:click=move |_| state.adding.set(true)
+                    >
+                        "+"
+                    </button>
+                </Show>
+            </div>
+            {move || {
+                failure
+                    .get()
+                    .map(|message| view! { <div class="sidebar-error">{message}</div> })
+            }}
             {move || {
                 state
                     .streams
@@ -458,14 +603,64 @@ pub fn Sidebar() -> impl IntoView {
                         Ok(list) => {
                             view! {
                                 <For each=move || list.clone() key=|s| s.id.clone() let:s>
-                                    <div
-                                        class="tree-item"
-                                        on:click=move |_| {
-                                            state.canvas_state.focus_request.set(Some(s.id.clone()));
+                                    {
+                                        let (focus_id, arm_id, delete_id, is_armed) = (
+                                            s.id.clone(),
+                                            s.id.clone(),
+                                            s.id.clone(),
+                                            s.id.clone(),
+                                        );
+                                        let armed_here = Memo::new(move |_| {
+                                            armed.get().as_deref() == Some(is_armed.as_str())
+                                        });
+                                        view! {
+                                            <div
+                                                class="tree-item"
+                                                on:click=move |_| {
+                                                    armed.set(None);
+                                                    state
+                                                        .canvas_state
+                                                        .focus_request
+                                                        .set(Some(focus_id.clone()));
+                                                }
+                                            >
+                                                <span class="tree-label">{s.id.clone()}</span>
+                                                // read-only means read-only:
+                                                // the delete isn't disabled,
+                                                // it isn't there
+                                                <Show when=move || state.editing()>
+                                                    <button
+                                                        class="icon-button danger"
+                                                        class:armed=move || armed_here.get()
+                                                        title=move || {
+                                                            if armed_here.get() {
+                                                                "click again to delete"
+                                                            } else {
+                                                                "delete pipeline"
+                                                            }
+                                                        }
+                                                        on:click={
+                                                            let (arm_id, delete_id) = (
+                                                                arm_id.clone(),
+                                                                delete_id.clone(),
+                                                            );
+                                                            move |ev| {
+                                                                // the row itself moves the camera
+                                                                ev.stop_propagation();
+                                                                if armed_here.get() {
+                                                                    delete(delete_id.clone());
+                                                                } else {
+                                                                    armed.set(Some(arm_id.clone()));
+                                                                }
+                                                            }
+                                                        }
+                                                    >
+                                                        {move || if armed_here.get() { "sure?" } else { "×" }}
+                                                    </button>
+                                                </Show>
+                                            </div>
                                         }
-                                    >
-                                        {s.id.clone()}
-                                    </div>
+                                    }
                                 </For>
                             }
                                 .into_any()
@@ -477,12 +672,477 @@ pub fn Sidebar() -> impl IntoView {
     }
 }
 
+/// One component being configured in the modal.
+///
+/// The same thing [`form::ComponentDraft`] describes, but with each editable
+/// part in its own signal. That split is what keeps the form usable: the field
+/// list has to be rebuilt when the kind or the variant changes — different
+/// components have different fields — but rebuilding it on every keystroke
+/// would destroy the `<input>` being typed into and take the caret with it. So
+/// the boxes are uncontrolled: they write to `values` and never read it back.
+#[derive(Clone, Copy)]
+struct DraftSignals {
+    family: Family,
+    kind: RwSignal<String>,
+    variant: RwSignal<Option<String>>,
+    values: RwSignal<HashMap<String, String>>,
+}
+
+impl DraftSignals {
+    fn new(doc: &streamer_core::docs::ComponentDoc) -> Self {
+        let draft = form::draft_of(doc);
+        Self {
+            family: draft.family,
+            kind: RwSignal::new(draft.kind),
+            variant: RwSignal::new(draft.variant),
+            values: RwSignal::new(draft.values),
+        }
+    }
+
+    /// What the pure form logic validates and builds from.
+    fn snapshot(self) -> form::ComponentDraft {
+        form::ComponentDraft {
+            family: self.family,
+            kind: self.kind.get_untracked(),
+            variant: self.variant.get_untracked(),
+            values: self.values.get_untracked(),
+        }
+    }
+}
+
+/// Add a pipeline: pick its components, fill in their settings, post it.
+///
+/// Nothing about the form is written by hand — every control comes from
+/// `streamer_core::docs`, which reflects the fields out of the config schemas,
+/// so a new component shows up here for the same reason it shows up on `/docs`.
+/// The validation is [`crate::form`]'s, which is pure and unit tested; this
+/// component only renders drafts and shows what comes back.
+#[component]
+fn AddNodeModal() -> impl IntoView {
+    let state = expect_context::<AppState>();
+    let docs = StoredValue::new(all_components());
+
+    let id = RwSignal::new(String::new());
+    let drafts = RwSignal::new(Vec::<DraftSignals>::new());
+    let errors = RwSignal::new(Vec::<form::FormError>::new());
+    // the server's own answer, which says things the form can't know — a
+    // duplicate id, an upstream that doesn't exist
+    let rejected = RwSignal::new(Option::<String>::None);
+    let submitting = RwSignal::new(false);
+
+    let close = move || {
+        state.adding.set(false);
+    };
+    // on the window rather than on the panel: a keydown only reaches an element
+    // that has focus, and the panel doesn't until something in it is clicked
+    let _ = use_event_listener(use_window(), leptos::ev::keydown, move |ev| {
+        if ev.key() == "Escape" {
+            close();
+        }
+    });
+
+    let add = move |family: Family| {
+        docs.with_value(|docs| {
+            if let Some(first) = form::kinds_in(docs, family).first() {
+                let draft = DraftSignals::new(first);
+                drafts.update(|d| d.push(draft));
+            }
+        });
+    };
+    // a pipeline needs an input, so start it with one rather than with an
+    // empty form and an error waiting to happen
+    add(Family::Input);
+
+    let submit = move || {
+        if submitting.get_untracked() {
+            return;
+        }
+        rejected.set(None);
+        let snapshots: Vec<form::ComponentDraft> = drafts
+            .get_untracked()
+            .into_iter()
+            .map(DraftSignals::snapshot)
+            .collect();
+        let built = docs.with_value(|docs| form::build_config(&id.get_untracked(), &snapshots, docs));
+        let body = match built {
+            Ok(body) => body,
+            Err(found) => {
+                errors.set(found);
+                return;
+            }
+        };
+        errors.set(Vec::new());
+        submitting.set(true);
+        leptos::task::spawn_local(async move {
+            let result = ApiClient {
+                base: String::new(),
+            }
+            .create_stream(&body)
+            .await;
+            submitting.set(false);
+            match result {
+                Ok(_) => {
+                    state.refresh();
+                    state.adding.set(false);
+                }
+                Err(err) => rejected.set(Some(err.to_string())),
+            }
+        });
+    };
+
+    view! {
+        // clicking the backdrop is the same as cancelling; clicking the panel
+        // must not be, hence the stopped propagation below
+        <div class="modal-backdrop" on:click=move |_| close()>
+            <div class="modal" on:click=move |ev| ev.stop_propagation()>
+                <header>
+                    <span class="modal-title">"add node"</span>
+                    <button class="icon-button" title="close" on:click=move |_| close()>
+                        "×"
+                    </button>
+                </header>
+
+                <div class="modal-body">
+                    <div class="form-row">
+                        <label for="pipeline-id">"id"</label>
+                        <input
+                            id="pipeline-id"
+                            class="text-input"
+                            placeholder="optional — generated if left blank"
+                            on:input=move |ev| id.set(event_target_value(&ev))
+                        />
+                    </div>
+
+                    <StageEditor family=Family::Input drafts=drafts errors=errors docs=docs />
+                    <StageEditor family=Family::Transform drafts=drafts errors=errors docs=docs />
+                    <StageEditor family=Family::Output drafts=drafts errors=errors docs=docs />
+                </div>
+
+                <footer>
+                    <div class="modal-messages">
+                        {move || {
+                            form::pipeline_errors(&errors.get())
+                                .into_iter()
+                                .map(|message| view! { <div class="form-error">{message}</div> })
+                                .collect_view()
+                        }}
+                        {move || {
+                            rejected
+                                .get()
+                                .map(|message| {
+                                    view! { <div class="form-error">"server: " {message}</div> }
+                                })
+                        }}
+                        // the pipeline starts running the moment this is
+                        // accepted; the file is a separate, explicit step, and
+                        // saying so here is what stops "create" from reading
+                        // like "save"
+                        <div class="form-hint">
+                            {move || {
+                                if state.config_file.get().is_some() {
+                                    "starts running now — save the config to keep it"
+                                } else {
+                                    "starts running now — no config file to save it to"
+                                }
+                            }}
+                        </div>
+                    </div>
+                    <button class="button" on:click=move |_| close()>
+                        "cancel"
+                    </button>
+                    <button
+                        class="button primary"
+                        disabled=move || submitting.get()
+                        on:click=move |_| submit()
+                    >
+                        {move || if submitting.get() { "creating…" } else { "create" }}
+                    </button>
+                </footer>
+            </div>
+        </div>
+    }
+}
+
+/// One of the three stages, with its components and a button to add another.
+#[component]
+fn StageEditor(
+    family: Family,
+    drafts: RwSignal<Vec<DraftSignals>>,
+    errors: RwSignal<Vec<form::FormError>>,
+    docs: StoredValue<Vec<streamer_core::docs::ComponentDoc>>,
+) -> impl IntoView {
+    let add = move |_| {
+        docs.with_value(|docs| {
+            if let Some(first) = form::kinds_in(docs, family).first() {
+                let draft = DraftSignals::new(first);
+                drafts.update(|d| d.push(draft));
+            }
+        });
+    };
+
+    view! {
+        <section class="stage">
+            <div class="stage-header">
+                <span class="section-kind">{family.label()}</span>
+                <button class="icon-button" title=format!("add {}", form::singular(family)) on:click=add>
+                    "+"
+                </button>
+            </div>
+            // Rebuilt rather than keyed: the index *is* the identity here (it's
+            // what an error names), and it shifts when a component is removed.
+            {move || {
+                drafts
+                    .get()
+                    .into_iter()
+                    .enumerate()
+                    .filter(|(_, draft)| draft.family == family)
+                    .map(|(index, draft)| {
+                        view! {
+                            <ComponentEditor index=index draft=draft drafts=drafts errors=errors docs=docs />
+                        }
+                    })
+                    .collect_view()
+            }}
+        </section>
+    }
+}
+
+/// One component: which kind it is, and the fields that kind has.
+#[component]
+fn ComponentEditor(
+    index: usize,
+    draft: DraftSignals,
+    drafts: RwSignal<Vec<DraftSignals>>,
+    errors: RwSignal<Vec<form::FormError>>,
+    docs: StoredValue<Vec<streamer_core::docs::ComponentDoc>>,
+) -> impl IntoView {
+    let family = draft.family;
+    let doc = move || docs.with_value(|docs| form::doc_for(docs, family, &draft.kind.get()).cloned());
+
+    // Changing the kind changes which fields exist, so whatever was typed into
+    // the old ones has nowhere to go. Clearing is the honest option: keeping
+    // the values would silently carry a `subject` from nats to kafka.
+    let choose_kind = move |ev: leptos::ev::Event| {
+        let kind = event_target_value(&ev);
+        let variant = docs.with_value(|docs| {
+            form::doc_for(docs, family, &kind).and_then(|d| d.variants.first().map(|v| v.name.clone()))
+        });
+        draft.values.set(HashMap::new());
+        draft.variant.set(variant);
+        draft.kind.set(kind);
+    };
+
+    // by position, not by identity: the list is rebuilt whenever it changes, so
+    // `index` is always this component's current place in it
+    let remove = move |_| {
+        drafts.update(|d| {
+            if index < d.len() {
+                d.remove(index);
+            }
+        });
+    };
+
+    view! {
+        <div class="component-editor">
+            <div class="component-header">
+                <select class="select" on:change=choose_kind>
+                    {move || {
+                        let selected = draft.kind.get();
+                        docs.with_value(|docs| {
+                            form::kinds_in(docs, family)
+                                .into_iter()
+                                .map(|component| {
+                                    let kind = component.kind.clone();
+                                    let label = kind.clone();
+                                    view! {
+                                        <option value=kind.clone() selected=kind == selected>
+                                            {label}
+                                        </option>
+                                    }
+                                })
+                                .collect_view()
+                        })
+                    }}
+                </select>
+                <button class="icon-button danger" title="remove" on:click=remove>
+                    "×"
+                </button>
+            </div>
+
+            // Rebuilt when the kind or the variant changes — which is exactly
+            // when the fields are different ones. The inputs inside are
+            // uncontrolled, so typing doesn't come back through here.
+            {move || {
+                let Some(doc) = doc() else {
+                    return view! { <div class="empty">"unknown component"</div> }.into_any();
+                };
+                let variants = doc.variants.clone();
+                let fields = form::fields_of(&doc, draft.variant.get().as_deref());
+                view! {
+                    <Show when={
+                        let has = !variants.is_empty();
+                        move || has
+                    }>
+                        <div class="form-row">
+                            <label>"form"</label>
+                            <select
+                                class="select"
+                                on:change=move |ev| {
+                                    // the variants share field names but not
+                                    // field types, so the values go too
+                                    draft.values.set(HashMap::new());
+                                    draft.variant.set(Some(event_target_value(&ev)));
+                                }
+                            >
+                                {
+                                    let selected = draft.variant.get();
+                                    variants
+                                        .clone()
+                                        .into_iter()
+                                        .map(|variant| {
+                                            let name = variant.name.clone();
+                                            let label = name.clone();
+                                            view! {
+                                                <option
+                                                    value=name.clone()
+                                                    selected=Some(name) == selected
+                                                >
+                                                    {label}
+                                                </option>
+                                            }
+                                        })
+                                        .collect_view()
+                                }
+                            </select>
+                        </div>
+                    </Show>
+                    {if fields.is_empty() {
+                        view! { <div class="empty">"no settings"</div> }.into_any()
+                    } else {
+                        fields
+                            .into_iter()
+                            .map(|field| {
+                                view! {
+                                    <FieldEditor
+                                        field=field
+                                        index=index
+                                        values=draft.values
+                                        errors=errors
+                                    />
+                                }
+                            })
+                            .collect_view()
+                            .into_any()
+                    }}
+                }
+                    .into_any()
+            }}
+        </div>
+    }
+}
+
+/// One field: a control chosen by the field's type, and whatever the validator
+/// had to say about it.
+#[component]
+fn FieldEditor(
+    field: streamer_core::docs::FieldDoc,
+    index: usize,
+    values: RwSignal<HashMap<String, String>>,
+    errors: RwSignal<Vec<form::FormError>>,
+) -> impl IntoView {
+    let name = field.name.clone();
+    // read once, on purpose: the control is uncontrolled from here on, so that
+    // typing into it doesn't rebuild it
+    let initial = values.with_untracked(|v| v.get(&name).cloned().unwrap_or_default());
+    let error_name = name.clone();
+    let error = Memo::new(move |_| {
+        errors.with(|errors| form::field_error(errors, index, &error_name).map(ToString::to_string))
+    });
+
+    let cleared_name = name.clone();
+    let write = move |ev: leptos::ev::Event| {
+        let value = event_target_value(&ev);
+        values.update(|v| {
+            v.insert(name.clone(), value);
+        });
+        errors.update(|errors| form::clear_field_error(errors, index, &cleared_name));
+    };
+
+    // A closed set of values is a dropdown; everything else is a box. The
+    // placeholder carries the rendered type, which for a structured field is
+    // the only hint that it wants JSON.
+    let control = match &field.field_type {
+        FieldType::Enum(options) => {
+            let unset = initial.is_empty();
+            let options = options.clone();
+            // A dropdown with nothing chosen must not *look* like it has: a
+            // browser shows the first option, but no change event has fired, so
+            // nothing was recorded and the field would fail as "required" while
+            // displaying a perfectly good value. A blank entry, selected, keeps
+            // what is shown and what is stored the same thing. Optional fields
+            // keep theirs for good — it is how a field gets unset again.
+            let blank = !field.required || unset;
+            view! {
+                <select class="select" on:change=write>
+                    <Show when=move || blank>
+                        <option value="" selected=unset></option>
+                    </Show>
+                    {
+                        let selected = initial.clone();
+                        options
+                            .clone()
+                            .into_iter()
+                            .map(|value| {
+                                let label = value.clone();
+                                view! {
+                                    <option value=value.clone() selected=value == selected>
+                                        {label}
+                                    </option>
+                                }
+                            })
+                            .collect_view()
+                    }
+                </select>
+            }
+            .into_any()
+        }
+        _ => view! {
+            <input
+                class="text-input"
+                value=initial.clone()
+                placeholder=field.type_name.clone()
+                on:input=write
+            />
+        }
+        .into_any(),
+    };
+
+    view! {
+        <div class="form-row">
+            <label title=field.description.clone().unwrap_or_default()>
+                {field.name.clone()}
+                <Show when={
+                    let required = field.required;
+                    move || required
+                }>
+                    <span class="required-marker" title="required">"*"</span>
+                </Show>
+            </label>
+            <div class="form-control" class:invalid=move || error.get().is_some()>
+                {control}
+                {move || error.get().map(|message| view! { <div class="form-error">{message}</div> })}
+            </div>
+        </div>
+    }
+}
+
 /// Shared by both pages. The zoom readout is canvas-only, so it's driven by an
 /// optional context rather than by knowing which page it's on: `/docs` provides
 /// no `AppState` and simply gets no readout.
 #[component]
 pub fn Navbar() -> impl IntoView {
-    let canvas = use_context::<AppState>().map(|state| state.canvas_state);
+    let state = use_context::<AppState>();
+    let canvas = state.map(|state| state.canvas_state);
     let zoom = move || {
         canvas.map(|c| format!("{:.0}%", c.camera.get().zoom * 100.0))
     };
@@ -493,10 +1153,238 @@ pub fn Navbar() -> impl IntoView {
                 <A href="/" exact=true>"canvas"</A>
                 <A href="/docs">"docs"</A>
             </nav>
+            {state.map(|state| view! { <ModeControls state=state /> })}
             <div class="zoom-level" title="scroll to zoom, drag to pan">
                 {zoom}
             </div>
         </aside>
+    }
+}
+
+/// The read-only / edit switch, and everything that only makes sense once
+/// you're editing: whether there is unsaved work, and the two ways to resolve
+/// it.
+///
+/// It lives in the navbar rather than the sidebar because it is about the
+/// session as a whole, not about any one pipeline.
+#[component]
+fn ModeControls(state: AppState) -> impl IntoView {
+    let reverting = RwSignal::new(false);
+    let armed = RwSignal::new(false);
+    let failure = RwSignal::new(Option::<String>::None);
+
+    let revert = move || {
+        armed.set(false);
+        failure.set(None);
+        reverting.set(true);
+        leptos::task::spawn_local(async move {
+            let result = ApiClient {
+                base: String::new(),
+            }
+            .revert_config()
+            .await;
+            reverting.set(false);
+            match result {
+                Ok(()) => state.refresh(),
+                Err(err) => failure.set(Some(err.to_string())),
+            }
+        });
+    };
+
+    view! {
+        <div class="mode-controls">
+            {move || {
+                failure.get().map(|message| view! { <span class="mode-error">{message}</span> })
+            }}
+
+            <Show when=move || state.editing() && state.unsaved.get()>
+                <span class="unsaved" title="the running graph is not in the config file">
+                    "unsaved changes"
+                </span>
+            </Show>
+
+            <Show when=move || state.editing()>
+                {move || {
+                    // nowhere to save to is worth saying once, plainly, rather
+                    // than by way of a button that always fails
+                    if state.config_file.get().is_none() {
+                        return view! {
+                            <span class="mode-note" title="start the server with --config to be able to save">
+                                "no config file"
+                            </span>
+                        }
+                            .into_any();
+                    }
+                    view! {
+                        <button
+                            class="button"
+                            class:armed=move || armed.get()
+                            disabled=move || reverting.get()
+                            title="discard every change and reload the config file"
+                            on:click=move |_| {
+                                if armed.get_untracked() {
+                                    revert();
+                                } else {
+                                    armed.set(true);
+                                }
+                            }
+                        >
+                            // reverting stops every running pipeline, so it
+                            // takes two clicks like a delete does
+                            {move || {
+                                if reverting.get() {
+                                    "reverting…"
+                                } else if armed.get() {
+                                    "discard changes?"
+                                } else {
+                                    "revert"
+                                }
+                            }}
+                        </button>
+                        <button
+                            class="button primary"
+                            on:click=move |_| {
+                                armed.set(false);
+                                state.saving.set(true);
+                            }
+                        >
+                            "save as…"
+                        </button>
+                    }
+                        .into_any()
+                }}
+            </Show>
+
+            <button
+                class="button mode-toggle"
+                class:active=move || state.editing()
+                title=move || {
+                    if state.editing() {
+                        "leave edit mode"
+                    } else {
+                        "add and remove pipelines"
+                    }
+                }
+                on:click=move |_| {
+                    armed.set(false);
+                    state
+                        .mode
+                        .update(|mode| {
+                            *mode = if mode.is_edit() { Mode::ReadOnly } else { Mode::Edit };
+                        });
+                }
+            >
+                {move || if state.editing() { "editing" } else { "edit" }}
+            </button>
+        </div>
+    }
+}
+
+/// Where to write the running graph.
+///
+/// A file name, not a path: the server only writes beside the config it was
+/// started from, and offering a directory picker for a choice that doesn't
+/// exist would be a lie. Overwriting is just typing the name it already has,
+/// which the modal points out rather than hides.
+#[component]
+fn SaveAsModal() -> impl IntoView {
+    let state = expect_context::<AppState>();
+    let current = state.config_file.get_untracked().unwrap_or_default();
+    let name = RwSignal::new(current.clone());
+    let saving = RwSignal::new(false);
+    let failure = RwSignal::new(Option::<String>::None);
+    let loaded = StoredValue::new(current);
+
+    let close = move || state.saving.set(false);
+    let _ = use_event_listener(use_window(), leptos::ev::keydown, move |ev| {
+        if ev.key() == "Escape" {
+            close();
+        }
+    });
+
+    let overwrites = move || {
+        let typed = name.get();
+        loaded.with_value(|loaded| !loaded.is_empty() && typed.trim() == loaded)
+    };
+
+    let submit = move || {
+        if saving.get_untracked() {
+            return;
+        }
+        failure.set(None);
+        saving.set(true);
+        leptos::task::spawn_local(async move {
+            let result = ApiClient {
+                base: String::new(),
+            }
+            .save_config(&name.get_untracked())
+            .await;
+            saving.set(false);
+            match result {
+                Ok(_) => {
+                    // the save is what makes "unsaved changes" go away, and
+                    // that answer lives on the server
+                    state.refresh();
+                    state.saving.set(false);
+                }
+                Err(err) => failure.set(Some(err.to_string())),
+            }
+        });
+    };
+
+    view! {
+        <div class="modal-backdrop" on:click=move |_| close()>
+            <div class="modal narrow" on:click=move |ev| ev.stop_propagation()>
+                <header>
+                    <span class="modal-title">"save as"</span>
+                    <button class="icon-button" title="close" on:click=move |_| close()>
+                        "×"
+                    </button>
+                </header>
+                <div class="modal-body">
+                    <div class="form-row">
+                        <label for="save-name">"file name"</label>
+                        <input
+                            id="save-name"
+                            class="text-input"
+                            value=name.get_untracked()
+                            placeholder="config.json"
+                            on:input=move |ev| name.set(event_target_value(&ev))
+                            on:keydown=move |ev| {
+                                if ev.key() == "Enter" {
+                                    submit();
+                                }
+                            }
+                        />
+                    </div>
+                    <p class="form-hint">
+                        "written next to the config the server was started with"
+                    </p>
+                </div>
+                <footer>
+                    <div class="modal-messages">
+                        {move || {
+                            failure
+                                .get()
+                                .map(|message| view! { <div class="form-error">{message}</div> })
+                        }}
+                        <Show when=overwrites>
+                            <div class="form-warning">"this replaces the file you started from"</div>
+                        </Show>
+                    </div>
+                    <button class="button" on:click=move |_| close()>
+                        "cancel"
+                    </button>
+                    <button
+                        class="button primary"
+                        disabled=move || saving.get() || name.get().trim().is_empty()
+                        on:click=move |_| submit()
+                    >
+                        {move || if saving.get() { "saving…" } else { "save" }}
+                    </button>
+                </footer>
+            </div>
+        </div>
     }
 }
 

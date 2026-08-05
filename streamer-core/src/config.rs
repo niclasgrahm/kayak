@@ -355,3 +355,26 @@ pub struct Config {
     /// output of its own.
     pub outputs: Vec<OutputConfig>,
 }
+
+impl Config {
+    /// The pipelines this one reads from: one per `streamer` input, in the
+    /// order they're declared. That is the whole of what makes the pipelines a
+    /// graph rather than a list, so both the canvas layout and the config-file
+    /// writer ask the question here rather than each matching on `InputKind`.
+    ///
+    /// The same upstream named twice comes back twice — de-duplicating is the
+    /// caller's business, and both callers want a different answer.
+    #[must_use]
+    pub fn upstreams(&self) -> Vec<&StreamerId> {
+        self.inputs
+            .iter()
+            // spelled out rather than wildcarded: a new input kind that names
+            // another pipeline has to be added here, and the compiler is the
+            // only thing that will say so
+            .filter_map(|input| match &input.kind {
+                InputKind::Streamer(c) => Some(&c.upstream),
+                InputKind::Dummy(_) | InputKind::Kafka(_) | InputKind::Nats(_) => None,
+            })
+            .collect()
+    }
+}

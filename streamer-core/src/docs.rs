@@ -37,6 +37,29 @@ impl Family {
     }
 }
 
+/// What a field actually accepts, as something a form can be built from.
+///
+/// [`FieldDoc::type_name`] is the same information rendered for a human to
+/// read; this is the machine-readable half, and it is what the "add node"
+/// modal picks a widget and a validation rule from. Keeping it here rather
+/// than in the frontend is the same bargain as the rest of this module: the
+/// config schema stays the single source of truth, so a new field gets a
+/// working form control without anyone editing the UI.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum FieldType {
+    Text,
+    Integer,
+    Number,
+    Boolean,
+    /// A closed set of accepted values — rendered as a dropdown, not a box.
+    Enum(Vec<String>),
+    /// Something with a shape of its own (an object, a list, a tagged union
+    /// like an input's `buffer`). There is no general widget for those, so the
+    /// form takes them as literal JSON.
+    Json,
+}
+
 /// One configurable field of a component.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct FieldDoc {
@@ -45,6 +68,8 @@ pub struct FieldDoc {
     /// A rendered type, e.g. `string`, `integer`, or `sum | avg | min | max`
     /// for a field that only accepts certain values.
     pub type_name: String,
+    /// The same thing in a form a UI can dispatch on.
+    pub field_type: FieldType,
     /// The field's doc comment, if it has one.
     pub description: Option<String>,
     /// Required fields have to appear in the JSON; optional ones may be omitted.
@@ -208,6 +233,7 @@ fn fields_of(root: &Value, def: &Value) -> Vec<FieldDoc> {
     let field = |name: &str, schema: &Value| FieldDoc {
         name: name.to_string(),
         type_name: type_name_of(root, schema),
+        field_type: field_type_of(root, schema),
         // a doc comment on the field wins over the one on its type: `urls` is
         // better described as "the nats url" than as all of `Secret`'s docs
         description: description_of(schema)
@@ -280,11 +306,69 @@ fn type_name_of(root: &Value, schema: &Value) -> String {
             type_name_of(root, def)
         });
     }
-    schema["type"].as_str().unwrap_or("object").to_string()
+    scalar_type_of(schema).unwrap_or("object").to_string()
+}
+
+/// The `type` keyword, as one name.
+///
+/// It is usually a string, but an optional scalar arrives as `["integer",
+/// "null"]` — schemars only reaches for the `anyOf` form when the inner type is
+/// a `$ref`. The null half says the same thing the `required` list already
+/// does, so it's dropped here and both spellings come out alike.
+fn scalar_type_of(schema: &Value) -> Option<&str> {
+    match &schema["type"] {
+        Value::String(name) => Some(name),
+        Value::Array(names) => {
+            let mut real = names.iter().filter_map(Value::as_str).filter(|n| *n != "null");
+            match (real.next(), real.next()) {
+                (Some(only), None) => Some(only),
+                _ => None,
+            }
+        }
+        _ => None,
+    }
 }
 
 fn join_values<'a>(values: impl Iterator<Item = &'a str>) -> String {
     values.collect::<Vec<_>>().join(" | ")
+}
+
+/// The same walk as [`type_name_of`], answering "what widget is this" instead
+/// of "what do I call this".
+///
+/// The two deliberately disagree in one place: a tagged union like a buffer's
+/// `static | tumbling` reads well as a type name, but there is no single
+/// control that edits it, so it comes back as [`FieldType::Json`].
+fn field_type_of(root: &Value, schema: &Value) -> FieldType {
+    // `Option<T>` is T here too: whether it may be omitted is the `required`
+    // flag's job, not the widget's
+    if let Some(branches) = schema["anyOf"].as_array() {
+        let mut real = branches.iter().filter(|b| b["type"] != "null");
+        if let (Some(only), None) = (real.next(), real.next()) {
+            return field_type_of(root, only);
+        }
+    }
+    if let Some(values) = schema["enum"].as_array() {
+        let values: Vec<String> = values
+            .iter()
+            .filter_map(Value::as_str)
+            .map(ToString::to_string)
+            .collect();
+        // an `enum` of anything but plain strings isn't a dropdown
+        if !values.is_empty() {
+            return FieldType::Enum(values);
+        }
+    }
+    if schema["$ref"].is_string() {
+        return resolve_ref(root, schema).map_or(FieldType::Json, |def| field_type_of(root, def));
+    }
+    match scalar_type_of(schema) {
+        Some("string") => FieldType::Text,
+        Some("integer") => FieldType::Integer,
+        Some("number") => FieldType::Number,
+        Some("boolean") => FieldType::Boolean,
+        _ => FieldType::Json,
+    }
 }
 
 #[cfg(test)]
@@ -435,6 +519,65 @@ mod tests {
         );
         assert_eq!(numeric.fields[1].type_name, "GreaterThan | LessThan | EqualTo");
         assert_eq!(numeric.fields[2].type_name, "number");
+    }
+
+    /// The form in the UI is generated from these, so a field that comes back
+    /// as the wrong kind gets the wrong widget and the wrong validation.
+    #[test]
+    fn a_field_carries_a_machine_readable_type_beside_its_rendered_one() {
+        assert_eq!(field(&component("nats"), "subject").field_type, FieldType::Text);
+        // a `Secret` is transparently a string, so it edits like one
+        assert_eq!(field(&component("nats"), "urls").field_type, FieldType::Text);
+        assert_eq!(field(&component("dummy"), "duration").field_type, FieldType::Integer);
+        let filter = component("filter");
+        let numeric = &filter.variants[0];
+        match numeric.fields.iter().find(|f| f.name == "value") {
+            Some(f) => assert_eq!(f.field_type, FieldType::Number),
+            None => panic!("the numeric filter has no 'value' field"),
+        }
+    }
+
+    /// A closed set of values is a dropdown, and it has to carry the values —
+    /// the rendered `sum | avg | min | max` is for reading, not for parsing.
+    #[test]
+    fn a_field_with_a_closed_set_of_values_carries_them() {
+        assert_eq!(
+            field(&component("reducer"), "function").field_type,
+            FieldType::Enum(vec![
+                "sum".to_string(),
+                "avg".to_string(),
+                "min".to_string(),
+                "max".to_string()
+            ])
+        );
+        // ...through an Option, too
+        assert_eq!(
+            field(&component("kafka"), "start_at").field_type,
+            FieldType::Enum(vec!["earliest".to_string(), "latest".to_string()])
+        );
+    }
+
+    /// `buffer` is a tagged union of two different shapes. It renders as
+    /// `static | tumbling`, but no single control edits it, so the form takes
+    /// it as JSON rather than offering a dropdown that can't work.
+    #[test]
+    fn a_structured_field_is_typed_as_json_even_when_it_names_its_variants() {
+        let dummy = component("dummy");
+        let buffer = field(&dummy, "buffer");
+        assert_eq!(buffer.type_name, "static | tumbling");
+        assert_eq!(buffer.field_type, FieldType::Json);
+    }
+
+    /// `Option<u16>` is an integer that may be omitted, not a nullable oddity.
+    #[test]
+    fn an_optional_scalar_is_typed_by_its_inner_type() {
+        let postgres = component("postgres");
+        let port = field(&postgres, "port");
+        assert!(!port.required);
+        assert_eq!(port.field_type, FieldType::Integer);
+        // schemars spells this one `["integer", "null"]` rather than as an
+        // `anyOf`, and the rendered name has to survive that too
+        assert_eq!(port.type_name, "integer");
     }
 
     #[test]

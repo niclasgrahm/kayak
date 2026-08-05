@@ -9,9 +9,7 @@
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 
-use streamer_core::{
-    EventPayload, StreamerId, UiEvent, config::Config, config::InputKind, stage,
-};
+use streamer_core::{EventPayload, StreamerId, UiEvent, config::Config, stage};
 
 /// Cards are a fixed width; only their height varies with the config they show.
 pub const CARD_WIDTH: f64 = 340.0;
@@ -116,16 +114,12 @@ pub fn tick_pulses(pulses: &mut HashMap<Edge, u8>) -> bool {
 /// A streamer's parents in the graph are whatever its `streamer` inputs name as
 /// upstream. A pipeline with none of those is a root; a pipeline can also mix
 /// them, being fed by another pipeline *and* by NATS.
+///
+/// The answer comes from `Config` itself, so the canvas and the server's
+/// config-file writer read the graph the same way.
 #[must_use]
 pub fn upstreams_of(config: &Config) -> Vec<&StreamerId> {
-    config
-        .inputs
-        .iter()
-        .filter_map(|input| match &input.kind {
-            InputKind::Streamer(c) => Some(&c.upstream),
-            InputKind::Dummy(_) | InputKind::Kafka(_) | InputKind::Nats(_) => None,
-        })
-        .collect()
+    config.upstreams()
 }
 
 /// `(id, upstreams)` pairs — the only thing the layout needs to know about a
@@ -418,6 +412,7 @@ pub fn approach(camera: Camera, target: Camera, delta_ms: f64) -> (Camera, bool)
 #[cfg(test)]
 mod tests {
     use super::*;
+    use streamer_core::config::InputKind;
 
     fn node(id: &str, parent: Option<&str>) -> (StreamerId, Vec<StreamerId>) {
         (

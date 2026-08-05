@@ -25,6 +25,9 @@ which input carried it.
 | wheel / trackpad scroll | zoom about the cursor, 20%–250% (shown in the navbar) |
 | drag empty canvas | pan (dragging *on* a card selects its text instead) |
 | click a name in the sidebar | glide the camera to centre that node |
+| `edit` in the navbar | switch out of read-only, revealing the controls below |
+| `+` in the sidebar header | open the "add node" modal |
+| `×` on a sidebar row | delete that pipeline (click twice — the first click arms it) |
 
 Each card shows its config as a tabbed property list — inputs / transforms /
 outputs — over a live message log. The log carries failures as well as messages:
@@ -44,6 +47,130 @@ in `frontend/src/graph.rs` as pure functions with unit tests, and the same goes
 for the inspector rows. Keep it that way: the Leptos components should only feed
 those functions and render the result, since anything inside a component can't
 be tested without a browser.
+
+## editing the graph
+
+The canvas has two modes and **starts in read-only**. That is the default
+because the primary use of this page is watching a running system: a live view
+should not have a delete button one click from the pipeline list. The edit
+controls are not disabled in read-only, they are absent.
+
+`edit` in the navbar reveals them. The `+` in the sidebar header opens a modal
+that builds a pipeline: an id, then any number of inputs, transforms and
+outputs, each picked from a dropdown and configured field by field. Submitting
+it is a `POST /api/streams`; the `×` on a sidebar row is a `DELETE`, armed by
+the first click and fired by the second.
+
+**Edits are live, not staged.** Creating a pipeline starts it running
+immediately; deleting one cancels its run loop immediately. The canvas stays a
+true window onto the server — a node you just added streams messages like any
+other — which is the whole reason the editor and the live view are the same
+screen. The price is that there is no draft to throw away, so `revert` (below)
+is the undo.
+
+Note that the mode is a property of the browser tab, not of the server: the API
+still accepts writes regardless. This is a local development tool and the API is
+its documented interface. If you ever want the mode enforced, that belongs on
+the server as a flag, not in the UI.
+
+**The form is generated, like the docs are.** It is built from the same
+`streamer_core::docs` reflection over the config schemas, so a new component
+appears in the dropdown with the right fields, the right required markers, the
+right dropdowns for closed-value fields, and the right validation — without
+anyone touching the frontend. Field doc comments become the labels' tooltips.
+
+Three things the field types decide:
+
+- a field with a closed set of values (`sum | avg | min | max`) is a dropdown,
+  and starts blank rather than showing the first value it hasn't recorded;
+- a structured field — an input's `buffer`, which is `static | tumbling` with
+  different fields either way — is taken as literal JSON, because there is no
+  single control that edits it;
+- an enum-shaped component (the `filter` transform) gets a `form` picker for its
+  `Numeric` / `String` variants, and its fields follow the choice.
+
+Validation is `frontend/src/form.rs`: pure, unit tested, and the same rules
+serde applies, so what it accepts the server accepts. It reports every problem
+at once rather than one per submit, against the field and the component it
+belongs to — two `nats` inputs stay distinguishable. It is not a security
+boundary; the server still rejects what it must, and its message (a duplicate
+id, an unknown upstream) is shown verbatim in the modal footer.
+
+### the config file
+
+The `--config` file is a **load source and a save target, never a mirror**. The
+server reads it at startup and writes it only when asked. Nothing you do to the
+graph reaches disk on its own.
+
+That is deliberate, and it was not the first design. Writing through on every
+edit conflates "what the server is running" with "what's in the file", and that
+conflation has sharp edges in both directions: merely *loading* a file rewrote
+it (load goes through create, create wrote), and a stray click in a live view
+became a committed change. Separating the two makes both impossible.
+
+So the loop is explicit and symmetric:
+
+| | |
+| --- | --- |
+| load | file → runtime, at startup |
+| `revert` | file → runtime, again — the undo for a session of editing |
+| `save as…` | runtime → file |
+
+**Unsaved changes.** Because edits are live and the file is untouched, the two
+can diverge invisibly, and a restart would drop the work. The navbar says
+`unsaved changes` whenever they have. The check is exact rather than a heuristic:
+`persist::render` is deterministic, so the server compares the rendered graph
+against the rendering of what it last loaded or saved. Add a pipeline and remove
+it again and the warning goes away, because the graph really is back where it
+started.
+
+**Saving** takes a bare file name, written beside the config the server started
+from. That constraint is a security boundary, not a convenience: the browser
+can't write to the server's disk, the server does on request, so an
+unconstrained path would be an arbitrary-write primitive for anyone who can
+reach the UI. Names containing a separator, a `..` or a root are refused rather
+than normalised — normalising is where these checks go wrong. Overwriting the
+loaded file is just typing its own name, which the modal warns about.
+
+Two properties make the output worth version controlling, both in
+`src/persist.rs` and both tested:
+
+- **Deterministic.** Pipelines are topologically sorted — parents before the
+  children that name them as `upstream`, which is the order a config file has to
+  be in to replay — and ties are broken by id. The same graph always renders the
+  same bytes, so a diff means the graph changed, not that a `HashMap` was
+  iterated twice.
+- **Atomic.** The whole file is rendered before anything is replaced, so a
+  failure partway through leaves the previous file rather than half a new one.
+
+A generated petname is written out, since it's the name a downstream's
+`upstream` would have to reference. `revert` parses the file before tearing
+anything down, so reverting to a file that has been broken by hand leaves the
+running graph alone; it also *picks up* hand edits, which makes it the way to
+reload a file you changed in an editor.
+
+Reverting also **waits for the old run loops to stop before building the new
+ones**, bounded by a few seconds for the one thing that can't be cancelled — an
+output already inside `emit()`. Overlapping the two graphs isn't merely untidy:
+two run loops for the same pipeline would share a kafka consumer group or a nats
+subscription and double up on every output.
+
+That teardown is also where a subtle bug lived, worth knowing about because the
+shape recurs. Cancelling every streamer and *then* dropping the upstreams wakes
+each downstream with two things ready at once — its own cancellation, and an
+"upstream streamer 'x' is gone" from the closing channel. `select!` picks
+randomly between ready branches, so a third of the time the run loop reported
+the shutdown *it had been asked to perform* as a pipeline failure. Those errors
+went to the UI, where they landed on the cards of the newly built streamers that
+had just inherited the same ids — so a perfectly good revert looked like it had
+produced a broken graph. The fix is `biased;` in the run loop's `select!` plus a
+cancellation check before reporting any input failure: an input dying because we
+asked it to is not news. An input dying on a streamer that is *still running*
+still is, which is the distinction the check makes.
+
+`GET /api/settings` reports the file name and whether there are unsaved changes.
+Without `--config` there is nowhere to save, and the UI says so rather than
+offering a button that can only fail.
 
 ## the component reference
 
@@ -147,6 +274,7 @@ Five layers, cheapest first:
 | `tests/pipeline.rs` | the run loop: transform chaining, error tolerance, fan-out, cancellation, UI events |
 | `tests/graph.rs` | `AppState`: ids, upstream wiring, lifecycle |
 | `tests/api.rs` | the HTTP surface and its status codes, via `tower::oneshot` |
+| `tests/persist.rs` | the config file: that editing *doesn't* touch it, that saving does, that a save can't escape its directory, and that reverting reloads it |
 | `hurl/tests/*.hurl` | one smoke test against a really running server (`just test-http`) |
 
 Two things to know when adding a component:

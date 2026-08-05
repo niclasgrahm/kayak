@@ -18,6 +18,11 @@ gloo-net = "0.7.0"
 leptos-use = "0.16"
 codee = { version = "0.3", features = ["json_serde"]}
 
+[dev-dependencies]
+# `?` in the pure-logic unit tests, so a failed setup step reads as an error
+# rather than as an unwrap
+anyhow = "1"
+
 [features]
 hydrate = ["leptos/hydrate"]
 ssr = ["leptos/ssr", "leptos_meta/ssr", "leptos_router/ssr", "leptos-use/ssr"]

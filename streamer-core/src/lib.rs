@@ -12,6 +12,33 @@ pub struct StreamerDto {
     pub config: Config,
 }
 
+/// How the server was started, and whether what it is running still matches
+/// the file it started from.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
+pub struct SettingsDto {
+    /// Name of the `--config` file, if there was one. Its absence means edits
+    /// can't be saved anywhere, which the UI has to say before someone spends
+    /// an afternoon building a graph.
+    pub config_file: Option<String>,
+    /// The running graph has diverged from what was last loaded or saved.
+    /// Edits apply to the runtime immediately and the file is left alone, so
+    /// without this the divergence would be invisible until a restart lost it.
+    pub unsaved_changes: bool,
+}
+
+/// What `POST /api/config/save` takes: a bare file name, saved beside the
+/// config the server was started from. Not a path — see `persist::save_path`.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
+pub struct SaveConfigRequest {
+    pub name: String,
+}
+
+/// Where a save actually landed, so the UI can name it rather than guess.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
+pub struct SaveConfigResponse {
+    pub path: String,
+}
+
 pub type StreamerId = String;
 pub type MessageBatch = Vec<Arc<serde_json::Value>>;
 

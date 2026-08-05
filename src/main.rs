@@ -1,3 +1,9 @@
+// The server renders the same Leptos tree the frontend does, so it hits the
+// same wall: the nested view types on the canvas page overflow rustc's default
+// type-layout query depth. `frontend/src/lib.rs` raises it for the hydrate
+// build; this is the SSR half of the same problem.
+#![recursion_limit = "512"]
+
 use anyhow::Context;
 use axum::Router;
 use frontend::app::{App, shell};

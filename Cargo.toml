@@ -64,4 +64,6 @@ rdkafka = { version = "0.39.0", features = ["tokio"] }
 # lets the integration tests call the axum router in-process, with no socket
 http-body-util = "0.1"
 tower = { version = "0.5", features = ["util"] }
+# a real directory to write a --config file into, cleaned up on drop
+tempfile = "3"
 
