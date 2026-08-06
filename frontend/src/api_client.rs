@@ -1,6 +1,6 @@
 use gloo_net::http::Request;
 use serde_json::Value;
-use streamer_core::{SaveConfigRequest, SaveConfigResponse, SettingsDto, StreamerDto};
+use streamer_core::{ConfigFormat, SaveConfigRequest, SaveConfigResponse, SettingsDto, StreamerDto};
 
 pub struct ApiClient {
     pub base: String,
@@ -48,13 +48,18 @@ impl ApiClient {
         }
     }
 
-    /// Write the running graph to `name`, beside the config the server was
-    /// started from. Returns the path it landed at, which is the server's to
-    /// report — the UI knows the file name but not the directory.
-    pub async fn save_config(&self, name: &str) -> Result<String, ApiError> {
+    /// Write the running graph to `name`, in `format`, beside the config the
+    /// server was started from. Returns the path it landed at, which is the
+    /// server's to report — the UI knows the file name but not the directory.
+    pub async fn save_config(
+        &self,
+        name: &str,
+        format: ConfigFormat,
+    ) -> Result<String, ApiError> {
         let resp = Request::post(&format!("{}/api/config/save", self.base))
             .json(&SaveConfigRequest {
                 name: name.to_string(),
+                format: Some(format),
             })?
             .send()
             .await?;

@@ -22,6 +22,8 @@ use streamer::state::AppState;
 struct Args {
     #[arg(long)]
     debug: bool,
+    /// The pipelines to start with, as JSON or YAML. The extension decides
+    /// which: `.yaml`/`.yml` is read as YAML, anything else as JSON.
     #[arg(long)]
     config: Option<PathBuf>,
     /// JSON file of `"NAME": "value"` pairs that `${NAME}` references in the

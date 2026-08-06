@@ -909,6 +909,28 @@ body {
   }
 }
 
+// json / yaml, as two halves of one control: the pressed side is the format the
+// file name says it is, so the pair reads as a statement about the name above
+// rather than a setting of its own.
+.format-picker {
+  display: flex;
+  gap: 4px;
+
+  .button {
+    flex: 1;
+    font-size: 11px;
+    padding: 2px 0;
+    text-transform: lowercase;
+  }
+
+  .button.active {
+    background: var(--accent);
+    border-color: var(--accent);
+    color: var(--bg-titlebar);
+    font-weight: 600;
+  }
+}
+
 .form-warning {
   color: #d8a657;
   font-size: 11px;

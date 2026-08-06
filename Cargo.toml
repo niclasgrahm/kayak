@@ -20,6 +20,21 @@ module_name_repetitions = "allow"
 missing_errors_doc = "allow"
 missing_panics_doc = "allow"
 
+# Keeps `target/` from growing without bound. Cargo never collects old
+# artifacts, and this workspace compiles its whole tree three times over
+# (native, wasm32, and cargo-leptos' separate front build), so the dev profile's
+# debug info is what actually fills the disk.
+#
+# `packed` puts it in one .dSYM per artifact instead of leaving a loose .o per
+# codegen unit next to it — macOS's default is `unpacked`, which had left 201k
+# orphaned object files here. `line-tables-only` keeps file-and-line backtraces,
+# which is what a panic or a failing test needs; stepping through lldb and
+# inspecting locals is what it gives up. Raise to `debug = true` for a session
+# if you need that.
+[profile.dev]
+split-debuginfo = "packed"
+debug = "line-tables-only"
+
 [[workspace.metadata.leptos]]
 name = "streamer"
 bin-package = "streamer"
@@ -59,6 +74,7 @@ leptos_axum = "0.8"
 leptos_meta = { version = "0.8", features = ["ssr"]}
 tokio-postgres = { version = "0.7.18", features = ["with-serde_json-1"] }
 rdkafka = { version = "0.39.0", features = ["tokio"] }
+serde_norway = "0.9.42"
 
 [dev-dependencies]
 # lets the integration tests call the axum router in-process, with no socket

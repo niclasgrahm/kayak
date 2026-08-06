@@ -233,3 +233,23 @@ fn the_repository_config_file_parses() -> anyhow::Result<()> {
     assert!(!configs.is_empty(), "config.json should describe at least one pipeline");
     Ok(())
 }
+
+/// `config.yaml` is the same graph as `config.json`, spelled the other way — a
+/// file to point `--config` at when you want to exercise the YAML path by hand.
+///
+/// Kept honest here because a sample that drifts is worse than none: a
+/// component added to `config.json` and not to `config.yaml` would leave the
+/// YAML example quietly describing a graph the repo no longer has. It is
+/// compared as *pipelines*, not as text — the two files order their fields
+/// differently, and only the parsed result has to agree.
+#[test]
+fn the_repository_yaml_config_describes_the_same_graph() -> anyhow::Result<()> {
+    let as_json: Vec<Config> = serde_json::from_str(&std::fs::read_to_string("config.json")?)?;
+    let as_yaml: Vec<Config> = serde_norway::from_str(&std::fs::read_to_string("config.yaml")?)?;
+    assert_eq!(
+        serde_json::to_value(&as_yaml)?,
+        serde_json::to_value(&as_json)?,
+        "config.yaml has drifted from config.json; regenerate it"
+    );
+    Ok(())
+}

@@ -5,6 +5,9 @@ use serde::{Deserialize, Serialize};
 
 pub mod config;
 pub mod docs;
+pub mod format;
+
+pub use format::ConfigFormat;
 
 #[derive(Serialize, Deserialize, Clone)]
 pub struct StreamerDto {
@@ -31,6 +34,11 @@ pub struct SettingsDto {
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
 pub struct SaveConfigRequest {
     pub name: String,
+    /// JSON or YAML. Omitted means "whatever `name` says it is", which is what
+    /// keeps a client that predates the choice — and a hand-written `curl` —
+    /// writing the format the file is named for.
+    #[serde(default)]
+    pub format: Option<ConfigFormat>,
 }
 
 /// Where a save actually landed, so the UI can name it rather than guess.

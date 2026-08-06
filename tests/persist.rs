@@ -21,7 +21,6 @@ use http_body_util::BodyExt;
 use serde_json::{Value, json};
 use streamer::api_router;
 use streamer::state::AppState;
-use streamer_core::config::Config;
 use tower::ServiceExt;
 
 /// A pipeline that will sit idle: the dummy input only ticks once an hour.
@@ -80,6 +79,20 @@ async fn save_as(app: &Router, name: &str) -> anyhow::Result<(StatusCode, Value)
     post(app, "/api/config/save", &json!({ "name": name })).await
 }
 
+/// A save that says which format it wants, as the UI's picker does.
+async fn save_as_format(
+    app: &Router,
+    name: &str,
+    format: &str,
+) -> anyhow::Result<(StatusCode, Value)> {
+    post(
+        app,
+        "/api/config/save",
+        &json!({ "name": name, "format": format }),
+    )
+    .await
+}
+
 async fn revert(app: &Router) -> anyhow::Result<StatusCode> {
     Ok(post(app, "/api/config/revert", &json!({})).await?.0)
 }
@@ -113,9 +126,10 @@ async fn listed_ids(app: &Router) -> anyhow::Result<Vec<String>> {
     Ok(ids)
 }
 
+/// The pipelines a file declares, in the order it declares them — read the way
+/// a restart would read it, so a `.yaml` file is checked as YAML.
 fn ids_in(path: &Path) -> anyhow::Result<Vec<String>> {
-    let configs: Vec<Config> = serde_json::from_str(&std::fs::read_to_string(path)?)?;
-    Ok(configs
+    Ok(streamer::persist::read(path)?
         .into_iter()
         .map(|c| c.id.unwrap_or_default())
         .collect())
@@ -356,6 +370,184 @@ async fn saving_an_unchanged_graph_twice_produces_an_identical_file() -> anyhow:
     assert_eq!(
         std::fs::read_to_string(dir.path().join("one.json"))?,
         std::fs::read_to_string(dir.path().join("two.json"))?
+    );
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// yaml
+//
+// The format is a property of the file and nothing else: the same graph, the
+// same rules, spelled differently. These pin that it really is only spelling.
+// ---------------------------------------------------------------------------
+
+/// The reason to support YAML at all: a hand-written `.yaml` file starts the
+/// server. Written in block style with a comment, because that is what someone
+/// would actually write and none of it may reach the runtime.
+#[tokio::test]
+async fn a_server_can_be_started_from_a_yaml_config_file() -> anyhow::Result<()> {
+    let dir = tempfile::tempdir()?;
+    let path = dir.path().join("config.yaml");
+    std::fs::write(
+        &path,
+        concat!(
+            "# the root, ticking once an hour\n",
+            "- id: z-root\n",
+            "  inputs:\n",
+            "    - type: dummy\n",
+            "      duration: 3600\n",
+            "  transforms: []\n",
+            "  outputs:\n",
+            "    - type: stdout\n",
+            "- id: a-child\n",
+            "  inputs:\n",
+            "    - type: streamer\n",
+            "      upstream: z-root\n",
+            "  transforms: []\n",
+            "  outputs: []\n",
+        ),
+    )?;
+
+    let app = app_from(&path)?;
+
+    assert_eq!(listed_ids(&app).await?, ["a-child", "z-root"]);
+    assert_eq!(settings(&app).await?["config_file"], json!("config.yaml"));
+    assert_eq!(
+        settings(&app).await?["unsaved_changes"],
+        json!(false),
+        "a graph straight off disk is in sync with disk, whatever it is written in"
+    );
+    Ok(())
+}
+
+/// Loading is not an edit in either format.
+#[tokio::test]
+async fn loading_a_yaml_config_file_does_not_rewrite_it() -> anyhow::Result<()> {
+    let dir = tempfile::tempdir()?;
+    let path = dir.path().join("config.yml");
+    let hand_written =
+        "- id: seeded\n  inputs: [{type: dummy, duration: 3600}]\n  transforms: []\n  outputs: []\n";
+    std::fs::write(&path, hand_written)?;
+
+    let _app = app_from(&path)?;
+
+    assert_eq!(std::fs::read_to_string(&path)?, hand_written);
+    Ok(())
+}
+
+/// The round trip that matters: save as YAML, restart from it, same graph —
+/// including the ordering that a `streamer` input depends on.
+#[tokio::test]
+async fn a_graph_saved_as_yaml_starts_again_from_the_yaml_file() -> anyhow::Result<()> {
+    let dir = tempfile::tempdir()?;
+    let path = seeded(&dir, &[idle_config("z-root")])?;
+    let app = app_from(&path)?;
+    post_stream(&app, &downstream_config("a-child", "z-root")).await?;
+
+    let (status, body) = save_as_format(&app, "config.yaml", "yaml").await?;
+    assert_eq!(status, StatusCode::OK);
+
+    let written = dir.path().join("config.yaml");
+    assert_eq!(body["path"], json!(written.display().to_string()));
+    let contents = std::fs::read_to_string(&written)?;
+    assert!(
+        !contents.trim_start().starts_with('['),
+        "asked for yaml, got json: {contents}"
+    );
+    assert_eq!(ids_in(&written)?, ["z-root", "a-child"]);
+
+    let restarted = app_from(&written)?;
+    assert_eq!(listed_ids(&restarted).await?, ["a-child", "z-root"]);
+    Ok(())
+}
+
+/// Saving is what makes "unsaved changes" go away — the dirty check compares
+/// graphs, so the format it was written in doesn't come into it.
+#[tokio::test]
+async fn saving_as_yaml_clears_the_unsaved_marker() -> anyhow::Result<()> {
+    let dir = tempfile::tempdir()?;
+    let path = seeded(&dir, &[idle_config("seeded")])?;
+    let app = app_from(&path)?;
+    post_stream(&app, &idle_config("added")).await?;
+    assert_eq!(settings(&app).await?["unsaved_changes"], json!(true));
+
+    save_as_format(&app, "config.yaml", "yaml").await?;
+
+    assert_eq!(settings(&app).await?["unsaved_changes"], json!(false));
+    Ok(())
+}
+
+/// A request that doesn't mention a format gets the one its name implies, so a
+/// client that predates the choice still writes a `.yaml` file that will load.
+#[tokio::test]
+async fn a_save_without_a_format_follows_the_file_name() -> anyhow::Result<()> {
+    let dir = tempfile::tempdir()?;
+    let path = seeded(&dir, &[idle_config("seeded")])?;
+    let app = app_from(&path)?;
+
+    assert_eq!(save_as(&app, "inferred.yaml").await?.0, StatusCode::OK);
+
+    let written = dir.path().join("inferred.yaml");
+    let contents = std::fs::read_to_string(&written)?;
+    assert!(
+        contents.starts_with("- id: seeded"),
+        "the extension did not pick the format: {contents}"
+    );
+    assert_eq!(ids_in(&written)?, ["seeded"]);
+    Ok(())
+}
+
+/// Both formats describe the same pipelines, down to the component fields —
+/// otherwise "save as yaml" would be a quiet way to change what runs next.
+#[tokio::test]
+async fn the_same_graph_saves_to_the_same_pipelines_in_either_format() -> anyhow::Result<()> {
+    let dir = tempfile::tempdir()?;
+    let path = seeded(&dir, &[idle_config("root")])?;
+    let app = app_from(&path)?;
+    post_stream(&app, &downstream_config("child", "root")).await?;
+
+    save_as_format(&app, "both.json", "json").await?;
+    save_as_format(&app, "both.yaml", "yaml").await?;
+
+    let as_json = streamer::persist::read(&dir.path().join("both.json"))?;
+    let as_yaml = streamer::persist::read(&dir.path().join("both.yaml"))?;
+    assert_eq!(
+        serde_json::to_value(&as_json)?,
+        serde_json::to_value(&as_yaml)?
+    );
+    Ok(())
+}
+
+/// The directory rule is about the path, not the contents, so a `.yaml` name
+/// gets exactly the same refusal.
+#[tokio::test]
+async fn a_yaml_save_cannot_leave_the_config_directory_either() -> anyhow::Result<()> {
+    let dir = tempfile::tempdir()?;
+    let path = seeded(&dir, &[idle_config("seeded")])?;
+    let app = app_from(&path)?;
+
+    let (status, _) = save_as_format(&app, "../stolen.yaml", "yaml").await?;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+    assert!(!dir.path().parent().unwrap_or(dir.path()).join("stolen.yaml").exists());
+    Ok(())
+}
+
+/// A `.yaml` file that isn't YAML is an error, not a fallback to JSON: the
+/// extension is the whole rule, and guessing would hide the typo.
+#[tokio::test]
+async fn a_yaml_file_that_does_not_parse_fails_to_start() -> anyhow::Result<()> {
+    let dir = tempfile::tempdir()?;
+    let path = dir.path().join("config.yaml");
+    std::fs::write(&path, "- id: broken\n  inputs: [{type: dummy,\n")?;
+
+    let Err(err) = app_from(&path) else {
+        panic!("a broken yaml file started a server");
+    };
+
+    let message = format!("{err:#}");
+    assert!(
+        message.contains("config.yaml") && message.contains("as yaml"),
+        "the error should name the file and the format: {message}"
     );
     Ok(())
 }

@@ -9,7 +9,7 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, MutexGuard};
 use streamer_core::config::Config;
-pub use streamer_core::{StreamerId, UiEvent};
+pub use streamer_core::{ConfigFormat, StreamerId, UiEvent};
 
 #[derive(Serialize)]
 pub struct StreamerHandle {
@@ -91,6 +91,10 @@ pub struct AppState {
     /// A snapshot rather than a re-read of the file, because the two questions
     /// differ: someone editing the file by hand hasn't made the *running* graph
     /// stale. `None` when there's no file to be in sync with.
+    ///
+    /// Always rendered as JSON, whatever the file on disk is written in: this
+    /// is a fingerprint of the *graph*, and saving the same pipelines as YAML
+    /// instead of JSON hasn't changed them.
     saved: Mutex<Option<String>>,
 }
 
@@ -153,10 +157,7 @@ impl AppState {
             anyhow::bail!("the server was not started with a --config file");
         };
         tracing::debug!("Loading configuration from {}...", path.display());
-        let file = std::fs::File::open(path)
-            .with_context(|| format!("failed to open config file {}", path.display()))?;
-        let configs: Vec<Config> = serde_json::from_reader(file)
-            .with_context(|| format!("failed to parse config file {}", path.display()))?;
+        let configs = crate::persist::read(path)?;
 
         let mut app = self.lock_streamers();
         for c in configs {
@@ -190,10 +191,7 @@ impl AppState {
         };
         // parse first: it costs one read and saves tearing down a working graph
         // for a file that was never going to load
-        let file = std::fs::File::open(path)
-            .with_context(|| format!("failed to open config file {}", path.display()))?;
-        let _: Vec<Config> = serde_json::from_reader(file)
-            .with_context(|| format!("failed to parse config file {}", path.display()))?;
+        let _ = crate::persist::read(path)?;
 
         // Cancel everything and take the join handles out, then drop the guard:
         // this is a `std::sync::Mutex` and must not be held across an await.
@@ -268,7 +266,7 @@ impl AppState {
             return false;
         }
         let app = self.lock_streamers();
-        let current = crate::persist::render(Self::configs_of(&app)).ok();
+        let current = Self::fingerprint(&app);
         let saved = self.lock_saved();
         match (&current, &*saved) {
             (Some(current), Some(saved)) => current != saved,
@@ -288,7 +286,17 @@ impl AppState {
     /// Record the current graph as the one on disk. Takes the held guard so the
     /// snapshot can't be of a map that changed in between.
     fn mark_saved(&self, app: &HashMap<StreamerId, StreamerHandle>) {
-        *self.lock_saved() = crate::persist::render(Self::configs_of(app)).ok();
+        *self.lock_saved() = Self::fingerprint(app);
+    }
+
+    /// The graph rendered to bytes, for comparing one moment against another.
+    ///
+    /// Deliberately always JSON: it stands in for "which pipelines, wired how",
+    /// and the answer to that doesn't change with the format a file happens to
+    /// be written in. `None` if it can't be rendered, which callers read as
+    /// "can't tell" rather than as an answer.
+    fn fingerprint(app: &HashMap<StreamerId, StreamerHandle>) -> Option<String> {
+        crate::persist::render(Self::configs_of(app), streamer_core::ConfigFormat::Json).ok()
     }
 
     /// Write the running graph to `name`, a file beside the one the server was
@@ -298,7 +306,15 @@ impl AppState {
     /// driven by an HTTP request, and confining it to one known directory is
     /// what keeps that from being an arbitrary-write primitive. Passing the
     /// current file's own name is how you overwrite it.
-    pub fn save_config_as(&self, name: &str) -> Result<PathBuf, StreamerError> {
+    ///
+    /// `format` is what the caller asked for; `None` means "whatever `name`
+    /// says", so a client that doesn't know about the choice still writes YAML
+    /// into a file called `.yaml`.
+    pub fn save_config_as(
+        &self,
+        name: &str,
+        format: Option<ConfigFormat>,
+    ) -> Result<PathBuf, StreamerError> {
         let Some(config_path) = &self.config_path else {
             return Err(StreamerError::InvalidConfig(anyhow::anyhow!(
                 "the server was not started with a --config file, so there is nowhere to save"
@@ -306,6 +322,7 @@ impl AppState {
         };
         let target = crate::persist::save_path(config_path, name)
             .map_err(StreamerError::InvalidConfig)?;
+        let format = format.unwrap_or_else(|| crate::persist::format_of(&target));
 
         let app = self.lock_streamers();
         let configs = Self::configs_of(&app);
@@ -319,10 +336,10 @@ impl AppState {
                 dangling.join(", ")
             );
         }
-        crate::persist::write(&target, configs)
+        crate::persist::write(&target, configs, format)
             .with_context(|| format!("failed to save the config to {}", target.display()))?;
         self.mark_saved(&app);
-        tracing::info!("config saved to {}", target.display());
+        tracing::info!("config saved to {} as {format}", target.display());
         Ok(target)
     }
 

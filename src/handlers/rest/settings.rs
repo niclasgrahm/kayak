@@ -26,12 +26,15 @@ pub async fn get_settings(State(state): State<Arc<AppState>>) -> impl IntoRespon
 /// `name` is a bare file name and is validated as one — this is a write to the
 /// server's disk driven by a request, so the directory is not negotiable. Using
 /// the loaded file's own name is how you overwrite it.
+///
+/// `format` picks JSON or YAML; leaving it out takes the format from the name's
+/// extension.
 #[allow(clippy::unused_async)]
 pub async fn save_config(
     State(state): State<Arc<AppState>>,
     Json(payload): Json<SaveConfigRequest>,
 ) -> Result<impl IntoResponse, AppError> {
-    let path = state.save_config_as(&payload.name)?;
+    let path = state.save_config_as(&payload.name, payload.format)?;
     Ok((
         StatusCode::OK,
         Json(SaveConfigResponse {

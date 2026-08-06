@@ -10,7 +10,7 @@ use leptos_use::{
 };
 use std::collections::{HashMap, VecDeque};
 use streamer_core::docs::{Family, FieldType, all_components};
-use streamer_core::{StreamerDto, StreamerId, UiEvent, config::Config};
+use streamer_core::{ConfigFormat, StreamerDto, StreamerId, UiEvent, config::Config};
 
 use crate::api_client::{ApiClient, ApiError};
 use crate::docs;
@@ -1280,12 +1280,18 @@ fn ModeControls(state: AppState) -> impl IntoView {
     }
 }
 
-/// Where to write the running graph.
+/// Where to write the running graph, and in which format.
 ///
 /// A file name, not a path: the server only writes beside the config it was
 /// started from, and offering a directory picker for a choice that doesn't
 /// exist would be a lie. Overwriting is just typing the name it already has,
 /// which the modal points out rather than hides.
+///
+/// The format picker and the file name are one decision shown twice: the
+/// selection is *derived* from the extension rather than held separately, and
+/// picking a format rewrites the name to match. That way there is no state in
+/// which the button says "yaml" and the file is called `config.json` — whatever
+/// the user last touched, the two agree.
 #[component]
 fn SaveAsModal() -> impl IntoView {
     let state = expect_context::<AppState>();
@@ -1294,6 +1300,8 @@ fn SaveAsModal() -> impl IntoView {
     let saving = RwSignal::new(false);
     let failure = RwSignal::new(Option::<String>::None);
     let loaded = StoredValue::new(current);
+    let format = Memo::new(move |_| ConfigFormat::of_file_name(&name.get()));
+    let choose = move |chosen: ConfigFormat| name.update(|n| *n = chosen.rename(n));
 
     let close = move || state.saving.set(false);
     let _ = use_event_listener(use_window(), leptos::ev::keydown, move |ev| {
@@ -1317,7 +1325,7 @@ fn SaveAsModal() -> impl IntoView {
             let result = ApiClient {
                 base: String::new(),
             }
-            .save_config(&name.get_untracked())
+            .save_config(&name.get_untracked(), format.get_untracked())
             .await;
             saving.set(false);
             match result {
@@ -1344,10 +1352,12 @@ fn SaveAsModal() -> impl IntoView {
                 <div class="modal-body">
                     <div class="form-row">
                         <label for="save-name">"file name"</label>
+                        // controlled, unlike the component fields: picking a
+                        // format rewrites the name, and the box has to show it
                         <input
                             id="save-name"
                             class="text-input"
-                            value=name.get_untracked()
+                            prop:value=move || name.get()
                             placeholder="config.json"
                             on:input=move |ev| name.set(event_target_value(&ev))
                             on:keydown=move |ev| {
@@ -1356,6 +1366,28 @@ fn SaveAsModal() -> impl IntoView {
                                 }
                             }
                         />
+                    </div>
+                    <div class="form-row">
+                        <label>"format"</label>
+                        <div class="format-picker">
+                            {[ConfigFormat::Json, ConfigFormat::Yaml]
+                                .map(|option| {
+                                    view! {
+                                        <button
+                                            class="button"
+                                            class:active=move || format.get() == option
+                                            title=move || {
+                                                format!("write the file as {option}")
+                                            }
+                                            on:click=move |_| choose(option)
+                                        >
+                                            {option.to_string()}
+                                        </button>
+                                    }
+                                })
+                                .into_iter()
+                                .collect::<Vec<_>>()}
+                        </div>
                     </div>
                     <p class="form-hint">
                         "written next to the config the server was started with"

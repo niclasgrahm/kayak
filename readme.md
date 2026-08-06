@@ -116,13 +116,28 @@ So the loop is explicit and symmetric:
 | `revert` | file → runtime, again — the undo for a session of editing |
 | `save as…` | runtime → file |
 
+**JSON or YAML.** The file can be either, and the extension decides which:
+`.yaml` and `.yml` are read as YAML, anything else as JSON. That is the whole
+rule — a `.yaml` file that isn't YAML fails to start rather than being retried as
+something else, because a second guess would hide the typo. The format is a
+property of the *file* and stops at the parser: a `Config` doesn't remember which
+one it came from, so the two describe exactly the same pipelines and can be
+mixed freely (load JSON, save YAML, restart from that).
+
+The `save as…` modal offers the choice, wired to the file name — picking a format
+renames the file, and typing a `.yaml` name selects YAML — so the two halves of
+the decision can't disagree. `POST /api/config/save` takes an optional `format`
+of `"json"` or `"yaml"`; leaving it out takes the format from the name.
+
 **Unsaved changes.** Because edits are live and the file is untouched, the two
 can diverge invisibly, and a restart would drop the work. The navbar says
 `unsaved changes` whenever they have. The check is exact rather than a heuristic:
 `persist::render` is deterministic, so the server compares the rendered graph
 against the rendering of what it last loaded or saved. Add a pipeline and remove
 it again and the warning goes away, because the graph really is back where it
-started.
+started. That comparison is always made in JSON, whatever the file is written
+in — it is a fingerprint of the graph, and re-spelling it as YAML hasn't changed
+which pipelines are running.
 
 **Saving** takes a bare file name, written beside the config the server started
 from. That constraint is a security boundary, not a convenience: the browser

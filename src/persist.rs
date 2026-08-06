@@ -20,13 +20,18 @@
 //!
 //! Secrets are safe here for the reason they're safe on the wire: a `Config`
 //! only ever holds the unresolved `${NAME}` template.
+//!
+//! A file can be JSON or YAML — see [`streamer_core::ConfigFormat`]. That is a
+//! property of the file and nothing else: the format is decided by the name at
+//! the two edges ([`read`] and [`write`]), and every other function here works
+//! on `Config`s that no longer remember which one they came from.
 
 use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::path::Path;
 
 use anyhow::Context;
 use streamer_core::config::Config;
-use streamer_core::StreamerId;
+use streamer_core::{ConfigFormat, StreamerId};
 
 /// The pipelines in an order the config file can be replayed in: every pipeline
 /// after all of the ones it names as upstream, and alphabetical among the ones
@@ -80,26 +85,67 @@ pub fn ordered(configs: Vec<Config>) -> Vec<Config> {
     out
 }
 
-/// The file's contents: the pipelines as a JSON array, in [`ordered`] order.
+/// The file's contents: the pipelines as a sequence, in [`ordered`] order,
+/// written in `format`.
 ///
 /// Pretty-printed with a trailing newline, because the file is meant to be
-/// read and diffed by a human rather than only by `serde`.
-pub fn render(configs: Vec<Config>) -> anyhow::Result<String> {
-    let mut json = serde_json::to_string_pretty(&ordered(configs))
-        .context("failed to serialize the pipelines")?;
-    json.push('\n');
-    Ok(json)
+/// read and diffed by a human rather than only by `serde`. Both formats are
+/// deterministic in the same way, which is what [`crate::state`] leans on to
+/// answer "are there unsaved changes" by comparing rendered bytes.
+pub fn render(configs: Vec<Config>, format: ConfigFormat) -> anyhow::Result<String> {
+    let ordered = ordered(configs);
+    match format {
+        ConfigFormat::Json => {
+            let mut json =
+                serde_json::to_string_pretty(&ordered).context("failed to serialize the pipelines")?;
+            json.push('\n');
+            Ok(json)
+        }
+        // serde_norway already ends its output in a newline
+        ConfigFormat::Yaml => {
+            serde_norway::to_string(&ordered).context("failed to serialize the pipelines")
+        }
+    }
 }
 
-/// Replace `path` with the given pipelines. Callers taking a path from a
-/// request must put it through [`save_path`] first.
+/// The pipelines in a config file's contents.
+///
+/// The counterpart of [`render`], and the only place either format is parsed —
+/// everything past here has a `Vec<Config>` and no idea how it was spelled.
+pub fn parse(contents: &str, format: ConfigFormat) -> anyhow::Result<Vec<Config>> {
+    match format {
+        ConfigFormat::Json => serde_json::from_str(contents).map_err(Into::into),
+        ConfigFormat::Yaml => serde_norway::from_str(contents).map_err(Into::into),
+    }
+}
+
+/// Read and parse the config file at `path`, in the format its name implies.
+pub fn read(path: &Path) -> anyhow::Result<Vec<Config>> {
+    let contents = std::fs::read_to_string(path)
+        .with_context(|| format!("failed to open config file {}", path.display()))?;
+    let format = format_of(path);
+    parse(&contents, format)
+        .with_context(|| format!("failed to parse config file {} as {format}", path.display()))
+}
+
+/// The format a path's extension names. A path with no file name is JSON, the
+/// same as any other name that doesn't say otherwise.
+#[must_use]
+pub fn format_of(path: &Path) -> ConfigFormat {
+    path.file_name()
+        .map(|name| ConfigFormat::of_file_name(&name.to_string_lossy()))
+        .unwrap_or_default()
+}
+
+/// Replace `path` with the given pipelines, written in `format`. Callers taking
+/// a path from a request must put it through [`save_path`] first.
 ///
 /// Rendered in full and renamed into place, so a failure partway through leaves
 /// the previous file untouched rather than a half-written one. The temporary
 /// sits next to the target because a rename across filesystems isn't atomic
 /// (and on some platforms isn't allowed at all).
-pub fn write(path: &Path, configs: Vec<Config>) -> anyhow::Result<()> {
-    let contents = render(configs)?;
+pub fn write(path: &Path, configs: Vec<Config>, format: ConfigFormat) -> anyhow::Result<()> {
+    let contents = render(configs, format)?;
     let temporary = temporary_path(path);
     std::fs::write(&temporary, contents)
         .with_context(|| format!("failed to write {}", temporary.display()))?;
@@ -129,7 +175,7 @@ fn temporary_path(path: &Path) -> std::path::PathBuf {
 ///
 /// **This is a security boundary, not a convenience.** The browser cannot write
 /// to the server's disk — the server does, on request — so an unconstrained
-/// path here would let anyone who can reach the UI write JSON anywhere the
+/// path here would let anyone who can reach the UI write a file anywhere the
 /// process can. Confining saves to the one directory the operator already
 /// pointed at is what keeps a config editor from being an arbitrary-write
 /// primitive.
@@ -266,17 +312,25 @@ mod tests {
     /// come out of a `HashMap`.
     #[test]
     fn the_same_graph_renders_the_same_file_whatever_order_it_arrives_in() -> anyhow::Result<()> {
-        let one = render(vec![
-            pipeline("child", &["root"]),
-            pipeline("other", &["root"]),
-            pipeline("root", &[]),
-        ])?;
-        let two = render(vec![
-            pipeline("other", &["root"]),
-            pipeline("root", &[]),
-            pipeline("child", &["root"]),
-        ])?;
-        assert_eq!(one, two);
+        for format in [ConfigFormat::Json, ConfigFormat::Yaml] {
+            let one = render(
+                vec![
+                    pipeline("child", &["root"]),
+                    pipeline("other", &["root"]),
+                    pipeline("root", &[]),
+                ],
+                format,
+            )?;
+            let two = render(
+                vec![
+                    pipeline("other", &["root"]),
+                    pipeline("root", &[]),
+                    pipeline("child", &["root"]),
+                ],
+                format,
+            )?;
+            assert_eq!(one, two, "{format}");
+        }
         Ok(())
     }
 
@@ -306,10 +360,71 @@ mod tests {
 
     #[test]
     fn the_rendered_file_is_a_json_array_ending_in_a_newline() -> anyhow::Result<()> {
-        let rendered = render(vec![pipeline("a", &[])])?;
+        let rendered = render(vec![pipeline("a", &[])], ConfigFormat::Json)?;
         assert!(rendered.ends_with("]\n"), "got: {rendered}");
         let parsed: Vec<Config> = serde_json::from_str(&rendered)?;
         assert_eq!(ids(&parsed), ["a"]);
+        Ok(())
+    }
+
+    /// The point of the YAML support: a file a human would rather write, that
+    /// still describes the same pipelines. The tagged `type` field survives,
+    /// which is the part `#[serde(flatten)]` could plausibly break.
+    #[test]
+    fn a_yaml_file_is_a_block_sequence_that_parses_back() -> anyhow::Result<()> {
+        let rendered = render(
+            vec![pipeline("child", &["root"]), pipeline("root", &[])],
+            ConfigFormat::Yaml,
+        )?;
+        assert!(rendered.starts_with("- id: root"), "got: {rendered}");
+        assert!(rendered.contains("type: dummy"), "got: {rendered}");
+        assert!(rendered.ends_with('\n'), "got: {rendered}");
+
+        let parsed = parse(&rendered, ConfigFormat::Yaml)?;
+        assert_eq!(ids(&parsed), ["root", "child"]);
+        Ok(())
+    }
+
+    /// Both formats have to describe the same graph, or "save as yaml" would
+    /// quietly change what the next start builds.
+    #[test]
+    fn the_two_formats_round_trip_to_the_same_pipelines() -> anyhow::Result<()> {
+        let graph = || vec![pipeline("child", &["root"]), pipeline("root", &[])];
+        let json = parse(&render(graph(), ConfigFormat::Json)?, ConfigFormat::Json)?;
+        let yaml = parse(&render(graph(), ConfigFormat::Yaml)?, ConfigFormat::Yaml)?;
+        assert_eq!(
+            serde_json::to_value(&json)?,
+            serde_json::to_value(&yaml)?,
+        );
+        Ok(())
+    }
+
+    /// A `.yaml` file is parsed as YAML and a `.json` file as JSON, whatever is
+    /// actually in them — the extension is the whole rule, so an unparseable
+    /// file gets an error rather than a second guess.
+    #[test]
+    fn a_file_is_read_in_the_format_its_name_implies() -> anyhow::Result<()> {
+        let dir = tempfile::tempdir()?;
+        for (name, format) in [
+            ("config.json", ConfigFormat::Json),
+            ("config.yaml", ConfigFormat::Yaml),
+            ("config.yml", ConfigFormat::Yaml),
+        ] {
+            let path = dir.path().join(name);
+            assert_eq!(format_of(&path), format, "{name}");
+            std::fs::write(&path, render(vec![pipeline("a", &[])], format)?)?;
+            assert_eq!(ids(&read(&path)?), ["a"], "{name}");
+        }
+
+        let broken = dir.path().join("broken.yaml");
+        std::fs::write(&broken, "not: [a, sequence, of, pipelines")?;
+        let Err(err) = read(&broken) else {
+            panic!("a file that is not yaml was read as one");
+        };
+        assert!(
+            format!("{err:#}").contains("as yaml"),
+            "the error should name the format tried: {err:#}"
+        );
         Ok(())
     }
 
@@ -375,7 +490,11 @@ mod tests {
         let path = dir.path().join("config.json");
         std::fs::write(&path, "[]")?;
 
-        write(&path, vec![pipeline("child", &["root"]), pipeline("root", &[])])?;
+        write(
+            &path,
+            vec![pipeline("child", &["root"]), pipeline("root", &[])],
+            ConfigFormat::Json,
+        )?;
 
         let reloaded: Vec<Config> = serde_json::from_str(&std::fs::read_to_string(&path)?)?;
         assert_eq!(ids(&reloaded), ["root", "child"]);
