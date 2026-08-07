@@ -227,7 +227,7 @@ mod tests {
                 },
                 OutputConfig {
                     kind: OutputKind::Nats(NatsOutputConfig {
-                        urls: "nats://localhost:4222".into(),
+                        connection: "local-nats".to_string(),
                         subject: "out".to_string(),
                     }),
                 },
@@ -360,12 +360,12 @@ mod tests {
             dummy_input(),
             vec![],
             OutputKind::Nats(NatsOutputConfig {
-                urls: "nats://localhost:4222".into(),
+                connection: "local-nats".to_string(),
                 subject: "test.subject".to_string(),
             }),
         ));
 
-        assert_eq!(value_of(&section, "urls"), "nats://localhost:4222");
+        assert_eq!(value_of(&section, "connection"), "local-nats");
         assert_eq!(value_of(&section, "subject"), "test.subject");
     }
 }

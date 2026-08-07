@@ -13,6 +13,7 @@ use std::sync::Arc;
 use tokio::sync::broadcast;
 
 pub mod config;
+pub mod connections;
 pub mod handlers;
 pub mod inputs;
 pub mod layout;
@@ -26,6 +27,7 @@ pub mod transforms;
 
 use crate::handlers::{
     rest::{
+        connection::{create_connection, delete_connection, get_connections},
         docs::get_docs,
         layout::{get_layout, put_layout},
         pipeline::{create_pipeline, delete_pipeline, get_pipelines},
@@ -36,23 +38,34 @@ use crate::handlers::{
 use crate::secrets::{EnvStore, Resolved, SecretStore};
 use crate::state::{AppState, PipelineHandle, PipelineId, UiEvent};
 use kayak_core::config::Secret;
+use kayak_core::connections::{Connections, KafkaConnection, NatsConnection, PostgresConnection};
 
 /// Threaded through every `build()` call. It carries the pipeline map — needed
 /// so a `pipeline` input can look up its upstream and register an mpsc sender
 /// on it — the id of the pipeline being built (components that label their
-/// output want it), the UI event channel, and the store that `${NAME}`
-/// references in the config resolve against.
+/// output want it), the UI event channel, the store that `${NAME}` references
+/// in the config resolve against, and the named connections a component's
+/// `connection` field points into.
 pub struct BuildCtx<'a> {
     pub pipelines: &'a mut HashMap<PipelineId, PipelineHandle>,
     pub pipeline_id: PipelineId,
     pub events: broadcast::Sender<UiEvent>,
     pub secrets: Arc<dyn SecretStore>,
+    /// The connections as they stand at the moment this pipeline is built.
+    ///
+    /// A snapshot, not a live view: a component reads what it needs here and
+    /// then holds its own settings, so editing a connection afterwards does not
+    /// reach the pipelines already running on it. Reverting — or deleting and
+    /// re-creating the pipeline — is what picks up a change, and that is the
+    /// same rule the config file already has.
+    pub connections: Arc<Connections>,
 }
 
 impl<'a> BuildCtx<'a> {
-    /// Resolves secrets from the environment only. Components that take no
-    /// secrets don't care, which is most of them and every test that isn't
-    /// about secrets; use [`BuildCtx::with_secrets`] for anything else.
+    /// Resolves secrets from the environment only, with no connections
+    /// configured. Components that take neither don't care, which is most of
+    /// them and every test that isn't about one or the other; use
+    /// [`BuildCtx::with_secrets`] for anything else.
     pub fn new(
         pipelines: &'a mut HashMap<PipelineId, PipelineHandle>,
         pipeline_id: PipelineId,
@@ -72,7 +85,15 @@ impl<'a> BuildCtx<'a> {
             pipeline_id,
             events,
             secrets,
+            connections: Arc::new(Connections::new()),
         }
+    }
+
+    /// The same, with the connections a component's `connection` field can name.
+    #[must_use]
+    pub fn with_connections(mut self, connections: Arc<Connections>) -> Self {
+        self.connections = connections;
+        self
     }
 
     /// Fill in the `${NAME}` references in a config value. Failing here fails
@@ -80,6 +101,21 @@ impl<'a> BuildCtx<'a> {
     /// to start" rather than a pipeline quietly running without credentials.
     pub fn resolve(&self, secret: &Secret) -> anyhow::Result<Resolved> {
         secrets::resolve(secret, self.secrets.as_ref())
+    }
+
+    /// The connection a component named, of the kind it can use. An unknown
+    /// name or the wrong kind fails the build with an error that says which —
+    /// see [`kayak_core::connections::ConnectionError`].
+    pub fn kafka_connection(&self, id: &str) -> anyhow::Result<&KafkaConnection> {
+        Ok(self.connections.kafka(id)?)
+    }
+
+    pub fn nats_connection(&self, id: &str) -> anyhow::Result<&NatsConnection> {
+        Ok(self.connections.nats(id)?)
+    }
+
+    pub fn postgres_connection(&self, id: &str) -> anyhow::Result<&PostgresConnection> {
+        Ok(self.connections.postgres(id)?)
     }
 }
 
@@ -103,5 +139,13 @@ pub fn api_router(state: Arc<AppState>) -> Router {
         .route("/api/pipelines", post(create_pipeline))
         .route("/api/pipelines", get(get_pipelines))
         .route("/api/pipelines/{pipeline_id}", delete(delete_pipeline))
+        // the systems those pipelines talk to, named once and referred to by
+        // the components — written to disk by the same explicit save
+        .route("/api/connections", get(get_connections))
+        .route("/api/connections", post(create_connection))
+        .route(
+            "/api/connections/{connection_id}",
+            delete(delete_connection),
+        )
         .with_state(state)
 }

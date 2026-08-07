@@ -1,0 +1,18 @@
+{
+  "local-kafka": {
+    "type": "kafka",
+    "brokers": "localhost:9092"
+  },
+  "local-nats": {
+    "type": "nats",
+    "urls": "nats://localhost:4222"
+  },
+  "local-postgres": {
+    "type": "postgres",
+    "host": "localhost",
+    "database": "kayak",
+    "user": "kayak",
+    "password": "${POSTGRES_PASSWORD}",
+    "port": 5432
+  }
+}

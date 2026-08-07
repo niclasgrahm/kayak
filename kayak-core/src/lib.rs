@@ -4,10 +4,12 @@ use crate::config::Config;
 use serde::{Deserialize, Serialize};
 
 pub mod config;
+pub mod connections;
 pub mod docs;
 pub mod format;
 pub mod layout;
 
+pub use connections::{ConnectionId, ConnectionKind, Connections};
 pub use format::ConfigFormat;
 pub use layout::{EdgeEnd, LayoutFile, PipelineLayout, PortLayout, Side};
 

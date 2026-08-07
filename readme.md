@@ -208,8 +208,9 @@ that graph out. In edit mode the navbar offers `create config file` instead of
 process's working directory, chosen when the server was started and never by the
 request, exactly as `--config`'s directory would be. The file that save creates
 *becomes* the server's config file, so from then on there is a `revert` to go
-back to, an `unsaved changes` marker that means something, and a home for the
-canvas arrangement — which is written out at that moment rather than being lost.
+back to, an `unsaved changes` marker that means something, and a home for both
+the canvas arrangement and the connections — which are written out at that
+moment rather than being lost.
 Saving under a second name later is still a copy: the loaded file stays the one
 the server works against.
 
@@ -363,15 +364,94 @@ over them. Selecting drops the losing futures on every iteration, and an input
 that waits on a timer would have its timer restarted every time a chattier
 sibling produced — starving it forever. There's a test for exactly that.
 
+## the sample
+
+`example_config/` is what to point the server at while working on it, and what
+`just dev` uses:
+
+| | |
+| --- | --- |
+| `config.json` | the worked example: every component kind bar the `file` output |
+| `config.yaml` | the same graph, spelled as YAML |
+| `config.connections.{json,yaml}` | the systems those pipelines name |
+| `config.layout.json` | where the cards sit on the canvas |
+| `secrets.example.json` | what the `${NAME}` references resolve against |
+
+One directory because the set travels together: the connections and layout files
+are *derived* from the config's path, so they only find each other when they sit
+side by side. `tests/config.rs` and `tests/graph.rs` load these files, so a
+sample that stops parsing — or a component added to the JSON and not the YAML —
+fails `just test` rather than rotting quietly.
+
+## connections
+
+A kafka cluster or a nats server is usually shared. One pipeline per topic on
+the same brokers is the normal shape, and repeating the broker list — and its
+`${NAME}` references — in every one of them is both tedious and a way for them
+to drift apart. So the connection is declared once, under a name, in a third
+file beside the config:
+
+```json
+// config.connections.json
+{
+  "prod-kafka": { "type": "kafka", "brokers": "${KAFKA_BROKERS}" },
+  "local-nats": { "type": "nats", "urls": "nats://localhost:4222" }
+}
+```
+
+```json
+// config.json
+{ "type": "kafka", "connection": "prod-kafka", "topic": "orders", "group": "kayak" }
+```
+
+The split between the two is **"what does the system need" against "what does
+this pipeline want from it"**: brokers, urls and credentials belong to the
+connection; the topic, the consumer group, the subject and the postgres table
+belong to the component. There is no inline form — a component names a
+connection or it does not build.
+
+One kind serves both directions: a `kafka` connection is what a kafka input
+consumes from *and* what a kafka output publishes to. The kind is checked as
+well as the name, so a nats connection in a kafka input is refused at build time
+with an error saying which kind it actually is, rather than being handed to a
+broker as a broker list. An unknown name lists the ones that do exist, since the
+usual cause is a typo.
+
+**Where the file comes from.** `--connections <path>` names it outright, which
+is how two configs share one; without the flag it is derived from the config's
+name and format — `config.json` → `config.connections.json`, `pipelines.yaml` →
+`pipelines.connections.yaml`. A derived file that isn't there means "no
+connections", which is the ordinary state of a graph built out of dummies; a
+file named with the flag has to exist, because starting without it would fail
+later and further from the cause.
+
+**It follows the config file's rules, not the layout file's.** Adding a
+connection in the UI changes what the server can build, so it is an unsaved
+change, and only a save writes it — the same save, since a config saved without
+the connections it names would not start. `revert` reloads both files, the
+connections first, because the pipelines being rebuilt name them.
+
+**A connection is read when a component is built.** Editing one therefore
+reaches new and rebuilt pipelines rather than the running ones, and deleting one
+a running pipeline still names is refused with a 409 listing them — delete those
+first. Nothing is pooled: two pipelines on one connection each get their own
+client, built from the same settings.
+
+In the UI, connections are the second tab in the sidebar, with the same `+` and
+the same armed delete as the pipelines. The form is generated the same way too —
+a connection kind is documented on `/docs` and gets its controls from the same
+schema reflection. Secrets are *referenced* there and never entered: a field
+takes `${NAME}`, and what that resolves to stays a deployment concern.
+
 ## secrets
 
 Config files are meant to be version controlled, so they carry *references* to
-secrets rather than the secrets themselves. Any field typed `Secret` — currently
-the `urls` of the nats input and output, and the `password` of the postgres
-output — accepts `${NAME}` placeholders:
+secrets rather than the secrets themselves. Any field typed `Secret` — these all
+live on connections now: the `urls` of a nats connection, the `brokers` of a
+kafka one, the `password` of a postgres one — accepts `${NAME}` placeholders:
 
 ```json
-{ "type": "nats", "urls": "nats://app:${NATS_PASSWORD}@broker:4222", "subject": "s" }
+{ "prod-nats": { "type": "nats", "urls": "nats://app:${NATS_PASSWORD}@broker:4222" } }
 ```
 
 Those are filled in when the pipeline is built, from two sources consulted in
@@ -383,8 +463,10 @@ order:
 The environment comes first so a single secret can be overridden for one run
 without touching the file. The flip side is that an unrelated environment
 variable with a colliding name shadows the file, so keep the names specific;
-a shadowed lookup is logged at debug level. `secrets.example.json` shows the
-file format, and `secrets.json` is gitignored.
+a shadowed lookup is logged at debug level. `example_config/secrets.example.json`
+shows the file format; anything named `secrets.json` is gitignored, wherever it
+sits, which is why `just dev` creates the sample's copy rather than the
+repository carrying one.
 
 A value with no `${...}` in it is passed through untouched, so fields that hold
 nothing sensitive need no special handling. An unknown name is an error, not an
@@ -461,13 +543,18 @@ working as designed, not the pipeline being wrong.
 
 `docker compose up` also brings up postgres on :5432 (database `kayak`, role
 `kayak`, password `hunter2`), which is where the `sensors_archive` pipeline in
-`config.json` writes. Because that pipeline's password is a `${POSTGRES_PASSWORD}`
-reference, running the server against the sample config now needs a secret:
+`config.json` writes. That pipeline names the `local-postgres` connection in
+`config.connections.json`, whose password is a `${POSTGRES_PASSWORD}` reference,
+so running the server against the sample config needs a secret:
 
 ```bash
-cp secrets.example.json secrets.json
-cargo run -- --config config.json --secrets ./secrets.json
+just dev
 ```
+
+That is the whole of it: `just dev` copies `example_config/secrets.example.json`
+into place if there is no `example_config/secrets.json` yet, then runs
+`cargo leptos watch` against the sample. `just dev-yaml` is the same graph in its
+other spelling.
 
 ## currently working on
 

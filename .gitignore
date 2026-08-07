@@ -1,3 +1,6 @@
 /target
-# real secrets, referenced from config files as ${NAME}; see secrets.example.json
-/secrets.json
+# real secrets, referenced from config files as ${NAME}; see
+# example_config/secrets.example.json. Nothing named secrets.json is committed,
+# anywhere — the example_config one holds only the docker-compose password and is
+# still ignored, because the rule is worth more than the one file it costs.
+secrets.json

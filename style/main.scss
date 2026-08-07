@@ -203,12 +203,57 @@ body {
     padding: 4px 8px;
     border-radius: var(--radius);
     cursor: pointer;
+    display: flex;
+    align-items: center;
+    gap: 6px;
     &:hover {
       background: var(--bg-hover);
     }
     // later, when you add selection state:
     &.selected {
       background: rgba(105, 156, 232, 0.25);
+    }
+
+    // the connection's kind, and the name it belongs to: the name takes the
+    // room and the kind sits at the end, so the two lists scan the same way
+    .tree-label {
+      flex: 1;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+  }
+}
+
+// The two lists: pipelines, and the systems they talk to. A tab strip rather
+// than two stacked panels, because only one of them is being worked on at a
+// time and the sidebar is 220px wide.
+.sidebar-tabs {
+  display: flex;
+  gap: 2px;
+  margin-bottom: 4px;
+  border-bottom: 1px solid var(--border);
+
+  .tab {
+    flex: 1;
+    background: none;
+    border: none;
+    border-bottom: 2px solid transparent;
+    color: var(--text-dim);
+    cursor: pointer;
+    font: inherit;
+    font-size: 11px;
+    padding: 4px 2px 5px;
+
+    &:hover {
+      color: var(--text);
+    }
+
+    // the selected tab is the one whose list is showing, which is the only
+    // state either of them has
+    &.active {
+      color: var(--text);
+      border-bottom-color: var(--accent);
     }
   }
 }

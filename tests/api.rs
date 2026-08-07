@@ -245,7 +245,8 @@ async fn the_docs_endpoint_serves_every_component_kind() -> anyhow::Result<()> {
     for doc in &docs {
         let kind = doc["kind"].as_str().unwrap_or("<none>");
         assert!(
-            ["input", "transform", "output"].contains(&doc["family"].as_str().unwrap_or_default()),
+            ["input", "transform", "output", "connection"]
+                .contains(&doc["family"].as_str().unwrap_or_default()),
             "'{kind}' has no family"
         );
         assert!(

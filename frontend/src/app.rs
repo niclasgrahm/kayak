@@ -1,7 +1,7 @@
 use kayak_core::docs::{Family, FieldType, all_components};
 use kayak_core::{
-    ConfigFormat, EdgeEnd, LayoutFile, PipelineDto, PipelineId, PortLayout, Side, UiEvent,
-    config::Config,
+    ConfigFormat, Connections, EdgeEnd, LayoutFile, PipelineDto, PipelineId, PortLayout, Side,
+    UiEvent, config::Config,
 };
 use leptos::prelude::*;
 use leptos_meta::*;
@@ -72,9 +72,23 @@ impl Mode {
     }
 }
 
+/// Which list the sidebar is showing.
+///
+/// Two tabs rather than two pages: they are the two halves of one config — the
+/// pipelines and the systems they talk to — and picking one shouldn't take the
+/// canvas away.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum SidebarTab {
+    Pipelines,
+    Connections,
+}
+
 #[derive(Clone, Copy)]
 pub struct AppState {
     pub pipelines: LocalResource<Result<Vec<PipelineDto>, ApiError>>,
+    /// The named connections pipelines refer to. Re-fetched on the same trigger
+    /// as the pipelines: adding one changes what the next form can offer.
+    pub connections: LocalResource<Result<Connections, ApiError>>,
     pub events: Signal<Option<UiEvent>>,
     pub canvas_state: CanvasState,
     /// Bumped after a pipeline is created or deleted. `pipelines` and `settings`
@@ -96,14 +110,38 @@ pub struct AppState {
     pub mode: RwSignal<Mode>,
     /// Whether the "add pipeline" modal is open.
     pub adding: RwSignal<bool>,
+    /// Whether the "add connection" modal is open.
+    pub adding_connection: RwSignal<bool>,
     /// Whether the "save as" modal is open.
     pub saving: RwSignal<bool>,
+    /// Which of the sidebar's two lists is showing.
+    pub tab: RwSignal<SidebarTab>,
 }
 
 impl AppState {
-    /// Re-read the pipeline list and the save state from the server.
+    /// Re-read the pipeline list, the connections and the save state from the
+    /// server.
     pub fn refresh(&self) {
         self.reload.update(|n| *n = n.wrapping_add(1));
+    }
+
+    /// The connections a form can offer, as `(name, kind)` in name order.
+    ///
+    /// Derived here rather than in the modal because two of them want it — the
+    /// list in the sidebar and the dropdown in the pipeline form — and because
+    /// the answer is server state either way.
+    pub fn connection_list(&self) -> Vec<(String, String)> {
+        let connections = self.connections;
+        let Some(res) = connections.get() else {
+            return Vec::new();
+        };
+        let Ok(connections) = res.as_ref() else {
+            return Vec::new();
+        };
+        connections
+            .iter()
+            .map(|(id, kind)| (id.clone(), kind.type_name().to_string()))
+            .collect()
     }
 
     fn editing(&self) -> bool {
@@ -357,6 +395,16 @@ pub fn CanvasPage() -> impl IntoView {
             .await
         }
     });
+    let connections = LocalResource::new(move || {
+        reload.track();
+        async move {
+            ApiClient {
+                base: String::new(),
+            }
+            .list_connections()
+            .await
+        }
+    });
     // re-fetched on the same trigger as the list: an edit is exactly what can
     // change whether there are unsaved changes
     let settings = LocalResource::new(move || {
@@ -394,6 +442,7 @@ pub fn CanvasPage() -> impl IntoView {
     let canvas_state = CanvasState::new();
     let state = AppState {
         pipelines,
+        connections,
         events: data,
         canvas_state,
         reload,
@@ -402,7 +451,9 @@ pub fn CanvasPage() -> impl IntoView {
         unsaved,
         mode: RwSignal::new(Mode::ReadOnly),
         adding: RwSignal::new(false),
+        adding_connection: RwSignal::new(false),
         saving: RwSignal::new(false),
+        tab: RwSignal::new(SidebarTab::Pipelines),
     };
     provide_context(state);
 
@@ -669,6 +720,9 @@ pub fn CanvasPage() -> impl IntoView {
             </div>
             <Show when=move || state.adding.get()>
                 <AddPipelineModal />
+            </Show>
+            <Show when=move || state.adding_connection.get()>
+                <AddConnectionModal />
             </Show>
             <Show when=move || state.saving.get()>
                 <SaveAsModal />
@@ -988,10 +1042,53 @@ fn PortGrip(edge: Edge, end: EdgeEnd, port: PortHandle) -> impl IntoView {
     }
 }
 
-/// The pipeline list, and the two ways to change it: the `+` that opens the
-/// "add pipeline" modal, and a delete on each row.
+/// The two lists behind one tab strip: the pipelines, and the connections they
+/// name.
+///
+/// Tabs rather than two panels stacked, because they are the two halves of one
+/// config and only one of them is being worked on at a time — and rather than
+/// two pages, because the canvas belongs beside both.
 #[component]
 pub fn Sidebar() -> impl IntoView {
+    let state = expect_context::<AppState>();
+    let tab = state.tab;
+    let is = move |which: SidebarTab| tab.get() == which;
+
+    view! {
+        <div class="sidebar">
+            <div class="sidebar-tabs">
+                <button
+                    class="tab"
+                    class:active=move || is(SidebarTab::Pipelines)
+                    on:click=move |_| tab.set(SidebarTab::Pipelines)
+                >
+                    "pipelines"
+                </button>
+                <button
+                    class="tab"
+                    class:active=move || is(SidebarTab::Connections)
+                    on:click=move |_| tab.set(SidebarTab::Connections)
+                >
+                    "connections"
+                </button>
+            </div>
+            // two `Show`s rather than one with a fallback: each list keeps its
+            // own state that way, so switching tabs doesn't disarm a delete or
+            // re-fetch anything
+            <Show when=move || is(SidebarTab::Pipelines)>
+                <PipelineList />
+            </Show>
+            <Show when=move || is(SidebarTab::Connections)>
+                <ConnectionList />
+            </Show>
+        </div>
+    }
+}
+
+/// The pipelines, and the two ways to change them: the `+` that opens the
+/// "add pipeline" modal, and a delete on each row.
+#[component]
+fn PipelineList() -> impl IntoView {
     let state = expect_context::<AppState>();
     // Deleting stops a running pipeline and can't be undone, so the button
     // arms rather than fires. One row at a time: arming a second disarms the
@@ -1016,7 +1113,7 @@ pub fn Sidebar() -> impl IntoView {
     };
 
     view! {
-        <div class="sidebar">
+        <div class="sidebar-list">
             <div class="sidebar-header">
                 <span class="sidebar-title">"pipelines"</span>
                 <Show when=move || state.editing()>
@@ -1111,6 +1208,261 @@ pub fn Sidebar() -> impl IntoView {
     }
 }
 
+/// The connections, with the same `+` and the same armed delete.
+///
+/// A row is a name and a kind and nothing else: what is *in* a connection is
+/// often a credential reference, and the sidebar is the wrong place to put
+/// those. There is no camera to move either — a connection isn't on the canvas
+/// — so unlike a pipeline row this one doesn't click through to anything.
+#[component]
+fn ConnectionList() -> impl IntoView {
+    let state = expect_context::<AppState>();
+    let armed = RwSignal::new(Option::<String>::None);
+    let failure = RwSignal::new(Option::<String>::None);
+
+    let delete = move |id: String| {
+        armed.set(None);
+        failure.set(None);
+        leptos::task::spawn_local(async move {
+            let result = ApiClient {
+                base: String::new(),
+            }
+            .delete_connection(&id)
+            .await;
+            match result {
+                Ok(()) => state.refresh(),
+                // the useful case: "still used by a, b" — which is the list of
+                // pipelines to deal with first
+                Err(err) => failure.set(Some(err.to_string())),
+            }
+        });
+    };
+
+    view! {
+        <div class="sidebar-list">
+            <div class="sidebar-header">
+                <span class="sidebar-title">"connections"</span>
+                <Show when=move || state.editing()>
+                    <button
+                        class="icon-button"
+                        title="add connection"
+                        on:click=move |_| state.adding_connection.set(true)
+                    >
+                        "+"
+                    </button>
+                </Show>
+            </div>
+            {move || {
+                failure
+                    .get()
+                    .map(|message| view! { <div class="sidebar-error">{message}</div> })
+            }}
+            {move || {
+                let list = state.connection_list();
+                if list.is_empty() {
+                    return view! {
+                        <div class="empty">"no connections configured"</div>
+                    }
+                        .into_any();
+                }
+                list.into_iter()
+                    .map(|(id, kind)| {
+                        let (arm_id, delete_id, is_armed) = (id.clone(), id.clone(), id.clone());
+                        let armed_here = Memo::new(move |_| {
+                            armed.get().as_deref() == Some(is_armed.as_str())
+                        });
+                        view! {
+                            <div class="tree-item" on:click=move |_| armed.set(None)>
+                                <span class="tree-label">{id.clone()}</span>
+                                <span class="section-kind">{kind}</span>
+                                <Show when=move || state.editing()>
+                                    <button
+                                        class="icon-button danger"
+                                        class:armed=move || armed_here.get()
+                                        title=move || {
+                                            if armed_here.get() {
+                                                "click again to delete"
+                                            } else {
+                                                "delete connection"
+                                            }
+                                        }
+                                        on:click={
+                                            let (arm_id, delete_id) = (
+                                                arm_id.clone(),
+                                                delete_id.clone(),
+                                            );
+                                            move |ev| {
+                                                ev.stop_propagation();
+                                                if armed_here.get() {
+                                                    delete(delete_id.clone());
+                                                } else {
+                                                    armed.set(Some(arm_id.clone()));
+                                                }
+                                            }
+                                        }
+                                    >
+                                        {move || if armed_here.get() { "sure?" } else { "×" }}
+                                    </button>
+                                </Show>
+                            </div>
+                        }
+                    })
+                    .collect_view()
+                    .into_any()
+            }}
+        </div>
+    }
+}
+
+/// Add a connection: a name, a kind, and that kind's settings.
+///
+/// The "add pipeline" modal with one component instead of a list — same
+/// reflected fields, same uncontrolled boxes, same reason for both. Secrets are
+/// referenced here, never entered: a field takes `${NAME}`, and what that
+/// resolves to is the deployment's business and never the UI's.
+#[component]
+fn AddConnectionModal() -> impl IntoView {
+    let state = expect_context::<AppState>();
+    let docs = StoredValue::new(kayak_core::docs::connection_components());
+
+    let id = RwSignal::new(String::new());
+    let errors = RwSignal::new(Vec::<form::FormError>::new());
+    let rejected = RwSignal::new(Option::<String>::None);
+    let submitting = RwSignal::new(false);
+
+    // the first kind, so the form is never in a state with no fields; there is
+    // always at least one, or there would be nothing to connect to
+    let draft = docs.with_value(|docs| docs.first().map(DraftSignals::new));
+
+    let close = move || state.adding_connection.set(false);
+    let _ = use_event_listener(use_window(), leptos::ev::keydown, move |ev| {
+        if ev.key() == "Escape" {
+            close();
+        }
+    });
+
+    let submit = move || {
+        let Some(draft) = draft else {
+            return;
+        };
+        if submitting.get_untracked() {
+            return;
+        }
+        rejected.set(None);
+        let snapshot = draft.snapshot();
+        let built =
+            docs.with_value(|docs| form::build_connection(&id.get_untracked(), &snapshot, docs));
+        let body = match built {
+            Ok(body) => body,
+            Err(found) => {
+                errors.set(found);
+                return;
+            }
+        };
+        errors.set(Vec::new());
+        submitting.set(true);
+        leptos::task::spawn_local(async move {
+            let result = ApiClient {
+                base: String::new(),
+            }
+            .create_connection(&body)
+            .await;
+            submitting.set(false);
+            match result {
+                Ok(()) => {
+                    state.refresh();
+                    state.adding_connection.set(false);
+                }
+                Err(err) => rejected.set(Some(err.to_string())),
+            }
+        });
+    };
+
+    view! {
+        <div class="modal-backdrop" on:click=move |_| close()>
+            <div class="modal" on:click=move |ev| ev.stop_propagation()>
+                <header>
+                    <span class="modal-title">"add connection"</span>
+                    <button class="icon-button" title="close" on:click=move |_| close()>
+                        "×"
+                    </button>
+                </header>
+
+                <div class="modal-body">
+                    <div class="form-row">
+                        <label for="connection-id">"name"</label>
+                        <input
+                            id="connection-id"
+                            class="text-input"
+                            placeholder="what pipelines will refer to, e.g. prod-kafka"
+                            on:input=move |ev| id.set(event_target_value(&ev))
+                        />
+                    </div>
+
+                    {match draft {
+                        Some(draft) => {
+                            view! {
+                                <section class="stage">
+                                    <ComponentEditor
+                                        index=0
+                                        draft=draft
+                                        // a connection form has exactly one
+                                        // component, so there is no list to
+                                        // remove it from and nothing to point
+                                        // at another pipeline
+                                        drafts=RwSignal::new(Vec::new())
+                                        errors=errors
+                                        docs=docs
+                                        pipelines=Signal::derive(Vec::new)
+                                        connections=Signal::derive(Vec::new)
+                                        removable=false
+                                    />
+                                </section>
+                            }
+                                .into_any()
+                        }
+                        None => view! { <div class="empty">"no connection kinds"</div> }.into_any(),
+                    }}
+                </div>
+
+                <footer>
+                    <div class="modal-messages">
+                        {move || {
+                            form::pipeline_errors(&errors.get())
+                                .into_iter()
+                                .map(|message| view! { <div class="form-error">{message}</div> })
+                                .collect_view()
+                        }}
+                        {move || {
+                            rejected
+                                .get()
+                                .map(|message| {
+                                    view! { <div class="form-error">"server: " {message}</div> }
+                                })
+                        }}
+                        // the same warning the pipeline modal carries, for the
+                        // same reason: this lands in the runtime now and in the
+                        // connections file only when someone saves
+                        <div class="form-hint">
+                            "available to new pipelines now — save the config to keep it"
+                        </div>
+                    </div>
+                    <button class="button" on:click=move |_| close()>
+                        "cancel"
+                    </button>
+                    <button
+                        class="button primary"
+                        disabled=move || submitting.get()
+                        on:click=move |_| submit()
+                    >
+                        {move || if submitting.get() { "creating…" } else { "create" }}
+                    </button>
+                </footer>
+            </div>
+        </div>
+    }
+}
+
 /// One component being configured in the modal.
 ///
 /// The same thing [`form::ComponentDraft`] describes, but with each editable
@@ -1169,6 +1521,10 @@ fn AddPipelineModal() -> impl IntoView {
     let rejected = RwSignal::new(Option::<String>::None);
     let submitting = RwSignal::new(false);
 
+    // What a field that names a connection can be set to. Like the pipeline
+    // list below it is server state rather than anything the schema knows, and
+    // it carries the kind so a kafka field offers only kafka connections.
+    let connections = Signal::derive(move || state.connection_list());
     // What a field that names another pipeline can be set to: the ids the
     // server is running right now. The one being added is not among them — it
     // doesn't exist yet, and could not feed itself if it did.
@@ -1272,6 +1628,7 @@ fn AddPipelineModal() -> impl IntoView {
                         errors=errors
                         docs=docs
                         pipelines=pipelines
+                        connections=connections
                     />
                     <StageEditor
                         family=Family::Transform
@@ -1279,6 +1636,7 @@ fn AddPipelineModal() -> impl IntoView {
                         errors=errors
                         docs=docs
                         pipelines=pipelines
+                        connections=connections
                     />
                     <StageEditor
                         family=Family::Output
@@ -1286,6 +1644,7 @@ fn AddPipelineModal() -> impl IntoView {
                         errors=errors
                         docs=docs
                         pipelines=pipelines
+                        connections=connections
                     />
                 </div>
 
@@ -1343,6 +1702,8 @@ fn StageEditor(
     docs: StoredValue<Vec<kayak_core::docs::ComponentDoc>>,
     /// The pipelines a field naming one can point at.
     pipelines: Signal<Vec<String>>,
+    /// The connections a field naming one can point at, as `(name, kind)`.
+    connections: Signal<Vec<(String, String)>>,
 ) -> impl IntoView {
     let add = move |_| {
         docs.with_value(|docs| {
@@ -1378,6 +1739,7 @@ fn StageEditor(
                                 errors=errors
                                 docs=docs
                                 pipelines=pipelines
+                                connections=connections
                             />
                         }
                     })
@@ -1396,6 +1758,11 @@ fn ComponentEditor(
     errors: RwSignal<Vec<form::FormError>>,
     docs: StoredValue<Vec<kayak_core::docs::ComponentDoc>>,
     pipelines: Signal<Vec<String>>,
+    connections: Signal<Vec<(String, String)>>,
+    /// Whether this component can be taken out again. False for the connection
+    /// form, which has exactly one and would be nothing without it.
+    #[prop(default = true)]
+    removable: bool,
 ) -> impl IntoView {
     let family = draft.family;
     let doc =
@@ -1447,9 +1814,11 @@ fn ComponentEditor(
                         })
                     }}
                 </select>
-                <button class="icon-button danger" title="remove" on:click=remove>
-                    "×"
-                </button>
+                <Show when=move || removable>
+                    <button class="icon-button danger" title="remove" on:click=remove>
+                        "×"
+                    </button>
+                </Show>
             </div>
 
             // Rebuilt when the kind or the variant changes — which is exactly
@@ -1512,6 +1881,7 @@ fn ComponentEditor(
                                         values=draft.values
                                         errors=errors
                                         pipelines=pipelines
+                                        connections=connections
                                     />
                                 }
                             })
@@ -1534,6 +1904,7 @@ fn FieldEditor(
     values: RwSignal<HashMap<String, String>>,
     errors: RwSignal<Vec<form::FormError>>,
     pipelines: Signal<Vec<String>>,
+    connections: Signal<Vec<(String, String)>>,
 ) -> impl IntoView {
     let name = field.name.clone();
     // read once, on purpose: the control is uncontrolled from here on, so that
@@ -1613,6 +1984,53 @@ fn FieldEditor(
                             "no other pipelines yet"
                         } else {
                             ""
+                        };
+                        view! {
+                            <option value="" selected=selected.is_empty()>
+                                {blank}
+                            </option>
+                            {available
+                                .into_iter()
+                                .map(|id| {
+                                    let label = id.clone();
+                                    view! {
+                                        <option value=id.clone() selected=id == selected>
+                                            {label}
+                                        </option>
+                                    }
+                                })
+                                .collect_view()}
+                        }
+                    }}
+                </select>
+            }
+            .into_any()
+        }
+        // The same trick as the pipeline dropdown above, narrowed by kind: a
+        // kafka input can only use a kafka connection, so offering the nats one
+        // would only be a way to build a pipeline that fails.
+        FieldType::Connection(kind) => {
+            let kind = kind.clone();
+            let chosen = field.name.clone();
+            let picked =
+                move || values.with_untracked(|v| v.get(&chosen).cloned().unwrap_or_default());
+            view! {
+                <select class="select" on:change=write>
+                    {move || {
+                        let selected = picked();
+                        let available: Vec<String> = connections
+                            .get()
+                            .into_iter()
+                            .filter(|(_, of_kind)| *of_kind == kind)
+                            .map(|(id, _)| id)
+                            .collect();
+                        // "there is nothing to point at" has to be said, and
+                        // said as the thing that is missing: the fix is to add
+                        // a connection of *this* kind, on the other tab
+                        let blank = if available.is_empty() {
+                            format!("no {kind} connections yet")
+                        } else {
+                            String::new()
                         };
                         view! {
                             <option value="" selected=selected.is_empty()>

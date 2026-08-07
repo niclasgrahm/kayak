@@ -19,14 +19,14 @@ HTTP 201
 pipeline_id: jsonpath "$.id"
 [Asserts]
 jsonpath "$.id" == "hurl-smoke-test"
-jsonpath "$.config.input.type" == "dummy"
+jsonpath "$.config.inputs[0].type" == "dummy"
 
 
 # it shows up in the listing
 GET http://localhost:6767/api/pipelines
 HTTP 200
 [Asserts]
-jsonpath "$[?(@.id=='{{pipeline_id}}')]" count == 1
+jsonpath "$[*].id" contains "{{pipeline_id}}"
 
 
 # ids are unique
@@ -60,3 +60,44 @@ HTTP 204
 
 DELETE http://localhost:6767/api/pipelines/{{pipeline_id}}
 HTTP 404
+
+
+# connections: created, listed, and refused while a pipeline names one
+POST http://localhost:6767/api/connections
+Content-Type: application/json
+{
+    "id": "hurl-smoke-nats",
+    "type": "nats",
+    "urls": "nats://localhost:4222"
+}
+HTTP 201
+
+
+GET http://localhost:6767/api/connections
+HTTP 200
+[Asserts]
+jsonpath "$['hurl-smoke-nats'].type" == "nats"
+
+
+POST http://localhost:6767/api/pipelines
+Content-Type: application/json
+{
+    "id": "hurl-smoke-connected",
+    "inputs": [{ "type": "nats", "connection": "hurl-smoke-nats", "subject": "test.subject" }],
+    "transforms": [],
+    "outputs": [{ "type": "stdout" }]
+}
+HTTP 201
+
+
+# still in use, so this is a 409 rather than a delete
+DELETE http://localhost:6767/api/connections/hurl-smoke-nats
+HTTP 409
+
+
+DELETE http://localhost:6767/api/pipelines/hurl-smoke-connected
+HTTP 204
+
+
+DELETE http://localhost:6767/api/connections/hurl-smoke-nats
+HTTP 204

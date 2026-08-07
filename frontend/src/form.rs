@@ -184,8 +184,9 @@ pub fn parse_field(field: &FieldDoc, raw: &str) -> Result<Option<Value>, String>
                 .map_err(|_| format!("'{trimmed}' is not true or false"))?,
         ),
         // an id: it goes in a URL path, so surrounding whitespace can only be a
-        // slip of the keyboard
-        FieldType::PipelineId => Value::String(trimmed.to_string()),
+        // slip of the keyboard. A connection name is the same kind of thing —
+        // picked from a dropdown of what exists, sent as the plain name
+        FieldType::PipelineId | FieldType::Connection(_) => Value::String(trimmed.to_string()),
         FieldType::Enum(values) => {
             if values.iter().any(|v| v == trimmed) {
                 Value::String(trimmed.to_string())
@@ -327,7 +328,73 @@ pub fn singular(family: Family) -> &'static str {
         Family::Input => "input",
         Family::Transform => "transform",
         Family::Output => "output",
+        Family::Connection => "connection",
     }
+}
+
+/// The "add connection" form: a name and one component draft in, the body of
+/// `POST /api/connections` out.
+///
+/// The pipeline form's smaller sibling, and deliberately built out of the same
+/// parts — the fields come from the same reflection, the messages come back in
+/// the same shape, so a new connection kind gets a working form for free.
+///
+/// The one real difference is the name: a pipeline may go without and be given
+/// a petname, but a connection *is* its name — that is the whole of how a
+/// component refers to it — so a blank one is an error.
+pub fn build_connection(
+    id: &str,
+    draft: &ComponentDraft,
+    docs: &[ComponentDoc],
+) -> Result<Value, Vec<FormError>> {
+    let mut errors = Vec::new();
+    let id = id.trim();
+    if id.is_empty() {
+        errors.push(FormError::Pipeline(
+            "a connection needs a name — it is what a pipeline refers to".to_string(),
+        ));
+    } else if !id.chars().all(is_id_char) {
+        errors.push(FormError::Pipeline(
+            "a name may only contain letters, digits, '-', '_' and '.'".to_string(),
+        ));
+    }
+
+    let mut body =
+        match doc_for(docs, Family::Connection, &draft.kind) {
+            Some(doc) => match component_json(doc, draft) {
+                Ok(Value::Object(body)) => body,
+                // `component_json` builds an object or nothing; the other arms
+                // cannot happen, and inventing an error for them would be worse
+                // than the empty one they'd produce
+                Ok(_) => Map::new(),
+                Err(field_errors) => {
+                    errors.extend(field_errors.into_iter().map(|(field, message)| {
+                        FormError::Field {
+                            component: 0,
+                            field,
+                            message,
+                        }
+                    }));
+                    Map::new()
+                }
+            },
+            None => {
+                errors.push(FormError::Pipeline(format!(
+                    "there is no connection called '{}'",
+                    draft.kind
+                )));
+                Map::new()
+            }
+        };
+
+    if !errors.is_empty() {
+        return Err(errors);
+    }
+    // the name sits alongside the flattened connection, which is exactly one
+    // entry of the connections file
+    let mut out = Map::from_iter([("id".to_string(), Value::String(id.to_string()))]);
+    out.append(&mut body);
+    Ok(Value::Object(out))
 }
 
 #[cfg(test)]
@@ -389,18 +456,85 @@ mod tests {
         let draft = filled(
             Family::Input,
             "nats",
-            &[
-                ("urls", "nats://localhost:4222"),
-                ("subject", "test.subject"),
-            ],
+            &[("connection", "local-nats"), ("subject", "test.subject")],
         );
         let json = component_json(&component(Family::Input, "nats"), &draft)
             .map_err(|e| anyhow::anyhow!("{e:?}"))?;
         assert_eq!(
             json,
-            json!({"type": "nats", "urls": "nats://localhost:4222", "subject": "test.subject"})
+            json!({"type": "nats", "connection": "local-nats", "subject": "test.subject"})
         );
         Ok(())
+    }
+
+    /// The connection reference renders as a dropdown of the connections that
+    /// exist, of the right kind — and goes on the wire as the plain name.
+    #[test]
+    fn a_connection_reference_is_built_as_the_name_it_picks() -> anyhow::Result<()> {
+        let kafka = component(Family::Input, "kafka");
+        assert_eq!(
+            fields_of(&kafka, None)
+                .iter()
+                .find(|f| f.name == "connection")
+                .map(|f| f.field_type.clone()),
+            Some(FieldType::Connection("kafka".to_string())),
+            "the form would render a text box for it"
+        );
+
+        let draft = filled(
+            Family::Input,
+            "kafka",
+            &[
+                ("connection", " prod-kafka "),
+                ("topic", "orders"),
+                ("group", "kayak"),
+            ],
+        );
+        let json = component_json(&kafka, &draft).map_err(|e| anyhow::anyhow!("{e:?}"))?;
+        assert_eq!(json["connection"], json!("prod-kafka"));
+        Ok(())
+    }
+
+    /// The add-connection form is the pipeline form's sibling: same fields from
+    /// the same reflection, and a body that is one entry of the connections
+    /// file.
+    #[test]
+    fn a_connection_form_builds_the_body_the_server_takes() -> anyhow::Result<()> {
+        let draft = filled(
+            Family::Connection,
+            "kafka",
+            &[("brokers", "${KAFKA_BROKERS}")],
+        );
+        let value = build_connection(" prod-kafka ", &draft, &docs())
+            .map_err(|e| anyhow::anyhow!("{e:?}"))?;
+        assert_eq!(
+            value,
+            json!({"id": "prod-kafka", "type": "kafka", "brokers": "${KAFKA_BROKERS}"})
+        );
+
+        let request: kayak_core::connections::CreateConnectionRequest =
+            serde_json::from_value(value)?;
+        assert_eq!(request.id, "prod-kafka");
+        Ok(())
+    }
+
+    /// A connection *is* its name — there is no petname fallback, because the
+    /// name is the whole of how a component refers to it.
+    #[test]
+    fn a_connection_without_a_name_is_rejected() {
+        let draft = filled(Family::Connection, "nats", &[("urls", "nats://localhost")]);
+        let errors = build_connection("  ", &draft, &docs())
+            .expect_err("a connection with no name cannot be referred to");
+        assert_eq!(pipeline_errors(&errors).len(), 1);
+    }
+
+    #[test]
+    fn a_connections_missing_fields_are_reported_against_them() {
+        let draft = filled(Family::Connection, "postgres", &[("host", "db")]);
+        let errors =
+            build_connection("warehouse", &draft, &docs()).expect_err("most of it is missing");
+        assert_eq!(field_error(&errors, 0, "user"), Some("required"));
+        assert_eq!(field_error(&errors, 0, "host"), None);
     }
 
     /// A `pipeline` input names another pipeline. The modal renders that as a
@@ -440,17 +574,16 @@ mod tests {
     #[test]
     fn an_empty_optional_field_is_omitted_rather_than_sent_blank() -> anyhow::Result<()> {
         let draft = filled(
-            Family::Output,
+            Family::Connection,
             "postgres",
             &[
                 ("host", "localhost"),
                 ("database", "kayak"),
                 ("user", "kayak"),
                 ("password", "${POSTGRES_PASSWORD}"),
-                ("table", "readings"),
             ],
         );
-        let json = component_json(&component(Family::Output, "postgres"), &draft)
+        let json = component_json(&component(Family::Connection, "postgres"), &draft)
             .map_err(|e| anyhow::anyhow!("{e:?}"))?;
         assert!(json.get("port").is_none(), "an empty port was sent: {json}");
         Ok(())
@@ -458,7 +591,7 @@ mod tests {
 
     #[test]
     fn a_missing_required_field_is_reported_against_that_field() {
-        let draft = filled(Family::Input, "nats", &[("urls", "nats://localhost:4222")]);
+        let draft = filled(Family::Input, "nats", &[("connection", "local-nats")]);
         let errors = component_json(&component(Family::Input, "nats"), &draft)
             .expect_err("a nats input with no subject should not validate");
         assert_eq!(errors, [("subject".to_string(), "required".to_string())]);
@@ -467,7 +600,7 @@ mod tests {
     /// Every bad field at once: one message per submit makes for five submits.
     #[test]
     fn all_the_bad_fields_are_reported_together() {
-        let draft = filled(Family::Input, "kafka", &[("brokers", "localhost:9092")]);
+        let draft = filled(Family::Input, "kafka", &[("connection", "prod-kafka")]);
         let errors = component_json(&component(Family::Input, "kafka"), &draft)
             .expect_err("two required fields are missing");
         let named: Vec<&str> = errors.iter().map(|(field, _)| field.as_str()).collect();
@@ -653,8 +786,12 @@ mod tests {
     #[test]
     fn errors_name_the_component_they_belong_to() {
         let drafts = vec![
-            filled(Family::Input, "nats", &[("urls", "a"), ("subject", "one")]),
-            filled(Family::Input, "nats", &[("urls", "b")]),
+            filled(
+                Family::Input,
+                "nats",
+                &[("connection", "a"), ("subject", "one")],
+            ),
+            filled(Family::Input, "nats", &[("connection", "b")]),
         ];
         let errors = build_config("p", &drafts, &docs()).expect_err("the second has no subject");
         assert_eq!(field_error(&errors, 1, "subject"), Some("required"));
@@ -669,11 +806,11 @@ mod tests {
             filled(Family::Input, "nats", &[]),
         ];
         let mut errors = build_config("p", &drafts, &docs()).expect_err("nothing is filled in");
-        clear_field_error(&mut errors, 0, "urls");
+        clear_field_error(&mut errors, 0, "connection");
 
-        assert_eq!(field_error(&errors, 0, "urls"), None);
+        assert_eq!(field_error(&errors, 0, "connection"), None);
         assert_eq!(field_error(&errors, 0, "subject"), Some("required"));
-        assert_eq!(field_error(&errors, 1, "urls"), Some("required"));
+        assert_eq!(field_error(&errors, 1, "connection"), Some("required"));
     }
 
     #[test]
@@ -684,7 +821,7 @@ mod tests {
         ];
         let errors = build_config("bad id", &drafts, &docs()).expect_err("three things are wrong");
         assert!(field_error(&errors, 0, "duration").is_some());
-        assert!(field_error(&errors, 1, "urls").is_some());
+        assert!(field_error(&errors, 1, "connection").is_some());
         assert!(field_error(&errors, 1, "subject").is_some());
         assert_eq!(pipeline_errors(&errors).len(), 1, "the id");
     }
@@ -701,7 +838,9 @@ mod tests {
                     continue;
                 }
                 let sample = match field.field_type {
-                    FieldType::Text | FieldType::PipelineId => "x".to_string(),
+                    FieldType::Text | FieldType::PipelineId | FieldType::Connection(_) => {
+                        "x".to_string()
+                    }
                     FieldType::Integer => "1".to_string(),
                     FieldType::Number => "1.5".to_string(),
                     FieldType::Boolean => "true".to_string(),

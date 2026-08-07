@@ -12,23 +12,40 @@ use kayak::secrets::{ChainStore, EnvStore, FileStore, SecretStore, resolve};
 use kayak::state::{AppState, PipelineError};
 use kayak::testing::MapSecretStore;
 use kayak_core::config::{Config, Secret};
+use kayak_core::connections::{ConnectionKind, NatsConnection};
 
 fn store(values: &[(&str, &str)]) -> MapSecretStore {
     MapSecretStore::new("the test store", values)
 }
 
-/// A config whose nats input url references `${NATS_PASSWORD}`.
-fn config_referencing_a_secret(id: &str) -> anyhow::Result<Config> {
+/// A pipeline reading from the connection below. The secret it needs is the
+/// *connection's*, not its own — which is the point of connections: one place
+/// holds the credential, however many pipelines use it.
+fn config_using_the_connection(id: &str) -> anyhow::Result<Config> {
     Ok(serde_json::from_value(serde_json::json!({
         "id": id,
         "inputs": [{
             "type": "nats",
-            "urls": "nats://app:${NATS_PASSWORD}@broker:4222",
+            "connection": "broker",
             "subject": "test.subject"
         }],
         "transforms": [],
         "outputs": [{"type": "stdout"}]
     }))?)
+}
+
+/// A nats connection whose url references `${NATS_PASSWORD}`.
+fn connection_referencing_a_secret() -> ConnectionKind {
+    ConnectionKind::Nats(NatsConnection {
+        urls: Secret::new("nats://app:${NATS_PASSWORD}@broker:4222"),
+    })
+}
+
+/// A server that knows the secret store and has the connection above.
+fn server_with(secrets: MapSecretStore) -> anyhow::Result<AppState> {
+    let state = AppState::with_secrets(Arc::new(secrets));
+    state.create_connection("broker".to_string(), connection_referencing_a_secret())?;
+    Ok(state)
 }
 
 /// The common case: most fields hold nothing sensitive and must be untouched.
@@ -164,27 +181,27 @@ fn a_resolved_secret_prints_its_reference_and_not_its_value() -> anyhow::Result<
     Ok(())
 }
 
-/// The config is the version-controlled artefact, so the reference — not the
-/// value — is what has to survive a parse/serialise round trip.
+/// The connections file is the version-controlled artefact now that the
+/// credentials live in it, so the reference — not the value — is what has to
+/// survive a parse/serialise round trip.
 #[test]
-fn a_config_that_references_a_secret_round_trips_unchanged() -> anyhow::Result<()> {
-    let config = config_referencing_a_secret("x")?;
-    let json = serde_json::to_value(&config)?;
+fn a_connection_that_references_a_secret_round_trips_unchanged() -> anyhow::Result<()> {
+    let json = serde_json::to_value(connection_referencing_a_secret())?;
     assert_eq!(
-        json["inputs"][0]["urls"],
+        json["urls"],
         serde_json::json!("nats://app:${NATS_PASSWORD}@broker:4222")
     );
     // and a Secret is a plain JSON string on the wire, not a wrapper object
-    assert!(json["inputs"][0]["urls"].is_string());
+    assert!(json["urls"].is_string());
     Ok(())
 }
 
 /// Building the pipeline is where resolution happens. The nats input connects
 /// lazily, so this exercises the build without needing a broker.
 #[tokio::test]
-async fn a_pipeline_builds_from_a_config_that_references_a_secret() -> anyhow::Result<()> {
-    let state = AppState::with_secrets(Arc::new(store(&[("NATS_PASSWORD", "hunter2")])));
-    state.create_pipeline(config_referencing_a_secret("with-secret")?)?;
+async fn a_pipeline_builds_from_a_connection_that_references_a_secret() -> anyhow::Result<()> {
+    let state = server_with(store(&[("NATS_PASSWORD", "hunter2")]))?;
+    state.create_pipeline(config_using_the_connection("with-secret")?)?;
     assert_eq!(state.get_pipeline_ids(), vec!["with-secret".to_string()]);
     Ok(())
 }
@@ -192,18 +209,23 @@ async fn a_pipeline_builds_from_a_config_that_references_a_secret() -> anyhow::R
 /// The whole point: a pipeline that has been built with a real secret still
 /// hands the *reference* back to `GET /api/pipelines` and the UI.
 #[tokio::test]
-async fn the_api_view_of_a_pipeline_never_shows_a_resolved_secret() -> anyhow::Result<()> {
-    let state = AppState::with_secrets(Arc::new(store(&[("NATS_PASSWORD", "hunter2")])));
-    state.create_pipeline(config_referencing_a_secret("with-secret")?)?;
+async fn the_api_view_of_a_connection_never_shows_a_resolved_secret() -> anyhow::Result<()> {
+    let state = server_with(store(&[("NATS_PASSWORD", "hunter2")]))?;
+    state.create_pipeline(config_using_the_connection("with-secret")?)?;
 
-    let view = serde_json::to_string(&state.get_pipelines()?)?;
+    // both surfaces: the pipeline never held the secret, and the connection —
+    // which did — hands back the reference it was given
+    let pipelines = serde_json::to_string(&state.get_pipelines()?)?;
+    let connections = serde_json::to_string(&state.connections())?;
+    for view in [&pipelines, &connections] {
+        assert!(
+            !view.contains("hunter2"),
+            "the resolved secret leaked into the API view: {view}"
+        );
+    }
     assert!(
-        !view.contains("hunter2"),
-        "the resolved secret leaked into the API view: {view}"
-    );
-    assert!(
-        view.contains("${NATS_PASSWORD}"),
-        "the API view should still show the reference: {view}"
+        connections.contains("${NATS_PASSWORD}"),
+        "the API view should still show the reference: {connections}"
     );
     Ok(())
 }
@@ -212,10 +234,10 @@ async fn the_api_view_of_a_pipeline_never_shows_a_resolved_secret() -> anyhow::R
 /// it must fail the build rather than start a pipeline that can't authenticate.
 #[tokio::test]
 async fn a_pipeline_whose_secret_is_missing_fails_to_start() -> anyhow::Result<()> {
-    let state = AppState::with_secrets(Arc::new(MapSecretStore::empty()));
+    let state = server_with(MapSecretStore::empty())?;
     // InvalidConfig is what the HTTP layer turns into a 4xx — a config naming an
     // unknown secret is the caller's mistake, not a server fault
-    let err = match state.create_pipeline(config_referencing_a_secret("no-secret")?) {
+    let err = match state.create_pipeline(config_using_the_connection("no-secret")?) {
         Err(PipelineError::InvalidConfig(e)) => format!("{e:#}"),
         Err(e) => panic!("expected InvalidConfig, got: {e}"),
         Ok(_) => panic!("a pipeline built despite its secret being missing"),

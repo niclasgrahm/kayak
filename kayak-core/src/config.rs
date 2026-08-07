@@ -1,4 +1,5 @@
 use crate::PipelineId;
+use crate::connections::ConnectionId;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
@@ -64,9 +65,11 @@ impl std::fmt::Display for Secret {
 #[derive(Clone, Debug, Deserialize, Serialize, JsonSchema)]
 #[schemars(title = "nats")]
 pub struct NatsConfig {
-    /// connection url, e.g. `nats://localhost:4222`. May reference secrets as
-    /// `${NAME}` — see "secrets" in the readme.
-    pub urls: Secret,
+    /// name of the nats connection to subscribe on — see "connections" in the
+    /// readme. The server it points at is declared once, in the connections
+    /// file, rather than repeated in every pipeline that uses it.
+    #[schemars(extend("x-connection" = "nats"))]
+    pub connection: ConnectionId,
     /// the subject to subscribe to
     pub subject: String,
 }
@@ -80,9 +83,11 @@ pub struct NatsConfig {
 #[derive(Clone, Debug, Deserialize, Serialize, JsonSchema)]
 #[schemars(title = "kafka")]
 pub struct KafkaConfig {
-    /// comma-separated broker list, e.g. `localhost:9092`. May reference
-    /// secrets as `${NAME}` — see "secrets" in the readme.
-    pub brokers: Secret,
+    /// name of the kafka connection to consume from — see "connections" in the
+    /// readme. The brokers are declared once, in the connections file, rather
+    /// than repeated in every pipeline reading from the same cluster.
+    #[schemars(extend("x-connection" = "kafka"))]
+    pub connection: ConnectionId,
     /// the topic to consume from
     pub topic: String,
     /// consumer group id. Kafka tracks the read position per group, so two
@@ -138,9 +143,10 @@ pub struct FileOutputConfig {}
 #[derive(Clone, Debug, Deserialize, Serialize, JsonSchema)]
 #[schemars(title = "nats")]
 pub struct NatsOutputConfig {
-    /// connection url, e.g. `nats://localhost:4222`. May reference secrets as
-    /// `${NAME}` — see "secrets" in the readme.
-    pub urls: Secret,
+    /// name of the nats connection to publish on — see "connections" in the
+    /// readme.
+    #[schemars(extend("x-connection" = "nats"))]
+    pub connection: ConnectionId,
     /// the subject to publish to
     pub subject: String,
 }
@@ -154,21 +160,15 @@ pub struct NatsOutputConfig {
 #[derive(Clone, Debug, Deserialize, Serialize, JsonSchema)]
 #[schemars(title = "postgres")]
 pub struct PostgresOutputConfig {
-    /// server hostname, e.g. `localhost`
-    pub host: String,
-    /// the database to connect to
-    pub database: String,
-    /// the role to connect as
-    pub user: String,
-    /// that role's password. May reference secrets as `${NAME}` — see
-    /// "secrets" in the readme, and prefer a reference to a literal here.
-    pub password: Secret,
+    /// name of the postgres connection to insert through — see "connections"
+    /// in the readme. The host, database and role live there; the table below
+    /// is this output's own.
+    #[schemars(extend("x-connection" = "postgres"))]
+    pub connection: ConnectionId,
     /// the table to insert into, created if it does not exist. Optionally
     /// schema-qualified (`analytics.readings`); letters, digits and underscores
     /// only, since it cannot be sent as a query parameter.
     pub table: String,
-    /// server port. Defaults to 5432.
-    pub port: Option<u16>,
 }
 
 /// Publishes every message in the batch to a kafka topic, one message per
@@ -177,9 +177,10 @@ pub struct PostgresOutputConfig {
 #[derive(Clone, Debug, Deserialize, Serialize, JsonSchema)]
 #[schemars(title = "kafka")]
 pub struct KafkaOutputConfig {
-    /// comma-separated broker list, e.g. `localhost:9092`. May reference
-    /// secrets as `${NAME}` — see "secrets" in the readme.
-    pub brokers: Secret,
+    /// name of the kafka connection to publish to — see "connections" in the
+    /// readme.
+    #[schemars(extend("x-connection" = "kafka"))]
+    pub connection: ConnectionId,
     /// the topic to publish to
     pub topic: String,
 }
@@ -377,5 +378,31 @@ impl Config {
                 InputKind::Dummy(_) | InputKind::Kafka(_) | InputKind::Nats(_) => None,
             })
             .collect()
+    }
+
+    /// The connections this pipeline names, inputs before outputs, in declaration
+    /// order.
+    ///
+    /// Asked here rather than by each caller matching on the kinds, for the same
+    /// reason [`Config::upstreams`] is: it is what "is this connection still in
+    /// use" and "does this graph name a connection that isn't configured" are
+    /// both answered from. The same connection named twice comes back twice.
+    #[must_use]
+    pub fn connections(&self) -> Vec<&ConnectionId> {
+        // spelled out rather than wildcarded: a new component that talks to a
+        // configured system has to be added here, and the compiler is the only
+        // thing that will say so
+        let inputs = self.inputs.iter().filter_map(|input| match &input.kind {
+            InputKind::Kafka(c) => Some(&c.connection),
+            InputKind::Nats(c) => Some(&c.connection),
+            InputKind::Dummy(_) | InputKind::Pipeline(_) => None,
+        });
+        let outputs = self.outputs.iter().filter_map(|output| match &output.kind {
+            OutputKind::Kafka(c) => Some(&c.connection),
+            OutputKind::Nats(c) => Some(&c.connection),
+            OutputKind::Postgres(c) => Some(&c.connection),
+            OutputKind::Stdout(_) | OutputKind::File(_) => None,
+        });
+        inputs.chain(outputs).collect()
     }
 }

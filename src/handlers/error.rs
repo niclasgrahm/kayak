@@ -38,7 +38,11 @@ where
         // hide the classification
         let status = match err.downcast_ref::<PipelineError>() {
             Some(PipelineError::NotFound(_)) => StatusCode::NOT_FOUND,
-            Some(PipelineError::DuplicateId(_)) => StatusCode::CONFLICT,
+            // both are "the server's state disagrees with what you asked for",
+            // and both are fixed by doing something else first
+            Some(PipelineError::DuplicateId(_) | PipelineError::ConnectionInUse(..)) => {
+                StatusCode::CONFLICT
+            }
             Some(PipelineError::InvalidConfig(_)) => StatusCode::UNPROCESSABLE_ENTITY,
             Some(PipelineError::Internal(_)) | None => StatusCode::INTERNAL_SERVER_ERROR,
         };

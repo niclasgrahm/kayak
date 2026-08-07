@@ -158,11 +158,12 @@ async fn deleting_a_pipeline_cancels_its_run_loop() -> anyhow::Result<()> {
 /// a flat list of roots.
 #[tokio::test]
 async fn the_repository_config_file_starts_a_working_graph() -> anyhow::Result<()> {
-    let declared: Vec<Config> = serde_json::from_str(&std::fs::read_to_string("config.json")?)?;
+    let declared: Vec<Config> =
+        serde_json::from_str(&std::fs::read_to_string("example_config/config.json")?)?;
     // config.json references secrets, so it needs a store; the environment is
     // not something a test should depend on or write to
     let state = AppState::from_config_with_secrets(
-        std::path::Path::new("config.json"),
+        std::path::Path::new("example_config/config.json"),
         std::sync::Arc::new(MapSecretStore::new(
             "the config.json test store",
             &[("POSTGRES_PASSWORD", "hunter2")],

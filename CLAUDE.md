@@ -7,13 +7,18 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 ## Commands
 
 ```bash
-cargo leptos watch                  # dev server w/ hot reload on 127.0.0.1:6767 (builds WASM + server)
+just dev                            # dev server on :6767 against example_config/ (hot reload; makes secrets.json if absent)
+cargo leptos watch                  # the same without a config — hot reload on 127.0.0.1:6767 (builds WASM + server)
 cargo leptos build --release        # production build (server binary + target/site assets)
 cargo check                         # fast type check of the whole workspace
 just ci                             # lint + test — what GitHub Actions runs
 just test                           # cargo test --all-targets (offline: no NATS, no server)
 just lint                           # cargo clippy --all-targets -- -D warnings
-cargo run -- --config config.json --secrets ./secrets.json --debug   # run server binary directly (no WASM rebuild)
+cargo run -- --config example_config/config.json --secrets example_config/secrets.json --debug
+                                    # run the server binary directly (no WASM rebuild). Note it binds
+                                    # :3000 and serves no frontend unless LEPTOS_SITE_ADDR/_ROOT are set —
+                                    # `just dev` is the one that works. --connections <path> is optional:
+                                    # without it the file is derived from the config's name.
 
 docker compose up                   # NATS :4222 + publisher on test.subject, kafka :9092 + publisher on test.events, postgres :5432
 just test-http                      # hurl --test hurl/tests/*.hurl (needs the server running)
@@ -41,7 +46,7 @@ Three workspace crates:
 
 ### The pipeline model
 
-A **pipeline** is one `inputs → [transforms] → outputs` chain. A pipeline may have several inputs (merged into one stream) and several outputs (each gets every batch); `inputs` and `outputs` are JSON arrays, and there is no singular form. Pipelines are identified by `id` (from config, or a random `petname` if omitted) and form a **graph**: the `pipeline` input kind subscribes to another pipeline's output, so one pipeline can fan out to several downstream ones. `config.json` is the worked example and deliberately covers every component kind bar the `file` output: two roots (a NATS source and a dummy ticker), a fan-out of seven under the source, one pipeline (`everything`) fed by three inputs — two upstreams and a nats subject another pipeline publishes to — one pipeline with two outputs of different kinds, and one pipeline at depth 3. Keep it that way when adding a component — it's what the UI is inspected against, and `tests/graph.rs` builds the whole file.
+A **pipeline** is one `inputs → [transforms] → outputs` chain. A pipeline may have several inputs (merged into one stream) and several outputs (each gets every batch); `inputs` and `outputs` are JSON arrays, and there is no singular form. Pipelines are identified by `id` (from config, or a random `petname` if omitted) and form a **graph**: the `pipeline` input kind subscribes to another pipeline's output, so one pipeline can fan out to several downstream ones. `example_config/config.json` (with `config.connections.json` beside it) is the worked example and deliberately covers every component kind bar the `file` output, and every connection kind: two roots (a NATS source and a dummy ticker), a fan-out of seven under the source, one pipeline (`everything`) fed by three inputs — two upstreams and a nats subject another pipeline publishes to — one pipeline with two outputs of different kinds, and one pipeline at depth 3. Keep it that way when adding a component — it's what the UI is inspected against, and `tests/graph.rs` builds the whole file.
 
 Data flowing through is always `Arc<MessageBatch>` — a batch of `Arc<serde_json::Value>`. There is no typed schema; everything is untyped JSON, and transforms address fields by name.
 
@@ -55,11 +60,53 @@ Three object-safe traits define the plugin points, all in the root crate:
 
 Config types live in `kayak-core::config` and are pure data. The *building* of runtime objects from them lives in the root crate, `src/config.rs`, via three local traits (`BuildInputConfig`, `BuildTransformConfig`, `BuildOutputConfig`) implemented **on the core config enums** — this is how the orphan rule is worked around while keeping core wasm-friendly. Each enum variant delegates to a per-component `BuildInput`/`BuildTransform`/`BuildOutput` impl in `src/inputs/*.rs`, `src/transforms/*.rs`, `src/outputs/*.rs`.
 
-`BuildCtx` (defined in `src/lib.rs`) is threaded through every `build()` call. It carries `&mut HashMap<PipelineId, PipelineHandle>` — needed so a `pipeline` input can look up its upstream and register an mpsc sender on it — the `broadcast::Sender<UiEvent>`, and the `Arc<dyn SecretStore>` that `${NAME}` references resolve against.
+`BuildCtx` (defined in `src/lib.rs`) is threaded through every `build()` call. It carries `&mut HashMap<PipelineId, PipelineHandle>` — needed so a `pipeline` input can look up its upstream and register an mpsc sender on it — the `broadcast::Sender<UiEvent>`, the `Arc<dyn SecretStore>` that `${NAME}` references resolve against, and the `Arc<Connections>` a component's `connection` field is looked up in.
+
+### Connections
+
+The systems pipelines talk to are declared once under a name, in a third file
+beside the config, and components refer to them: `{"type": "kafka", "connection":
+"prod-kafka", "topic": "orders", "group": "kayak"}`. The split is **what the
+system needs (brokers, urls, credentials) against what this pipeline wants from
+it (topic, group, subject, table)** — there is no inline form, a component names
+a connection or it does not build. Types are in `kayak-core/src/connections.rs`
+(`ConnectionKind`, `Connections` — a `BTreeMap` newtype, so iteration order is
+the name order and the file is deterministic); file IO is `src/connections.rs`,
+mirroring `persist` rather than `layout`: JSON or YAML by extension, atomic
+write, and **written only by an explicit save**, because adding a connection
+changes what the server can build. The same save writes both files — a config
+saved without the connections it names would not start — and `revert` reloads
+the connections *first*, since the pipelines being rebuilt name them.
+
+One kind serves both directions (a `kafka` connection feeds a kafka input and a
+kafka output). The kind is checked as well as the name: `Connections::kafka/nats/
+postgres` return a `ConnectionError` that says which kind it actually is, or —
+for an unknown name — lists the ones that exist. `BuildCtx` carries an
+`Arc<Connections>` snapshot, so a component reads its settings once at build
+time and editing a connection afterwards reaches only new and rebuilt pipelines.
+Deleting one a running pipeline names is refused (409, `PipelineError::
+ConnectionInUse`, listing them).
+
+The path is `--connections <path>` — fixed for the process, which is what lets
+two configs share one file — or, without the flag, derived from the config's
+name *and format* (`config.json` → `config.connections.json`, `pipelines.yaml` →
+`pipelines.connections.yaml`; unlike the layout file, which is always JSON,
+because this one is hand-written). A derived file that is missing means "no
+connections"; one named with the flag has to exist.
+
+`Config::connections()` is the counterpart of `Config::upstreams()` — spelled
+out per kind on purpose, so a new component that talks to a configured system
+has to be added there and the compiler is what says so.
+
+**Adding a connection kind** touches: the struct + `ConnectionKind` variant in
+`kayak-core/src/connections.rs`, the typed accessor beside it, the `BuildCtx`
+helper in `src/lib.rs`, and a wire-format sample in `tests/config.rs`. The docs
+page, the `/api/docs` output and the "add connection" form all come from the
+schema reflection and need nothing.
 
 ### Secrets
 
-Config fields that can hold credentials are typed `Secret` (`kayak-core::config`), not `String`. `Secret` only ever holds the *unresolved* `${NAME}` template, which is what makes it safe to serialize back out of `GET /api/pipelines` and to compile for wasm. Resolution happens at build time via `ctx.resolve()` and yields a `secrets::Resolved`, whose `Display`/`Debug` print the template rather than the value — so error contexts can name a connection without leaking it. Reaching the real value takes `.expose()`; flag new call sites in review, and never put a `Resolved` into anything `Serialize`. Stores (`EnvStore`, `FileStore`, `ChainStore`) live in `src/secrets.rs`; `main.rs` chains env ahead of `--secrets <file>`. `src/testing.rs` has `MapSecretStore` for tests. See "secrets" in `readme.md`.
+Config fields that can hold credentials are typed `Secret` (`kayak-core::config`), not `String`. They all live on *connections* now rather than on components. `Secret` only ever holds the *unresolved* `${NAME}` template, which is what makes it safe to serialize back out of `GET /api/pipelines` and to compile for wasm. Resolution happens at build time via `ctx.resolve()` and yields a `secrets::Resolved`, whose `Display`/`Debug` print the template rather than the value — so error contexts can name a connection without leaking it. Reaching the real value takes `.expose()`; flag new call sites in review, and never put a `Resolved` into anything `Serialize`. Stores (`EnvStore`, `FileStore`, `ChainStore`) live in `src/secrets.rs`; `main.rs` chains env ahead of `--secrets <file>`. `src/testing.rs` has `MapSecretStore` for tests. See "secrets" in `readme.md`.
 
 Note that `$defs` in the generated schema now holds non-component types (`Secret`), so anything reflecting over the schema has to distinguish those from components — see the docs section below.
 
@@ -71,7 +118,9 @@ Buffering is an input decorator, not a transform: `InputConfig.buffer` wraps any
 
 ### Runtime & state
 
-`AppState` (`src/state.rs`) holds `Mutex<HashMap<PipelineId, PipelineHandle>>` and the UI event broadcast channel. Creating a pipeline builds a `PipelineRuntime` and `tokio::spawn`s its `run()` loop; each `Pipeline` owns a `CancellationToken` that `delete_pipeline` cancels, and the run loop `select!`s on it against the next input message. Downstream fan-out is a `Mutex<Vec<mpsc::Sender>>` on `Pipeline`, populated by `subscribe()`.
+`AppState` (`src/state.rs`) holds `Mutex<HashMap<PipelineId, PipelineHandle>>`, the connections (plus their own saved-snapshot), and the UI event broadcast channel. Creating a pipeline builds a `PipelineRuntime` and `tokio::spawn`s its `run()` loop; each `Pipeline` owns a `CancellationToken` that `delete_pipeline` cancels, and the run loop `select!`s on it against the next input message. Downstream fan-out is a `Mutex<Vec<mpsc::Sender>>` on `Pipeline`, populated by `subscribe()`.
+
+Lock order, worth preserving: the pipelines lock is taken *before* the connections lock and never the other way round — `delete_connection` asks `pipelines_using` first and lets that guard go before it touches the map.
 
 Note the concurrency shape: `std::sync::Mutex` guards, held across map lookups but never across `.await` — the lock is dropped/cloned out before awaiting sends. Worth preserving. `revert` obeys it the awkward way round: it cancels and takes the join handles out under the guard, drops the guard, *then* awaits them.
 
@@ -114,7 +163,7 @@ Pinned pipelines **keep their slot in the automatic flow** (`layout` overwrites 
 
 ### HTTP surface
 
-`src/main.rs` builds two routers and merges them: an `api` router with `Arc<AppState>` state (`POST/GET /api/pipelines`, `DELETE /api/pipelines/{id}`, `GET /events` SSE, `GET /api/docs`, `GET/PUT /api/layout`), and the Leptos router with `LeptosOptions` state plus `file_and_error_handler` fallback.
+`src/main.rs` builds two routers and merges them: an `api` router with `Arc<AppState>` state (`POST/GET /api/pipelines`, `DELETE /api/pipelines/{id}`, `POST/GET /api/connections`, `DELETE /api/connections/{id}`, `GET /events` SSE, `GET /api/docs`, `GET/PUT /api/layout`), and the Leptos router with `LeptosOptions` state plus `file_and_error_handler` fallback.
 
 `/events` is an SSE stream over the `UiEvent` broadcast; the frontend consumes it with `leptos_use::use_event_source` + `codee` JSON. Pipeline run loops only send events when `receiver_count() > 0`. This is explicitly marked temporary in `src/pipeline.rs`.
 
@@ -130,6 +179,8 @@ Nothing in there knows the name of any component — keep it that way. Notes for
 
 A `FieldDoc` carries `field_type` (`FieldType`) beside the human-readable `type_name`. That's the same reflection serving a second consumer: the "add pipeline" modal generates its form from it, so a new component gets working controls and validation for free. `FieldType::Json` is the honest fallback for anything with a shape of its own (a tagged union like `buffer`) — it renders as a JSON box rather than a control that can't work.
 
+`FieldType::Connection(kind)` works the same way and for the same reason, one step further: a `connection` field carries `#[schemars(extend("x-connection" = "kafka"))]`, and the marker holds the *kind* — "any connection" is the wrong set to offer, since a kafka input can only use a kafka connection. `Family::Connection` is a fourth family, so a connection kind documents itself on `/docs` and generates its own form through the same machinery a component does.
+
 `FieldType::PipelineId` is the one field type the schema alone can't derive: a pipeline id is a `String` like any other, so the field says so where it's declared — `#[schemars(extend("x-pipeline-id" = true))]` on `PipelineConfig.upstream` — and `docs.rs` looks for the marker, not for the field's name. The rule about not knowing component names covers their field names too, so any component that grows a reference to another pipeline gets the dropdown by adding that attribute. The options can't come from the schema either: they are the running graph, so `AddPipelineModal` derives them from the pipeline list and passes them down to `FieldEditor`. That control is the only one in the modal that reads its value back — the list can arrive after the modal opened, and a rebuild must re-mark what was already chosen rather than drop it.
 
 ### Editing the graph from the UI
@@ -140,7 +191,7 @@ The same applies to the edge handles: `ChannelGrip` and `PortGrip` are each two 
 
 Drags are tracked with window-level listeners rather than on the card (a fast pointer leaves the card behind, and a `mouseup` outside it would never arrive). The delta is divided by the zoom, applied to the geometry captured at press time rather than accumulated, and written into `arrangement` live so the edges follow; the `PUT` happens once, on release. It's a browser-tab property — the API accepts writes either way, which is fine for a dev tool but shouldn't be mistaken for enforcement. Edits apply to the runtime immediately, so `revert` (reload the file) is the only undo, and `unsaved changes` in the navbar is the only thing between a session's work and a restart.
 
-The `+` in the sidebar opens `AddPipelineModal` (`frontend/src/app.rs`), whose pure half is `frontend/src/form.rs` — drafts in, `POST /api/pipelines` body or a list of `FormError`s out, unit tested like `graph.rs`/`inspector.rs`/`docs.rs`. One non-obvious constraint shapes the component: the field boxes are **uncontrolled** (`value=` once, `on:input` writes, never reads back), because the field list is rebuilt when the kind or variant changes and a rebuild on every keystroke would destroy the `<input>` being typed into. `DraftSignals` exists for the same reason — per-part signals so typing doesn't invalidate the list.
+The sidebar has two tabs (`SidebarTab`), pipelines and connections, each with its own `+` and armed delete. The `+` in the pipelines tab opens `AddPipelineModal` (`frontend/src/app.rs`), whose pure half is `frontend/src/form.rs` — drafts in, `POST /api/pipelines` body or a list of `FormError`s out, unit tested like `graph.rs`/`inspector.rs`/`docs.rs`. One non-obvious constraint shapes the component: the field boxes are **uncontrolled** (`value=` once, `on:input` writes, never reads back), because the field list is rebuilt when the kind or variant changes and a rebuild on every keystroke would destroy the `<input>` being typed into. `DraftSignals` exists for the same reason — per-part signals so typing doesn't invalidate the list.
 
 `frontend/src/docs.rs` holds the page's pure logic (search filtering, grouping, anchors, doc-comment rendering) with unit tests, same convention as `graph.rs`/`inspector.rs`. One trap worth remembering: the docs lists are rebuilt with plain closures rather than `<For>`, because keying groups by family leaves stale components on screen when a filter changes a group's contents without changing its key.
 
@@ -148,4 +199,5 @@ The `+` in the sidebar opens `AddPipelineModal` (`frontend/src/app.rs`), whose p
 
 - `readme.md` holds the current TODO list — check it for what's in flight before proposing work.
 - Leptos config lives in the root `Cargo.toml` under `[[workspace.metadata.leptos]]`; `site-addr` there (6767) is what the binary actually binds, not the `--port` arg.
-- `Dockerfile` is a two-stage cargo-leptos build; the runtime image bakes in `config.json` and the `LEPTOS_SITE_*` env vars.
+- `Dockerfile` is a two-stage cargo-leptos build; the runtime image bakes in `example_config/config.json` (and the connections file beside it, which has to keep the same stem or it stops being found) and the `LEPTOS_SITE_*` env vars.
+- **`example_config/` is the sample everything is tried against**, and it is one directory because the set travels together: the connections and layout files are *derived* from the config's path, so they only find each other side by side. `tests/config.rs` and `tests/graph.rs` read the files from there by relative path, so moving or renaming them breaks those tests — which is the point, the sample is not allowed to rot. `secrets.json` is gitignored anywhere in the tree; `just dev` creates the sample's from `secrets.example.json`.

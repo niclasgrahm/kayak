@@ -21,10 +21,16 @@ const SEND_TIMEOUT: Duration = Duration::from_secs(30);
 
 impl BuildOutput for KafkaOutputConfig {
     fn build(self, ctx: &mut BuildCtx) -> Result<Box<dyn OutputDestination>> {
+        let cluster = ctx
+            .kafka_connection(&self.connection)
+            .context("the kafka output cannot be built")?;
         Ok(Box::new(KafkaOutput {
-            brokers: ctx
-                .resolve(&self.brokers)
-                .context("failed to resolve secrets in the kafka output brokers")?,
+            brokers: ctx.resolve(&cluster.brokers).with_context(|| {
+                format!(
+                    "failed to resolve secrets in the brokers of connection '{}'",
+                    self.connection
+                )
+            })?,
             topic: self.topic,
             producer: None,
         }))

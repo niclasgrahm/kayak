@@ -13,10 +13,16 @@ use std::sync::Arc;
 
 impl BuildInput for KafkaConfig {
     fn build(self, ctx: &mut BuildCtx) -> Result<Box<dyn InputSource>> {
+        let cluster = ctx
+            .kafka_connection(&self.connection)
+            .context("the kafka input cannot be built")?;
         Ok(Box::new(KafkaInput {
-            brokers: ctx
-                .resolve(&self.brokers)
-                .context("failed to resolve secrets in the kafka input brokers")?,
+            brokers: ctx.resolve(&cluster.brokers).with_context(|| {
+                format!(
+                    "failed to resolve secrets in the brokers of connection '{}'",
+                    self.connection
+                )
+            })?,
             topic: self.topic,
             group: self.group,
             start_at: self.start_at.unwrap_or(KafkaStartAt::Latest),

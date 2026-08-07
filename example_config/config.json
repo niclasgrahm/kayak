@@ -19,7 +19,7 @@
     "inputs": [
       {
         "type": "kafka",
-        "brokers": "localhost:9092",
+        "connection": "local-kafka",
         "topic": "test.events",
         "group": "kayak-sample",
         "start_at": "latest"
@@ -37,7 +37,7 @@
     "inputs": [
       {
         "type": "nats",
-        "urls": "nats://localhost:4222",
+        "connection": "local-nats",
         "subject": "test.subject"
       }
     ],
@@ -61,7 +61,7 @@
       },
       {
         "type": "nats",
-        "urls": "nats://localhost:4222",
+        "connection": "local-nats",
         "subject": "test.aggregated.max"
       }
     ],
@@ -72,7 +72,7 @@
       },
       {
         "type": "nats",
-        "urls": "nats://localhost:4222",
+        "connection": "local-nats",
         "subject": "test.everything"
       }
     ]
@@ -122,12 +122,8 @@
     "outputs": [
       {
         "type": "postgres",
-        "host": "localhost",
-        "database": "kayak",
-        "user": "kayak",
-        "password": "${POSTGRES_PASSWORD}",
-        "table": "hot_readings",
-        "port": 5432
+        "connection": "local-postgres",
+        "table": "hot_readings"
       }
     ]
   },
@@ -153,7 +149,7 @@
     "outputs": [
       {
         "type": "nats",
-        "urls": "nats://localhost:4222",
+        "connection": "local-nats",
         "subject": "test.aggregated.max"
       }
     ]
@@ -205,12 +201,8 @@
     "outputs": [
       {
         "type": "postgres",
-        "host": "localhost",
-        "database": "kayak",
-        "user": "kayak",
-        "password": "${POSTGRES_PASSWORD}",
-        "table": "sensor_sums",
-        "port": 5432
+        "connection": "local-postgres",
+        "table": "sensor_sums"
       }
     ]
   },
@@ -230,12 +222,8 @@
     "outputs": [
       {
         "type": "postgres",
-        "host": "localhost",
-        "database": "kayak",
-        "user": "kayak",
-        "password": "${POSTGRES_PASSWORD}",
-        "table": "readings",
-        "port": 5432
+        "connection": "local-postgres",
+        "table": "readings"
       },
       {
         "type": "stdout"
@@ -263,7 +251,7 @@
     "outputs": [
       {
         "type": "kafka",
-        "brokers": "localhost:9092",
+        "connection": "local-kafka",
         "topic": "test.slow"
       },
       {

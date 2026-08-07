@@ -18,14 +18,20 @@ impl BuildOutput for PostgresOutputConfig {
         // rejected at build time rather than on first insert: a bad table name
         // should fail the pipeline that owns it, not surface an hour later
         let table = Table::parse(&self.table)?;
+        let server = ctx
+            .postgres_connection(&self.connection)
+            .context("the postgres output cannot be built")?;
         Ok(Box::new(PostgresOutput {
-            host: self.host,
-            port: self.port.unwrap_or(DEFAULT_PORT),
-            database: self.database,
-            user: self.user,
-            password: ctx
-                .resolve(&self.password)
-                .context("failed to resolve secrets in the postgres output password")?,
+            host: server.host.clone(),
+            port: server.port.unwrap_or(DEFAULT_PORT),
+            database: server.database.clone(),
+            user: server.user.clone(),
+            password: ctx.resolve(&server.password).with_context(|| {
+                format!(
+                    "failed to resolve secrets in the password of connection '{}'",
+                    self.connection
+                )
+            })?,
             table,
             client: None,
         }))

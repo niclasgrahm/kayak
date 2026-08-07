@@ -6,7 +6,8 @@ use crate::BuildCtx;
 use crate::pipeline::Pipeline;
 use crate::secrets::{EnvStore, SecretStore};
 use kayak_core::config::Config;
-pub use kayak_core::{ConfigFormat, LayoutFile, PipelineId, UiEvent};
+use kayak_core::connections::ConnectionKind;
+pub use kayak_core::{ConfigFormat, ConnectionId, Connections, LayoutFile, PipelineId, UiEvent};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, MutexGuard};
@@ -24,6 +25,10 @@ pub struct PipelineHandle {
 pub enum PipelineError {
     NotFound(PipelineId),
     DuplicateId(PipelineId),
+    /// A connection someone asked to delete is still named by running
+    /// pipelines. Deleting it would leave them running on settings nothing
+    /// records, and the next revert would refuse to rebuild them.
+    ConnectionInUse(ConnectionId, Vec<PipelineId>),
     /// The config parsed, but describes a pipeline that can't be built — e.g.
     /// it names an upstream pipeline that doesn't exist. That's the caller's
     /// mistake, not ours.
@@ -36,6 +41,11 @@ impl std::fmt::Display for PipelineError {
         match self {
             Self::NotFound(id) => write!(f, "pipeline with id '{id}' not found"),
             Self::DuplicateId(id) => write!(f, "pipeline with id '{id}' already exists"),
+            Self::ConnectionInUse(id, used_by) => write!(
+                f,
+                "connection '{id}' is still used by {}",
+                used_by.join(", ")
+            ),
             // only this layer — the rest of the chain is reachable through
             // source(), so printing it here too would duplicate it
             Self::InvalidConfig(err) | Self::Internal(err) => write!(f, "{err}"),
@@ -93,6 +103,25 @@ pub struct AppState {
     /// loaded one in place, so "revert" keeps meaning what it meant a moment
     /// ago.
     config_path: Mutex<Option<PathBuf>>,
+    /// The connections file, when the operator named one with `--connections`.
+    ///
+    /// Fixed for the life of the process, unlike [`AppState::config_path`]:
+    /// pointing two configs at one shared connections file is exactly what the
+    /// flag is for, so it must not be quietly replaced by a save. When it is
+    /// `None` the file is *derived* from the config file instead — see
+    /// [`AppState::connections_path`] — which is what lets a server started
+    /// with neither flag still acquire both files from one save.
+    connections_file: Option<PathBuf>,
+    /// The systems the pipelines talk to, by name.
+    ///
+    /// Held beside the graph rather than inside it because that is the point of
+    /// them: one kafka cluster, named once, referred to by every pipeline that
+    /// reads a topic on it. Read when a pipeline is *built*, so a change here
+    /// reaches new and rebuilt pipelines rather than running ones.
+    connections: Mutex<Connections>,
+    /// The connections as last loaded or saved, rendered — the same
+    /// fingerprint trick [`AppState::saved`] uses, for the same question.
+    saved_connections: Mutex<Option<String>>,
     /// The one directory a save may write to. Fixed at startup and never
     /// derived from a request — see [`crate::persist::save_path`], which is
     /// what makes that a boundary rather than a default.
@@ -157,6 +186,9 @@ impl AppState {
             events,
             secrets,
             config_path: Mutex::new(None),
+            connections_file: None,
+            connections: Mutex::new(Connections::new()),
+            saved_connections: Mutex::new(None),
             save_dir,
             saved: Mutex::new(None),
             layout: Mutex::new(LayoutFile::default()),
@@ -172,6 +204,20 @@ impl AppState {
 
     pub fn subscribe_events(&self) -> broadcast::Receiver<UiEvent> {
         self.events.subscribe()
+    }
+
+    /// An empty server whose connections come from a file the operator named.
+    ///
+    /// Used by a `--connections` without a `--config`: there are no pipelines
+    /// yet, but the connections a UI-built one can refer to are already there.
+    pub fn with_secrets_and_connections(
+        secrets: Arc<dyn SecretStore>,
+        connections_file: Option<&Path>,
+    ) -> anyhow::Result<Self> {
+        let mut state = Self::with_secrets(secrets);
+        state.connections_file = connections_file.map(Path::to_path_buf);
+        state.load_connections_file()?;
+        Ok(state)
     }
 
     /// Resolves secrets from the environment only; see
@@ -191,17 +237,151 @@ impl AppState {
         path: &Path,
         secrets: Arc<dyn SecretStore>,
     ) -> anyhow::Result<Self> {
+        Self::from_config_with(path, secrets, None)
+    }
+
+    /// As [`AppState::from_config_with_secrets`], with the connections file
+    /// named outright rather than derived from the config's name.
+    ///
+    /// The connections are loaded **before** the pipelines, and that order is
+    /// not incidental: a component names a connection and cannot be built
+    /// without it, so a server that read them the other way round would refuse
+    /// to start every pipeline in the file.
+    pub fn from_config_with(
+        path: &Path,
+        secrets: Arc<dyn SecretStore>,
+        connections_file: Option<&Path>,
+    ) -> anyhow::Result<Self> {
         // a bare `config.json` names a file in the working directory, and
         // `parent()` of that is the empty path rather than "."
         let dir = match path.parent() {
             Some(dir) if !dir.as_os_str().is_empty() => dir.to_path_buf(),
             _ => PathBuf::from("."),
         };
-        let new_state = AppState::with_secrets_in(dir, secrets);
+        let mut new_state = AppState::with_secrets_in(dir, secrets);
+        new_state.connections_file = connections_file.map(Path::to_path_buf);
         *new_state.lock_config_path() = Some(path.to_path_buf());
+        new_state.load_connections_file()?;
         new_state.load_from_config_file()?;
         new_state.load_layout_file()?;
         Ok(new_state)
+    }
+
+    /// The connections file this server loads from and saves to: the
+    /// `--connections` one if there is one, otherwise the one derived from the
+    /// config file's name. `None` only when there is neither — a server started
+    /// bare, which acquires one the moment a save gives it a config file.
+    #[must_use]
+    pub fn connections_path(&self) -> Option<PathBuf> {
+        self.connections_file.clone().or_else(|| {
+            self.config_path()
+                .as_deref()
+                .map(crate::connections::connections_path)
+        })
+    }
+
+    /// Read whatever connections there are. A derived file that isn't there is
+    /// no connections at all; one the operator named has to exist.
+    fn load_connections_file(&self) -> anyhow::Result<()> {
+        let Some(path) = self.connections_path() else {
+            return Ok(());
+        };
+        let connections = if self.connections_file.is_some() {
+            tracing::info!("loading connections from {}", path.display());
+            crate::connections::read_required(&path)?
+        } else {
+            crate::connections::read(&path)?
+        };
+        if !connections.is_empty() {
+            tracing::debug!(
+                "loaded {} connections from {}",
+                connections.len(),
+                path.display()
+            );
+        }
+        *self.lock_saved_connections() =
+            crate::connections::render(&connections, kayak_core::ConfigFormat::Json).ok();
+        *self.lock_connections() = connections;
+        Ok(())
+    }
+
+    fn lock_connections(&self) -> MutexGuard<'_, Connections> {
+        self.connections.lock().unwrap_or_else(|poisoned| {
+            tracing::warn!("connections lock was poisoned; recovering");
+            poisoned.into_inner()
+        })
+    }
+
+    fn lock_saved_connections(&self) -> MutexGuard<'_, Option<String>> {
+        self.saved_connections.lock().unwrap_or_else(|poisoned| {
+            tracing::warn!("saved-connections lock was poisoned; recovering");
+            poisoned.into_inner()
+        })
+    }
+
+    /// The connections as the UI lists them, and as a build reads them.
+    #[must_use]
+    pub fn connections(&self) -> Connections {
+        self.lock_connections().clone()
+    }
+
+    /// Add a connection under a name that isn't taken yet.
+    ///
+    /// Running pipelines are untouched: a connection is read when a component
+    /// is built, so this is only about what the *next* build can name. Nothing
+    /// is written to disk — that is the explicit save, the same as a pipeline.
+    pub fn create_connection(
+        &self,
+        id: ConnectionId,
+        connection: ConnectionKind,
+    ) -> Result<(), PipelineError> {
+        let mut connections = self.lock_connections();
+        if connections.contains(&id) {
+            return Err(PipelineError::DuplicateId(id));
+        }
+        tracing::debug!("connection created: {id} ({})", connection.type_name());
+        connections.insert(id, connection);
+        Ok(())
+    }
+
+    /// Remove a connection, unless a running pipeline still names it.
+    ///
+    /// Refusing is the useful answer: the pipelines using it keep running
+    /// either way — they hold their own settings — but the graph would no
+    /// longer describe itself, and the next revert would fail to rebuild them.
+    /// Deleting those pipelines first is the honest order to do it in.
+    pub fn delete_connection(&self, id: &str) -> Result<(), PipelineError> {
+        let used_by = self.pipelines_using(id);
+        if !used_by.is_empty() {
+            return Err(PipelineError::ConnectionInUse(id.to_string(), used_by));
+        }
+        let mut connections = self.lock_connections();
+        if connections.remove(id).is_none() {
+            return Err(PipelineError::NotFound(id.to_string()));
+        }
+        tracing::debug!("connection deleted: {id}");
+        Ok(())
+    }
+
+    /// The ids of the running pipelines that name this connection, in id order
+    /// so the error reads the same twice.
+    #[must_use]
+    pub fn pipelines_using(&self, connection_id: &str) -> Vec<PipelineId> {
+        let app = self.lock_pipelines();
+        let mut used_by: Vec<PipelineId> = app
+            .values()
+            .filter(|handle| {
+                handle
+                    .shared
+                    .config
+                    .connections()
+                    .iter()
+                    .any(|named| named.as_str() == connection_id)
+            })
+            .map(|handle| handle.shared.id.clone())
+            .collect();
+        used_by.sort();
+        used_by
     }
 
     /// Read the arrangement that belongs to the config file, if there is one.
@@ -313,8 +493,12 @@ impl AppState {
             );
         };
         // parse first: it costs one read and saves tearing down a working graph
-        // for a file that was never going to load
+        // for a file that was never going to load. Both files, since either one
+        // being broken by hand would strand the rebuild halfway.
         let _ = crate::persist::read(&path)?;
+        if let Some(connections) = self.connections_path() {
+            let _ = crate::connections::read(&connections)?;
+        }
 
         // Cancel everything and take the join handles out, then drop the guard:
         // this is a `std::sync::Mutex` and must not be held across an await.
@@ -347,6 +531,11 @@ impl AppState {
             );
         }
 
+        // back to what is on disk means both files, and the connections have to
+        // land first: the pipelines about to be rebuilt name them
+        self.load_connections_file().context(
+            "the running pipelines were stopped, but the connections file could not be reloaded",
+        )?;
         self.load_from_config_file().context(
             "the running pipelines were stopped, but the config file could not be reloaded",
         )?;
@@ -402,6 +591,9 @@ impl AppState {
         if self.config_path().is_none() {
             return false;
         }
+        if self.connections_changed() {
+            return true;
+        }
         let app = self.lock_pipelines();
         let current = Self::fingerprint(&app);
         let saved = self.lock_saved();
@@ -409,6 +601,26 @@ impl AppState {
             (Some(current), Some(saved)) => current != saved,
             // a render that failed says nothing either way; claiming "unsaved"
             // is the answer that can't cost someone their work
+            _ => true,
+        }
+    }
+
+    /// Whether the connections have diverged from the file, by the same
+    /// rendered-bytes comparison the pipelines use.
+    ///
+    /// It counts as an unsaved change for the same reason a pipeline does: a
+    /// connection added in the UI is something the running server can build
+    /// against, and a restart without a save would lose it.
+    fn connections_changed(&self) -> bool {
+        let current =
+            crate::connections::render(&self.lock_connections(), kayak_core::ConfigFormat::Json)
+                .ok();
+        let saved = self.lock_saved_connections();
+        match (&current, &*saved) {
+            (Some(current), Some(saved)) => current != saved,
+            // nothing loaded and nothing added is not a change; anything else
+            // that can't be rendered errs towards "unsaved"
+            (Some(current), None) => current.trim() != "{}",
             _ => true,
         }
     }
@@ -476,12 +688,70 @@ impl AppState {
                 dangling.join(", ")
             );
         }
+        // the same warning for the other file: a pipeline naming a connection
+        // that isn't configured is saved, and won't start
+        let unknown = self.unknown_connections(&configs);
+        if !unknown.is_empty() {
+            tracing::warn!(
+                "saving {} with connections that are not configured: {}; those pipelines will not start",
+                target.display(),
+                unknown.join(", ")
+            );
+        }
         crate::persist::write(&target, configs, format)
             .with_context(|| format!("failed to save the config to {}", target.display()))?;
         self.mark_saved(&app);
+        drop(app);
         self.adopt(&target);
+        // after `adopt`, so a server that had no config file until a moment ago
+        // now has somewhere to derive the connections file from
+        self.save_connections()?;
         tracing::info!("config saved to {} as {format}", target.display());
         Ok(target)
+    }
+
+    /// Write the connections out beside the config, and treat that as the new
+    /// baseline.
+    ///
+    /// Part of the same save rather than a button of its own: the two files
+    /// describe one system, and a config saved without the connections it names
+    /// is a config that won't start. The path is not the caller's to choose —
+    /// it is the `--connections` file or the one derived from the config's
+    /// name, so a save-as of the pipelines does not scatter connection files
+    /// around.
+    fn save_connections(&self) -> Result<(), PipelineError> {
+        let Some(path) = self.connections_path() else {
+            return Ok(());
+        };
+        let connections = self.connections();
+        // an empty set that was never on disk needs no file: writing `{}` into
+        // a repository that has no connections would be noise
+        if connections.is_empty() && !path.exists() {
+            return Ok(());
+        }
+        let format = crate::persist::format_of(&path);
+        crate::connections::write(&path, &connections, format)
+            .with_context(|| format!("failed to save the connections to {}", path.display()))?;
+        *self.lock_saved_connections() =
+            crate::connections::render(&connections, kayak_core::ConfigFormat::Json).ok();
+        tracing::info!("connections saved to {}", path.display());
+        Ok(())
+    }
+
+    /// The connections these pipelines name that no connection is configured
+    /// for, in name order and without repeats. The counterpart of
+    /// [`crate::persist::dangling_upstreams`], across the two files.
+    fn unknown_connections(&self, configs: &[Config]) -> Vec<ConnectionId> {
+        let connections = self.lock_connections();
+        let mut unknown: Vec<ConnectionId> = configs
+            .iter()
+            .flat_map(Config::connections)
+            .filter(|id| !connections.contains(id))
+            .cloned()
+            .collect();
+        unknown.sort();
+        unknown.dedup();
+        unknown
     }
 
     /// Make a just-written file the server's config file, if it hasn't got one.
@@ -553,12 +823,17 @@ impl AppState {
         if app.contains_key(id.as_str()) {
             return Err(PipelineError::DuplicateId(id));
         }
+        // a snapshot, taken before the map is borrowed: what this pipeline is
+        // built from is the connections as they stand now, and editing one
+        // later doesn't reach back into it
+        let connections = Arc::new(self.connections());
         let ctx = BuildCtx::with_secrets(
             app,
             id.clone(),
             self.events.clone(),
             Arc::clone(&self.secrets),
-        );
+        )
+        .with_connections(connections);
         // building the runtime only fails on things the config got wrong
         // (unknown upstream, unbuildable component)
         let join_handle = pipeline.start(ctx).map_err(|e| {

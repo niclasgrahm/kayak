@@ -12,10 +12,16 @@ use kayak_core::config::NatsConfig;
 
 impl BuildInput for NatsConfig {
     fn build(self, ctx: &mut BuildCtx) -> Result<Box<dyn InputSource>> {
+        let server = ctx
+            .nats_connection(&self.connection)
+            .context("the nats input cannot be built")?;
         Ok(Box::new(NatsInput {
-            urls: ctx
-                .resolve(&self.urls)
-                .context("failed to resolve secrets in the nats input url")?,
+            urls: ctx.resolve(&server.urls).with_context(|| {
+                format!(
+                    "failed to resolve secrets in the url of connection '{}'",
+                    self.connection
+                )
+            })?,
             subject: self.subject,
             sub: None,
         }))

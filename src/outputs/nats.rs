@@ -12,10 +12,16 @@ use crate::{
 
 impl BuildOutput for NatsOutputConfig {
     fn build(self, ctx: &mut BuildCtx) -> anyhow::Result<Box<dyn OutputDestination>> {
+        let server = ctx
+            .nats_connection(&self.connection)
+            .context("the nats output cannot be built")?;
         Ok(Box::new(NatsOutput {
-            urls: ctx
-                .resolve(&self.urls)
-                .context("failed to resolve secrets in the nats output url")?,
+            urls: ctx.resolve(&server.urls).with_context(|| {
+                format!(
+                    "failed to resolve secrets in the url of connection '{}'",
+                    self.connection
+                )
+            })?,
             subject: self.subject,
             client: None,
         }))

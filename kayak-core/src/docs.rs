@@ -12,18 +12,24 @@
 //! renders it, and `GET /api/docs` serves it as JSON.
 
 use crate::config::{InputConfig, InputKind, OutputKind, TransformKind};
+use crate::connections::ConnectionKind;
 use schemars::schema_for;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-/// Which of the three plugin points a component plugs into. Also the grouping
-/// the docs sidebar uses, which is why it's ordered the way a pipeline reads.
+/// Which plugin point a component plugs into. Also the grouping the docs
+/// sidebar uses, which is why it's ordered the way a pipeline reads.
+///
+/// A connection isn't a stage of a pipeline, but it is configured the same way
+/// — a tagged struct with doc-commented fields — so it documents itself and
+/// generates its form through exactly this machinery.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Family {
     Input,
     Transform,
     Output,
+    Connection,
 }
 
 impl Family {
@@ -33,6 +39,7 @@ impl Family {
             Self::Input => "inputs",
             Self::Transform => "transforms",
             Self::Output => "outputs",
+            Self::Connection => "connections",
         }
     }
 }
@@ -59,6 +66,12 @@ pub enum FieldType {
     /// knows — so it renders as a dropdown of the pipelines that exist rather
     /// than as a box to retype an id into.
     PipelineId,
+    /// The name of a configured connection, of the kind carried here (`kafka`,
+    /// `nats`, ...). Like [`FieldType::PipelineId`] it is a string on the wire
+    /// whose valid answers are server state, so it renders as a dropdown — of
+    /// the connections of *that kind*, since a nats connection is no use to a
+    /// kafka input.
+    Connection(String),
     /// Something with a shape of its own (an object, a list, a tagged union
     /// like an input's `buffer`). There is no general widget for those, so the
     /// form takes them as literal JSON.
@@ -154,7 +167,19 @@ pub fn all_components() -> Vec<ComponentDoc> {
 
     docs.extend(of(json_schema_of_transform(), Family::Transform));
     docs.extend(of(json_schema_of_output(), Family::Output));
+    docs.extend(of(json_schema_of_connection(), Family::Connection));
     docs
+}
+
+/// Just the connections, for the places that offer *those* rather than
+/// pipeline components — the "add connection" form. A filter over
+/// [`all_components`] rather than a second reflection, so the two can't drift.
+#[must_use]
+pub fn connection_components() -> Vec<ComponentDoc> {
+    all_components()
+        .into_iter()
+        .filter(|c| c.family == Family::Connection)
+        .collect()
 }
 
 /// The fields every input has, whatever its kind — the ones `InputConfig`
@@ -174,6 +199,10 @@ fn json_schema_of_transform() -> Value {
 
 fn json_schema_of_output() -> Value {
     serde_json::to_value(schema_for!(OutputKind)).unwrap_or(Value::Null)
+}
+
+fn json_schema_of_connection() -> Value {
+    serde_json::to_value(schema_for!(ConnectionKind)).unwrap_or(Value::Null)
 }
 
 /// Read the components out of one `#[serde(tag = "type")]` enum's schema.
@@ -288,6 +317,9 @@ fn type_name_of(root: &Value, schema: &Value) -> String {
     if is_pipeline_id(schema) {
         return "pipeline id".to_string();
     }
+    if let Some(kind) = connection_kind(schema) {
+        return format!("{kind} connection");
+    }
     // how an `Option<T>` arrives: T or null. The null half is already said by
     // the field being optional, so it would only add noise here.
     if let Some(branches) = schema["anyOf"].as_array() {
@@ -352,6 +384,17 @@ fn is_pipeline_id(schema: &Value) -> bool {
     schema[PIPELINE_ID_MARKER] == Value::Bool(true)
 }
 
+/// The same idea for connections, one step further: the marker carries the
+/// *kind* of connection the field wants (`#[schemars(extend("x-connection" =
+/// "kafka"))]`), because "any connection" isn't a useful answer — a kafka input
+/// can only use a kafka connection, and the form should offer those and no
+/// others.
+const CONNECTION_MARKER: &str = "x-connection";
+
+fn connection_kind(schema: &Value) -> Option<&str> {
+    schema[CONNECTION_MARKER].as_str()
+}
+
 fn join_values<'a>(values: impl Iterator<Item = &'a str>) -> String {
     values.collect::<Vec<_>>().join(" | ")
 }
@@ -365,6 +408,9 @@ fn join_values<'a>(values: impl Iterator<Item = &'a str>) -> String {
 fn field_type_of(root: &Value, schema: &Value) -> FieldType {
     if is_pipeline_id(schema) {
         return FieldType::PipelineId;
+    }
+    if let Some(kind) = connection_kind(schema) {
+        return FieldType::Connection(kind.to_string());
     }
     // `Option<T>` is T here too: whether it may be omitted is the `required`
     // flag's job, not the widget's
@@ -401,10 +447,23 @@ fn field_type_of(root: &Value, schema: &Value) -> FieldType {
 mod tests {
     use super::*;
 
+    /// The first component with this tag, which is the input one where a tag is
+    /// shared. `nats` names an input, an output *and* a connection, so anything
+    /// asking about one of the others has to say which — see [`in_family`].
     fn component(kind: &str) -> ComponentDoc {
         match all_components().into_iter().find(|c| c.kind == kind) {
             Some(c) => c,
             None => panic!("no component documented for '{kind}'"),
+        }
+    }
+
+    fn in_family(kind: &str, family: Family) -> ComponentDoc {
+        match all_components()
+            .into_iter()
+            .find(|c| c.kind == kind && c.family == family)
+        {
+            Some(c) => c,
+            None => panic!("no {} component documented for '{kind}'", family.label()),
         }
     }
 
@@ -427,6 +486,7 @@ mod tests {
             json_schema_of_input(),
             json_schema_of_transform(),
             json_schema_of_output(),
+            json_schema_of_connection(),
         ]
         .iter()
         .flat_map(|schema| {
@@ -466,7 +526,7 @@ mod tests {
     #[test]
     fn required_and_optional_fields_are_distinguished() {
         let nats = component("nats");
-        assert!(field(&nats, "urls").required);
+        assert!(field(&nats, "connection").required);
         assert!(field(&nats, "subject").required);
         // `buffer` is an Option, and optional on the wire
         assert!(!field(&nats, "buffer").required);
@@ -478,13 +538,13 @@ mod tests {
     fn required_fields_come_first_in_declaration_order() {
         assert_eq!(
             field_names(&component("nats")),
-            ["urls", "subject", "buffer"]
+            ["connection", "subject", "buffer"]
         );
     }
 
     #[test]
     fn field_descriptions_come_from_field_doc_comments() {
-        let urls = field(&component("nats"), "urls").clone();
+        let urls = field(&in_family("nats", Family::Connection), "urls").clone();
         let description = urls.description.unwrap_or_default();
         assert!(
             description.contains("${NAME}"),
@@ -573,7 +633,7 @@ mod tests {
         );
         // a `Secret` is transparently a string, so it edits like one
         assert_eq!(
-            field(&component("nats"), "urls").field_type,
+            field(&in_family("nats", Family::Connection), "urls").field_type,
             FieldType::Text
         );
         assert_eq!(
@@ -602,6 +662,47 @@ mod tests {
         assert_eq!(
             field(&component("nats"), "subject").field_type,
             FieldType::Text
+        );
+    }
+
+    /// A connection is configured exactly like a component, so it documents
+    /// itself through the same reflection — and the `/docs` page and the "add
+    /// connection" form both come out of this with nothing written by hand.
+    #[test]
+    fn connections_are_documented_as_their_own_family() {
+        let kinds: Vec<String> = connection_components()
+            .into_iter()
+            .map(|c| c.kind)
+            .collect();
+        assert_eq!(kinds, ["kafka", "nats", "postgres"]);
+
+        let kafka = in_family("kafka", Family::Connection);
+        assert_eq!(field_names(&kafka), ["brokers"]);
+        // ...and it is not the kafka *input*, which has moved its brokers here
+        assert!(!field_names(&component("kafka")).contains(&"brokers"));
+    }
+
+    /// The connection reference is a `String` like any other, so without the
+    /// marker the form would render a box to retype a name into. The kind rides
+    /// along because "any connection" is the wrong set to offer.
+    #[test]
+    fn a_field_that_names_a_connection_says_which_kind_it_wants() {
+        let kafka_input = component("kafka");
+        let connection = field(&kafka_input, "connection");
+        assert_eq!(
+            connection.field_type,
+            FieldType::Connection("kafka".to_string())
+        );
+        assert_eq!(connection.type_name, "kafka connection");
+
+        // each component asks for the kind it can actually use
+        assert_eq!(
+            field(&in_family("postgres", Family::Output), "connection").field_type,
+            FieldType::Connection("postgres".to_string())
+        );
+        assert_eq!(
+            field(&in_family("nats", Family::Output), "connection").field_type,
+            FieldType::Connection("nats".to_string())
         );
     }
 
@@ -639,7 +740,7 @@ mod tests {
     /// `Option<u16>` is an integer that may be omitted, not a nullable oddity.
     #[test]
     fn an_optional_scalar_is_typed_by_its_inner_type() {
-        let postgres = component("postgres");
+        let postgres = in_family("postgres", Family::Connection);
         let port = field(&postgres, "port");
         assert!(!port.required);
         assert_eq!(port.field_type, FieldType::Integer);

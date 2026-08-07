@@ -12,6 +12,7 @@
 use std::collections::BTreeSet;
 
 use kayak_core::config::{Config, InputConfig, InputKind, OutputKind, TransformKind};
+use kayak_core::connections::{ConnectionKind, Connections};
 use schemars::schema_for;
 use serde_json::{Value, json};
 
@@ -29,14 +30,14 @@ fn input_samples() -> Vec<(&'static str, Value)> {
         ("dummy", json!({"type": "dummy", "duration": 5})),
         (
             "nats",
-            json!({"type": "nats", "urls": "nats://localhost:4222", "subject": "test.subject"}),
+            json!({"type": "nats", "connection": "local-nats", "subject": "test.subject"}),
         ),
         ("pipeline", json!({"type": "pipeline", "upstream": "p1"})),
         (
             "kafka",
             json!({
                 "type": "kafka",
-                "brokers": "localhost:9092",
+                "connection": "local-kafka",
                 "topic": "test.events",
                 "group": "kayak",
                 "start_at": "latest"
@@ -73,22 +74,45 @@ fn output_samples() -> Vec<(&'static str, Value)> {
         ("file", json!({"type": "file"})),
         (
             "nats",
-            json!({"type": "nats", "urls": "nats://localhost:4222", "subject": "out.subject"}),
+            json!({"type": "nats", "connection": "local-nats", "subject": "out.subject"}),
         ),
         (
             "kafka",
-            json!({"type": "kafka", "brokers": "localhost:9092", "topic": "out.events"}),
+            json!({"type": "kafka", "connection": "local-kafka", "topic": "out.events"}),
+        ),
+        (
+            "postgres",
+            json!({
+                "type": "postgres",
+                "connection": "local-postgres",
+                "table": "readings"
+            }),
+        ),
+    ]
+}
+
+/// One sample per connection kind, for the same reason the components have
+/// them: the connections file is a wire format someone commits, and the
+/// flatten/tag layout is as easy to break here as anywhere.
+fn connection_samples() -> Vec<(&'static str, Value)> {
+    vec![
+        (
+            "kafka",
+            json!({"type": "kafka", "brokers": "localhost:9092"}),
+        ),
+        (
+            "nats",
+            json!({"type": "nats", "urls": "nats://localhost:4222"}),
         ),
         (
             "postgres",
             json!({
                 "type": "postgres",
                 "host": "localhost",
-                "port": 5432,
                 "database": "kayak",
                 "user": "kayak",
                 "password": "${POSTGRES_PASSWORD}",
-                "table": "readings"
+                "port": 5432
             }),
         ),
     ]
@@ -131,6 +155,11 @@ fn every_component_kind_has_a_wire_format_sample() -> anyhow::Result<()> {
             "OutputKind",
             serde_json::to_value(schema_for!(OutputKind))?,
             sample_tags(&output_samples()),
+        ),
+        (
+            "ConnectionKind",
+            serde_json::to_value(schema_for!(ConnectionKind))?,
+            sample_tags(&connection_samples()),
         ),
     ];
 
@@ -193,6 +222,97 @@ fn every_component_sample_round_trips_unchanged() -> anyhow::Result<()> {
     Ok(())
 }
 
+/// A connection round-trips the same way a component does, and the file it
+/// lives in is a map of name to connection — that map *is* the wire format,
+/// both on disk and out of `GET /api/connections`.
+#[test]
+fn every_connection_sample_round_trips_unchanged() -> anyhow::Result<()> {
+    for (tag, connection) in connection_samples() {
+        let file = json!({"the-name": connection});
+        let parsed: Connections = serde_json::from_value(file.clone())?;
+        assert_eq!(
+            parsed.get("the-name").map(ConnectionKind::type_name),
+            Some(tag)
+        );
+        assert_eq!(
+            serde_json::to_value(&parsed)?,
+            file,
+            "connection '{tag}' changed shape"
+        );
+    }
+    Ok(())
+}
+
+/// A component names a connection and carries nothing of its own about the
+/// system: that split is the whole feature, and putting the brokers back on the
+/// input would silently make the connection optional again.
+#[test]
+fn a_component_refers_to_a_connection_rather_than_describing_one() {
+    for (name, sample) in input_samples().into_iter().chain(output_samples()) {
+        let Some(object) = sample.as_object() else {
+            panic!("'{name}' is not an object");
+        };
+        for moved in ["brokers", "urls", "host", "user", "password"] {
+            assert!(
+                !object.contains_key(moved),
+                "'{name}' still describes the connection itself ('{moved}')"
+            );
+        }
+    }
+}
+
+/// A component that names a connection must say so — leaving it out would
+/// deserialize into a config that can never be built.
+#[test]
+fn a_component_without_its_connection_is_rejected() {
+    let cases = [
+        json!({"type": "nats", "subject": "x"}),
+        json!({"type": "kafka", "topic": "x", "group": "g"}),
+    ];
+    for case in cases {
+        let config = json!({"id": "x", "inputs": [case.clone()], "transforms": [], "outputs": []});
+        assert!(
+            serde_json::from_value::<Config>(config).is_err(),
+            "expected {case} to be rejected"
+        );
+    }
+}
+
+/// The connections the repository's own config file names have to exist in the
+/// connections file beside it, or the sample everything is copied from does not
+/// start.
+#[test]
+fn the_repository_config_names_only_connections_that_are_configured() -> anyhow::Result<()> {
+    let configs: Vec<Config> =
+        serde_json::from_str(&std::fs::read_to_string("example_config/config.json")?)?;
+    let connections: Connections = serde_json::from_str(&std::fs::read_to_string(
+        "example_config/config.connections.json",
+    )?)?;
+    let named: Vec<&String> = configs.iter().flat_map(Config::connections).collect();
+    assert!(!named.is_empty(), "the sample should exercise connections");
+    for id in named {
+        assert!(
+            connections.contains(id),
+            "config.json names '{id}', which config.connections.json does not declare"
+        );
+    }
+    Ok(())
+}
+
+/// The YAML sample has to describe the same connections as the JSON one, for
+/// the same reason the two config files are kept in step.
+#[test]
+fn the_repository_yaml_connections_are_the_same_connections() -> anyhow::Result<()> {
+    let as_json: Connections = serde_json::from_str(&std::fs::read_to_string(
+        "example_config/config.connections.json",
+    )?)?;
+    let as_yaml: Connections = serde_norway::from_str(&std::fs::read_to_string(
+        "example_config/config.connections.yaml",
+    )?)?;
+    assert_eq!(as_json, as_yaml, "the two connection samples have drifted");
+    Ok(())
+}
+
 /// `buffer` on an input is a decorator that sits alongside the input's own
 /// fields — a shape that flatten makes easy to break.
 #[test]
@@ -232,6 +352,7 @@ fn an_input_without_a_buffer_is_valid() -> anyhow::Result<()> {
 fn unknown_component_types_are_rejected() {
     let cases = [
         json!({"id": "x", "inputs": [{"type": "kafka"}], "transforms": [], "outputs": [{"type": "stdout"}]}),
+        json!({"id": "x", "inputs": [{"type": "dummy", "duration": 1}], "transforms": [], "outputs": [{"type": "postgres", "connection": "c"}]}),
         json!({"id": "x", "inputs": [{"type": "dummy", "duration": 1}], "transforms": [{"type": "map"}], "outputs": [{"type": "stdout"}]}),
         json!({"id": "x", "inputs": [{"type": "dummy", "duration": 1}], "transforms": [], "outputs": [{"type": "s3"}]}),
     ];
@@ -247,7 +368,7 @@ fn unknown_component_types_are_rejected() {
 /// example every new pipeline gets copied from, and the Dockerfile bakes it in.
 #[test]
 fn the_repository_config_file_parses() -> anyhow::Result<()> {
-    let raw = std::fs::read_to_string("config.json")?;
+    let raw = std::fs::read_to_string("example_config/config.json")?;
     let configs: Vec<Config> = serde_json::from_str(&raw)?;
     assert!(
         !configs.is_empty(),
@@ -272,8 +393,10 @@ fn the_repository_config_file_parses() -> anyhow::Result<()> {
 /// sequences raw would fail on it while missing nothing.
 #[test]
 fn the_repository_yaml_config_describes_the_same_graph() -> anyhow::Result<()> {
-    let as_json: Vec<Config> = serde_json::from_str(&std::fs::read_to_string("config.json")?)?;
-    let as_yaml: Vec<Config> = serde_norway::from_str(&std::fs::read_to_string("config.yaml")?)?;
+    let as_json: Vec<Config> =
+        serde_json::from_str(&std::fs::read_to_string("example_config/config.json")?)?;
+    let as_yaml: Vec<Config> =
+        serde_norway::from_str(&std::fs::read_to_string("example_config/config.yaml")?)?;
     assert_eq!(
         serde_json::to_value(kayak::persist::ordered(as_yaml))?,
         serde_json::to_value(kayak::persist::ordered(as_json))?,

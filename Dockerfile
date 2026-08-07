@@ -27,7 +27,10 @@ WORKDIR /app
 
 COPY --from=builder /app/kayak-bin /app/kayak
 COPY --from=builder /app/site /app/site
-COPY config.json /app/config.json
+# the sample graph and the connections it names; the pair has to keep its
+# derived-name relationship, so both land in /app with the same stem
+COPY example_config/config.json /app/config.json
+COPY example_config/config.connections.json /app/config.connections.json
 
 ENV LEPTOS_SITE_ROOT="/app/site" \
   LEPTOS_SITE_PKG_DIR="pkg" \

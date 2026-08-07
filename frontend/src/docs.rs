@@ -9,7 +9,14 @@
 use kayak_core::docs::{ComponentDoc, Family};
 
 /// The families in pipeline order, which is the order the sidebar lists them.
-pub const FAMILIES: [Family; 3] = [Family::Input, Family::Transform, Family::Output];
+/// Connections come last: they are what the components above them refer to,
+/// so the page reads as a pipeline first and its plumbing after.
+pub const FAMILIES: [Family; 4] = [
+    Family::Input,
+    Family::Transform,
+    Family::Output,
+    Family::Connection,
+];
 
 /// A family and the components in it that matched the search. Families with no
 /// matches are dropped, so an empty sidebar means "nothing matched" rather than
@@ -35,6 +42,7 @@ fn family_slug(family: Family) -> &'static str {
         Family::Input => "input",
         Family::Transform => "transform",
         Family::Output => "output",
+        Family::Connection => "connection",
     }
 }
 
@@ -167,14 +175,14 @@ mod tests {
         assert_eq!(total(&nothing), 0);
     }
 
-    /// `nats` is both an input and an output, so a search for it has to find
-    /// both — and they need different anchors.
+    /// `nats` names an input, an output *and* the connection they share, so a
+    /// search for it has to find all three — and they need different anchors.
     ///
     /// Other components can match too (a description mentioning nats is a hit),
     /// which is the search working; what is pinned here is that the kind itself
     /// appears once per family.
     #[test]
-    fn a_kind_that_exists_in_two_families_is_listed_in_both() {
+    fn a_kind_that_exists_in_several_families_is_listed_in_each() {
         let groups = groups(&all_components(), "nats");
 
         let anchors: Vec<String> = groups
@@ -183,7 +191,7 @@ mod tests {
             .filter(|c| c.kind == "nats")
             .map(anchor_id)
             .collect();
-        assert_eq!(anchors, ["input-nats", "output-nats"]);
+        assert_eq!(anchors, ["input-nats", "output-nats", "connection-nats"]);
     }
 
     #[test]

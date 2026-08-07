@@ -1,0 +1,403 @@
+//! Named connections to the systems pipelines talk to.
+//!
+//! A kafka cluster or a nats server is usually shared: one pipeline per topic on
+//! the same brokers is the normal shape, and repeating the broker list — and its
+//! `${NAME}` secret references — in every one of them is both tedious and a way
+//! for them to drift apart. So the connection is declared *once*, under a name,
+//! and a component refers to it:
+//!
+//! ```json
+//! // connections.json
+//! { "prod-kafka": { "type": "kafka", "brokers": "${KAFKA_BROKERS}" } }
+//!
+//! // config.json
+//! { "type": "kafka", "connection": "prod-kafka", "topic": "orders", "group": "kayak" }
+//! ```
+//!
+//! The split between the two is "what does the *system* need" against "what does
+//! *this pipeline* want from it": brokers and credentials belong to the
+//! connection, the topic and consumer group to the component. There is no inline
+//! form — a component names a connection or it doesn't build.
+//!
+//! Connections hold [`Secret`]s, never resolved values, for the same reason
+//! configs do: this crate compiles to wasm for the frontend, and the file is
+//! meant to be committed. Resolution happens in the root crate at build time.
+//!
+//! A connection is *not* a runtime object. Nothing here opens a socket; two
+//! pipelines naming one connection each get their own client, built from the
+//! same settings. Pooling would be a separate change, and this is what it would
+//! be built on.
+
+use crate::config::Secret;
+use schemars::JsonSchema;
+use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
+
+/// What a connection is called. The name is the user's, and it is what a
+/// component's `connection` field holds.
+pub type ConnectionId = String;
+
+/// A kafka cluster: the brokers, and eventually whatever it takes to
+/// authenticate against them.
+#[derive(Clone, Debug, Deserialize, Serialize, JsonSchema, PartialEq, Eq)]
+#[schemars(title = "kafka")]
+pub struct KafkaConnection {
+    /// comma-separated broker list, e.g. `localhost:9092`. May reference
+    /// secrets as `${NAME}` — see "secrets" in the readme.
+    pub brokers: Secret,
+}
+
+/// A nats server, or a cluster of them.
+#[derive(Clone, Debug, Deserialize, Serialize, JsonSchema, PartialEq, Eq)]
+#[schemars(title = "nats")]
+pub struct NatsConnection {
+    /// connection url, e.g. `nats://localhost:4222`. May reference secrets as
+    /// `${NAME}` — see "secrets" in the readme.
+    pub urls: Secret,
+}
+
+/// A postgres database, as one role connects to it.
+///
+/// The database and the role are part of the connection; the *table* is not —
+/// that is what a particular output writes into, so it stays on the output.
+#[derive(Clone, Debug, Deserialize, Serialize, JsonSchema, PartialEq, Eq)]
+#[schemars(title = "postgres")]
+pub struct PostgresConnection {
+    /// server hostname, e.g. `localhost`
+    pub host: String,
+    /// the database to connect to
+    pub database: String,
+    /// the role to connect as
+    pub user: String,
+    /// that role's password. May reference secrets as `${NAME}` — see
+    /// "secrets" in the readme, and prefer a reference to a literal here.
+    pub password: Secret,
+    /// server port. Defaults to 5432.
+    // omitted rather than written as `null` when absent, so a connection saved
+    // back out is the file someone hand-wrote — same rule as an input's buffer
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub port: Option<u16>,
+}
+
+/// Every kind of system a connection can describe.
+///
+/// Tagged the same way the component enums are, so a connection reads like the
+/// components that use it. One kind serves both directions: a `kafka`
+/// connection is what a kafka input consumes from *and* what a kafka output
+/// publishes to.
+#[derive(Clone, Debug, Deserialize, Serialize, JsonSchema, PartialEq, Eq)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum ConnectionKind {
+    Kafka(KafkaConnection),
+    Nats(NatsConnection),
+    Postgres(PostgresConnection),
+}
+
+impl ConnectionKind {
+    /// The `type` tag that selects this kind — the same string a component's
+    /// `connection` field is matched against.
+    #[must_use]
+    pub fn type_name(&self) -> &'static str {
+        match self {
+            Self::Kafka(_) => KAFKA,
+            Self::Nats(_) => NATS,
+            Self::Postgres(_) => POSTGRES,
+        }
+    }
+}
+
+pub const KAFKA: &str = "kafka";
+pub const NATS: &str = "nats";
+pub const POSTGRES: &str = "postgres";
+
+/// What `POST /api/connections` takes: a name, and the connection itself
+/// flattened alongside it.
+///
+/// The name is a field here rather than a path segment because it is part of
+/// what is being created, and because the body then reads exactly like one
+/// entry of the file it will be written to.
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+pub struct CreateConnectionRequest {
+    pub id: ConnectionId,
+    #[serde(flatten)]
+    pub connection: ConnectionKind,
+}
+
+/// Everything in the connections file, by name.
+///
+/// A `BTreeMap` rather than a list of `{id, ...}` objects: the name is the
+/// identity, duplicates are impossible to express, and iteration is in name
+/// order — which is what makes the file deterministic to write, the same
+/// property the config file depends on.
+#[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(transparent)]
+pub struct Connections(BTreeMap<ConnectionId, ConnectionKind>);
+
+impl Connections {
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    #[must_use]
+    pub fn get(&self, id: &str) -> Option<&ConnectionKind> {
+        self.0.get(id)
+    }
+
+    #[must_use]
+    pub fn contains(&self, id: &str) -> bool {
+        self.0.contains_key(id)
+    }
+
+    /// Returns the connection that was there before, if any.
+    pub fn insert(
+        &mut self,
+        id: ConnectionId,
+        connection: ConnectionKind,
+    ) -> Option<ConnectionKind> {
+        self.0.insert(id, connection)
+    }
+
+    pub fn remove(&mut self, id: &str) -> Option<ConnectionKind> {
+        self.0.remove(id)
+    }
+
+    pub fn iter(&self) -> impl Iterator<Item = (&ConnectionId, &ConnectionKind)> {
+        self.0.iter()
+    }
+
+    #[must_use]
+    pub fn ids(&self) -> Vec<ConnectionId> {
+        self.0.keys().cloned().collect()
+    }
+
+    #[must_use]
+    pub fn len(&self) -> usize {
+        self.0.len()
+    }
+
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+
+    /// The kafka cluster called `id`, or an error naming what went wrong. The
+    /// three accessors exist so a component asks for the kind it can actually
+    /// use, and a mismatch is reported where it can say which kind was wanted.
+    pub fn kafka(&self, id: &str) -> Result<&KafkaConnection, ConnectionError> {
+        match self.lookup(id, KAFKA)? {
+            ConnectionKind::Kafka(c) => Ok(c),
+            other => Err(ConnectionError::wrong_kind(id, KAFKA, other)),
+        }
+    }
+
+    pub fn nats(&self, id: &str) -> Result<&NatsConnection, ConnectionError> {
+        match self.lookup(id, NATS)? {
+            ConnectionKind::Nats(c) => Ok(c),
+            other => Err(ConnectionError::wrong_kind(id, NATS, other)),
+        }
+    }
+
+    pub fn postgres(&self, id: &str) -> Result<&PostgresConnection, ConnectionError> {
+        match self.lookup(id, POSTGRES)? {
+            ConnectionKind::Postgres(c) => Ok(c),
+            other => Err(ConnectionError::wrong_kind(id, POSTGRES, other)),
+        }
+    }
+
+    /// An unknown name lists the ones that do exist: the usual cause is a typo
+    /// or a connection that was never added, and both are answered by the list.
+    fn lookup(&self, id: &str, wanted: &'static str) -> Result<&ConnectionKind, ConnectionError> {
+        self.0.get(id).ok_or_else(|| ConnectionError::Unknown {
+            id: id.to_string(),
+            wanted,
+            known: self.ids(),
+        })
+    }
+}
+
+impl FromIterator<(ConnectionId, ConnectionKind)> for Connections {
+    fn from_iter<T: IntoIterator<Item = (ConnectionId, ConnectionKind)>>(iter: T) -> Self {
+        Self(iter.into_iter().collect())
+    }
+}
+
+/// Why a component could not get the connection it asked for.
+///
+/// Both cases are the user's mistake in a config file rather than a runtime
+/// failure, so they carry enough to fix it without going and reading the other
+/// file.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ConnectionError {
+    Unknown {
+        id: ConnectionId,
+        wanted: &'static str,
+        known: Vec<ConnectionId>,
+    },
+    WrongKind {
+        id: ConnectionId,
+        wanted: &'static str,
+        found: &'static str,
+    },
+}
+
+impl ConnectionError {
+    fn wrong_kind(id: &str, wanted: &'static str, found: &ConnectionKind) -> Self {
+        Self::WrongKind {
+            id: id.to_string(),
+            wanted,
+            found: found.type_name(),
+        }
+    }
+}
+
+impl std::fmt::Display for ConnectionError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Unknown { id, wanted, known } => {
+                write!(f, "there is no connection called '{id}'")?;
+                if known.is_empty() {
+                    write!(f, "; no connections are configured")
+                } else {
+                    write!(f, "; configured connections are {}", known.join(", "))?;
+                    write!(f, " (a {wanted} connection is wanted here)")
+                }
+            }
+            Self::WrongKind { id, wanted, found } => write!(
+                f,
+                "connection '{id}' is a {found} connection, but a {wanted} connection is wanted here"
+            ),
+        }
+    }
+}
+
+impl std::error::Error for ConnectionError {}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn connections() -> Connections {
+        [
+            (
+                "prod-kafka".to_string(),
+                ConnectionKind::Kafka(KafkaConnection {
+                    brokers: "localhost:9092".into(),
+                }),
+            ),
+            (
+                "local-nats".to_string(),
+                ConnectionKind::Nats(NatsConnection {
+                    urls: "nats://localhost:4222".into(),
+                }),
+            ),
+        ]
+        .into_iter()
+        .collect()
+    }
+
+    #[test]
+    fn a_connection_is_found_by_name_and_kind() -> Result<(), ConnectionError> {
+        assert_eq!(
+            connections().kafka("prod-kafka")?.brokers.template(),
+            "localhost:9092"
+        );
+        assert_eq!(
+            connections().nats("local-nats")?.urls.template(),
+            "nats://localhost:4222"
+        );
+        Ok(())
+    }
+
+    /// The whole point of naming the kind on both sides: a nats connection in a
+    /// kafka input is a mistake that has to be caught where it can be explained,
+    /// not passed to a broker as a broker list.
+    #[test]
+    fn asking_for_the_wrong_kind_says_which_kind_it_actually_is() {
+        let Err(err) = connections().kafka("local-nats") else {
+            panic!("a nats connection was accepted as a kafka one");
+        };
+        assert_eq!(
+            err,
+            ConnectionError::WrongKind {
+                id: "local-nats".to_string(),
+                wanted: "kafka",
+                found: "nats",
+            }
+        );
+        let message = err.to_string();
+        assert!(message.contains("is a nats connection"), "{message}");
+    }
+
+    /// A typo is the common case, and the fix is in the *other* file — so the
+    /// error carries the names that do exist rather than sending someone to go
+    /// and look.
+    #[test]
+    fn an_unknown_connection_lists_the_ones_that_exist() {
+        let Err(err) = connections().kafka("prod-kafk") else {
+            panic!("an unknown connection was accepted");
+        };
+        let message = err.to_string();
+        assert!(
+            message.contains("no connection called 'prod-kafk'"),
+            "{message}"
+        );
+        assert!(message.contains("local-nats"), "{message}");
+        assert!(message.contains("prod-kafka"), "{message}");
+    }
+
+    #[test]
+    fn an_unknown_connection_on_an_empty_file_says_so() {
+        let Err(err) = Connections::new().kafka("prod-kafka") else {
+            panic!("an unknown connection was accepted");
+        };
+        let message = err.to_string();
+        assert!(
+            message.contains("no connections are configured"),
+            "{message}"
+        );
+    }
+
+    /// The file is a map of name to connection, and a connection is tagged the
+    /// same way a component is. This is the wire format the UI posts and the
+    /// file holds.
+    #[test]
+    fn the_file_is_a_map_of_name_to_tagged_connection() -> Result<(), serde_json::Error> {
+        let raw = serde_json::json!({
+            "prod-kafka": {"type": "kafka", "brokers": "${KAFKA_BROKERS}"},
+            "warehouse": {
+                "type": "postgres",
+                "host": "db",
+                "database": "kayak",
+                "user": "kayak",
+                "password": "${POSTGRES_PASSWORD}"
+            }
+        });
+        let parsed: Connections = serde_json::from_value(raw.clone())?;
+        assert_eq!(parsed.len(), 2);
+        assert_eq!(
+            parsed.get("warehouse").map(ConnectionKind::type_name),
+            Some("postgres")
+        );
+        // and back out unchanged: the file is committed, so a load-and-save
+        // must not rewrite it
+        assert_eq!(serde_json::to_value(&parsed)?, raw);
+        Ok(())
+    }
+
+    /// Names come out in order whatever order they went in, which is what makes
+    /// the written file deterministic.
+    #[test]
+    fn names_are_iterated_in_order() {
+        let mut connections = Connections::new();
+        for id in ["z", "a", "m"] {
+            connections.insert(
+                id.to_string(),
+                ConnectionKind::Nats(NatsConnection {
+                    urls: "nats://localhost:4222".into(),
+                }),
+            );
+        }
+        assert_eq!(connections.ids(), ["a", "m", "z"]);
+    }
+}

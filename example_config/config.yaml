@@ -1,7 +1,7 @@
 - id: sensors
   inputs:
   - type: nats
-    urls: nats://localhost:4222
+    connection: local-nats
     subject: test.subject
   transforms: []
   outputs:
@@ -26,12 +26,8 @@
     field: value
   outputs:
   - type: postgres
-    host: localhost
-    database: kayak
-    user: kayak
-    password: ${POSTGRES_PASSWORD}
+    connection: local-postgres
     table: sensor_sums
-    port: 5432
 - id: sensors_10s_avg
   inputs:
   - type: pipeline
@@ -58,7 +54,7 @@
     field: value
   outputs:
   - type: nats
-    urls: nats://localhost:4222
+    connection: local-nats
     subject: test.aggregated.max
 - id: hot_readings
   inputs:
@@ -72,12 +68,8 @@
       value: 90.0
   outputs:
   - type: postgres
-    host: localhost
-    database: kayak
-    user: kayak
-    password: ${POSTGRES_PASSWORD}
+    connection: local-postgres
     table: hot_readings
-    port: 5432
 - id: tagged_readings
   inputs:
   - type: pipeline
@@ -113,12 +105,8 @@
   transforms: []
   outputs:
   - type: postgres
-    host: localhost
-    database: kayak
-    user: kayak
-    password: ${POSTGRES_PASSWORD}
+    connection: local-postgres
     table: readings
-    port: 5432
   - type: stdout
 - id: everything
   inputs:
@@ -127,18 +115,18 @@
   - type: pipeline
     upstream: heartbeat
   - type: nats
-    urls: nats://localhost:4222
+    connection: local-nats
     subject: test.aggregated.max
   transforms: []
   outputs:
   - type: stdout
   - type: nats
-    urls: nats://localhost:4222
+    connection: local-nats
     subject: test.everything
 - id: kafka_events
   inputs:
   - type: kafka
-    brokers: localhost:9092
+    connection: local-kafka
     topic: test.events
     group: kayak-sample
     start_at: latest
@@ -157,7 +145,7 @@
       value: 400.0
   outputs:
   - type: kafka
-    brokers: localhost:9092
+    connection: local-kafka
     topic: test.slow
   - type: stdout
 - id: heartbeat_pairs

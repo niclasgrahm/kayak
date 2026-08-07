@@ -34,7 +34,7 @@ services:
       retries: 20
 
   # the kafka equivalent of the nats publisher: one json log line a second on
-  # test.events, which the `kafka_events` pipeline in config.json consumes
+  # test.events, which the `kafka_events` pipeline in example_config/config.json consumes
   kafka-publisher:
     image: apache/kafka:3.9.0
     depends_on:
@@ -48,8 +48,9 @@ services:
           sleep 1
         done | /opt/kafka/bin/kafka-console-producer.sh --bootstrap-server kafka:29092 --topic test.events
 
-  # the postgres output in config.json writes here. the password is what
-  # ${POSTGRES_PASSWORD} has to resolve to — see secrets.example.json
+  # the postgres output in example_config/config.json writes here. the password
+  # is what ${POSTGRES_PASSWORD} has to resolve to — see
+  # example_config/secrets.example.json
   postgres:
     image: postgres:17
     ports:

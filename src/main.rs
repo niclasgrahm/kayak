@@ -32,6 +32,13 @@ struct Args {
     /// single secret can be overridden for one run without editing the file.
     #[arg(long)]
     secrets: Option<PathBuf>,
+    /// The systems the pipelines connect to, as JSON or YAML — a kafka cluster
+    /// or a nats server declared once under a name, which a component's
+    /// `connection` field then refers to. Defaults to `<config>.connections.<ext>`
+    /// beside the config file; name one here to share a single file between
+    /// several configs. Holds `${NAME}` secret references, not secrets.
+    #[arg(long)]
+    connections: Option<PathBuf>,
     #[arg(long, default_value_t = 6767)]
     port: u16,
 }
@@ -66,10 +73,12 @@ async fn main() -> anyhow::Result<()> {
     tracing::info!("Starting server on {}", addr);
 
     let secrets = secret_store(args.secrets.as_ref()).context("failed to load secrets")?;
+    let connections = args.connections.as_deref();
     let state = match &args.config {
-        Some(path) => AppState::from_config_with_secrets(path, secrets)
+        Some(path) => AppState::from_config_with(path, secrets, connections)
             .context("failed to initialize app state from config")?,
-        None => AppState::with_secrets(secrets),
+        None => AppState::with_secrets_and_connections(secrets, connections)
+            .context("failed to load connections")?,
     };
 
     let conf = get_configuration(None)?;

@@ -1,6 +1,7 @@
 use gloo_net::http::Request;
 use kayak_core::{
-    ConfigFormat, LayoutFile, PipelineDto, SaveConfigRequest, SaveConfigResponse, SettingsDto,
+    ConfigFormat, Connections, LayoutFile, PipelineDto, SaveConfigRequest, SaveConfigResponse,
+    SettingsDto,
 };
 use serde_json::Value;
 
@@ -65,6 +66,43 @@ impl ApiClient {
 
     pub async fn delete_pipeline(&self, id: &str) -> Result<(), ApiError> {
         let resp = Request::delete(&format!("{}/api/pipelines/{id}", self.base))
+            .send()
+            .await?;
+        if resp.ok() {
+            Ok(())
+        } else {
+            Err(rejection(resp).await)
+        }
+    }
+
+    /// The systems pipelines can connect to, by name — the same map the
+    /// connections file holds.
+    pub async fn list_connections(&self) -> Result<Connections, ApiError> {
+        let resp = Request::get(&format!("{}/api/connections", self.base))
+            .send()
+            .await?;
+        Ok(resp.json::<Connections>().await?)
+    }
+
+    /// Add a connection. `connection` is `{"id": ..., "type": ..., ...}` as the
+    /// form built it — a `Value` for the same reason `create_pipeline` takes
+    /// one.
+    pub async fn create_connection(&self, connection: &Value) -> Result<(), ApiError> {
+        let resp = Request::post(&format!("{}/api/connections", self.base))
+            .json(connection)?
+            .send()
+            .await?;
+        if resp.ok() {
+            Ok(())
+        } else {
+            Err(rejection(resp).await)
+        }
+    }
+
+    /// Remove a connection. The server refuses — with a 409 naming them — while
+    /// a running pipeline still uses it.
+    pub async fn delete_connection(&self, id: &str) -> Result<(), ApiError> {
+        let resp = Request::delete(&format!("{}/api/connections/{id}", self.base))
             .send()
             .await?;
         if resp.ok() {
