@@ -11,6 +11,7 @@ pub mod form;
 pub mod graph;
 pub mod inspector;
 pub mod log;
+pub mod sidebar;
 
 #[cfg(feature = "hydrate")]
 #[wasm_bindgen::prelude::wasm_bindgen]

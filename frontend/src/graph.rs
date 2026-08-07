@@ -627,6 +627,70 @@ fn channel_at(start: f64, end: f64, offset: f64) -> f64 {
     snap((start + end) / 2.0 + offset).clamp(lo, hi)
 }
 
+/// How far apart the automatic separation puts two channels that would
+/// otherwise lie on the same line: one cell, the unit everything else on the
+/// canvas moves in, and far enough that two 2px lines read as two lines.
+const CHANNEL_STEP: f64 = GRID;
+
+/// How far off the half-way line the automatic separation is willing to go
+/// before it gives up and leaves an edge where it was. Six cells is more than
+/// the gap between two rows holds — [`route`] clamps long before this — so it is
+/// a bound on the search rather than on the answer.
+const MAX_CHANNEL_STEPS: u32 = 6;
+
+/// The offsets tried when a channel is placed automatically: the half-way line
+/// first, then a cell either side of it, then two, and so on. Nearest-first, so
+/// an edge only moves as far as it has to and a graph with room to spare looks
+/// exactly as it did before there was anything to separate.
+fn candidate_offsets() -> impl Iterator<Item = f64> {
+    std::iter::once(0.0).chain(
+        (1..=MAX_CHANNEL_STEPS).flat_map(|step| {
+            let d = f64::from(step) * CHANNEL_STEP;
+            [d, -d]
+        }),
+    )
+}
+
+/// A channel as the separator sees it: the line it lies on, and the stretch of
+/// that line it covers.
+///
+/// `line` is a y for a horizontal bar and an x for a vertical one, which is why
+/// the orientation is carried and compared — the same number means different
+/// places on the two.
+#[derive(Clone, Copy)]
+struct Segment {
+    vertical: bool,
+    line: f64,
+    lo: f64,
+    hi: f64,
+}
+
+impl Segment {
+    fn of(channel: Channel) -> Self {
+        let (line, across) = if channel.vertical {
+            (channel.at.1, channel.at.0)
+        } else {
+            (channel.at.0, channel.at.1)
+        };
+        Self {
+            vertical: channel.vertical,
+            line,
+            lo: across - channel.length / 2.0,
+            hi: across + channel.length / 2.0,
+        }
+    }
+
+    /// Whether the two would be drawn on top of each other. Touching end to end
+    /// doesn't count: that is two lines meeting at a point, which is what a
+    /// shared channel between adjacent fans looks like and is fine.
+    fn overlaps(&self, other: &Self) -> bool {
+        self.vertical == other.vertical
+            && near(self.line, other.line)
+            && self.lo < other.hi - 0.01
+            && other.lo < self.hi - 0.01
+    }
+}
+
 /// Where a channel ends up after being dragged by `delta` surface pixels.
 ///
 /// Snapped, like everything else on the canvas, and snapped on the *result* so
@@ -744,6 +808,12 @@ pub struct EdgePath {
     pub edge: Edge,
     pub path: String,
     pub channel: Option<Channel>,
+    /// The offset the channel was actually drawn at, which is the stored one
+    /// where there is one and the automatically chosen one otherwise. A drag
+    /// starts from here rather than from the layout file, so grabbing a line
+    /// that was separated automatically moves it from where it is rather than
+    /// snapping it back to the half-way line first.
+    pub channel_offset: f64,
     pub from_port: PortHandle,
     pub to_port: PortHandle,
 }
@@ -755,10 +825,12 @@ pub struct EdgePath {
 /// below it down, and a card that is dragged to the side of its parent changes
 /// which faces its edges use.
 ///
-/// The two passes are what the ports need. Which face an edge uses depends only
-/// on the pair of cards, but *where* on that face it attaches depends on how
-/// many other edges chose the same one — so every edge is assigned a face
-/// first, and only then a place on it.
+/// The three passes are what the ports and the channels need. Which face an
+/// edge uses depends only on the pair of cards, but *where* on that face it
+/// attaches depends on how many other edges chose the same one — so every edge
+/// is assigned a face first, and only then a place on it. Only once both ends
+/// are known is there a channel to place, and placing one takes knowing where
+/// all the others went ([`channel_offsets`]).
 #[must_use]
 pub fn edge_paths(
     pipelines: &[(PipelineId, Vec<PipelineId>)],
@@ -795,11 +867,11 @@ pub fn edge_paths(
 
     let slots = slots_on_faces(&assigned);
 
-    assigned
-        .into_iter()
-        .zip(slots)
+    let ports: Vec<(PortHandle, PortHandle)> = assigned
+        .iter()
+        .zip(&slots)
         .map(|(a, (out_slot, in_slot))| {
-            let end = |geom: CardGeom, side: Side, pinned: Option<f64>, slot: Slot| {
+            let end = |geom: CardGeom, side: Side, pinned: Option<f64>, slot: &Slot| {
                 let along =
                     pinned.unwrap_or_else(|| auto_along(geom, side, slot.index, slot.count));
                 PortHandle {
@@ -810,25 +882,106 @@ pub fn edge_paths(
                     pinned: pinned.is_some(),
                 }
             };
-            let from_port = end(a.from, a.from_side, a.pinned_from, out_slot);
-            let to_port = end(a.to, a.to_side, a.pinned_to, in_slot);
+            (
+                end(a.from, a.from_side, a.pinned_from, out_slot),
+                end(a.to, a.to_side, a.pinned_to, in_slot),
+            )
+        })
+        .collect();
 
+    let offsets = channel_offsets(&assigned, &ports, arrangement);
+
+    assigned
+        .into_iter()
+        .zip(ports)
+        .zip(offsets)
+        .map(|((a, (from_port, to_port)), channel_offset)| {
             let routed = route(
                 from_port.at,
                 a.from_side,
                 to_port.at,
                 a.to_side,
-                arrangement.edge_offset(&a.edge.from, &a.edge.to),
+                channel_offset,
             );
             EdgePath {
                 path: rounded_path(&routed.points, CORNER),
                 channel: routed.channel,
+                channel_offset,
                 from_port,
                 to_port,
                 edge: a.edge,
             }
         })
         .collect()
+}
+
+/// The offset every edge's channel is drawn at: the one the user stored where
+/// there is one, and otherwise the nearest line to half way that no other
+/// channel is already lying along.
+///
+/// This is what keeps a fan-out from being a single thick line. Every route
+/// between the same two rows would otherwise take the same half-way line, and a
+/// dozen of them would be drawn on top of each other with only their stubs
+/// showing — the graph's shape hidden in exactly the place it is most worth
+/// seeing. Dragging them apart by hand worked, and still does; doing it by hand
+/// on every graph did not.
+///
+/// Two rules of thumb decide the order. **Stored offsets are laid down first**,
+/// because they cannot move: an automatic channel gets out of the user's way
+/// rather than the other way round. **The rest go left to right**, which is the
+/// greedy order that packs intervals onto the fewest lines, and — because the
+/// search starts at half way and works outwards — keeps every line as close to
+/// where it would have been as the crowd allows.
+///
+/// Vertical stubs are not considered, only the middle segments: the ports are
+/// already fanned out across their faces, so two stubs coincide only when two
+/// ports do, and that is [`slots_on_faces`]' business.
+fn channel_offsets(
+    assigned: &[Assigned],
+    ports: &[(PortHandle, PortHandle)],
+    arrangement: &LayoutFile,
+) -> Vec<f64> {
+    let segment = |i: usize, offset: f64| {
+        let a = &assigned[i];
+        let (from, to) = &ports[i];
+        route(from.at, a.from_side, to.at, a.to_side, offset)
+            .channel
+            .map(Segment::of)
+    };
+    let stored: Vec<Option<f64>> = assigned
+        .iter()
+        .map(|a| arrangement.edge_offset(&a.edge.from, &a.edge.to))
+        .collect();
+
+    let mut order: Vec<usize> = (0..assigned.len()).collect();
+    order.sort_by(|&a, &b| {
+        // an edge with no middle segment has nothing to place and sorts last,
+        // where it costs nothing
+        let start = |i: usize| segment(i, 0.0).map_or(f64::MAX, |s| s.lo);
+        stored[a]
+            .is_none()
+            .cmp(&stored[b].is_none())
+            .then_with(|| start(a).total_cmp(&start(b)))
+            .then_with(|| a.cmp(&b))
+    });
+
+    let mut taken: Vec<Segment> = Vec::new();
+    let mut out = vec![0.0; assigned.len()];
+    for i in order {
+        let chosen = stored[i].or_else(|| {
+            candidate_offsets().find(|offset| {
+                segment(i, *offset).is_none_or(|s| !taken.iter().any(|t| t.overlaps(&s)))
+            })
+        });
+        // nothing within reach was free: leave the edge where it wanted to be
+        // and let it overlap, which is at least where the user will look for it
+        let chosen = chosen.unwrap_or(0.0);
+        out[i] = chosen;
+        if let Some(s) = segment(i, chosen) {
+            taken.push(s);
+        }
+    }
+    out
 }
 
 /// Where an edge attaches to a card, as drawn.
@@ -2085,10 +2238,11 @@ mod tests {
         );
     }
 
-    /// The layout file reaches the routes: an adjusted edge is drawn adjusted,
-    /// and its neighbours are not.
+    /// The layout file reaches the routes: an adjusted edge is drawn where it
+    /// was put, exactly, and the automatic separation works around it rather
+    /// than over it.
     #[test]
-    fn an_adjusted_edge_is_the_only_one_that_moves() {
+    fn an_adjusted_edge_is_drawn_where_it_was_put() {
         let pipelines = [
             pipeline("root", None),
             pipeline("a", Some("root")),
@@ -2098,18 +2252,150 @@ mod tests {
 
         let automatic = edge_paths(&pipelines, &placed, &LayoutFile::default());
         let mut arrangement = LayoutFile::default();
-        arrangement.set_edge_offset("root", "a", 60.0);
+        arrangement.set_edge_offset("root", "a", Some(60.0));
         let adjusted = edge_paths(&pipelines, &placed, &arrangement);
 
-        let path_to = |paths: &[EdgePath], to: &str| {
-            paths
-                .iter()
-                .find(|p| p.edge.to == to)
-                .map(|p| p.path.clone())
-                .expect("edge not drawn")
-        };
-        assert_ne!(path_to(&automatic, "a"), path_to(&adjusted, "a"));
-        assert_eq!(path_to(&automatic, "b"), path_to(&adjusted, "b"));
+        assert_ne!(drawn(&automatic, "a").path, drawn(&adjusted, "a").path);
+        assert_eq!(drawn(&adjusted, "a").channel_offset, 60.0);
+        assert_no_overlapping_channels(&adjusted);
+    }
+
+    /// Every channel the automatic separation places, as the separator sees
+    /// them — which is what "these two lines are drawn on top of each other"
+    /// means precisely.
+    fn channel_segments(paths: &[EdgePath]) -> Vec<(&Edge, Segment)> {
+        paths
+            .iter()
+            .filter_map(|p| p.channel.map(|c| (&p.edge, Segment::of(c))))
+            .collect()
+    }
+
+    fn assert_no_overlapping_channels(paths: &[EdgePath]) {
+        let segments = channel_segments(paths);
+        for (i, (edge, segment)) in segments.iter().enumerate() {
+            for (other_edge, other) in &segments[i + 1..] {
+                assert!(
+                    !segment.overlaps(other),
+                    "{}→{} and {}→{} are drawn along the same line",
+                    edge.from,
+                    edge.to,
+                    other_edge.from,
+                    other_edge.to
+                );
+            }
+        }
+    }
+
+    /// The default this change is about: a fan-out is several routes between the
+    /// same two rows, every one of them wanting the same half-way line. Left to
+    /// themselves they are drawn as one thick line with a few stubs coming out
+    /// of it — so they are spread onto lines of their own.
+    #[test]
+    fn a_fan_out_does_not_draw_its_routes_on_top_of_each_other() {
+        let pipelines: Vec<_> = std::iter::once(pipeline("root", None))
+            .chain(["a", "b", "c", "d", "e"].map(|id| pipeline(id, Some("root"))))
+            .collect();
+        let placed = lay(&pipelines, &no_heights());
+
+        let paths = edge_paths(&pipelines, &placed, &LayoutFile::default());
+        assert_eq!(paths.len(), 5);
+        assert_no_overlapping_channels(&paths);
+        // and each of them is still on the grid. The child directly under the
+        // root is a straight line with no channel at all, which is why this
+        // filters rather than unwraps.
+        for (edge, segment) in channel_segments(&paths) {
+            assert!(
+                on_grid(segment.line),
+                "the channel of {}→{} is off the grid at {}",
+                edge.from,
+                edge.to,
+                segment.line
+            );
+        }
+    }
+
+    /// A join is the same problem upside down, and the same answer: several
+    /// parents feeding one child, arriving on lines of their own.
+    ///
+    /// Placed by hand rather than laid out, because the automatic layout centres
+    /// a child under its parents and the routes then leave in opposite
+    /// directions. Parents stacked to one side of their child is the shape where
+    /// they all run the same way along the same line.
+    #[test]
+    fn a_join_does_not_draw_its_routes_on_top_of_each_other() {
+        let pipelines = vec![
+            pipeline("a", None),
+            pipeline("b", None),
+            pipeline("c", None),
+            pipeline_with("sink", &["a", "b", "c"]),
+        ];
+        let placed = HashMap::from([
+            ("a".to_string(), card(0.0, 0.0, CARD_WIDTH, 200.0)),
+            ("b".to_string(), card(400.0, 0.0, CARD_WIDTH, 200.0)),
+            ("c".to_string(), card(800.0, 0.0, CARD_WIDTH, 200.0)),
+            ("sink".to_string(), card(2000.0, 600.0, CARD_WIDTH, 200.0)),
+        ]);
+
+        assert_no_overlapping_channels(&edge_paths(&pipelines, &placed, &LayoutFile::default()));
+    }
+
+    /// Separation is a last resort, not a style: an edge with the half-way line
+    /// to itself stays on it, so a graph with room to spare is drawn exactly as
+    /// it was before there was anything to separate.
+    #[test]
+    fn a_channel_with_nothing_in_its_way_stays_on_the_half_way_line() {
+        let pipelines = vec![
+            pipeline("left", None),
+            pipeline("left-child", Some("left")),
+            pipeline("right", None),
+            pipeline("right-child", Some("right")),
+        ];
+        // two pairs, far enough apart that the two channels share a line but
+        // not a stretch of it
+        let placed = HashMap::from([
+            ("left".to_string(), card(0.0, 0.0, CARD_WIDTH, 200.0)),
+            (
+                "left-child".to_string(),
+                card(400.0, 600.0, CARD_WIDTH, 200.0),
+            ),
+            ("right".to_string(), card(4000.0, 0.0, CARD_WIDTH, 200.0)),
+            (
+                "right-child".to_string(),
+                card(4400.0, 600.0, CARD_WIDTH, 200.0),
+            ),
+        ]);
+
+        let paths = edge_paths(&pipelines, &placed, &LayoutFile::default());
+        for path in &paths {
+            assert_eq!(
+                path.channel_offset, 0.0,
+                "{}→{} was moved off the half-way line with nothing in its way",
+                path.edge.from, path.edge.to
+            );
+        }
+    }
+
+    /// Where the line is drawn is what a drag on it has to start from. An
+    /// automatically separated channel reports the offset it was placed at, so
+    /// grabbing it carries on from there instead of snapping back to half way.
+    #[test]
+    fn a_route_reports_the_offset_it_was_drawn_at() {
+        let pipelines: Vec<_> = std::iter::once(pipeline("root", None))
+            .chain(["a", "b", "c"].map(|id| pipeline(id, Some("root"))))
+            .collect();
+        let placed = lay(&pipelines, &no_heights());
+
+        for path in edge_paths(&pipelines, &placed, &LayoutFile::default()) {
+            let Some(channel) = path.channel else { continue };
+            let expected = route(
+                path.from_port.at,
+                path.from_port.side,
+                path.to_port.at,
+                path.to_port.side,
+                path.channel_offset,
+            );
+            assert_eq!(expected.channel, Some(channel));
+        }
     }
 
     /// The whole point of `edge_paths`: an edge is a function of where the

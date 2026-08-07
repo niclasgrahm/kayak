@@ -22,19 +22,29 @@ the line reads as running backwards because it does. Edges sharing a face fan
 out along it rather than piling onto one point, in the order of the cards they
 lead to.
 
+**Channels are separated automatically.** The middle segment of every route
+wants the same place — half way between the two rows — so a fan-out would be
+drawn as one thick line with a few stubs coming out of it. Instead each edge
+takes the nearest grid line to half way that no other channel is already lying
+along, working outwards a cell at a time, so an edge only moves as far as it has
+to and a graph with room to spare looks exactly as it would have. Edges the user
+has placed by hand are laid down first and the automatic ones route around them.
+
 **Three parts of a route are draggable in edit mode**, and each is the answer to
 something automatic routing can't get right on its own. Double-click any of them
 to put that part back to automatic.
 
 *The channel* — the middle segment, the part between the two cards and the only
-one not pinned to a port. A dozen edges between the same two rows all choose the
-same half-way line and lie on top of each other; pull them apart and each is
-followable. Stored as an *offset* from that half-way line rather than a
-coordinate, so it survives either card being moved, and clamped to the gap
-between the cards, since past either end the route would double back. A route
-with no middle to move — a straight line between two aligned cards, an L-shape
-between perpendicular faces — has no handle, because one that did nothing would
-be worse than none.
+one not pinned to a port. The automatic separation keeps the lines apart but has
+no opinion about which one should pass above which; dragging is how you say.
+Stored as an *offset* from the half-way line rather than a coordinate, so it
+survives either card being moved, and clamped to the gap between the cards,
+since past either end the route would double back. A stored offset of zero is a
+real answer — "on the half-way line, whatever else is there" — which is why
+handing a channel back to the automatic separation is done by double-clicking
+it, not by dragging it back to the middle. A route with no middle to move — a
+straight line between two aligned cards, an L-shape between perpendicular faces
+— has no handle, because one that did nothing would be worse than none.
 
 *The two ends.* Which *face* an edge uses stays automatic — that answer is
 nearly always right and it has to keep up as cards move — but where along that
@@ -73,6 +83,8 @@ which input carried it.
 | wheel / trackpad scroll | zoom about the cursor, 20%–250% (shown in the navbar) |
 | drag empty canvas | pan (dragging *on* a card selects its text instead) |
 | click a name in the sidebar | glide the camera to centre that pipeline |
+| `flat` / `tree` in the sidebar header | switch between the pipelines in id order and the same set nested under the upstreams that feed them |
+| type in the sidebar's search box | narrow the list; in tree mode a match keeps the chain above it |
 | `edit` in the navbar | switch out of read-only, revealing the controls below |
 | `+` in the sidebar header | open the "add pipeline" modal |
 | `×` on a sidebar row | delete that pipeline (click twice — the first click arms it) |
@@ -82,6 +94,24 @@ which input carried it.
 | drag the middle of a line (edit mode) | move that line's channel closer to one card or the other |
 | drag the end of a line (edit mode) | slide where it connects along the card's face |
 | double-click either (edit mode) | put that part of the line back to automatic |
+
+The sidebar's pipeline list has the same two views of the graph the canvas has,
+behind the `flat` / `tree` button in its header. Flat is every pipeline once, in
+id order — sorted in the browser, because `GET /api/pipelines` walks a hash map
+and its order changes between reloads. Tree nests each pipeline under the
+upstreams that feed it, which the graph being a DAG makes slightly more than an
+indent: a pipeline with several upstreams is listed under each of them, in full
+under the *deepest* one — the parent the canvas draws its card below, so the two
+agree about where it lives — and as a dimmed pointer under the rest. Those
+pointers don't repeat their children and carry no delete: one pipeline, one
+`×`.
+
+The search box above the list filters it. In flat mode that is just the matching
+rows; in tree mode the ancestors of a match are kept as well, because a match
+indented under nothing has lost the one thing the tree was for. Descendants are
+not — searching for a root would otherwise show the whole graph. Both modes and
+the filter are `frontend/src/sidebar.rs`, unit-tested away from the browser like
+`graph.rs`.
 
 Each card shows its config as a tabbed property list — inputs / transforms /
 outputs — over a live message log. The log carries failures as well as messages:

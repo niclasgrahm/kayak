@@ -92,11 +92,17 @@ pub struct PortLayout {
 
 /// One edge's routing, where the automatic answer wasn't the readable one.
 ///
-/// An edge between two cards runs out of one, along a channel half way between
-/// them, and into the other. `offset` moves that channel off the half-way line
-/// — pulled towards one card or the other — which is how two routes that would
-/// otherwise share a channel and lie on top of each other get separated. The
-/// two ports say where on their cards the edge attaches.
+/// An edge between two cards runs out of one, along a channel between them, and
+/// into the other. `offset` moves that channel off the half-way line — pulled
+/// towards one card or the other — which is how a route that the automatic
+/// separation put somewhere unhelpful gets moved. The two ports say where on
+/// their cards the edge attaches.
+///
+/// `None` is not "zero": it means nobody has touched this channel, so the canvas
+/// is free to place it — and it does, spreading edges that would otherwise lie
+/// on top of each other onto lines of their own. A stored `Some(0.0)` is a
+/// deliberate "on the half-way line, whatever else is there", which is why this
+/// is an option rather than a number with a default.
 ///
 /// The offset is *relative* rather than an absolute coordinate, because cards
 /// move: storing "20 above the middle" keeps the adjustment meaningful after
@@ -107,8 +113,8 @@ pub struct PortLayout {
 /// id character is special.
 #[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Default)]
 pub struct EdgeAdjustment {
-    #[serde(default, skip_serializing_if = "is_zero")]
-    pub offset: f64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub offset: Option<f64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub from_port: Option<PortLayout>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -136,10 +142,6 @@ impl EdgeAdjustment {
             EdgeEnd::To => &mut self.to_port,
         }
     }
-}
-
-fn is_zero(value: &f64) -> bool {
-    *value == 0.0
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
@@ -211,14 +213,16 @@ impl LayoutFile {
             .map_or_else(EdgeAdjustment::default, |i| self.edges[i].adjustment)
     }
 
-    /// How far this edge's channel has been pulled off the half-way line.
+    /// How far this edge's channel has been pulled off the half-way line, or
+    /// `None` when it is still placed automatically.
     #[must_use]
-    pub fn edge_offset(&self, from: &str, to: &str) -> f64 {
+    pub fn edge_offset(&self, from: &str, to: &str) -> Option<f64> {
         self.edge(from, to).offset
     }
 
-    /// Move an edge's channel.
-    pub fn set_edge_offset(&mut self, from: &str, to: &str, offset: f64) {
+    /// Move an edge's channel, or — with `None` — hand it back to the automatic
+    /// separation.
+    pub fn set_edge_offset(&mut self, from: &str, to: &str, offset: Option<f64>) {
         self.adjust_edge(from, to, |a| a.offset = offset);
     }
 
@@ -313,9 +317,9 @@ mod tests {
     #[test]
     fn adjusted_edges_are_stored_in_a_stable_order() {
         let mut layout = LayoutFile::default();
-        layout.set_edge_offset("root", "zed", 40.0);
-        layout.set_edge_offset("alpha", "child", -20.0);
-        layout.set_edge_offset("root", "abel", 60.0);
+        layout.set_edge_offset("root", "zed", Some(40.0));
+        layout.set_edge_offset("alpha", "child", Some(-20.0));
+        layout.set_edge_offset("root", "abel", Some(60.0));
 
         let order: Vec<(&str, &str)> = layout
             .edges
@@ -328,22 +332,54 @@ mod tests {
         );
     }
 
-    /// Adjusting the same edge twice replaces the offset, and putting it back
-    /// where it started removes the entry — an undone adjustment shouldn't
-    /// leave a no-op behind in a committed file.
+    /// The file has to be able to say "on the half-way line" as well as "wherever
+    /// you like": an untouched channel is placed by the canvas, so a zero that
+    /// was written on purpose is a different instruction and has to survive the
+    /// round trip rather than be read back as an absent key.
     #[test]
-    fn readjusting_an_edge_replaces_it_and_zero_removes_it() {
+    fn a_channel_pinned_to_the_middle_survives_the_file() -> serde_json::Result<()> {
         let mut layout = LayoutFile::default();
-        layout.set_edge_offset("a", "b", 40.0);
-        layout.set_edge_offset("a", "b", 80.0);
-        assert_eq!(layout.edges.len(), 1);
-        assert_eq!(layout.edge_offset("a", "b"), 80.0);
+        layout.set_edge_offset("a", "b", Some(0.0));
 
-        layout.set_edge_offset("a", "b", 0.0);
+        let json = serde_json::to_string(&layout)?;
+        assert!(json.contains(r#""offset":0.0"#), "got: {json}");
+        assert_eq!(
+            serde_json::from_str::<LayoutFile>(&json)?.edge_offset("a", "b"),
+            Some(0.0)
+        );
+
+        // and an edge nobody touched still writes no key at all
+        let mut untouched = LayoutFile::default();
+        untouched.set_edge_port("a", "b", EdgeEnd::From, Some(port(Side::Top, 40.0)));
+        let json = serde_json::to_string(&untouched)?;
+        assert!(!json.contains("offset"), "got: {json}");
+        Ok(())
+    }
+
+    /// Adjusting the same edge twice replaces the offset, and handing it back to
+    /// the automatic router removes the entry — an undone adjustment shouldn't
+    /// leave a no-op behind in a committed file.
+    ///
+    /// Note that `Some(0.0)` is *not* the way back: an offset of zero is "on the
+    /// half-way line, whatever else is drawn there", which is a real answer and
+    /// not the same as letting the canvas choose.
+    #[test]
+    fn readjusting_an_edge_replaces_it_and_unsetting_removes_it() {
+        let mut layout = LayoutFile::default();
+        layout.set_edge_offset("a", "b", Some(40.0));
+        layout.set_edge_offset("a", "b", Some(80.0));
+        assert_eq!(layout.edges.len(), 1);
+        assert_eq!(layout.edge_offset("a", "b"), Some(80.0));
+
+        layout.set_edge_offset("a", "b", Some(0.0));
+        assert_eq!(layout.edges.len(), 1, "a channel pinned to the middle");
+        assert_eq!(layout.edge_offset("a", "b"), Some(0.0));
+
+        layout.set_edge_offset("a", "b", None);
         assert!(layout.edges.is_empty());
-        assert_eq!(layout.edge_offset("a", "b"), 0.0);
+        assert_eq!(layout.edge_offset("a", "b"), None);
         // and an edge nobody has touched is simply the automatic route
-        assert_eq!(layout.edge_offset("never", "touched"), 0.0);
+        assert_eq!(layout.edge_offset("never", "touched"), None);
     }
 
     /// "Lay it out for me again" is every hand-placed card and every adjusted
@@ -361,7 +397,7 @@ mod tests {
                 height: Some(300.0),
             },
         );
-        layout.set_edge_offset("a", "b", 40.0);
+        layout.set_edge_offset("a", "b", Some(40.0));
         layout.set_edge_port("a", "b", EdgeEnd::From, Some(port(Side::Bottom, 60.0)));
         assert!(!layout.is_empty());
 
@@ -381,13 +417,13 @@ mod tests {
     #[test]
     fn an_edge_carries_its_channel_and_its_two_ports_independently() {
         let mut layout = LayoutFile::default();
-        layout.set_edge_offset("a", "b", 40.0);
+        layout.set_edge_offset("a", "b", Some(40.0));
         layout.set_edge_port("a", "b", EdgeEnd::From, Some(port(Side::Bottom, 60.0)));
         layout.set_edge_port("a", "b", EdgeEnd::To, Some(port(Side::Top, 120.0)));
 
         assert_eq!(layout.edges.len(), 1, "one entry per edge");
         let edge = layout.edge("a", "b");
-        assert_eq!(edge.offset, 40.0);
+        assert_eq!(edge.offset, Some(40.0));
         assert_eq!(edge.port(EdgeEnd::From), Some(port(Side::Bottom, 60.0)));
         assert_eq!(edge.port(EdgeEnd::To), Some(port(Side::Top, 120.0)));
     }
@@ -397,10 +433,10 @@ mod tests {
     #[test]
     fn an_edge_entry_survives_until_every_adjustment_is_undone() {
         let mut layout = LayoutFile::default();
-        layout.set_edge_offset("a", "b", 40.0);
+        layout.set_edge_offset("a", "b", Some(40.0));
         layout.set_edge_port("a", "b", EdgeEnd::From, Some(port(Side::Bottom, 60.0)));
 
-        layout.set_edge_offset("a", "b", 0.0);
+        layout.set_edge_offset("a", "b", None);
         assert_eq!(
             layout.edges.len(),
             1,
@@ -433,13 +469,13 @@ mod tests {
     #[test]
     fn edges_are_distinguished_by_both_ends_and_direction() {
         let mut layout = LayoutFile::default();
-        layout.set_edge_offset("a", "b", 40.0);
-        layout.set_edge_offset("b", "a", -40.0);
-        layout.set_edge_offset("a", "c", 20.0);
+        layout.set_edge_offset("a", "b", Some(40.0));
+        layout.set_edge_offset("b", "a", Some(-40.0));
+        layout.set_edge_offset("a", "c", Some(20.0));
 
-        assert_eq!(layout.edge_offset("a", "b"), 40.0);
-        assert_eq!(layout.edge_offset("b", "a"), -40.0);
-        assert_eq!(layout.edge_offset("a", "c"), 20.0);
+        assert_eq!(layout.edge_offset("a", "b"), Some(40.0));
+        assert_eq!(layout.edge_offset("b", "a"), Some(-40.0));
+        assert_eq!(layout.edge_offset("a", "c"), Some(20.0));
     }
 
     /// A hand-written or truncated file shouldn't need every key: the missing

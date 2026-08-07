@@ -731,31 +731,71 @@ body {
   }
 }
 
+// Both sidebars filter the same way, so they look the same doing it: the
+// component reference and the pipeline list.
+.sidebar .search-box {
+  position: relative;
+  // the margin lives here rather than on the input, so the clear button
+  // positions against the field and not against the gap below it
+  margin-bottom: 6px;
+}
+
+.sidebar .search {
+  width: 100%;
+  // recessed, like an inspector value: this is an input, not a surface
+  background: var(--bg-canvas);
+  border: 1px solid var(--border);
+  border-radius: 2px;
+  color: var(--text);
+  font: inherit;
+  font-size: 11px;
+  padding: 4px 6px;
+  // room for the clear button, so a long query doesn't run under it
+  padding-right: 20px;
+
+  &::placeholder {
+    color: var(--text-dim);
+  }
+  &:focus {
+    outline: none;
+    border-color: var(--accent);
+  }
+  // webkit draws its own clear button on type="search"; ours is the one that
+  // works everywhere, and two of them side by side is nobody's design
+  &::-webkit-search-cancel-button {
+    appearance: none;
+    display: none;
+  }
+}
+
+.sidebar .search-clear {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  right: 1px;
+  width: 18px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+  background: none;
+  border: none;
+  cursor: pointer;
+  color: var(--text-dim);
+  // the glyph is small at the inherited size, and this is a target as much as
+  // a symbol
+  font-size: 14px;
+  line-height: 1;
+
+  &:hover {
+    color: var(--text);
+  }
+}
+
 .docs-sidebar {
   display: flex;
   flex-direction: column;
   gap: 2px;
-
-  .search {
-    width: 100%;
-    margin-bottom: 6px;
-    // recessed, like an inspector value: this is an input, not a surface
-    background: var(--bg-canvas);
-    border: 1px solid var(--border);
-    border-radius: 2px;
-    color: var(--text);
-    font: inherit;
-    font-size: 11px;
-    padding: 4px 6px;
-
-    &::placeholder {
-      color: var(--text-dim);
-    }
-    &:focus {
-      outline: none;
-      border-color: var(--accent);
-    }
-  }
 
   .nav-group + .nav-group {
     margin-top: 8px;
@@ -980,6 +1020,15 @@ body {
     background: var(--error-bg);
     color: var(--error);
   }
+  // a word rather than a glyph: "flat" and "tree" say what they are, and two
+  // icons for two arrangements of a list would not
+  &.mode-toggle {
+    font-size: 10px;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    border: 1px solid var(--border);
+    padding: 2px 5px;
+  }
   // a delete that has been clicked once and is waiting for the second click
   &.armed {
     background: var(--error-bg);
@@ -1028,6 +1077,15 @@ body {
     white-space: nowrap;
     margin-right: auto;
   }
+  // A pipeline with several upstreams is listed under each of them, and all
+  // but one of those rows is a pointer to where it is listed in full. Dimmed
+  // and italic, the way an alias is everywhere else: still readable, clearly
+  // not the thing itself.
+  &.repeat .tree-label {
+    color: var(--text-dim);
+    font-style: italic;
+  }
+
   // the delete only appears on the row you are pointing at; it stays visible
   // once armed, or the second click would have nothing to land on
   .icon-button {

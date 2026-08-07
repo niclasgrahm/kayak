@@ -25,6 +25,8 @@ use crate::graph::{
 };
 use crate::inspector;
 use crate::log;
+use crate::sidebar;
+use crate::sidebar::{Row, SidebarMode};
 
 /// How hard the wheel zooms. Small, because the factor is exponential in the
 /// scroll distance.
@@ -121,6 +123,11 @@ pub struct AppState {
     pub saving: RwSignal<bool>,
     /// Which of the sidebar's two lists is showing.
     pub tab: RwSignal<SidebarTab>,
+    /// How the pipeline list is arranged. Lives here rather than in
+    /// `PipelineList` because the tab strip unmounts that component, and a way
+    /// of looking at the graph shouldn't be forgotten by a glance at the
+    /// connections.
+    pub sidebar_mode: RwSignal<SidebarMode>,
     /// Wall clock, epoch millis, ticking once a second. One timer for the whole
     /// page rather than one per card: the only thing that needs it is the
     /// throughput readout on each log, and that has to fall back to zero when
@@ -319,10 +326,13 @@ impl CanvasState {
         } else {
             (client.0 - drag.origin.0) / zoom
         };
-        self.set_channel(&drag.edge, dragged_channel(drag.start_offset, delta));
+        self.set_channel(
+            &drag.edge,
+            Some(dragged_channel(drag.start_offset, delta)),
+        );
     }
 
-    fn set_channel(&self, edge: &Edge, offset: f64) {
+    fn set_channel(&self, edge: &Edge, offset: Option<f64>) {
         self.arrangement
             .update(|a| a.set_edge_offset(&edge.from, &edge.to, offset));
     }
@@ -510,6 +520,7 @@ pub fn CanvasPage() -> impl IntoView {
         adding_connection: RwSignal::new(false),
         saving: RwSignal::new(false),
         tab: RwSignal::new(SidebarTab::Pipelines),
+        sidebar_mode: RwSignal::new(SidebarMode::default()),
         now: RwSignal::new(0.0),
         tz_offset: RwSignal::new(0),
     };
@@ -942,7 +953,13 @@ pub fn Edges(pipelines: Vec<PipelineDto>) -> impl IntoView {
                             let channel = routed
                                 .channel
                                 .map(|channel| {
-                                    view! { <ChannelGrip edge=routed.edge.clone() channel=channel /> }
+                                    view! {
+                                        <ChannelGrip
+                                            edge=routed.edge.clone()
+                                            channel=channel
+                                            offset=routed.channel_offset
+                                        />
+                                    }
                                 });
                             view! {
                                 {channel}
@@ -966,10 +983,14 @@ pub fn Edges(pipelines: Vec<PipelineDto>) -> impl IntoView {
 /// Two lines on top of each other: a thick invisible one that catches the
 /// pointer, because a 2px stroke is not something anyone can reliably hit, and a
 /// visible grip that says the segment is draggable. Dragging it moves the
-/// channel across the gap between the two cards, which is how two routes that
-/// would otherwise lie along the same line get separated.
+/// channel across the gap between the two cards, which is how a route the
+/// automatic separation put somewhere unhelpful is moved out of the way.
+///
+/// `offset` is where the line is drawn, which is not always what the layout file
+/// says: an untouched channel is placed automatically, and a drag has to carry
+/// on from there rather than jump back to the half-way line on the first pixel.
 #[component]
-fn ChannelGrip(edge: Edge, channel: Channel) -> impl IntoView {
+fn ChannelGrip(edge: Edge, channel: Channel, offset: f64) -> impl IntoView {
     let state = expect_context::<AppState>();
     let canvas = state.canvas_state;
 
@@ -1001,12 +1022,8 @@ fn ChannelGrip(edge: Edge, channel: Channel) -> impl IntoView {
         ev.prevent_default();
         ev.stop_propagation();
         canvas.interrupt_focus();
-        let edge = stored_edge.get_value();
-        let offset = canvas
-            .arrangement
-            .with_untracked(|a| a.edge_offset(&edge.from, &edge.to));
         canvas.dragging_channel.set(Some(DraggingChannel {
-            edge,
+            edge: stored_edge.get_value(),
             vertical: channel.vertical,
             origin: (f64::from(ev.client_x()), f64::from(ev.client_y())),
             start_offset: offset,
@@ -1033,7 +1050,7 @@ fn ChannelGrip(edge: Edge, channel: Channel) -> impl IntoView {
                 // the way back to the automatic route, same gesture as a card's
                 on:dblclick=move |_| {
                     let edge = stored_edge.get_value();
-                    canvas.set_channel(&edge, 0.0);
+                    canvas.set_channel(&edge, None);
                     canvas.save_arrangement();
                 }
                 // an attribute, not an svg `<title>` child: leptos_meta claims
@@ -1166,6 +1183,62 @@ pub fn Sidebar() -> impl IntoView {
 
 /// The pipelines, and the two ways to change them: the `+` that opens the
 /// "add pipeline" modal, and a delete on each row.
+///
+/// The list itself has two arrangements — a flat one in id order and a tree
+/// A sidebar filter box, with a `×` to empty it.
+///
+/// One component for both sidebars because they filter the same way and should
+/// look the same doing it — the pipeline list and the component reference.
+///
+/// The `×` is rendered only once there is something to clear
+/// ([`sidebar::clearable`]), and clearing puts the caret back in the box: the
+/// reason to abandon a search is nearly always to start another one, and having
+/// to click back into the field afterwards would undo the point of the button.
+/// It replaces the native `type="search"` cancel button rather than sitting
+/// beside it — that one is webkit-only, so leaving it would mean two different
+/// clear buttons depending on the browser.
+#[component]
+fn SearchBox(#[prop(into)] placeholder: String, query: RwSignal<String>) -> impl IntoView {
+    let input: NodeRef<leptos::html::Input> = NodeRef::new();
+    view! {
+        <div class="search-box">
+            <input
+                node_ref=input
+                class="search"
+                type="search"
+                placeholder=placeholder
+                prop:value=move || query.get()
+                on:input=move |ev| query.set(event_target_value(&ev))
+            />
+            // a plain closure rather than <Show>, whose children have to be
+            // Send + Sync — the node ref this one captures is neither
+            {move || {
+                sidebar::clearable(&query.get())
+                    .then(|| {
+                        view! {
+                            <button
+                                class="search-clear"
+                                type="button"
+                                aria-label="clear search"
+                                title="clear search"
+                                on:click=move |_| {
+                                    query.set(String::new());
+                                    if let Some(input) = input.get_untracked() {
+                                        let _ = input.focus();
+                                    }
+                                }
+                            >
+                                "×"
+                            </button>
+                        }
+                    })
+            }}
+        </div>
+    }
+}
+
+/// nested by upstream — and a search box over both. Which rows that comes to is
+/// [`crate::sidebar`]'s problem; this only draws them.
 #[component]
 fn PipelineList() -> impl IntoView {
     let state = expect_context::<AppState>();
@@ -1174,6 +1247,33 @@ fn PipelineList() -> impl IntoView {
     // first, and clicking anywhere else in the list disarms it too.
     let armed = RwSignal::new(Option::<PipelineId>::None);
     let failure = RwSignal::new(Option::<String>::None);
+    // Local to the list rather than kept in `AppState`, unlike the mode: a
+    // filter is something you are doing right now, and coming back to the tab
+    // to a list still narrowed by a word you typed earlier reads as a bug.
+    let query = RwSignal::new(String::new());
+    let mode = state.sidebar_mode;
+
+    // The list as rows: the graph shape, the mode and the search box, all of
+    // which are somebody else's pure function.
+    let rows = Memo::new(move |_| {
+        let Some(Ok(list)) = state.pipelines.get() else {
+            return Vec::new();
+        };
+        let pairs: Vec<(PipelineId, Config)> = list
+            .iter()
+            .map(|s| (s.id.clone(), s.config.clone()))
+            .collect();
+        sidebar::rows(&pipelines_from(&pairs), mode.get(), &query.get())
+    });
+    // whether the list is empty because nothing matched or because there is
+    // nothing to match — two different things to say
+    let any_pipelines = Memo::new(move |_| {
+        matches!(state.pipelines.get(), Some(Ok(list)) if !list.is_empty())
+    });
+    let load_error = Memo::new(move |_| match state.pipelines.get() {
+        Some(Err(err)) => Some(err.to_string()),
+        _ => None,
+    });
 
     let delete = move |id: PipelineId| {
         armed.set(None);
@@ -1195,6 +1295,15 @@ fn PipelineList() -> impl IntoView {
         <div class="sidebar-list">
             <div class="sidebar-header">
                 <span class="sidebar-title">"pipelines"</span>
+                // available read-only too: how a list is arranged is a way of
+                // reading it, not a change to anything
+                <button
+                    class="icon-button mode-toggle"
+                    title=move || mode.get().title()
+                    on:click=move |_| mode.update(|m| *m = m.toggled())
+                >
+                    {move || mode.get().label()}
+                </button>
                 <Show when=move || state.editing()>
                     <button
                         class="icon-button"
@@ -1205,82 +1314,103 @@ fn PipelineList() -> impl IntoView {
                     </button>
                 </Show>
             </div>
+            // outside the list below, which is rebuilt on every keystroke: an
+            // input that gets rebuilt as it is typed into loses the caret
+            <SearchBox placeholder="search pipelines" query=query />
             {move || {
                 failure
                     .get()
                     .map(|message| view! { <div class="sidebar-error">{message}</div> })
             }}
             {move || {
-                state
-                    .pipelines
-                    .get()
-                    .map(|res| match res {
-                        Ok(list) => {
-                            view! {
-                                <For each=move || list.clone() key=|s| s.id.clone() let:s>
-                                    {
-                                        let (focus_id, arm_id, delete_id, is_armed) = (
-                                            s.id.clone(),
-                                            s.id.clone(),
-                                            s.id.clone(),
-                                            s.id.clone(),
-                                        );
-                                        let armed_here = Memo::new(move |_| {
-                                            armed.get().as_deref() == Some(is_armed.as_str())
-                                        });
+                load_error.get().map(|err| view! { <p>"error: " {err}</p> })
+            }}
+            // Rebuilt wholesale rather than keyed with <For>, for two reasons:
+            // the same pipeline can appear twice in the tree, so there is no
+            // key to be had, and filtering changes the list's contents without
+            // changing the ids in it.
+            {move || {
+                rows.get()
+                    .into_iter()
+                    .map(|row| {
+                        let Row { id, depth, repeat } = row;
+                        let (focus_id, arm_id, delete_id, is_armed) = (
+                            id.clone(),
+                            id.clone(),
+                            id.clone(),
+                            id.clone(),
+                        );
+                        let armed_here = Memo::new(move |_| {
+                            armed.get().as_deref() == Some(is_armed.as_str())
+                        });
+                        view! {
+                            <div
+                                class="tree-item"
+                                class:repeat=repeat
+                                // one level of nesting per grid step; a flat
+                                // list is every row at zero, so this is the
+                                // same rule in both modes
+                                style:padding-left=format!("{}px", 8 + depth * 12)
+                                title=repeat.then_some("also fed by this — shown in full elsewhere")
+                                on:click=move |_| {
+                                    armed.set(None);
+                                    state.canvas_state.focus_request.set(Some(focus_id.clone()));
+                                }
+                            >
+                                <span class="tree-label">{id.clone()}</span>
+                                // A repeat is a pointer to a row that is on
+                                // screen in full somewhere else, so it gets no
+                                // delete: two buttons for one pipeline, arming
+                                // together (the armed state is the id), would
+                                // read as two pipelines.
+                                {(!repeat)
+                                    .then(|| {
                                         view! {
-                                            <div
-                                                class="tree-item"
-                                                on:click=move |_| {
-                                                    armed.set(None);
-                                                    state
-                                                        .canvas_state
-                                                        .focus_request
-                                                        .set(Some(focus_id.clone()));
-                                                }
-                                            >
-                                                <span class="tree-label">{s.id.clone()}</span>
-                                                // read-only means read-only:
-                                                // the delete isn't disabled,
-                                                // it isn't there
-                                                <Show when=move || state.editing()>
-                                                    <button
-                                                        class="icon-button danger"
-                                                        class:armed=move || armed_here.get()
-                                                        title=move || {
+                                            // read-only means read-only: the
+                                            // delete isn't disabled, it isn't there
+                                            <Show when=move || state.editing()>
+                                                <button
+                                                    class="icon-button danger"
+                                                    class:armed=move || armed_here.get()
+                                                    title=move || {
+                                                        if armed_here.get() {
+                                                            "click again to delete"
+                                                        } else {
+                                                            "delete pipeline"
+                                                        }
+                                                    }
+                                                    on:click={
+                                                        let (arm_id, delete_id) = (
+                                                            arm_id.clone(),
+                                                            delete_id.clone(),
+                                                        );
+                                                        move |ev| {
+                                                            // the row itself moves the camera
+                                                            ev.stop_propagation();
                                                             if armed_here.get() {
-                                                                "click again to delete"
+                                                                delete(delete_id.clone());
                                                             } else {
-                                                                "delete pipeline"
+                                                                armed.set(Some(arm_id.clone()));
                                                             }
                                                         }
-                                                        on:click={
-                                                            let (arm_id, delete_id) = (
-                                                                arm_id.clone(),
-                                                                delete_id.clone(),
-                                                            );
-                                                            move |ev| {
-                                                                // the row itself moves the camera
-                                                                ev.stop_propagation();
-                                                                if armed_here.get() {
-                                                                    delete(delete_id.clone());
-                                                                } else {
-                                                                    armed.set(Some(arm_id.clone()));
-                                                                }
-                                                            }
-                                                        }
-                                                    >
-                                                        {move || if armed_here.get() { "sure?" } else { "×" }}
-                                                    </button>
-                                                </Show>
-                                            </div>
+                                                    }
+                                                >
+                                                    {move || if armed_here.get() { "sure?" } else { "×" }}
+                                                </button>
+                                            </Show>
                                         }
-                                    }
-                                </For>
-                            }
-                                .into_any()
+                                    })}
+                            </div>
                         }
-                        Err(err) => view! { <p>"error: " {err.to_string()}</p> }.into_any(),
+                    })
+                    .collect_view()
+            }}
+            {move || {
+                (rows.get().is_empty() && any_pipelines.get())
+                    .then(|| {
+                        view! {
+                            <div class="empty">"no pipeline matches “" {move || query.get()} "”"</div>
+                        }
                     })
             }}
         </div>
@@ -2574,13 +2704,7 @@ fn DocsSidebar(
 ) -> impl IntoView {
     view! {
         <div class="sidebar docs-sidebar">
-            <input
-                class="search"
-                type="search"
-                placeholder="search components"
-                prop:value=move || query.get()
-                on:input=move |ev| query.set(event_target_value(&ev))
-            />
+            <SearchBox placeholder="search components" query=query />
             // rebuilt rather than keyed, for the same reason as the reference
             // pane: the key is the family, and filtering changes its contents
             {move || {
