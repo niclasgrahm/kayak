@@ -10,8 +10,8 @@
 use std::collections::{BTreeMap, HashMap, HashSet};
 
 use kayak_core::{
-    EdgeEnd, EventPayload, LayoutFile, PipelineId, PipelineLayout, PortLayout, Side, UiEvent,
-    config::Config, stage,
+    EdgeEnd, EventPayload, LayoutFile, PipelineId, PipelineLayout, PortLayout, Side, Stage, UiEvent,
+    config::Config,
 };
 
 /// The canvas' grid, in surface pixels.
@@ -116,7 +116,7 @@ pub const PULSE_TICK_MS: u64 = 50;
 /// picking one edge and being wrong about it.
 #[must_use]
 pub fn pulsed_edges(event: &UiEvent, pipelines: &[(PipelineId, Vec<PipelineId>)]) -> Vec<Edge> {
-    if event.stage != stage::INPUT || !matches!(event.payload, EventPayload::Batch(_)) {
+    if event.stage != Stage::Input || !matches!(event.payload, EventPayload::Batch(_)) {
         return Vec::new();
     }
     // a root's inputs come from outside the graph, so no edge lights up
@@ -974,6 +974,25 @@ pub fn focus_camera(camera: Camera, target: CardGeom, viewport: (f64, f64)) -> C
         x: cx - (viewport.0 / 2.0) / camera.zoom,
         y: cy - (viewport.1 / 2.0) / camera.zoom,
         zoom: camera.zoom,
+    }
+}
+
+/// The card geometry, in surface pixels, that exactly covers the canvas
+/// viewport at the camera's current position and zoom.
+///
+/// A maximized card stays inside the transformed surface rather than being
+/// lifted out of it, so it keeps its place among its neighbours and there is no
+/// second coordinate system to keep in step. The surface is scaled by `zoom`, so
+/// covering a viewport of `w` screen pixels takes `w / zoom` surface pixels —
+/// which is also why this answer is not snapped to the grid: it is measured
+/// against the window rather than against the layout.
+#[must_use]
+pub fn maximized_geom(camera: Camera, viewport: (f64, f64)) -> CardGeom {
+    CardGeom {
+        x: camera.x,
+        y: camera.y,
+        width: viewport.0 / camera.zoom,
+        height: viewport.1 / camera.zoom,
     }
 }
 
@@ -2130,7 +2149,7 @@ mod tests {
         assert!(edge_paths(&pipelines, &HashMap::new(), &LayoutFile::default()).is_empty());
     }
 
-    fn batch_event(pipeline_id: &str, stage: &str) -> UiEvent {
+    fn batch_event(pipeline_id: &str, stage: Stage) -> UiEvent {
         UiEvent::batch(
             pipeline_id.to_string(),
             stage,
@@ -2144,7 +2163,7 @@ mod tests {
     fn an_input_event_lights_the_edge_from_its_upstream() {
         let pipelines = [pipeline("a", None), pipeline("b", Some("a"))];
         assert_eq!(
-            pulsed_edges(&batch_event("b", stage::INPUT), &pipelines),
+            pulsed_edges(&batch_event("b", Stage::Input), &pipelines),
             vec![Edge {
                 from: "a".to_string(),
                 to: "b".to_string()
@@ -2162,7 +2181,7 @@ mod tests {
             pipeline_with("c", &["a", "b"]),
         ];
         assert_eq!(
-            pulsed_edges(&batch_event("c", stage::INPUT), &pipelines),
+            pulsed_edges(&batch_event("c", Stage::Input), &pipelines),
             vec![
                 Edge {
                     from: "a".to_string(),
@@ -2181,7 +2200,7 @@ mod tests {
     #[test]
     fn an_output_event_lights_nothing() {
         let pipelines = [pipeline("a", None), pipeline("b", Some("a"))];
-        assert!(pulsed_edges(&batch_event("b", stage::OUTPUT), &pipelines).is_empty());
+        assert!(pulsed_edges(&batch_event("b", Stage::Output), &pipelines).is_empty());
     }
 
     /// A failure at the input stage is the *absence* of a batch, so it must not
@@ -2189,7 +2208,7 @@ mod tests {
     #[test]
     fn an_error_event_lights_nothing() {
         let pipelines = [pipeline("a", None), pipeline("b", Some("a"))];
-        let failed = UiEvent::error("b".to_string(), stage::INPUT, &"upstream went away");
+        let failed = UiEvent::error("b".to_string(), Stage::Input, &"upstream went away");
         assert!(pulsed_edges(&failed, &pipelines).is_empty());
     }
 
@@ -2198,9 +2217,9 @@ mod tests {
     #[test]
     fn an_input_event_on_a_root_lights_nothing() {
         let pipelines = [pipeline("a", None), pipeline("b", Some("a"))];
-        assert!(pulsed_edges(&batch_event("a", stage::INPUT), &pipelines).is_empty());
+        assert!(pulsed_edges(&batch_event("a", Stage::Input), &pipelines).is_empty());
         // and a pipeline that isn't on the canvas at all can't light anything
-        assert!(pulsed_edges(&batch_event("ghost", stage::INPUT), &pipelines).is_empty());
+        assert!(pulsed_edges(&batch_event("ghost", Stage::Input), &pipelines).is_empty());
     }
 
     /// Pulses have to burn out on their own, or an edge that saw one batch
@@ -2385,6 +2404,50 @@ mod tests {
             slow.x,
             fast.x
         );
+    }
+
+    /// The geometry is in surface pixels, so it has to be divided by the zoom
+    /// the surface is scaled by: at 200% a viewport of 800px is 400 surface
+    /// pixels wide, and a card given 800 would hang half a screen off the right.
+    #[test]
+    fn a_maximized_card_covers_the_viewport_at_any_zoom() {
+        for zoom in [0.5, 1.0, 2.0] {
+            let camera = Camera {
+                x: 120.0,
+                y: -40.0,
+                zoom,
+            };
+            let geom = maximized_geom(camera, (800.0, 600.0));
+            assert_eq!(
+                geom,
+                CardGeom {
+                    x: 120.0,
+                    y: -40.0,
+                    width: 800.0 / zoom,
+                    height: 600.0 / zoom,
+                },
+                "at zoom {zoom}"
+            );
+        }
+    }
+
+    /// It is glued to the viewport rather than to the graph: panning moves the
+    /// card with the camera, so it stays where it was put on screen.
+    #[test]
+    fn a_maximized_card_follows_the_camera() {
+        let viewport = (800.0, 600.0);
+        let before = maximized_geom(Camera::default(), viewport);
+        let after = maximized_geom(
+            Camera {
+                x: 300.0,
+                y: 200.0,
+                ..Camera::default()
+            },
+            viewport,
+        );
+        assert_eq!(after.x - before.x, 300.0);
+        assert_eq!(after.y - before.y, 200.0);
+        assert_eq!((after.width, after.height), (before.width, before.height));
     }
 
     #[test]

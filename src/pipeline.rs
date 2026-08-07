@@ -1,5 +1,6 @@
 use crate::BuildCtx;
 use crate::config::BuildInputConfig;
+use crate::events::publish;
 use crate::config::BuildOutputConfig;
 use crate::config::BuildTransformConfig;
 use crate::inputs::InputSource;
@@ -11,7 +12,7 @@ use crate::transforms::Transform;
 use anyhow::Context;
 use anyhow::Result;
 use kayak_core::config::Config;
-use kayak_core::stage;
+use kayak_core::Stage;
 use serde::Serialize;
 use std::sync::{Arc, Mutex};
 use tokio::select;
@@ -49,16 +50,6 @@ async fn next_input_message(input: &mut Box<dyn InputSource>) -> Result<Arc<Mess
     input.next().await
 }
 
-/// Publish to the UI feed. Nothing is built or sent when no one is watching —
-/// errors reach the server log either way, and this keeps a headless run from
-/// paying to describe them. A free function rather than a method so it can be
-/// called from inside a loop that already holds `&mut self.transforms`.
-fn publish(events: &broadcast::Sender<UiEvent>, event: impl FnOnce() -> UiEvent) {
-    if events.receiver_count() > 0 {
-        let _ = events.send(event());
-    }
-}
-
 pub struct PipelineRuntime {
     /// Every configured input, merged into one — see [`crate::inputs::merge`].
     input: Box<dyn InputSource>,
@@ -94,14 +85,20 @@ impl PipelineRuntime {
         // an output that can't be initialised is fatal: it would never accept a
         // batch, and a pipeline half-writing its outputs is worse than one that
         // says why it didn't start
-        for output in &mut self.outputs {
+        for (index, output) in self.outputs.iter_mut().enumerate() {
             if let Err(e) = output.init().await {
+                // no `seq`: this is before the first pass, not part of one
                 publish(&self.events, || {
-                    UiEvent::error(self.shared.id.clone(), stage::OUTPUT, &e)
+                    UiEvent::error(self.shared.id.clone(), Stage::Output, &e).component(index)
                 });
                 return Err(e);
             }
         }
+        // Which pass through the loop we are on. Every event a pass produces
+        // carries it, which is what lets the UI show one batch's journey — in,
+        // transforms, out — as one thing rather than as unrelated lines that
+        // happened to arrive together.
+        let mut pass = 0u64;
         loop {
             let next_msg = match select! {
                 // `biased` so cancellation always wins a tie. Tearing the graph
@@ -133,18 +130,21 @@ impl PipelineRuntime {
                         self.shared.id, e
                     );
                     publish(&self.events, || {
-                        UiEvent::error(self.shared.id.clone(), stage::INPUT, &e)
+                        UiEvent::error(self.shared.id.clone(), Stage::Input, &e)
                     });
                     break;
                 }
             };
-            // NOTE this is temporary! Send input to web client
+            pass += 1;
+            // The batch as it arrived, before any transform has touched it —
+            // one half of what a card's log shows, the other being what leaves
+            // at the outputs below.
             publish(&self.events, || {
-                UiEvent::batch(self.shared.id.clone(), stage::INPUT, Arc::clone(&next_msg))
+                UiEvent::batch(self.shared.id.clone(), Stage::Input, Arc::clone(&next_msg))
+                    .seq(pass)
             });
-            // END NOTE this is temporary! Send input to web client
             let mut batches = vec![next_msg];
-            for t in &mut self.transforms {
+            for (index, t) in self.transforms.iter_mut().enumerate() {
                 let mut next = Vec::new();
                 for b in batches {
                     match t.apply(b).await {
@@ -154,7 +154,9 @@ impl PipelineRuntime {
                         Err(e) => {
                             error!("[{}]\t transform error: {:?}", self.shared.id, e);
                             publish(&self.events, || {
-                                UiEvent::error(self.shared.id.clone(), stage::TRANSFORM, &e)
+                                UiEvent::error(self.shared.id.clone(), Stage::Transform, &e)
+                                    .seq(pass)
+                                    .component(index)
                             });
                         }
                     }
@@ -162,23 +164,26 @@ impl PipelineRuntime {
                 batches = next;
             }
 
-            // NOTE this is temporary! Send output to web client
+            // What the transforms produced, reported before the outputs are
+            // given it: the log is a record of what passed through this
+            // pipeline, which is true whether or not an output then took it.
             for b in &batches {
                 publish(&self.events, || {
-                    UiEvent::batch(self.shared.id.clone(), stage::OUTPUT, Arc::clone(b))
+                    UiEvent::batch(self.shared.id.clone(), Stage::Output, Arc::clone(b)).seq(pass)
                 });
             }
-            // END NOTE this is temporary! Send output to web client
 
             for b in &batches {
                 // every output gets every batch. a failing one shouldn't tear
                 // the pipeline down — its siblings and the downstream pipelines
                 // are still fed, same as we do for transform errors
-                for output in &mut self.outputs {
+                for (index, output) in self.outputs.iter_mut().enumerate() {
                     if let Err(e) = output.emit(b.clone()).await {
                         error!("[{}]\t output error: {:?}", self.shared.id, e);
                         publish(&self.events, || {
-                            UiEvent::error(self.shared.id.clone(), stage::OUTPUT, &e)
+                            UiEvent::error(self.shared.id.clone(), Stage::Output, &e)
+                                .seq(pass)
+                                .component(index)
                         });
                     }
                 }

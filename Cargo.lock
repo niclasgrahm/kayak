@@ -1037,6 +1037,7 @@ dependencies = [
  "codee",
  "console_error_panic_hook",
  "gloo-net 0.7.0",
+ "js-sys",
  "kayak-core",
  "leptos",
  "leptos-use",

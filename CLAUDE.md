@@ -161,6 +161,8 @@ One known gap: a channel can still pass through a third card. That's now a drag 
 
 Pinned pipelines **keep their slot in the automatic flow** (`layout` overwrites the auto answer rather than removing the pipeline from it), so dragging one card doesn't rearrange the rest. Cards can then overlap, which is the user's business.
 
+A card can also be **maximized** to fill the canvas, from the button in its title bar (`canvas.maximized`, at most one at a time, available in read-only too — filling the screen with a card is a way of reading it). Its geometry comes from `graph::maximized_geom(camera, viewport)` rather than from the layout, so it stays inside the transformed surface and needs no second coordinate system; the width is divided by the zoom the surface is scaled by. Three things it deliberately does *not* do: it never reaches the layout file (it's a way of looking at a card, not a change to where the card lives, so it doesn't survive a reload), it doesn't report its window-sized height into `measured` (that would push every row below it apart and pull them back on restore), and it leaves its laid-out position alone underneath — which is why restoring it is exact and the edges, still routed against that position, come back to a card that never moved. A focus request clears it, since being shown a pipeline means the canvas.
+
 ### HTTP surface
 
 `src/main.rs` builds two routers and merges them: an `api` router with `Arc<AppState>` state (`POST/GET /api/pipelines`, `DELETE /api/pipelines/{id}`, `POST/GET /api/connections`, `DELETE /api/connections/{id}`, `GET /events` SSE, `GET /api/docs`, `GET/PUT /api/layout`), and the Leptos router with `LeptosOptions` state plus `file_and_error_handler` fallback.

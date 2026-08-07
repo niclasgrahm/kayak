@@ -3,8 +3,9 @@ use std::sync::Arc;
 use tokio::sync::broadcast;
 
 use crate::BuildCtx;
+use crate::events::publish;
 use crate::state::{PipelineId, UiEvent};
-use kayak_core::stage;
+use kayak_core::Stage;
 
 pub mod dummy;
 pub mod kafka;
@@ -115,11 +116,9 @@ impl InputSource for Merged {
                 self.alive,
                 e
             );
-            if self.events.receiver_count() > 0 {
-                let _ =
-                    self.events
-                        .send(UiEvent::error(self.pipeline_id.clone(), stage::INPUT, &e));
-            }
+            publish(&self.events, || {
+                UiEvent::error(self.pipeline_id.clone(), Stage::Input, &e)
+            });
         }
     }
 }

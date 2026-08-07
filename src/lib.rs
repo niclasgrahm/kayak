@@ -14,6 +14,7 @@ use tokio::sync::broadcast;
 
 pub mod config;
 pub mod connections;
+pub mod events;
 pub mod handlers;
 pub mod inputs;
 pub mod layout;

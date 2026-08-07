@@ -18,7 +18,7 @@ use kayak::testing::{
     CollectingOutput, Emitted, FailOnNth, ScriptedInput, Ticking, WhenExhausted, batch, stub_config,
 };
 use kayak::transforms::Transform;
-use kayak_core::EventPayload;
+use kayak_core::{EventPayload, Stage};
 use kayak_core::config::{
     ReduceFnKind, ReduceTransformConfig, SplitterTransformConfig, TransformConfig, TransformKind,
 };
@@ -261,7 +261,131 @@ async fn ui_events_are_published_for_the_input_and_output_stages() {
             stages.push(ev.stage);
         }
     }
-    assert_eq!(stages, vec!["input".to_string(), "output".to_string()]);
+    assert_eq!(stages, vec![Stage::Input, Stage::Output]);
+}
+
+/// One batch in, its transforms, and everything that left are one pass — and
+/// the frontend groups the log by exactly this number. Without it the log can
+/// only guess where one batch's journey ends and the next begins.
+#[tokio::test]
+async fn every_event_of_one_pass_shares_a_sequence_number() {
+    let (events, mut rx) = broadcast::channel::<UiEvent>(32);
+    let runtime = runtime(
+        vec![Box::new(ScriptedInput::new(
+            vec![
+                batch(vec![json!({"n": 1})]),
+                batch(vec![json!({"n": 2})]),
+                batch(vec![json!({"n": 3})]),
+            ],
+            WhenExhausted::Fail,
+        ))],
+        vec![],
+        vec![Box::new(CollectingOutput::new())],
+        pipeline("events"),
+        events,
+    );
+    let _ = runtime.run().await;
+
+    let mut passes = Vec::new();
+    while let Ok(ev) = rx.try_recv() {
+        if matches!(ev.payload, EventPayload::Batch(_)) {
+            passes.push((ev.seq, ev.stage));
+        }
+    }
+
+    assert_eq!(
+        passes,
+        vec![
+            (Some(1), Stage::Input),
+            (Some(1), Stage::Output),
+            (Some(2), Stage::Input),
+            (Some(2), Stage::Output),
+            (Some(3), Stage::Input),
+            (Some(3), Stage::Output),
+        ]
+    );
+}
+
+/// An input dying happens in its own task while the loop waits for it, so it
+/// belongs to no pass. `None` is the honest answer, and the log shows it as an
+/// event of its own rather than folding it into whichever pass ran last.
+#[tokio::test]
+async fn an_event_outside_a_pass_carries_no_sequence_number() {
+    let (events, mut rx) = broadcast::channel::<UiEvent>(16);
+    let runtime = runtime(
+        vec![Box::new(ScriptedInput::new(vec![], WhenExhausted::Fail))],
+        vec![],
+        vec![Box::new(CollectingOutput::new())],
+        pipeline("events"),
+        events,
+    );
+    let _ = runtime.run().await;
+
+    let errors: Vec<_> = std::iter::from_fn(|| rx.try_recv().ok())
+        .filter(|ev| matches!(ev.payload, EventPayload::Error(_)))
+        .collect();
+    let first = errors
+        .first()
+        .unwrap_or_else(|| panic!("no error was published"));
+    assert_eq!(first.stage, Stage::Input);
+    assert_eq!(first.seq, None);
+}
+
+/// With two outputs, "output failed" is not enough to act on — the card has to
+/// be able to say *which* one, and only the run loop knows the index.
+#[tokio::test]
+async fn a_failing_output_names_which_of_them_failed() {
+    let (events, mut rx) = broadcast::channel::<UiEvent>(16);
+    let runtime = runtime(
+        vec![Box::new(ScriptedInput::new(
+            vec![batch(vec![json!({"n": 1})])],
+            WhenExhausted::Fail,
+        ))],
+        vec![],
+        vec![
+            Box::new(CollectingOutput::new()),
+            Box::new(CollectingOutput::failing()),
+        ],
+        pipeline("events"),
+        events,
+    );
+    let _ = runtime.run().await;
+
+    let failure = std::iter::from_fn(|| rx.try_recv().ok())
+        .find(|ev| ev.stage == Stage::Output && matches!(ev.payload, EventPayload::Error(_)))
+        .unwrap_or_else(|| panic!("no output error was published"));
+
+    assert_eq!(failure.component, Some(1), "the second output is the one");
+    assert_eq!(failure.seq, Some(1));
+}
+
+/// Same for a chain of transforms: which one dropped the batch is the question
+/// the card is being asked.
+#[tokio::test]
+async fn a_failing_transform_names_its_place_in_the_chain() {
+    let (events, mut rx) = broadcast::channel::<UiEvent>(16);
+    let runtime = runtime(
+        vec![Box::new(ScriptedInput::new(
+            vec![batch(vec![json!({"n": 1})])],
+            WhenExhausted::Fail,
+        ))],
+        // one that never fails, then one that fails on the first batch
+        vec![
+            Box::new(FailOnNth::new(usize::MAX)),
+            Box::new(FailOnNth::new(0)),
+        ],
+        vec![Box::new(CollectingOutput::new())],
+        pipeline("events"),
+        events,
+    );
+    let _ = runtime.run().await;
+
+    let failure = std::iter::from_fn(|| rx.try_recv().ok())
+        .find(|ev| ev.stage == Stage::Transform)
+        .unwrap_or_else(|| panic!("no transform error was published"));
+
+    assert_eq!(failure.component, Some(1), "the second transform is the one");
+    assert_eq!(failure.seq, Some(1));
 }
 
 /// Errors are the reason a card stops updating, so the UI feed has to carry
@@ -287,7 +411,7 @@ async fn a_failing_transform_publishes_an_error_event_for_that_stage() {
     let first = errors
         .first()
         .unwrap_or_else(|| panic!("no error was published"));
-    assert_eq!(first.0, "transform");
+    assert_eq!(first.0, Stage::Transform);
     assert!(
         first.1.contains("transform failed on batch 0"),
         "the event should carry the cause: {}",
@@ -316,7 +440,7 @@ async fn a_failing_output_publishes_an_error_event_for_that_stage() {
     let first = errors
         .first()
         .unwrap_or_else(|| panic!("no error was published"));
-    assert_eq!(first.0, "output");
+    assert_eq!(first.0, Stage::Output);
     assert!(
         first.1.contains("collecting output was told to fail"),
         "the event should carry the cause: {}",
@@ -340,7 +464,7 @@ async fn a_failing_input_publishes_an_error_event_before_the_loop_ends() {
 
     let errors = collect_errors(&mut rx);
     assert_eq!(errors.len(), 1, "expected one input error, got {errors:?}");
-    assert_eq!(errors[0].0, "input");
+    assert_eq!(errors[0].0, Stage::Input);
     assert!(
         errors[0].1.contains("scripted input exhausted"),
         "the event should carry the cause: {}",
@@ -349,7 +473,7 @@ async fn a_failing_input_publishes_an_error_event_before_the_loop_ends() {
 }
 
 /// Drain the feed down to the error events, as `(stage, message)`.
-fn collect_errors(rx: &mut broadcast::Receiver<UiEvent>) -> Vec<(String, String)> {
+fn collect_errors(rx: &mut broadcast::Receiver<UiEvent>) -> Vec<(Stage, String)> {
     let mut errors = Vec::new();
     while let Ok(ev) = rx.try_recv() {
         if let EventPayload::Error(message) = ev.payload {
@@ -450,7 +574,7 @@ async fn a_running_pipeline_still_reports_its_input_dying() {
         1,
         "expected the failure to be reported: {errors:?}"
     );
-    assert_eq!(errors[0].0, "input");
+    assert_eq!(errors[0].0, Stage::Input);
 }
 
 /// The `Buffered` input decorator collects `size` upstream batches into one.
@@ -698,7 +822,7 @@ async fn one_input_failing_does_not_stop_the_others() {
         1,
         "expected the dead input to be reported once"
     );
-    assert_eq!(errors[0].0, "input");
+    assert_eq!(errors[0].0, Stage::Input);
     assert!(
         errors[0].1.contains("scripted input exhausted"),
         "the event should carry the cause: {}",

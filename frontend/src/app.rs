@@ -13,7 +13,7 @@ use leptos_use::{
     use_event_listener, use_event_source, use_interval_fn_with_options, use_raf_fn_with_options,
     use_window,
 };
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet};
 
 use crate::api_client::{ApiClient, ApiError};
 use crate::docs;
@@ -29,6 +29,11 @@ use crate::log;
 /// How hard the wheel zooms. Small, because the factor is exponential in the
 /// scroll distance.
 const ZOOM_SENSITIVITY: f64 = 0.0015;
+
+/// How far from the bottom of a log still counts as being at the bottom, in
+/// pixels. A line-height's worth of slack: a browser's fractional scroll
+/// positions mean an exact comparison drops out of follow mode on its own.
+const FOLLOW_SLACK_PX: i32 = 20;
 
 /// How wide the handle on a port is, in surface pixels. A grid cell: wide
 /// enough to grab, narrow enough that two adjacent ports on a fanned-out face
@@ -116,6 +121,19 @@ pub struct AppState {
     pub saving: RwSignal<bool>,
     /// Which of the sidebar's two lists is showing.
     pub tab: RwSignal<SidebarTab>,
+    /// Wall clock, epoch millis, ticking once a second. One timer for the whole
+    /// page rather than one per card: the only thing that needs it is the
+    /// throughput readout on each log, and that has to fall back to zero when
+    /// traffic stops — which no event will ever arrive to say.
+    pub now: RwSignal<f64>,
+    /// The viewer's timezone, as minutes to add to local time to get UTC —
+    /// `Date`'s `getTimezoneOffset` convention, which is what fills it.
+    ///
+    /// Read once into a signal rather than at each call site because it can
+    /// only be read on the client: server-side rendering has no `Date`, and the
+    /// zone it would report is the server's anyway. Until the effect runs it is
+    /// zero, so the first render of a log line is UTC.
+    pub tz_offset: RwSignal<i32>,
 }
 
 impl AppState {
@@ -227,6 +245,11 @@ pub struct CanvasState {
     pub dragging_port: RwSignal<Option<DraggingPort>>,
     /// Card heights as actually rendered, fed back into the layout.
     pub measured: RwSignal<HashMap<PipelineId, f64>>,
+    /// The card blown up to fill the canvas, if any. At most one at a time, and
+    /// deliberately *not* part of `arrangement`: it is a way of looking at a
+    /// card rather than a change to where the card lives, so it neither goes to
+    /// the layout file nor survives a reload.
+    pub maximized: RwSignal<Option<PipelineId>>,
     pub camera: RwSignal<Camera>,
     /// Size of the canvas viewport in css pixels; needed to centre a pipeline.
     pub viewport: RwSignal<(f64, f64)>,
@@ -245,6 +268,7 @@ impl CanvasState {
             dragging_channel: RwSignal::new(None),
             dragging_port: RwSignal::new(None),
             measured: RwSignal::new(HashMap::new()),
+            maximized: RwSignal::new(None),
             camera: RwSignal::new(Camera::default()),
             viewport: RwSignal::new((0.0, 0.0)),
             focus_request: RwSignal::new(None),
@@ -329,6 +353,20 @@ impl CanvasState {
     fn set_port(&self, edge: &Edge, end: EdgeEnd, port: Option<PortLayout>) {
         self.arrangement
             .update(|a| a.set_edge_port(&edge.from, &edge.to, end, port));
+    }
+
+    /// Blow a card up to fill the canvas, or put it back if it already is.
+    ///
+    /// Maximizing a second card restores the first, since only one can be the
+    /// one you are looking at.
+    fn toggle_maximized(&self, id: &PipelineId) {
+        self.maximized.update(|current| {
+            *current = if current.as_ref() == Some(id) {
+                None
+            } else {
+                Some(id.clone())
+            };
+        });
     }
 
     /// Put a card back under the automatic layout.
@@ -472,8 +510,26 @@ pub fn CanvasPage() -> impl IntoView {
         adding_connection: RwSignal::new(false),
         saving: RwSignal::new(false),
         tab: RwSignal::new(SidebarTab::Pipelines),
+        now: RwSignal::new(0.0),
+        tz_offset: RwSignal::new(0),
     };
     provide_context(state);
+
+    // Client only: an effect doesn't run during server-side rendering, which is
+    // exactly the boundary — `js_sys::Date` is a browser API, and the server's
+    // own zone would be the wrong answer even where it could be read.
+    Effect::new(move |_| {
+        #[allow(clippy::cast_possible_truncation)]
+        state
+            .tz_offset
+            .set(js_sys::Date::new_0().get_timezone_offset() as i32);
+        state.now.set(js_sys::Date::now());
+    });
+    use_interval_fn_with_options(
+        move || state.now.set(js_sys::Date::now()),
+        1_000,
+        UseIntervalFnOptions::default(),
+    );
 
     // Leaving edit mode with work that only exists in the server's memory is
     // the one way to lose it by accident, so the browser asks. It can only be a
@@ -606,6 +662,11 @@ pub fn CanvasPage() -> impl IntoView {
             return;
         };
         canvas_state.focus_request.set(None);
+        // Asking to be shown a pipeline means the canvas, so a card filling it
+        // gets out of the way — the glide would otherwise happen behind it and
+        // read as the sidebar not working. Done here rather than in the sidebar
+        // because this is where a focus is acted on.
+        canvas_state.maximized.set(None);
         let Some(geom) = canvas_state.geom_of(&id) else {
             return;
         };
@@ -2797,6 +2858,294 @@ fn SectionView(
     }
 }
 
+/// One row: when, which stage, and what.
+///
+/// Each `<span>` is written on a single line on purpose. A `{...}` on a line of
+/// its own inside `view!` leaves a whitespace text node beside the value, and a
+/// span holding one wraps to a second line — which turned every row of this log
+/// double height, with the stage badge stranded under the timestamp.
+#[component]
+fn LogRow(entry: log::Entry, names: StoredValue<log::ComponentNames>) -> impl IntoView {
+    let state = expect_context::<AppState>();
+    let ts = entry.ts;
+    let text = names.with_value(|names| {
+        log::summary(&entry, names.name(entry.stage, entry.component))
+    });
+
+    view! {
+        // Every class here is prefixed, and that is not just tidiness: the
+        // "add pipeline" modal has a `.stage` of its own — a group of
+        // components, nothing to do with this — and a badge that borrowed the
+        // name silently picked up its 12px top margin.
+        <div class="log-row" class:error=entry.is_error()>
+            <span class="log-time">{move || log::format_time(ts, state.tz_offset.get())}</span>
+            <span class="log-stage" title=entry.stage.as_str()>
+                {log::stage_label(entry.stage)}
+            </span>
+            // the full payload on hover: a card is 18 cells wide and a batch is
+            // not
+            <span class="log-text" title=text.clone()>{text.clone()}</span>
+        </div>
+    }
+}
+
+/// One pass, collapsed to a summary until it is opened.
+///
+/// The header is the row you read: a batch arrived, this much left, and whether
+/// anything failed on the way. What it took to get there is a click away —
+/// which is the whole argument for grouping, since the alternative is reading
+/// the same journey as three or four unrelated lines.
+#[component]
+fn PassView(
+    pass: log::Pass,
+    names: StoredValue<log::ComponentNames>,
+    expanded: RwSignal<HashSet<u64>>,
+) -> impl IntoView {
+    let state = expect_context::<AppState>();
+    let key = pass.key();
+    let (ts, seq, gap) = (pass.ts, pass.seq, pass.gap_before);
+    let (summary, errors) = (pass.summary(), pass.errors);
+    let entries = StoredValue::new(pass.entries);
+    let is_open = move || expanded.with(|open| open.contains(&key));
+
+    view! {
+        // A gap is not an entry, so it is not inside the pass — it is the
+        // statement that some passes are missing from between them.
+        <Show when=move || { gap > 0 }>
+            <div class="log-gap" title="the event feed drops rather than blocks when a browser falls behind">
+                {format!("⋯ {gap} passes not shown")}
+            </div>
+        </Show>
+        <div
+            class="log-pass"
+            class:error=move || { errors > 0 }
+            class:open=is_open
+            title=seq.map_or_else(
+                || "an event that belongs to no pass".to_string(),
+                |seq| format!("pass {seq}"),
+            )
+            on:click=move |_| {
+                expanded
+                    .update(|open| {
+                        if !open.remove(&key) {
+                            open.insert(key);
+                        }
+                    })
+            }
+        >
+            <span class="log-time">{move || log::format_time(ts, state.tz_offset.get())}</span>
+            <span class="log-caret">{move || if is_open() { "▾" } else { "▸" }}</span>
+            <span class="log-text">{summary}</span>
+            <Show when=move || { errors > 0 }>
+                <span class="log-errors">{format!("⚠ {errors}")}</span>
+            </Show>
+        </div>
+        // Wrapped rather than left as siblings of the header: the rows have to
+        // be addressable as "inside this pass" for the indent, and a sibling
+        // selector would reach every row below, including the next pass's.
+        <Show when=is_open>
+            <div class="log-pass-entries">
+                {move || {
+                    entries
+                        .get_value()
+                        .into_iter()
+                        .map(|entry| view! { <LogRow entry names /> })
+                        .collect_view()
+                }}
+            </div>
+        </Show>
+    }
+}
+
+/// A card's log: a bar of controls over a scrolling tail of events.
+///
+/// The bar is part of the log rather than of the card because everything on it
+/// acts on the log — which is also why the filter lives here and not in the
+/// inspector's tab strip above. The two answer different questions: the tabs
+/// navigate a config that never changes, this filters a stream that does.
+#[component]
+fn MessageLog(
+    messages: RwSignal<log::Log>,
+    filter: RwSignal<log::Filter>,
+    names: StoredValue<log::ComponentNames>,
+) -> impl IntoView {
+    let state = expect_context::<AppState>();
+    let body_ref = NodeRef::<leptos::html::Div>::new();
+
+    // Flat by default: every event in the order it arrived, which is what a log
+    // is expected to be. Grouping is the view you switch to when the question
+    // is what one batch did rather than what just happened.
+    let grouped = RwSignal::new(false);
+    let expanded = RwSignal::new(HashSet::<u64>::new());
+
+    // Whether the tail is pinned to the bottom. The log used to scroll down on
+    // every event, which on a busy pipeline means no line can be read at all:
+    // follow only while the reader is already at the end, and offer them the
+    // way back when they aren't.
+    let following = RwSignal::new(true);
+    let at_bottom = move |el: &leptos::web_sys::HtmlDivElement| {
+        el.scroll_height() - el.scroll_top() - el.client_height() <= FOLLOW_SLACK_PX
+    };
+    let scroll_to_end = move || {
+        if let Some(el) = body_ref.get_untracked() {
+            el.set_scroll_top(el.scroll_height());
+        }
+    };
+
+    Effect::new(move |_| {
+        messages.track();
+        filter.track();
+        if following.get_untracked() {
+            scroll_to_end();
+        }
+    });
+
+    // Both are memos and only one is ever read: a memo doesn't compute until
+    // something reads it, so the view that isn't showing costs nothing.
+    let visible_passes = Memo::new(move |_| {
+        let filter = filter.get();
+        messages.with(|log| log::visible_passes(log.passes(), filter))
+    });
+    let visible_entries = Memo::new(move |_| {
+        let filter = filter.get();
+        messages.with(|log| {
+            log.entries()
+                .iter()
+                .filter(|entry| filter.matches(entry))
+                .cloned()
+                .collect::<Vec<_>>()
+        })
+    });
+    let nothing_to_show = move || {
+        if grouped.get() {
+            visible_passes.with(Vec::is_empty)
+        } else {
+            visible_entries.with(Vec::is_empty)
+        }
+    };
+
+    // Zero reads as "nothing is flowing", which is worth distinguishing from a
+    // pipeline that has never produced anything — so the readout only appears
+    // once there is a rate to report.
+    let rate = Memo::new(move |_| {
+        #[allow(clippy::cast_sign_loss, clippy::cast_possible_truncation)]
+        let now = state.now.get().max(0.0) as u64;
+        messages.with(|log| log.per_second(now))
+    });
+
+    let chip = move |label: &'static str,
+                     title: &'static str,
+                     read: fn(&log::Filter) -> bool,
+                     write: fn(&mut log::Filter)| {
+        view! {
+            <button
+                class="chip"
+                class:active=move || filter.with(read)
+                title=title
+                on:click=move |_| filter.update(write)
+            >
+                {label}
+            </button>
+        }
+    };
+
+    view! {
+        <div class="log">
+            <div class="log-bar">
+                {chip("in", "batches as they arrived", |f| f.input, |f| f.input = !f.input)}
+                {chip(
+                    "out",
+                    "batches as they left the transforms",
+                    |f| f.output,
+                    |f| f.output = !f.output,
+                )}
+                {chip(
+                    "err",
+                    "failures, at any stage",
+                    |f| f.errors,
+                    |f| f.errors = !f.errors,
+                )}
+                <span class="rate">
+                    {move || {
+                        let rate = rate.get();
+                        (rate > 0.0).then(|| format!("{rate:.0}/s"))
+                    }}
+                </span>
+                <button
+                    class="clear"
+                    title="group each batch's journey into one row, or list every event"
+                    on:click=move |_| grouped.update(|g| *g = !*g)
+                >
+                    {move || if grouped.get() { "grouped" } else { "flat" }}
+                </button>
+                <button
+                    class="clear"
+                    title="clear this log"
+                    on:click=move |_| {
+                        messages.update(log::Log::clear);
+                        following.set(true);
+                    }
+                >
+                    "clear"
+                </button>
+            </div>
+            <div
+                class="log-body"
+                node_ref=body_ref
+                on:scroll=move |_| {
+                    if let Some(el) = body_ref.get_untracked() {
+                        following.set(at_bottom(&el));
+                    }
+                }
+            >
+                <Show when=nothing_to_show>
+                    <div class="empty">
+                        {move || {
+                            if filter.get().is_empty() {
+                                "everything is filtered out"
+                            } else if messages.with(log::Log::is_empty) {
+                                "waiting for messages…"
+                            } else {
+                                "nothing matches this filter"
+                            }
+                        }}
+                    </div>
+                </Show>
+                <Show when=move || grouped.get()>
+                    <For
+                        each=move || visible_passes.get()
+                        // by content, not identity: a pass grows after it is
+                        // first drawn, and a stable key would freeze the row
+                        key=log::Pass::render_key
+                        let:pass
+                    >
+                        <PassView pass names expanded />
+                    </For>
+                </Show>
+                <Show when=move || !grouped.get()>
+                    <For each=move || visible_entries.get() key=|entry| entry.id let:entry>
+                        <LogRow entry names />
+                    </For>
+                </Show>
+            </div>
+            // Only while the reader has scrolled away, and inside the log rather
+            // than over the card: it is the log's own "you are not seeing the
+            // newest line" and shouldn't cover the config above it.
+            <Show when=move || !following.get()>
+                <button
+                    class="log-jump"
+                    on:click=move |_| {
+                        following.set(true);
+                        scroll_to_end();
+                    }
+                >
+                    "jump to latest"
+                </button>
+            </Show>
+        </div>
+    }
+}
+
 #[component]
 pub fn Card(
     pipeline_id: PipelineId,
@@ -2805,28 +3154,34 @@ pub fn Card(
 ) -> impl IntoView {
     let state = expect_context::<AppState>();
     let canvas = state.canvas_state;
-    let messages = RwSignal::new(VecDeque::<(u64, log::Line)>::with_capacity(
-        log::LOG_CAPACITY,
-    ));
-    let next_id = RwSignal::new(0u64);
+    let messages = RwSignal::new(log::Log::default());
+    let filter = RwSignal::new(log::Filter::default());
+    // What the component index on a failure means. Read once: the config of a
+    // running pipeline never changes, and an edit rebuilds the card.
+    let names = StoredValue::new(log::ComponentNames {
+        transforms: inspector::transform_sections(&config)
+            .into_iter()
+            .map(|section| section.kind)
+            .collect(),
+        outputs: inspector::output_sections(&config)
+            .into_iter()
+            .map(|section| section.kind)
+            .collect(),
+    });
     let id = pipeline_id.clone();
+
+    let maximized_id = pipeline_id.clone();
+    let is_maximized = Memo::new(move |_| {
+        canvas
+            .maximized
+            .with(|m| m.as_ref() == Some(&maximized_id))
+    });
 
     Effect::new(move |_| {
         if let Some(ev) = events.get()
             && ev.pipeline_id == id
         {
-            let lines = log::lines_for(&ev);
-            let mut id = next_id.get_untracked();
-            messages.update(|entries| log::append(entries, &mut id, lines));
-            next_id.set(id);
-        }
-    });
-    let log_ref = NodeRef::<leptos::html::Div>::new();
-
-    Effect::new(move |_| {
-        messages.track();
-        if let Some(el) = log_ref.get() {
-            el.set_scroll_top(el.scroll_height());
+            messages.update(|log| log.push(&ev));
         }
     });
 
@@ -2851,6 +3206,13 @@ pub fn Card(
         if height <= 0.0 {
             return;
         }
+        // A maximized card is as tall as the window, which is not a fact about
+        // its content: reporting it would push every row below it apart and
+        // then pull them back on restore. The last real measurement stands,
+        // which is also the one the card goes back to.
+        if is_maximized.get_untracked() {
+            return;
+        }
         let changed = canvas.measured.with_untracked(|m| {
             m.get(&measure_id)
                 .is_none_or(|old| (old - height).abs() > 1.0)
@@ -2864,6 +3226,15 @@ pub fn Card(
 
     let position_id = pipeline_id.clone();
     let position = Memo::new(move |_| {
+        // A maximized card is placed against the viewport rather than by the
+        // layout, and reads the camera so that panning and zooming leave it
+        // where it is on screen. Its laid-out position is untouched underneath,
+        // so restoring it is only a matter of dropping this branch — and the
+        // edges, which are still routed against that position, come back to a
+        // card that never moved.
+        if is_maximized.get() {
+            return crate::graph::maximized_geom(canvas.camera.get(), canvas.viewport.get());
+        }
         canvas
             .placements
             .with(|p| p.get(&position_id).copied())
@@ -2917,12 +3288,19 @@ pub fn Card(
     });
 
     let reset_id = pipeline_id.clone();
+    let toggle_id = StoredValue::new(pipeline_id.clone());
+
+    // A maximized card is sized by the window rather than by its content, which
+    // is the same arrangement a resized one is in: the box is given, and the log
+    // takes what is left over and scrolls.
+    let fixed_height = move || is_maximized.get() || pinned_height.get().is_some();
 
     view! {
         <div
             class="card"
             class:dragging=move || is_dragging.get()
-            class:pinned=move || pinned_height.get().is_some()
+            class:maximized=move || is_maximized.get()
+            class:pinned=fixed_height
             node_ref=card_ref
             style:left=move || format!("{}px", position.get().x)
             style:top=move || format!("{}px", position.get().y)
@@ -2931,47 +3309,58 @@ pub fn Card(
             // it keeps growing with its content; a resized one is pinned to the
             // height that was asked for and its log scrolls inside it.
             style:height=move || {
-                pinned_height.get().map(|_| format!("{}px", position.get().height))
+                fixed_height().then(|| format!("{}px", position.get().height))
             }
             style:min-height=move || {
-                if pinned_height.get().is_some() {
-                    None
-                } else {
-                    Some(format!("{}px", position.get().height))
-                }
+                if fixed_height() { None } else { Some(format!("{}px", position.get().height)) }
             }
         >
             <header
-                class:draggable=move || state.editing()
+                // A maximized card is already where it is going to be: dragging
+                // it would only write a position no one can see being chosen.
+                class:draggable=move || state.editing() && !is_maximized.get()
                 on:mousedown=move |ev| {
-                    if state.editing() {
+                    if state.editing() && !is_maximized.get() {
                         grab(ev, Grab::Move);
                     }
                 }
                 // double-click puts the card back under the automatic layout,
                 // which is the only way back once it has been moved
                 on:dblclick=move |_| {
-                    if state.editing() {
+                    if state.editing() && !is_maximized.get() {
                         canvas.unpin(&reset_id);
                     }
                 }
                 title=move || {
-                    if state.editing() {
+                    if state.editing() && !is_maximized.get() {
                         "drag to move, double-click to lay out automatically"
                     } else {
                         ""
                     }
                 }
             >
-                {pipeline_id.clone()}
+                <span class="card-title">{pipeline_id.clone()}</span>
+                // Not behind the edit-mode `<Show>`: filling the screen with a
+                // card is a way of reading it, and read-only wants it most.
+                <button
+                    class="card-maximize"
+                    // the press must not reach the drag handle underneath it
+                    on:mousedown=move |ev| ev.stop_propagation()
+                    on:dblclick=move |ev| ev.stop_propagation()
+                    on:click=move |_| canvas.toggle_maximized(&toggle_id.get_value())
+                    title=move || {
+                        if is_maximized.get() { "restore" } else { "maximize" }
+                    }
+                    aria-label=move || {
+                        if is_maximized.get() { "restore" } else { "maximize" }
+                    }
+                >
+                    {move || if is_maximized.get() { "⤡" } else { "⤢" }}
+                </button>
             </header>
             <Inspector config=config />
-            <div class="messages" node_ref=log_ref>
-                <For each=move || messages.get() key=|(i, _)| *i let:entry>
-                    <div class:error=entry.1.error>{entry.1.text}</div>
-                </For>
-            </div>
-            <Show when=move || state.editing()>
+            <MessageLog messages filter names />
+            <Show when=move || state.editing() && !is_maximized.get()>
                 <div
                     class="resize-handle"
                     title="drag to resize"
