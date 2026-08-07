@@ -8,13 +8,14 @@
 //!
 //! [`Config`]: crate::config::Config
 
+use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 /// The two ways a config file can be written.
 ///
 /// JSON is the default because it is what every existing file and every example
 /// in the repository uses; a file only gets read as YAML if it says so.
-#[derive(Serialize, Deserialize, Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, Default, PartialEq, Eq, Hash, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum ConfigFormat {
     #[default]

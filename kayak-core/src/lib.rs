@@ -1,8 +1,10 @@
 use std::sync::Arc;
 
 use crate::config::Config;
+use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
+pub mod api_docs;
 pub mod config;
 pub mod connections;
 pub mod docs;
@@ -13,7 +15,12 @@ pub use connections::{ConnectionId, ConnectionKind, Connections};
 pub use format::ConfigFormat;
 pub use layout::{EdgeEnd, LayoutFile, PipelineLayout, PortLayout, Side};
 
-#[derive(Serialize, Deserialize, Clone)]
+/// One pipeline as the API reports it: the id it is running under, and the
+/// config it was built from.
+///
+/// The same wire shape the run loop's `PipelineView` serializes to — this is
+/// the owned spelling of it, and the one the schema is generated from.
+#[derive(Serialize, Deserialize, Clone, JsonSchema)]
 pub struct PipelineDto {
     pub id: String,
     pub config: Config,
@@ -21,7 +28,7 @@ pub struct PipelineDto {
 
 /// How the server was started, and whether what it is running still matches
 /// the file it started from.
-#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq, JsonSchema)]
 pub struct SettingsDto {
     /// Name of the config file the server is working against — the `--config`
     /// one, or the one a save has since created. Its absence doesn't mean edits
@@ -44,7 +51,7 @@ pub struct SettingsDto {
 
 /// What `POST /api/config/save` takes: a bare file name, saved beside the
 /// config the server was started from. Not a path — see `persist::save_path`.
-#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq, JsonSchema)]
 pub struct SaveConfigRequest {
     pub name: String,
     /// JSON or YAML. Omitted means "whatever `name` says it is", which is what
@@ -55,7 +62,7 @@ pub struct SaveConfigRequest {
 }
 
 /// Where a save actually landed, so the UI can name it rather than guess.
-#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq, JsonSchema)]
 pub struct SaveConfigResponse {
     pub path: String,
 }
@@ -70,7 +77,7 @@ pub type MessageBatch = Vec<Arc<serde_json::Value>>;
 ///
 /// The serialized spellings are wire format — `/events` carries them and the
 /// frontend's filter chips are named after them. `stage_round_trips` pins them.
-#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq, Hash, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum Stage {
     Input,
@@ -99,7 +106,7 @@ impl std::fmt::Display for Stage {
 
 /// What a run loop is reporting: a batch that passed through, or something that
 /// went wrong while handling one.
-#[derive(Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Clone, Serialize, Deserialize, PartialEq, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum EventPayload {
     Batch(Arc<MessageBatch>),
@@ -109,7 +116,7 @@ pub enum EventPayload {
     Error(String),
 }
 
-#[derive(Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Clone, Serialize, Deserialize, PartialEq, JsonSchema)]
 pub struct UiEvent {
     pub pipeline_id: PipelineId,
     pub stage: Stage,

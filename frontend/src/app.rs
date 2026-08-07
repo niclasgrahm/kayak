@@ -1,3 +1,4 @@
+use kayak_core::api_docs::{ApiDoc, endpoints};
 use kayak_core::docs::{Family, FieldType, all_components};
 use kayak_core::{
     ConfigFormat, Connections, EdgeEnd, LayoutFile, PipelineDto, PipelineId, PortLayout, Side,
@@ -16,6 +17,7 @@ use leptos_use::{
 use std::collections::{HashMap, HashSet};
 
 use crate::api_client::{ApiClient, ApiError};
+use crate::api_docs;
 use crate::docs;
 use crate::form;
 use crate::graph::{
@@ -2759,62 +2761,320 @@ fn SaveAsModal() -> impl IntoView {
     }
 }
 
-/// The component reference: every input, transform and output kayak can build,
-/// generated from the config schemas rather than written by hand.
+/// Which reference the `/docs` page is showing.
+///
+/// A tab rather than a second route because the two are the same question asked
+/// at two levels — "what can I build" and "how do I ask for it" — and someone
+/// reading one wants the other a click away, not a URL away.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DocsTab {
+    Components,
+    Http,
+}
+
+/// The reference: every component kayak can build, and every request its API
+/// serves. Both generated rather than written by hand — the components by
+/// reflecting over the config schemas, the endpoints from the table the router
+/// itself is built from.
 ///
 /// The docs are the same on every visit, so they're built once here and only
 /// re-filtered as the search box changes.
 #[component]
 pub fn DocsPage() -> impl IntoView {
     let all = StoredValue::new(all_components());
+    let all_endpoints = StoredValue::new(endpoints());
+    let tab = RwSignal::new(DocsTab::Components);
+    // one query per tab: a search for "nats" and a search for "409" are not the
+    // same search, and carrying one into the other tab would show an empty page
     let query = RwSignal::new(String::new());
+    let api_query = RwSignal::new(String::new());
+    // which entry the sidebar has jumped to, per tab for the same reason the
+    // queries are
     let selected = RwSignal::new(Option::<String>::None);
+    let api_selected = RwSignal::new(Option::<String>::None);
     let groups = Memo::new(move |_| all.with_value(|all| docs::groups(all, &query.get())));
+    let api_groups = Memo::new(move |_| {
+        all_endpoints.with_value(|all| api_docs::groups(all, &api_query.get()))
+    });
+    let is = move |which: DocsTab| tab.get() == which;
 
     view! {
         <Navbar />
         <div class="main-content">
-            <DocsSidebar groups=groups query=query selected=selected />
-            <div class="docs-content">
-                <Show
-                    when=move || docs::total(&groups.get()) != 0
-                    fallback=move || {
-                        view! {
-                            <p class="empty">
-                                "no component matches “" {move || query.get()} "”"
-                            </p>
-                        }
-                    }
-                >
-                    // Rebuilt wholesale on every keystroke rather than keyed
-                    // with <For>: the groups are keyed by family, and a family
-                    // whose *contents* changed keeps its key, so a keyed list
-                    // would leave filtered-out components on screen.
-                    {move || {
-                        groups
-                            .get()
-                            .into_iter()
-                            .map(|group| {
-                                view! {
-                                    <section class="docs-family">
-                                        <h2>{group.family.label()}</h2>
-                                        {group
-                                            .components
-                                            .into_iter()
-                                            .map(|component| {
-                                                view! {
-                                                    <ComponentDoc component=component selected=selected />
-                                                }
-                                            })
-                                            .collect_view()}
-                                    </section>
-                                }
-                            })
-                            .collect_view()
-                    }}
+            <div class="sidebar docs-sidebar">
+                <div class="sidebar-tabs">
+                    <button
+                        class="tab"
+                        class:active=move || is(DocsTab::Components)
+                        on:click=move |_| tab.set(DocsTab::Components)
+                    >
+                        "components"
+                    </button>
+                    <button
+                        class="tab"
+                        class:active=move || is(DocsTab::Http)
+                        on:click=move |_| tab.set(DocsTab::Http)
+                    >
+                        "http api"
+                    </button>
+                </div>
+                // two `Show`s rather than one with a fallback, same as the
+                // canvas sidebar: each keeps its own search and scroll position
+                <Show when=move || is(DocsTab::Components)>
+                    <DocsSidebar groups=groups query=query selected=selected />
+                </Show>
+                <Show when=move || is(DocsTab::Http)>
+                    <ApiSidebar groups=api_groups query=api_query selected=api_selected />
                 </Show>
             </div>
+            <Show when=move || is(DocsTab::Components)>
+                <div class="docs-content">
+                    <Show
+                        when=move || docs::total(&groups.get()) != 0
+                        fallback=move || {
+                            view! {
+                                <p class="empty">
+                                    "no component matches \u{201c}" {move || query.get()} "\u{201d}"
+                                </p>
+                            }
+                        }
+                    >
+                        // Rebuilt wholesale on every keystroke rather than keyed
+                        // with <For>: the groups are keyed by family, and a family
+                        // whose *contents* changed keeps its key, so a keyed list
+                        // would leave filtered-out components on screen.
+                        {move || {
+                            groups
+                                .get()
+                                .into_iter()
+                                .map(|group| {
+                                    view! {
+                                        <section class="docs-family">
+                                            <h2>{group.family.label()}</h2>
+                                            {group
+                                                .components
+                                                .into_iter()
+                                                .map(|component| {
+                                                    view! {
+                                                        <ComponentDoc component=component selected=selected />
+                                                    }
+                                                })
+                                                .collect_view()}
+                                        </section>
+                                    }
+                                })
+                                .collect_view()
+                        }}
+                    </Show>
+                </div>
+            </Show>
+            <Show when=move || is(DocsTab::Http)>
+                <div class="docs-content">
+                    <ApiIntro />
+                    <Show
+                        when=move || api_docs::total(&api_groups.get()) != 0
+                        fallback=move || {
+                            view! {
+                                <p class="empty">
+                                    "no endpoint matches \u{201c}" {move || api_query.get()} "\u{201d}"
+                                </p>
+                            }
+                        }
+                    >
+                        // rebuilt rather than keyed, for the same reason as the
+                        // component reference above
+                        {move || {
+                            api_groups
+                                .get()
+                                .into_iter()
+                                .map(|group| {
+                                    view! {
+                                        <section class="docs-family">
+                                            <h2>{group.tag.label()}</h2>
+                                            <p class="doc-description">{group.tag.description()}</p>
+                                            {group
+                                                .endpoints
+                                                .into_iter()
+                                                .map(|endpoint| {
+                                                    view! {
+                                                        <EndpointDoc endpoint=endpoint selected=api_selected />
+                                                    }
+                                                })
+                                                .collect_view()}
+                                        </section>
+                                    }
+                                })
+                                .collect_view()
+                        }}
+                    </Show>
+                </div>
+            </Show>
         </div>
+    }
+}
+
+/// The line above the endpoint list, pointing at the two things this page is a
+/// readable summary *of*: the spec, and the renderer that does the full job.
+#[component]
+fn ApiIntro() -> impl IntoView {
+    view! {
+        <section class="api-intro">
+            <p class="doc-description">
+                "Everything below is generated from the same table the server builds its \
+                 routes from, so it describes the server you are talking to. The full \
+                 reference, with schemas and a request panel, is at "
+                <a href="/api/reference">"/api/reference"</a>
+                "; the machine-readable spec is at "
+                <a href="/api/openapi.json">"/api/openapi.json"</a>
+                " \u{2014} point a client generator or a contract test at that one."
+            </p>
+        </section>
+    }
+}
+
+/// Search box plus the matching endpoints, grouped by tag.
+#[component]
+fn ApiSidebar(
+    groups: Memo<Vec<api_docs::Group>>,
+    query: RwSignal<String>,
+    selected: RwSignal<Option<String>>,
+) -> impl IntoView {
+    view! {
+        <SearchBox placeholder="search endpoints" query=query />
+        // rebuilt rather than keyed, for the same reason as the reference pane
+        {move || {
+            groups
+                .get()
+                .into_iter()
+                .map(|group| {
+                    view! {
+                        <div class="nav-group">
+                            <div class="nav-group-title">{group.tag.label()}</div>
+                            {group
+                                .endpoints
+                                .into_iter()
+                                .map(|endpoint| {
+                                    let anchor = endpoint.anchor_id();
+                                    let on_click = anchor.clone();
+                                    let method = endpoint.method;
+                                    view! {
+                                        <div
+                                            class="tree-item endpoint-item"
+                                            class:selected=move || {
+                                                selected.get().as_deref() == Some(anchor.as_str())
+                                            }
+                                            on:click=move |_| {
+                                                selected.set(Some(on_click.clone()));
+                                                scroll_to(&on_click);
+                                            }
+                                        >
+                                            <span class=format!(
+                                                "method-badge {}",
+                                                api_docs::method_class(method),
+                                            )>{method.label()}</span>
+                                            <code class="endpoint-path">{endpoint.path}</code>
+                                        </div>
+                                    }
+                                })
+                                .collect_view()}
+                        </div>
+                    }
+                })
+                .collect_view()
+        }}
+    }
+}
+
+/// One endpoint's entry in the reference.
+#[component]
+fn EndpointDoc(endpoint: ApiDoc, selected: RwSignal<Option<String>>) -> impl IntoView {
+    let anchor = endpoint.anchor_id();
+    let is_selected = anchor.clone();
+    let method = endpoint.method;
+    let params = endpoint.params.clone();
+    let responses = endpoint.responses.clone();
+    let request = endpoint.request;
+
+    view! {
+        <article
+            class="doc-card endpoint-card"
+            class:selected=move || selected.get().as_deref() == Some(is_selected.as_str())
+            id=anchor
+        >
+            <header>
+                <span class=format!(
+                    "method-badge {}",
+                    api_docs::method_class(method),
+                )>{method.label()}</span>
+                <code class="endpoint-path">{endpoint.path}</code>
+                <code class="doc-tag">{endpoint.operation_id()}</code>
+            </header>
+            <p class="endpoint-summary">{endpoint.summary}</p>
+            <Description text=endpoint.description.to_string() />
+
+            {(!params.is_empty())
+                .then(|| {
+                    view! {
+                        <div class="section-kind">"path parameters"</div>
+                        <div class="field-table">
+                            {params
+                                .into_iter()
+                                .map(|param| {
+                                    view! {
+                                        <div class="field">
+                                            <code class="field-name">{param.name}</code>
+                                            <code class="field-type">"string"</code>
+                                            <span class="field-requirement">"required"</span>
+                                            <div class="field-description">
+                                                <Description text=param.description.to_string() />
+                                            </div>
+                                        </div>
+                                    }
+                                })
+                                .collect_view()}
+                        </div>
+                    }
+                })}
+
+            {request
+                .map(|request| {
+                    view! {
+                        <div class="section-kind">"request body"</div>
+                        <div class="field-table">
+                            <div class="field">
+                                <code class="field-name">"body"</code>
+                                <code class="field-type">{request.body.type_name()}</code>
+                                <span class="field-requirement">"required"</span>
+                                <div class="field-description">
+                                    <Description text=request.description.to_string() />
+                                </div>
+                            </div>
+                        </div>
+                    }
+                })}
+
+            <div class="section-kind">"responses"</div>
+            <div class="field-table">
+                {responses
+                    .into_iter()
+                    .map(|response| {
+                        view! {
+                            <div class="field">
+                                <code class=format!(
+                                    "field-name status {}",
+                                    api_docs::status_class(response.status),
+                                )>{response.status}</code>
+                                <code class="field-type">{response.body.type_name()}</code>
+                                <span class="field-requirement optional"></span>
+                                <div class="field-description">
+                                    <Description text=response.description.to_string() />
+                                </div>
+                            </div>
+                        }
+                    })
+                    .collect_view()}
+            </div>
+        </article>
     }
 }
 
@@ -2828,7 +3088,7 @@ fn DocsSidebar(
     selected: RwSignal<Option<String>>,
 ) -> impl IntoView {
     view! {
-        <div class="sidebar docs-sidebar">
+        <>
             <SearchBox placeholder="search components" query=query />
             // rebuilt rather than keyed, for the same reason as the reference
             // pane: the key is the family, and filtering changes its contents
@@ -2867,7 +3127,7 @@ fn DocsSidebar(
                     })
                     .collect_view()
             }}
-        </div>
+        </>
     }
 }
 

@@ -4,20 +4,18 @@
 //! `main.rs`, so that integration tests in `tests/` (which are separate crates)
 //! can build pipelines, drive run loops and call the HTTP handlers directly.
 
-use axum::{
-    Router,
-    routing::{delete, get, post, put},
-};
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::broadcast;
 
 pub mod config;
 pub mod connections;
+pub mod endpoints;
 pub mod events;
 pub mod handlers;
 pub mod inputs;
 pub mod layout;
+pub mod openapi;
 pub mod outputs;
 pub mod persist;
 pub mod pipeline;
@@ -26,18 +24,9 @@ pub mod state;
 pub mod testing;
 pub mod transforms;
 
-use crate::handlers::{
-    rest::{
-        connection::{create_connection, delete_connection, get_connections},
-        docs::get_docs,
-        layout::{get_layout, put_layout},
-        pipeline::{create_pipeline, delete_pipeline, get_pipelines},
-        settings::{get_settings, revert_config, save_config},
-    },
-    ui::ui::events_handler,
-};
+pub use crate::endpoints::api_router;
 use crate::secrets::{EnvStore, Resolved, SecretStore};
-use crate::state::{AppState, PipelineHandle, PipelineId, UiEvent};
+use crate::state::{PipelineHandle, PipelineId, UiEvent};
 use kayak_core::config::Secret;
 use std::path::PathBuf;
 
@@ -146,35 +135,4 @@ impl<'a> BuildCtx<'a> {
     pub fn file_connection(&self, id: &str) -> anyhow::Result<&FileConnection> {
         Ok(self.connections.file(id)?)
     }
-}
-
-/// The JSON/SSE surface, without the Leptos routes. `main` merges this with the
-/// frontend router; tests call it directly through `tower::ServiceExt::oneshot`,
-/// which keeps them off real sockets.
-pub fn api_router(state: Arc<AppState>) -> Router {
-    Router::new()
-        // the /docs *page* is a Leptos route; this is the same data as JSON
-        .route("/api/docs", get(get_docs))
-        .route("/api/settings", get(get_settings))
-        // where the cards sit, not what they run: written on the spot rather
-        // than waiting for a save — see `layout`
-        .route("/api/layout", get(get_layout))
-        .route("/api/layout", put(put_layout))
-        // the config file is written only here, never as a side effect of an
-        // edit — see `persist`
-        .route("/api/config/save", post(save_config))
-        .route("/api/config/revert", post(revert_config))
-        .route("/events", get(events_handler))
-        .route("/api/pipelines", post(create_pipeline))
-        .route("/api/pipelines", get(get_pipelines))
-        .route("/api/pipelines/{pipeline_id}", delete(delete_pipeline))
-        // the systems those pipelines talk to, named once and referred to by
-        // the components — written to disk by the same explicit save
-        .route("/api/connections", get(get_connections))
-        .route("/api/connections", post(create_connection))
-        .route(
-            "/api/connections/{connection_id}",
-            delete(delete_connection),
-        )
-        .with_state(state)
 }

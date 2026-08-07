@@ -256,3 +256,128 @@ async fn the_docs_endpoint_serves_every_component_kind() -> anyhow::Result<()> {
     }
     Ok(())
 }
+
+/// Every documented endpoint is actually routed, at the method it is documented
+/// under.
+///
+/// The router is built by folding over the same table, so a documented route
+/// that isn't served would take a bug in `endpoints::handler_for` — but the
+/// *method* is worth pinning: a 405 here means the table and the handler
+/// disagree about what kind of request this is, which is the one mismatch
+/// folding can't rule out.
+///
+/// A 404 is the awkward case, because two different things produce one: the
+/// router, for a path it doesn't serve, and `delete_pipeline`, for an id that
+/// isn't running. They are told apart by the body — the router's is empty,
+/// `AppError`'s is the JSON error object. Anything else counts as routed; an
+/// extractor rejecting `{}` with a 422 is still an endpoint answering.
+#[tokio::test]
+async fn every_documented_endpoint_is_routed_at_its_documented_method() -> anyhow::Result<()> {
+    let app = app();
+    for endpoint in kayak_core::api_docs::endpoints() {
+        // a placeholder needs *some* value; a 404 from the handler is still a
+        // routed endpoint, and this test only rejects a 404 from the router
+        let path = endpoint.path.replace("{pipeline_id}", "nope").replace(
+            "{connection_id}",
+            "nope",
+        );
+        let method = match endpoint.method {
+            kayak_core::api_docs::Method::Get => "GET",
+            kayak_core::api_docs::Method::Post => "POST",
+            kayak_core::api_docs::Method::Put => "PUT",
+            kayak_core::api_docs::Method::Delete => "DELETE",
+        };
+        let req = Request::builder()
+            .method(method)
+            .uri(&path)
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(Body::from("{}"))?;
+        let res = app.clone().oneshot(req).await?;
+        let status = res.status();
+
+        assert_ne!(
+            status,
+            StatusCode::METHOD_NOT_ALLOWED,
+            "{method} {path} is documented but routed under a different method"
+        );
+        // the body is only read on a 404, and deliberately so: `/events` is an
+        // event stream that stays open, so collecting every response here would
+        // hang on it forever
+        if status == StatusCode::NOT_FOUND {
+            let bytes = res.into_body().collect().await?.to_bytes();
+            let body: Value = serde_json::from_slice(&bytes).unwrap_or(Value::Null);
+            assert!(
+                body["error"].is_string(),
+                "{method} {path} is documented but not routed"
+            );
+        }
+    }
+    Ok(())
+}
+
+/// The spec is served, is 3.1, and describes the server serving it.
+#[tokio::test]
+async fn the_openapi_endpoint_serves_a_document_covering_every_endpoint() -> anyhow::Result<()> {
+    let req = Request::builder()
+        .uri("/api/openapi.json")
+        .body(Body::empty())?;
+    let res = app().oneshot(req).await?;
+    assert_eq!(res.status(), StatusCode::OK);
+
+    let bytes = res.into_body().collect().await?.to_bytes();
+    let document: Value = serde_json::from_slice(&bytes)?;
+    assert_eq!(document["openapi"], "3.1.0");
+
+    for endpoint in kayak_core::api_docs::endpoints() {
+        assert_eq!(
+            document["paths"][endpoint.path][endpoint.method.key()]["operationId"],
+            endpoint.operation_id(),
+            "{} {} is missing from the served document",
+            endpoint.method.label(),
+            endpoint.path
+        );
+    }
+    Ok(())
+}
+
+/// The reference page is served as HTML and points at this server's spec.
+#[tokio::test]
+async fn the_reference_page_is_served_as_html() -> anyhow::Result<()> {
+    let req = Request::builder()
+        .uri("/api/reference")
+        .body(Body::empty())?;
+    let res = app().oneshot(req).await?;
+    assert_eq!(res.status(), StatusCode::OK);
+    assert!(
+        res.headers()
+            .get(header::CONTENT_TYPE)
+            .and_then(|value| value.to_str().ok())
+            .unwrap_or_default()
+            .starts_with("text/html"),
+        "the reference page should be served as html"
+    );
+
+    let bytes = res.into_body().collect().await?.to_bytes();
+    let page = String::from_utf8(bytes.to_vec())?;
+    assert!(page.contains("/api/openapi.json"));
+    Ok(())
+}
+
+/// The documented error body has to be the one `AppError` actually produces.
+///
+/// `ApiError` is a Rust type in `kayak_core::api_docs` precisely so the spec's
+/// error schema is generated rather than written; this is what stops the two
+/// from drifting, since nothing else connects them.
+#[tokio::test]
+async fn an_error_body_matches_the_documented_shape() -> anyhow::Result<()> {
+    let (status, body) = delete_pipeline(&app(), "nope").await?;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+
+    let parsed: kayak_core::api_docs::ApiError = serde_json::from_value(body)?;
+    assert!(
+        parsed.error.contains("nope"),
+        "the error should name the id: {}",
+        parsed.error
+    );
+    Ok(())
+}

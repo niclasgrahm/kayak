@@ -142,7 +142,7 @@ pub const FILE: &str = "file";
 /// The name is a field here rather than a path segment because it is part of
 /// what is being created, and because the body then reads exactly like one
 /// entry of the file it will be written to.
-#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq, JsonSchema)]
 pub struct CreateConnectionRequest {
     pub id: ConnectionId,
     #[serde(flatten)]
@@ -155,7 +155,7 @@ pub struct CreateConnectionRequest {
 /// identity, duplicates are impossible to express, and iteration is in name
 /// order — which is what makes the file deterministic to write, the same
 /// property the config file depends on.
-#[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq, Eq, JsonSchema)]
 #[serde(transparent)]
 pub struct Connections(BTreeMap<ConnectionId, ConnectionKind>);
 

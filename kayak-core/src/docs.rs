@@ -13,7 +13,7 @@
 
 use crate::config::{InputConfig, InputKind, OutputKind, TransformKind};
 use crate::connections::ConnectionKind;
-use schemars::schema_for;
+use schemars::{JsonSchema, schema_for};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
@@ -23,7 +23,7 @@ use serde_json::Value;
 /// A connection isn't a stage of a pipeline, but it is configured the same way
 /// — a tagged struct with doc-commented fields — so it documents itself and
 /// generates its form through exactly this machinery.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum Family {
     Input,
@@ -52,7 +52,7 @@ impl Family {
 /// than in the frontend is the same bargain as the rest of this module: the
 /// config schema stays the single source of truth, so a new field gets a
 /// working form control without anyone editing the UI.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum FieldType {
     Text,
@@ -79,7 +79,7 @@ pub enum FieldType {
 }
 
 /// One configurable field of a component.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct FieldDoc {
     /// The wire name — what actually goes in the JSON.
     pub name: String,
@@ -96,14 +96,14 @@ pub struct FieldDoc {
 
 /// A component config that is a tagged enum rather than a flat struct — the
 /// `filter` transform, whose fields depend on which kind of filter it is.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct VariantDoc {
     pub name: String,
     pub fields: Vec<FieldDoc>,
 }
 
 /// One component: everything `/docs` shows about it.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct ComponentDoc {
     /// The `type` tag that selects this component in a config file.
     pub kind: String,

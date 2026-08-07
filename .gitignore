@@ -7,3 +7,4 @@ secrets.json
 # what `just dev` passes as --data-dir: pipeline data written by file outputs.
 # It is output, not a fixture, and a dev run can fill it without limit.
 /dev_data
+.playwright-mcp/

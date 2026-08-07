@@ -40,8 +40,8 @@ Lints are strict by design: clippy `pedantic` plus `unwrap_used`/`expect_used` a
 
 Three workspace crates:
 
-- **`kayak-core/`** — shared, dependency-light types. All config structs/enums (`config.rs`), plus `PipelineId`, `MessageBatch = Vec<Arc<serde_json::Value>>`, `UiEvent`, `PipelineDto`, and the canvas layout types (`layout.rs`). Compiles for both native and `wasm32`, which is why it exists: the frontend needs the same config types as the server. It has no async/network deps and no real `main.rs`.
-- **`/` (root `kayak` crate)** — the Axum server and the whole stream-processing runtime. It is a **lib + bin**: everything lives in `src/lib.rs` and its modules so integration tests can import it; `src/main.rs` is only clap args, tracing setup and the Leptos router wiring. `api_router()` in `lib.rs` builds the JSON/SSE routes for both.
+- **`kayak-core/`** — shared, dependency-light types. All config structs/enums (`config.rs`), plus `PipelineId`, `MessageBatch = Vec<Arc<serde_json::Value>>`, `UiEvent`, `PipelineDto`, the canvas layout types (`layout.rs`), and the endpoint table the HTTP surface is built and documented from (`api_docs.rs`). Compiles for both native and `wasm32`, which is why it exists: the frontend needs the same config types as the server. It has no async/network deps and no real `main.rs`.
+- **`/` (root `kayak` crate)** — the Axum server and the whole stream-processing runtime. It is a **lib + bin**: everything lives in `src/lib.rs` and its modules so integration tests can import it; `src/main.rs` is only clap args, tracing setup and the Leptos router wiring. `api_router()` — re-exported from `lib.rs`, defined in `src/endpoints.rs` — builds the JSON/SSE routes for both.
 - **`frontend/`** — Leptos 0.8 SSR + hydrate crate. `cdylib`+`rlib` with `ssr`/`hydrate` features; the root binary depends on it with `ssr` and mounts it via `leptos_axum`.
 
 ### The pipeline model
@@ -214,11 +214,13 @@ A card can also be **maximized** to fill the canvas, from the button in its titl
 
 ### HTTP surface
 
-`src/main.rs` builds two routers and merges them: an `api` router with `Arc<AppState>` state (`POST/GET /api/pipelines`, `DELETE /api/pipelines/{id}`, `POST/GET /api/connections`, `DELETE /api/connections/{id}`, `GET /events` SSE, `GET /api/docs`, `GET/PUT /api/layout`), and the Leptos router with `LeptosOptions` state plus `file_and_error_handler` fallback.
+`src/main.rs` builds two routers and merges them: the `api_router` with `Arc<AppState>` state, and the Leptos router with `LeptosOptions` state plus `file_and_error_handler` fallback.
+
+**The API router is not a list of `.route()` calls.** `src/endpoints.rs` folds it over `kayak_core::api_docs::endpoints()`, so that table isn't a description of the routes — it *is* the routes, and an endpoint missing from it is never registered. `handler_for` matches on the `Operation` enum, so a table entry with no handler doesn't compile; `route_of` takes the method from the table, so an entry documented `PUT` and wired to `post(...)` isn't expressible. Adding an endpoint therefore touches three places (an `Operation` variant, an `ApiDoc` entry, a handler arm) and the compiler names two of them.
 
 `/events` is an SSE stream over the `UiEvent` broadcast; the frontend consumes it with `leptos_use::use_event_source` + `codee` JSON. Pipeline run loops only send events when `receiver_count() > 0`. This is explicitly marked temporary in `src/pipeline.rs`.
 
-The frontend has two routes behind `leptos_router` (`frontend/src/app.rs`): `/` is the pannable/zoomable canvas of pipeline "cards" fed by `ApiClient::list_pipelines()` plus the live event signal, and `/docs` is the generated component reference. `Navbar` is shared and reads `AppState` through `use_context` rather than `expect_context`, because only the canvas provides it.
+The frontend has two routes behind `leptos_router` (`frontend/src/app.rs`): `/` is the pannable/zoomable canvas of pipeline "cards" fed by `ApiClient::list_pipelines()` plus the live event signal, and `/docs` is the generated reference — two tabs, components and HTTP API. `Navbar` is shared and reads `AppState` through `use_context` rather than `expect_context`, because only the canvas provides it.
 
 Of the older Askama templates, only `templates/index.html` and the dead `/ui` `index_handler` are left; both are slated for removal, and Askama goes with them.
 
@@ -233,6 +235,23 @@ A `FieldDoc` carries `field_type` (`FieldType`) beside the human-readable `type_
 `FieldType::Connection(kind)` works the same way and for the same reason, one step further: a `connection` field carries `#[schemars(extend("x-connection" = "kafka"))]`, and the marker holds the *kind* — "any connection" is the wrong set to offer, since a kafka input can only use a kafka connection. `Family::Connection` is a fourth family, so a connection kind documents itself on `/docs` and generates its own form through the same machinery a component does.
 
 `FieldType::PipelineId` is the one field type the schema alone can't derive: a pipeline id is a `String` like any other, so the field says so where it's declared — `#[schemars(extend("x-pipeline-id" = true))]` on `PipelineConfig.upstream` — and `docs.rs` looks for the marker, not for the field's name. The rule about not knowing component names covers their field names too, so any component that grows a reference to another pipeline gets the dropdown by adding that attribute. The options can't come from the schema either: they are the running graph, so `AddPipelineModal` derives them from the pipeline list and passes them down to `FieldEditor`. That control is the only one in the modal that reads its value back — the list can arrive after the modal opened, and a rebuild must re-mark what was already chosen rather than drop it.
+
+### The HTTP API reference (`/api/openapi.json`, `/api/reference`, the `/docs` tab)
+
+Three consumers off the one table in `kayak-core/src/api_docs.rs` — the same table `api_router` is folded over, so none of them can describe a server that doesn't exist.
+
+Unlike `docs.rs` this table is **written, not reflected**, and has to be: a Rust doc comment on an axum handler isn't readable at runtime. So the convention inverts — **the prose lives in the `ApiDoc` entry** and handlers carry a one-line `///` pointing at it. Don't "fix" that by moving descriptions back onto the handlers; nothing would read them. Bodies are the exception: they name a schema and `api_docs::schemas()` generates those with `schema_for!`, so request/response shapes can't drift from the Rust types.
+
+`src/openapi.rs` renders the table as OpenAPI 3.1. The only real work is hoisting each generated root schema's `$defs` into one `components/schemas` and rewriting the `$ref`s — schemars 1.x emits JSON Schema 2020-12, which 3.1 embeds unchanged, so there's no translation beyond that. Only the *value of a `$ref` key* is rewritten; a description mentioning `#/$defs/` is prose and is left alone.
+
+Four things to preserve:
+
+- **`ApiError` is a Rust type** (`api_docs::ApiError`) so the spec's error schema is generated rather than written. `an_error_body_matches_the_documented_shape` in `tests/api.rs` deserializes a real failure into it — that test is the only thing connecting `AppError` to what the spec claims.
+- **`/events` is described as far as OpenAPI can go and no further.** `Body::EventStream` renders as a string body plus prose, because 3.1 can name the media type but not the events in it. That's AsyncAPI's job; describing it as a JSON body would make clients try to parse the stream in one piece.
+- **The renderer is vendored**, `assets/scalar.js` (3.5 MB, committed) with `assets-dir = "assets"` in the leptos metadata. The page loads it and the spec by relative URL, so an offline `just dev` serves a working reference. `the_reference_page_loads_the_spec_and_the_bundle_from_this_server` fails if a CDN link creeps back in.
+- **The route-coverage test reads the body, not just the status.** `every_documented_endpoint_is_routed_at_its_documented_method` has to tell the router's 404 from `delete_pipeline`'s — the router's is empty, `AppError`'s is JSON. And it only collects the body on a 404, because collecting `/events` would hang forever.
+
+`frontend/src/api_docs.rs` is the pure half of the `/docs` tab, mirroring `frontend/src/docs.rs`; the two tabs keep separate search queries and separate `selected` signals, because a search for "nats" and a search for "409" aren't the same search. Endpoint prose is rendered through `docs::rendered_description` rather than a copy of it.
 
 ### Editing the graph from the UI
 

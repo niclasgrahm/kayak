@@ -15,6 +15,7 @@
 
 use std::collections::BTreeMap;
 
+use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 use crate::PipelineId;
@@ -32,7 +33,7 @@ pub const LAYOUT_VERSION: u32 = 1;
 /// different things: normally it is *measured* from the content it renders, and
 /// only an explicit resize pins it. `None` means "however tall it needs to be",
 /// which is what you want a card to go back to when its config grows.
-#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq)]
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, JsonSchema)]
 pub struct PipelineLayout {
     pub x: f64,
     pub y: f64,
@@ -45,7 +46,7 @@ pub struct PipelineLayout {
 /// cards sit and is never stored — but *where along it* the edge attaches can
 /// be, and a stored position only means anything together with the face it was
 /// measured on.
-#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum Side {
     Top,
@@ -84,7 +85,7 @@ pub enum EdgeEnd {
 /// position measured along the old face means nothing on the new one. When they
 /// disagree the stored position is ignored and the edge goes back to being
 /// placed automatically, which is self-healing and needs no cleanup pass.
-#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq)]
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, JsonSchema)]
 pub struct PortLayout {
     pub side: Side,
     pub along: f64,
@@ -111,7 +112,7 @@ pub struct PortLayout {
 ///
 /// Listed rather than keyed by a joined id, so nothing has to be escaped and no
 /// id character is special.
-#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Default)]
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Default, JsonSchema)]
 pub struct EdgeAdjustment {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub offset: Option<f64>,
@@ -144,7 +145,7 @@ impl EdgeAdjustment {
     }
 }
 
-#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, JsonSchema)]
 pub struct EdgeLayout {
     pub from: PipelineId,
     pub to: PipelineId,
@@ -158,7 +159,7 @@ pub struct EdgeLayout {
 /// Absent ids are the normal case, not a gap to be filled — the canvas lays
 /// those out itself. A pipeline is added here the first time it is dragged and
 /// removed when the arrangement is reset.
-#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, JsonSchema)]
 pub struct LayoutFile {
     #[serde(default = "default_version")]
     pub version: u32,

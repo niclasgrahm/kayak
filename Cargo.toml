@@ -46,6 +46,10 @@ reload-port = 3001
 site-root = "target/site"
 site-pkg-dir = "pkg"
 style-file = "style/main.scss"
+# copied verbatim into `site-root`. It holds the vendored API-reference
+# renderer, which `/api/reference` loads from this server rather than a CDN so
+# that an offline `just dev` still serves a working reference.
+assets-dir = "assets"
 
 [dependencies]
 kayak-core = { path = "kayak-core" }
