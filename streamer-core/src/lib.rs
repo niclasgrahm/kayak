@@ -21,10 +21,19 @@ pub struct StreamerDto {
 /// the file it started from.
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
 pub struct SettingsDto {
-    /// Name of the `--config` file, if there was one. Its absence means edits
-    /// can't be saved anywhere, which the UI has to say before someone spends
-    /// an afternoon building a graph.
+    /// Name of the config file the server is working against — the `--config`
+    /// one, or the one a save has since created. Its absence doesn't mean edits
+    /// can't be saved: it means there is no file *yet*, so the UI offers to
+    /// create one rather than to overwrite one.
     pub config_file: Option<String>,
+    /// The directory a save writes into. Shown so "create a config file" can
+    /// say where the file will appear, which is the one thing the file name on
+    /// its own doesn't tell you.
+    ///
+    /// Defaults to empty when a client is talking to an older server, which
+    /// reads the same as "unknown" — the UI just leaves the location out.
+    #[serde(default)]
+    pub save_directory: String,
     /// The running graph has diverged from what was last loaded or saved.
     /// Edits apply to the runtime immediately and the file is left alone, so
     /// without this the divergence would be invisible until a restart lost it.

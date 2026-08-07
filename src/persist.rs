@@ -170,27 +170,30 @@ pub(crate) fn temporary_path(path: &Path) -> std::path::PathBuf {
     path.with_file_name(name)
 }
 
-/// Where a "save as" of `name` is allowed to land, given the file the server
-/// was started from.
+/// Where a "save as" of `name` is allowed to land, given the one directory the
+/// server may write configs to.
 ///
 /// **This is a security boundary, not a convenience.** The browser cannot write
 /// to the server's disk — the server does, on request — so an unconstrained
 /// path here would let anyone who can reach the UI write a file anywhere the
 /// process can. Confining saves to the one directory the operator already
 /// pointed at is what keeps a config editor from being an arbitrary-write
-/// primitive.
+/// primitive. `dir` is the `--config` file's directory, or — for a server
+/// started without one, which can still be asked to *create* a config — the
+/// directory the process was started in. Either way it is chosen by whoever ran
+/// the server, never by the request.
 ///
 /// So `name` must be a bare file name. That is enough for everything the
 /// feature is for, including overwriting the loaded file — pass its own name.
 /// Anything with a separator, a `..`, or a root in it is refused rather than
 /// normalised, because normalising is where these checks go wrong: the rule is
 /// easier to trust when nothing is rewritten to satisfy it.
-pub fn save_path(config_path: &Path, name: &str) -> anyhow::Result<std::path::PathBuf> {
+pub fn save_path(dir: &Path, name: &str) -> anyhow::Result<std::path::PathBuf> {
     let trimmed = name.trim();
     anyhow::ensure!(!trimmed.is_empty(), "a file name is required");
     anyhow::ensure!(
         !trimmed.contains(['/', '\\']),
-        "'{trimmed}' is not a file name: a config can only be saved beside the one the server was started with, so it cannot contain a path"
+        "'{trimmed}' is not a file name: a config can only be saved in the directory the server writes to, so it cannot contain a path"
     );
     // `.` and `..` pass the separator check but name directories, not files
     anyhow::ensure!(
@@ -204,7 +207,7 @@ pub fn save_path(config_path: &Path, name: &str) -> anyhow::Result<std::path::Pa
     else {
         anyhow::bail!("'{trimmed}' is not a file name");
     };
-    Ok(config_path.with_file_name(only))
+    Ok(dir.join(only))
 }
 
 /// The ids named as upstream by any of these pipelines but not declared by any
@@ -429,17 +432,20 @@ mod tests {
     }
 
     #[test]
-    fn a_save_lands_beside_the_file_the_server_was_started_from() -> anyhow::Result<()> {
-        let config = Path::new("/srv/kayak/config.json");
+    fn a_save_lands_in_the_directory_the_server_writes_configs_to() -> anyhow::Result<()> {
+        let dir = Path::new("/srv/kayak");
         assert_eq!(
-            save_path(config, "other.json")?,
+            save_path(dir, "other.json")?,
             Path::new("/srv/kayak/other.json")
         );
         // saving over the loaded file is the ordinary "save" case
-        assert_eq!(save_path(config, "config.json")?, config);
+        assert_eq!(
+            save_path(dir, "config.json")?,
+            Path::new("/srv/kayak/config.json")
+        );
         // surrounding whitespace is a typing artefact, not part of a name
         assert_eq!(
-            save_path(config, "  spaced.json  ")?,
+            save_path(dir, "  spaced.json  ")?,
             Path::new("/srv/kayak/spaced.json")
         );
         Ok(())
@@ -451,7 +457,7 @@ mod tests {
     /// acceptable — they are refused.
     #[test]
     fn a_save_cannot_escape_the_config_directory() {
-        let config = Path::new("/srv/kayak/config.json");
+        let dir = Path::new("/srv/kayak");
         for escape in [
             "../outside.json",
             "../../etc/cron.d/kayak",
@@ -465,7 +471,7 @@ mod tests {
             r"..\windows.json",
             r"C:\windows\system32\x.json",
         ] {
-            let result = save_path(config, escape);
+            let result = save_path(dir, escape);
             assert!(
                 result.is_err(),
                 "'{escape}' was accepted as {:?}",

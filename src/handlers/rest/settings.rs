@@ -7,21 +7,25 @@ use crate::{handlers::error::AppError, state::AppState};
 
 /// How the server was started, and whether it has drifted from the file.
 ///
-/// The canvas can't work either out on its own, and both change what it should
-/// offer: there is no point showing a save button with nowhere to save to, and
-/// "unsaved changes" is the only warning that edits — which are live in the
-/// runtime — are not yet on disk.
+/// The canvas can't work any of it out on its own, and each part changes what
+/// it should offer: whether the save button says "save as" or "create a config
+/// file", where that file would land, and whether to warn that edits — which
+/// are live in the runtime — are not yet on disk.
 // axum handlers have to be async even when they do no awaiting
 #[allow(clippy::unused_async)]
 pub async fn get_settings(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     Json(SettingsDto {
         config_file: state.config_file_name(),
+        save_directory: state.save_directory().display().to_string(),
         unsaved_changes: state.has_unsaved_changes(),
     })
 }
 
-/// Write the running graph to a config file beside the one the server started
-/// from.
+/// Write the running graph to a config file in the server's save directory.
+///
+/// On a server started without `--config` this is how a config file comes into
+/// existence at all — the graph built in the UI is written out, and from then
+/// on that file is the one the server reverts to.
 ///
 /// `name` is a bare file name and is validated as one — this is a write to the
 /// server's disk driven by a request, so the directory is not negotiable. Using

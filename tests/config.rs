@@ -242,13 +242,19 @@ fn the_repository_config_file_parses() -> anyhow::Result<()> {
 /// YAML example quietly describing a graph the repo no longer has. It is
 /// compared as *pipelines*, not as text — the two files order their fields
 /// differently, and only the parsed result has to agree.
+///
+/// Both sides go through `persist::ordered` first, for the same reason: one of
+/// the files was written by a save and the other by hand, so they declare the
+/// same pipelines in a different order. That is not drift — the order a config
+/// file may be written in is exactly what `ordered` defines — and comparing the
+/// sequences raw would fail on it while missing nothing.
 #[test]
 fn the_repository_yaml_config_describes_the_same_graph() -> anyhow::Result<()> {
     let as_json: Vec<Config> = serde_json::from_str(&std::fs::read_to_string("config.json")?)?;
     let as_yaml: Vec<Config> = serde_norway::from_str(&std::fs::read_to_string("config.yaml")?)?;
     assert_eq!(
-        serde_json::to_value(&as_yaml)?,
-        serde_json::to_value(&as_json)?,
+        serde_json::to_value(streamer::persist::ordered(as_yaml))?,
+        serde_json::to_value(streamer::persist::ordered(as_json))?,
         "config.yaml has drifted from config.json; regenerate it"
     );
     Ok(())

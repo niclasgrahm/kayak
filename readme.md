@@ -193,13 +193,25 @@ started. That comparison is always made in JSON, whatever the file is written
 in — it is a fingerprint of the graph, and re-spelling it as YAML hasn't changed
 which pipelines are running.
 
-**Saving** takes a bare file name, written beside the config the server started
-from. That constraint is a security boundary, not a convenience: the browser
+**Saving** takes a bare file name, written into the one directory the server
+saves to. That constraint is a security boundary, not a convenience: the browser
 can't write to the server's disk, the server does on request, so an
 unconstrained path would be an arbitrary-write primitive for anyone who can
 reach the UI. Names containing a separator, a `..` or a root are refused rather
 than normalised — normalising is where these checks go wrong. Overwriting the
 loaded file is just typing its own name, which the modal warns about.
+
+**Starting without a config file.** `--config` is optional, and a server without
+one still runs whatever you build in the UI — so it can also be asked to write
+that graph out. In edit mode the navbar offers `create config file` instead of
+`save as…`, and the modal names the directory the file will appear in: the
+process's working directory, chosen when the server was started and never by the
+request, exactly as `--config`'s directory would be. The file that save creates
+*becomes* the server's config file, so from then on there is a `revert` to go
+back to, an `unsaved changes` marker that means something, and a home for the
+canvas arrangement — which is written out at that moment rather than being lost.
+Saving under a second name later is still a copy: the loaded file stays the one
+the server works against.
 
 Two properties make the output worth version controlling, both in
 `src/persist.rs` and both tested:
@@ -237,9 +249,9 @@ cancellation check before reporting any input failure: an input dying because we
 asked it to is not news. An input dying on a streamer that is *still running*
 still is, which is the distinction the check makes.
 
-`GET /api/settings` reports the file name and whether there are unsaved changes.
-Without `--config` there is nowhere to save, and the UI says so rather than
-offering a button that can only fail.
+`GET /api/settings` reports the file name, the directory saves land in, and
+whether there are unsaved changes. No file name means there is no config file
+*yet*, which is what turns the navbar's `save as…` into `create config file`.
 
 ## arranging the canvas
 
@@ -288,9 +300,9 @@ same reason: moving a card changes nothing the server runs, so `PUT
 canvas never counts as an unsaved change. There is no save step because there is
 nothing worth reviewing before it lands. It is a full replacement rather than a
 patch, which is what makes "put everything back to automatic" an ordinary send
-of a smaller map. Without a `--config` there is nowhere to put the file and the
-arrangement lasts only as long as the process — honest, and better than refusing
-to let someone tidy the canvas.
+of a smaller map. Without a config file there is nowhere to put it, so the
+arrangement lives in memory — until a save creates one, which writes it out on
+the spot rather than losing the tidying that came before it.
 
 **The grid is the unit.** `GRID` in `frontend/src/graph.rs` is 20px, the card
 width is 18 cells, positions and sizes snap to it, ports sit on its lines, and

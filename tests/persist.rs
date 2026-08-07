@@ -232,26 +232,158 @@ async fn an_edit_that_cancels_itself_out_is_not_an_unsaved_change() -> anyhow::R
     Ok(())
 }
 
-/// With nowhere to save to there is nothing to be out of sync with, and the UI
-/// should not nag about it.
+/// Until a save has happened there is no file to be out of sync with, so the
+/// UI has nothing to nag about — it offers to create one instead.
 #[tokio::test]
-async fn a_server_without_a_config_file_has_nothing_to_save() -> anyhow::Result<()> {
+async fn a_server_without_a_config_file_reports_that_it_has_none() -> anyhow::Result<()> {
     let dir = tempfile::tempdir()?;
-    let app = api_router(Arc::new(AppState::new()));
+    let app = api_router(Arc::new(AppState::new_in(dir.path().to_path_buf())));
 
     post_stream(&app, &idle_config("ephemeral")).await?;
     let settings = settings(&app).await?;
     assert_eq!(settings["config_file"], Value::Null);
     assert_eq!(settings["unsaved_changes"], json!(false));
-
-    // and a save has nowhere to go, rather than picking somewhere
-    let (status, _) = save_as(&app, "anywhere.json").await?;
-    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+    // the UI needs somewhere to point at when it offers to create one
+    assert_eq!(
+        settings["save_directory"],
+        json!(dir.path().display().to_string())
+    );
     assert_eq!(
         std::fs::read_dir(dir.path())?.count(),
         0,
-        "an in-memory server wrote something"
+        "a server that was only asked for its settings wrote something"
     );
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// creating a config file from a server that started without one
+// ---------------------------------------------------------------------------
+
+/// The point of the whole feature: a graph built in the UI on a server started
+/// with no `--config` can be written out, and the file it writes is one the
+/// next start can build.
+#[tokio::test]
+async fn a_server_started_without_a_config_can_write_one() -> anyhow::Result<()> {
+    let dir = tempfile::tempdir()?;
+    let app = api_router(Arc::new(AppState::new_in(dir.path().to_path_buf())));
+
+    post_stream(&app, &idle_config("root")).await?;
+    post_stream(&app, &downstream_config("child", "root")).await?;
+
+    let (status, body) = save_as(&app, "config.json").await?;
+    assert_eq!(status, StatusCode::OK);
+
+    let written = dir.path().join("config.json");
+    assert_eq!(body["path"], json!(written.display().to_string()));
+    // parents before children, as in any other save — the file has to start
+    assert_eq!(ids_in(&written)?, ["root", "child"]);
+
+    // and it really does start: a server booted from it runs the same graph
+    let restarted = app_from(&written)?;
+    assert_eq!(listed_ids(&restarted).await?, ["child", "root"]);
+    Ok(())
+}
+
+/// Having created the file, the server is working against it — that is what
+/// makes the *next* save an ordinary overwrite, "unsaved changes" meaningful,
+/// and revert possible at all.
+#[tokio::test]
+async fn the_created_file_becomes_the_one_the_server_works_against() -> anyhow::Result<()> {
+    let dir = tempfile::tempdir()?;
+    let app = api_router(Arc::new(AppState::new_in(dir.path().to_path_buf())));
+
+    post_stream(&app, &idle_config("kept")).await?;
+    assert_eq!(save_as(&app, "pipelines.yaml").await?.0, StatusCode::OK);
+
+    let after_save = settings(&app).await?;
+    assert_eq!(after_save["config_file"], json!("pipelines.yaml"));
+    assert_eq!(after_save["unsaved_changes"], json!(false));
+
+    // an edit after the save is a divergence from it, as it would be for a
+    // file the server had been started with
+    post_stream(&app, &idle_config("added-later")).await?;
+    assert_eq!(settings(&app).await?["unsaved_changes"], json!(true));
+
+    // and revert now has somewhere to go back to
+    assert_eq!(revert(&app).await?, StatusCode::NO_CONTENT);
+    assert_eq!(listed_ids(&app).await?, ["kept"]);
+    assert_eq!(settings(&app).await?["unsaved_changes"], json!(false));
+    Ok(())
+}
+
+/// The arrangement someone made before there was anywhere to put it is not
+/// thrown away by the save that finally gives it a home.
+#[tokio::test]
+async fn creating_a_config_writes_the_arrangement_beside_it() -> anyhow::Result<()> {
+    let dir = tempfile::tempdir()?;
+    let app = api_router(Arc::new(AppState::new_in(dir.path().to_path_buf())));
+
+    post_stream(&app, &idle_config("placed")).await?;
+    let layout = json!({
+        "nodes": { "placed": { "x": 40.0, "y": 60.0, "width": 360.0 } }
+    });
+    let req = Request::builder()
+        .method("PUT")
+        .uri("/api/layout")
+        .header(header::CONTENT_TYPE, "application/json")
+        .body(Body::from(serde_json::to_vec(&layout)?))?;
+    assert_eq!(send(&app, req).await?.0, StatusCode::NO_CONTENT);
+    // nowhere to write it yet — that is the state this test is about
+    assert!(!dir.path().join("config.layout.json").exists());
+
+    assert_eq!(save_as(&app, "config.json").await?.0, StatusCode::OK);
+
+    let written: Value =
+        serde_json::from_str(&std::fs::read_to_string(dir.path().join("config.layout.json"))?)?;
+    assert_eq!(written["nodes"]["placed"]["x"], json!(40.0));
+    Ok(())
+}
+
+/// Creating a file is still a write to the server's disk driven by a request,
+/// so it is confined to the same one directory. Nothing about *not* having a
+/// config file relaxes that.
+#[tokio::test]
+async fn creating_a_config_cannot_escape_the_save_directory() -> anyhow::Result<()> {
+    let outer = tempfile::tempdir()?;
+    let inner = outer.path().join("work");
+    std::fs::create_dir(&inner)?;
+    let app = api_router(Arc::new(AppState::new_in(inner.clone())));
+    post_stream(&app, &idle_config("kept")).await?;
+
+    for escape in ["../outside.json", "sub/dir.json", "/tmp/kayak-escape.json"] {
+        let (status, _) = save_as(&app, escape).await?;
+        assert_eq!(
+            status,
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "'{escape}' was accepted"
+        );
+    }
+    assert_eq!(
+        std::fs::read_dir(outer.path())?.count(),
+        1,
+        "a save escaped into the parent directory"
+    );
+    assert_eq!(
+        std::fs::read_dir(&inner)?.count(),
+        0,
+        "a refused save wrote something anyway"
+    );
+    // a refused save must not have left the server thinking it has a file
+    assert_eq!(settings(&app).await?["config_file"], Value::Null);
+    Ok(())
+}
+
+/// Saving under a second name doesn't move the server onto it: `revert` still
+/// means "back to the file I was started from", and a save-as is a copy.
+#[tokio::test]
+async fn saving_under_another_name_does_not_change_the_loaded_file() -> anyhow::Result<()> {
+    let dir = tempfile::tempdir()?;
+    let path = seeded(&dir, &[idle_config("seeded")])?;
+    let app = app_from(&path)?;
+
+    assert_eq!(save_as(&app, "copy.json").await?.0, StatusCode::OK);
+    assert_eq!(settings(&app).await?["config_file"], json!("config.json"));
     Ok(())
 }
 

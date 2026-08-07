@@ -79,12 +79,24 @@ pub struct AppState {
     /// pipeline posted to `/api/streams` gets the same secrets as one loaded
     /// from the config file.
     secrets: Arc<dyn SecretStore>,
-    /// The `--config` file, when the server was started with one.
+    /// The config file this server is working against: the `--config` file it
+    /// was started with, or the one a save has since created.
     ///
     /// It is a *load source and a save target*, not a mirror: nothing here
-    /// writes to it except an explicit save. Its directory also bounds where a
-    /// save is allowed to write. See [`crate::persist`].
-    config_path: Option<PathBuf>,
+    /// writes to it except an explicit save. See [`crate::persist`].
+    ///
+    /// Behind a lock because it can be *acquired*: a server started without a
+    /// file still lets someone build a graph in the UI and save it, and from
+    /// that save on the file it created is the one it reloads, compares against
+    /// and arranges beside. It is only ever set from nothing to something —
+    /// saving under a second name while a file is already loaded leaves the
+    /// loaded one in place, so "revert" keeps meaning what it meant a moment
+    /// ago.
+    config_path: Mutex<Option<PathBuf>>,
+    /// The one directory a save may write to. Fixed at startup and never
+    /// derived from a request — see [`crate::persist::save_path`], which is
+    /// what makes that a boundary rather than a default.
+    save_dir: PathBuf,
     /// The rendered form of the graph as last loaded or saved, which is what
     /// "unsaved changes" is measured against.
     ///
@@ -120,17 +132,42 @@ impl AppState {
         Self::with_secrets(Arc::new(EnvStore))
     }
 
+    /// An empty server that saves into the directory it was started in.
+    ///
+    /// There is no config file yet, and a save is what creates one — so the
+    /// working directory is where it lands. That is the same rule as
+    /// `--config`: the operator chose the directory when they started the
+    /// process, and no request can move it. Tests that write should use
+    /// [`AppState::with_secrets_in`] and name a temporary directory instead of
+    /// leaning on the process's.
     pub fn with_secrets(secrets: Arc<dyn SecretStore>) -> Self {
+        let cwd = std::env::current_dir().unwrap_or_else(|err| {
+            tracing::warn!("could not read the working directory ({err}); saving to '.'");
+            PathBuf::from(".")
+        });
+        Self::with_secrets_in(cwd, secrets)
+    }
+
+    /// As [`AppState::with_secrets`], with the save directory named outright.
+    pub fn with_secrets_in(save_dir: PathBuf, secrets: Arc<dyn SecretStore>) -> Self {
         tracing::debug!("Initializing empty server state...");
         let (events, _) = broadcast::channel(1024);
         Self {
             streamers: Mutex::new(HashMap::new()),
             events,
             secrets,
-            config_path: None,
+            config_path: Mutex::new(None),
+            save_dir,
             saved: Mutex::new(None),
             layout: Mutex::new(LayoutFile::default()),
         }
+    }
+
+    /// An empty server with no secrets beyond the environment, saving into
+    /// `save_dir`.
+    #[must_use]
+    pub fn new_in(save_dir: PathBuf) -> Self {
+        Self::with_secrets_in(save_dir, Arc::new(EnvStore))
     }
 
     pub fn subscribe_events(&self) -> broadcast::Receiver<UiEvent> {
@@ -154,8 +191,14 @@ impl AppState {
         path: &Path,
         secrets: Arc<dyn SecretStore>,
     ) -> anyhow::Result<Self> {
-        let mut new_state = AppState::with_secrets(secrets);
-        new_state.config_path = Some(path.to_path_buf());
+        // a bare `config.json` names a file in the working directory, and
+        // `parent()` of that is the empty path rather than "."
+        let dir = match path.parent() {
+            Some(dir) if !dir.as_os_str().is_empty() => dir.to_path_buf(),
+            _ => PathBuf::from("."),
+        };
+        let new_state = AppState::with_secrets_in(dir, secrets);
+        *new_state.lock_config_path() = Some(path.to_path_buf());
         new_state.load_from_config_file()?;
         new_state.load_layout_file()?;
         Ok(new_state)
@@ -168,10 +211,10 @@ impl AppState {
     /// run, while a layout that won't load only costs the arrangement. It is
     /// still surfaced rather than swallowed — see [`crate::layout::read`].
     fn load_layout_file(&self) -> anyhow::Result<()> {
-        let Some(path) = &self.config_path else {
+        let Some(path) = self.config_path() else {
             return Ok(());
         };
-        let path = crate::layout::layout_path(path);
+        let path = crate::layout::layout_path(&path);
         let layout = crate::layout::read(&path)?;
         if !layout.is_empty() {
             tracing::debug!(
@@ -182,6 +225,19 @@ impl AppState {
         }
         *self.lock_layout() = layout;
         Ok(())
+    }
+
+    fn lock_config_path(&self) -> MutexGuard<'_, Option<PathBuf>> {
+        self.config_path.lock().unwrap_or_else(|poisoned| {
+            tracing::warn!("config-path lock was poisoned; recovering");
+            poisoned.into_inner()
+        })
+    }
+
+    /// The config file this server loads from and saves to, if it has one yet.
+    #[must_use]
+    pub fn config_path(&self) -> Option<PathBuf> {
+        self.lock_config_path().clone()
     }
 
     fn lock_layout(&self) -> MutexGuard<'_, LayoutFile> {
@@ -206,8 +262,8 @@ impl AppState {
     /// better than refusing to let someone tidy up the canvas.
     pub fn set_layout(&self, layout: LayoutFile) -> Result<(), StreamerError> {
         let mut held = self.lock_layout();
-        if let Some(config_path) = &self.config_path {
-            let path = crate::layout::layout_path(config_path);
+        if let Some(config_path) = self.config_path() {
+            let path = crate::layout::layout_path(&config_path);
             crate::layout::write(&path, &layout)
                 .with_context(|| format!("failed to save the layout to {}", path.display()))?;
         }
@@ -218,11 +274,11 @@ impl AppState {
     /// Read the config file and start everything in it. Shared by startup and
     /// by [`AppState::revert`], which is the same operation done twice.
     fn load_from_config_file(&self) -> anyhow::Result<()> {
-        let Some(path) = &self.config_path else {
-            anyhow::bail!("the server was not started with a --config file");
+        let Some(path) = self.config_path() else {
+            anyhow::bail!("the server has no config file");
         };
         tracing::debug!("Loading configuration from {}...", path.display());
-        let configs = crate::persist::read(path)?;
+        let configs = crate::persist::read(&path)?;
 
         let mut app = self.lock_streamers();
         for c in configs {
@@ -251,12 +307,14 @@ impl AppState {
     /// briefly share a kafka consumer group or a nats subscription, and both
     /// would write to the same outputs.
     pub async fn revert(&self) -> anyhow::Result<()> {
-        let Some(path) = &self.config_path else {
-            anyhow::bail!("the server was not started with a --config file, so there is nothing to revert to");
+        let Some(path) = self.config_path() else {
+            anyhow::bail!(
+                "the server has no config file, so there is nothing to revert to; save one first"
+            );
         };
         // parse first: it costs one read and saves tearing down a working graph
         // for a file that was never going to load
-        let _ = crate::persist::read(path)?;
+        let _ = crate::persist::read(&path)?;
 
         // Cancel everything and take the join handles out, then drop the guard:
         // this is a `std::sync::Mutex` and must not be held across an await.
@@ -314,15 +372,21 @@ impl AppState {
         self.lock_streamers().keys().cloned().collect()
     }
 
-    /// The name of the file the server was started from, if any. The UI offers
-    /// it as the default save target, and its directory is the only place a
-    /// save is allowed to write.
+    /// The name of the config file the server is working against, if it has one
+    /// yet. The UI offers it as the default save target; without it, the UI
+    /// offers to create one instead.
     #[must_use]
     pub fn config_file_name(&self) -> Option<String> {
-        self.config_path
-            .as_ref()
-            .and_then(|p| p.file_name())
+        self.config_path()
+            .as_deref()
+            .and_then(Path::file_name)
             .map(|name| name.to_string_lossy().into_owned())
+    }
+
+    /// The directory a save writes into. Fixed for the life of the process.
+    #[must_use]
+    pub fn save_directory(&self) -> &Path {
+        &self.save_dir
     }
 
     /// Whether the running graph has diverged from what was last loaded or
@@ -334,7 +398,7 @@ impl AppState {
     /// false without a config file — there is nothing to be out of sync with.
     #[must_use]
     pub fn has_unsaved_changes(&self) -> bool {
-        if self.config_path.is_none() {
+        if self.config_path().is_none() {
             return false;
         }
         let app = self.lock_streamers();
@@ -371,13 +435,21 @@ impl AppState {
         crate::persist::render(Self::configs_of(app), streamer_core::ConfigFormat::Json).ok()
     }
 
-    /// Write the running graph to `name`, a file beside the one the server was
-    /// started from, and treat that as the new baseline.
+    /// Write the running graph to `name`, a file in the server's save
+    /// directory, and treat that as the new baseline.
     ///
     /// Only a bare file name is accepted: this is a write to the server's disk
     /// driven by an HTTP request, and confining it to one known directory is
     /// what keeps that from being an arbitrary-write primitive. Passing the
     /// current file's own name is how you overwrite it.
+    ///
+    /// A server started **without** a `--config` file saves too, and that save
+    /// is what gives it one: the graph someone built in the UI becomes a file,
+    /// and the file becomes what `revert` reloads and "unsaved changes" is
+    /// measured against. Without this, an afternoon in the UI could only ever
+    /// end in a restart that threw it away. It is an *acquisition*, not a
+    /// switch — a save under a new name on a server that already has a file
+    /// leaves that file as the loaded one, as it always did.
     ///
     /// `format` is what the caller asked for; `None` means "whatever `name`
     /// says", so a client that doesn't know about the choice still writes YAML
@@ -387,12 +459,7 @@ impl AppState {
         name: &str,
         format: Option<ConfigFormat>,
     ) -> Result<PathBuf, StreamerError> {
-        let Some(config_path) = &self.config_path else {
-            return Err(StreamerError::InvalidConfig(anyhow::anyhow!(
-                "the server was not started with a --config file, so there is nowhere to save"
-            )));
-        };
-        let target = crate::persist::save_path(config_path, name)
+        let target = crate::persist::save_path(&self.save_dir, name)
             .map_err(StreamerError::InvalidConfig)?;
         let format = format.unwrap_or_else(|| crate::persist::format_of(&target));
 
@@ -411,8 +478,38 @@ impl AppState {
         crate::persist::write(&target, configs, format)
             .with_context(|| format!("failed to save the config to {}", target.display()))?;
         self.mark_saved(&app);
+        self.adopt(&target);
         tracing::info!("config saved to {} as {format}", target.display());
         Ok(target)
+    }
+
+    /// Make a just-written file the server's config file, if it hasn't got one.
+    ///
+    /// The arrangement goes with it: cards dragged around before there was
+    /// anywhere to put them have been living in memory only, and this is the
+    /// first moment they have a home. Failing to write it only warns — the
+    /// pipelines are already safely on disk, and losing the save over the
+    /// cosmetic half would be the wrong trade.
+    fn adopt(&self, target: &Path) {
+        let mut path = self.lock_config_path();
+        if path.is_some() {
+            return;
+        }
+        *path = Some(target.to_path_buf());
+        tracing::info!("now working against {}", target.display());
+        drop(path);
+
+        let layout = self.lock_layout().clone();
+        if layout.is_empty() {
+            return;
+        }
+        let layout_path = crate::layout::layout_path(target);
+        if let Err(err) = crate::layout::write(&layout_path, &layout) {
+            tracing::warn!(
+                "saved the pipelines, but could not write the layout to {}: {err:#}",
+                layout_path.display()
+            );
+        }
     }
 
     /// Every running pipeline's config, with the id filled in.

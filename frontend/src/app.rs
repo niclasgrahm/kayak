@@ -82,10 +82,13 @@ pub struct AppState {
     /// a `LocalResource`, and re-reading the server beats patching a local copy
     /// that could disagree with it.
     pub reload: RwSignal<u32>,
-    /// Name of the file the server was started from, if any. `None` also means
-    /// there is nowhere to save, so the edit controls say so rather than
-    /// offering a button that can only fail.
+    /// Name of the config file the server is working against, if it has one
+    /// yet. `None` means a save would *create* one, so the edit controls offer
+    /// "create config file" rather than "save as".
     pub config_file: Signal<Option<String>>,
+    /// Where a save lands on the server. Shown when there is no config file
+    /// yet, because "config.json" on its own doesn't say where it will appear.
+    pub save_directory: Signal<String>,
     /// The running graph has diverged from that file. Edits are live and the
     /// file is left alone, so this is the only thing standing between an
     /// afternoon's work and a restart.
@@ -369,6 +372,12 @@ pub fn CanvasPage() -> impl IntoView {
             .get()
             .and_then(|res| res.as_ref().ok().and_then(|s| s.config_file.clone()))
     });
+    let save_directory = Signal::derive(move || {
+        settings
+            .get()
+            .and_then(|res| res.as_ref().ok().map(|s| s.save_directory.clone()))
+            .unwrap_or_default()
+    });
     // false until the answer arrives — a "unsaved changes" warning that flashes
     // up on every load would train people to ignore it
     let unsaved = Signal::derive(move || {
@@ -387,6 +396,7 @@ pub fn CanvasPage() -> impl IntoView {
         canvas_state,
         reload,
         config_file,
+        save_directory,
         unsaved,
         mode: RwSignal::new(Mode::ReadOnly),
         adding: RwSignal::new(false),
@@ -1621,13 +1631,22 @@ fn ModeControls(state: AppState) -> impl IntoView {
 
             <Show when=move || state.editing()>
                 {move || {
-                    // nowhere to save to is worth saying once, plainly, rather
-                    // than by way of a button that always fails
+                    // A server started without --config has no file to revert
+                    // to, but it can still be asked to write one: the graph on
+                    // the canvas is exactly what a config file describes, so
+                    // "create" is a save with nothing to overwrite.
                     if state.config_file.get().is_none() {
                         return view! {
-                            <span class="mode-note" title="start the server with --config to be able to save">
-                                "no config file"
-                            </span>
+                            <button
+                                class="button primary"
+                                title="write these pipelines out as a config file"
+                                on:click=move |_| {
+                                    armed.set(false);
+                                    state.saving.set(true);
+                                }
+                            >
+                                "create config file"
+                            </button>
                         }
                             .into_any();
                     }
@@ -1698,21 +1717,37 @@ fn ModeControls(state: AppState) -> impl IntoView {
 
 /// Where to write the running graph, and in which format.
 ///
-/// A file name, not a path: the server only writes beside the config it was
-/// started from, and offering a directory picker for a choice that doesn't
-/// exist would be a lie. Overwriting is just typing the name it already has,
-/// which the modal points out rather than hides.
+/// A file name, not a path: the server only writes into one directory, and
+/// offering a directory picker for a choice that doesn't exist would be a lie.
+/// Overwriting is just typing the name it already has, which the modal points
+/// out rather than hides.
+///
+/// It does double duty as "create a config file" on a server started without
+/// one, because that *is* the same act — the difference is only that there is
+/// nothing to overwrite, so the modal names the directory the new file will
+/// appear in and suggests `config.json` to put in it.
 ///
 /// The format picker and the file name are one decision shown twice: the
 /// selection is *derived* from the extension rather than held separately, and
 /// picking a format rewrites the name to match. That way there is no state in
 /// which the button says "yaml" and the file is called `config.json` — whatever
 /// the user last touched, the two agree.
+/// What a config file is called when nobody has said otherwise. Only a
+/// suggestion — the server takes whatever name comes back.
+const DEFAULT_CONFIG_NAME: &str = "config.json";
+
 #[component]
 fn SaveAsModal() -> impl IntoView {
     let state = expect_context::<AppState>();
     let current = state.config_file.get_untracked().unwrap_or_default();
-    let name = RwSignal::new(current.clone());
+    // creating rather than saving over: the name box starts on the conventional
+    // one instead of empty, so the common case is one click
+    let creating = current.is_empty();
+    let name = RwSignal::new(if creating {
+        DEFAULT_CONFIG_NAME.to_string()
+    } else {
+        current.clone()
+    });
     let saving = RwSignal::new(false);
     let failure = RwSignal::new(Option::<String>::None);
     let loaded = StoredValue::new(current);
@@ -1760,7 +1795,9 @@ fn SaveAsModal() -> impl IntoView {
         <div class="modal-backdrop" on:click=move |_| close()>
             <div class="modal narrow" on:click=move |ev| ev.stop_propagation()>
                 <header>
-                    <span class="modal-title">"save as"</span>
+                    <span class="modal-title">
+                        {if creating { "create config file" } else { "save as" }}
+                    </span>
                     <button class="icon-button" title="close" on:click=move |_| close()>
                         "×"
                     </button>
@@ -1806,7 +1843,20 @@ fn SaveAsModal() -> impl IntoView {
                         </div>
                     </div>
                     <p class="form-hint">
-                        "written next to the config the server was started with"
+                        {move || {
+                            if creating {
+                                // where it lands is the question a fresh server
+                                // raises and a loaded one doesn't
+                                match state.save_directory.get() {
+                                    dir if dir.is_empty() => {
+                                        "created in the server's working directory".to_string()
+                                    }
+                                    dir => format!("created in {dir}"),
+                                }
+                            } else {
+                                "written next to the config the server was started with".to_string()
+                            }
+                        }}
                     </p>
                 </div>
                 <footer>
@@ -1828,7 +1878,11 @@ fn SaveAsModal() -> impl IntoView {
                         disabled=move || saving.get() || name.get().trim().is_empty()
                         on:click=move |_| submit()
                     >
-                        {move || if saving.get() { "saving…" } else { "save" }}
+                        {move || match (saving.get(), creating) {
+                            (true, _) => "saving…",
+                            (false, true) => "create",
+                            (false, false) => "save",
+                        }}
                     </button>
                 </footer>
             </div>
