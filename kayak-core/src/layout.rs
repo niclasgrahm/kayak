@@ -193,6 +193,16 @@ impl LayoutFile {
         self.pipelines.is_empty() && self.edges.is_empty()
     }
 
+    /// Throw the whole arrangement away and go back to the automatic layout —
+    /// the state a graph nobody has dragged is in.
+    ///
+    /// The version is kept rather than reset with the rest: it says what shape
+    /// the file is written in, not what is in it.
+    pub fn clear(&mut self) {
+        self.pipelines.clear();
+        self.edges.clear();
+    }
+
     /// Everything that has been adjusted about one edge. All defaults for an
     /// edge nobody has touched, which is most of them.
     #[must_use]
@@ -334,6 +344,32 @@ mod tests {
         assert_eq!(layout.edge_offset("a", "b"), 0.0);
         // and an edge nobody has touched is simply the automatic route
         assert_eq!(layout.edge_offset("never", "touched"), 0.0);
+    }
+
+    /// "Lay it out for me again" is every hand-placed card and every adjusted
+    /// edge gone at once — the same thing as never having arranged it. The
+    /// version stays, because it describes the file rather than the arrangement.
+    #[test]
+    fn clearing_a_layout_leaves_nothing_arranged() {
+        let mut layout = LayoutFile::default();
+        layout.pipelines.insert(
+            "a".to_string(),
+            PipelineLayout {
+                x: 40.0,
+                y: 80.0,
+                width: 360.0,
+                height: Some(300.0),
+            },
+        );
+        layout.set_edge_offset("a", "b", 40.0);
+        layout.set_edge_port("a", "b", EdgeEnd::From, Some(port(Side::Bottom, 60.0)));
+        assert!(!layout.is_empty());
+
+        layout.clear();
+
+        assert!(layout.is_empty());
+        assert_eq!(layout, LayoutFile::default());
+        assert_eq!(layout.version, LAYOUT_VERSION);
     }
 
     fn port(side: Side, along: f64) -> PortLayout {

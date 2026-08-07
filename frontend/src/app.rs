@@ -341,6 +341,24 @@ impl CanvasState {
         }
     }
 
+    /// Put the whole canvas back under the automatic layout: every card someone
+    /// has dragged or resized, and every edge whose route they have adjusted.
+    ///
+    /// The way out of an arrangement that has been made a mess of, and the same
+    /// state as deleting the layout file and starting the server again. It is
+    /// saved like any other arrangement change, so the file on disk goes back to
+    /// empty too rather than reappearing on the next reload.
+    fn reset_arrangement(&self) {
+        let cleared = self.arrangement.try_update(|a| {
+            let had_any = !a.is_empty();
+            a.clear();
+            had_any
+        });
+        if cleared == Some(true) {
+            self.save_arrangement();
+        }
+    }
+
     fn save_arrangement(&self) {
         persist_arrangement(self.arrangement.get_untracked());
     }
@@ -2149,6 +2167,22 @@ fn ModeControls(state: AppState) -> impl IntoView {
             </Show>
 
             <Show when=move || state.editing()>
+                // Arranging the canvas is easy to make a mess of and has no
+                // undo, so there is one way back: throw the arrangement away and
+                // let the automatic layout have it. Disabled rather than hidden
+                // when there is nothing arranged — the answer to "can I start
+                // over" shouldn't be a button that isn't there.
+                <button
+                    class="button"
+                    disabled=move || state.canvas_state.arrangement.with(LayoutFile::is_empty)
+                    title="put every card and edge back where the automatic layout wants them"
+                    on:click=move |_| {
+                        armed.set(false);
+                        state.canvas_state.reset_arrangement();
+                    }
+                >
+                    "auto layout"
+                </button>
                 {move || {
                     // A server started without --config has no file to revert
                     // to, but it can still be asked to write one: the graph on
