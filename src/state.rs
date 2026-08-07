@@ -126,6 +126,15 @@ pub struct AppState {
     /// derived from a request — see [`crate::persist::save_path`], which is
     /// what makes that a boundary rather than a default.
     save_dir: PathBuf,
+    /// The directory tree file outputs may write pipeline data into, from
+    /// `--data-dir`. `None` — the default — turns file output off entirely.
+    ///
+    /// Deliberately *not* [`AppState::save_dir`], though both are directories
+    /// fixed at startup: that one bounds where the server writes *configs* on
+    /// request, this one bounds where pipelines write *data*, and pointing a
+    /// data firehose at the directory holding the config someone is editing is
+    /// not a default anyone would choose. See [`crate::outputs::file::Root`].
+    data_dir: Option<Arc<PathBuf>>,
     /// The rendered form of the graph as last loaded or saved, which is what
     /// "unsaved changes" is measured against.
     ///
@@ -190,9 +199,39 @@ impl AppState {
             connections: Mutex::new(Connections::new()),
             saved_connections: Mutex::new(None),
             save_dir,
+            data_dir: None,
             saved: Mutex::new(None),
             layout: Mutex::new(LayoutFile::default()),
         }
+    }
+
+    /// Confine file outputs to `data_dir`, or — with `None` — leave them turned
+    /// off.
+    ///
+    /// Canonicalized here, once, rather than on every build: the checks in
+    /// [`crate::outputs::file::Root`] compare resolved paths, so a `--data-dir`
+    /// that is itself a symlink (`/tmp` on macOS, which is `/private/tmp`)
+    /// would otherwise fail every one of them.
+    pub fn with_data_dir(mut self, data_dir: Option<PathBuf>) -> anyhow::Result<Self> {
+        self.data_dir = Self::resolve_data_dir(data_dir)?;
+        Ok(self)
+    }
+
+    /// Canonicalize `--data-dir` once, at startup, rather than on every build:
+    /// the checks in [`crate::outputs::file::Root`] compare resolved paths, so
+    /// a `--data-dir` that is itself a symlink (`/tmp` on macOS, which is
+    /// really `/private/tmp`) would otherwise fail every one of them.
+    fn resolve_data_dir(data_dir: Option<PathBuf>) -> anyhow::Result<Option<Arc<PathBuf>>> {
+        data_dir
+            .map(|dir| {
+                std::fs::create_dir_all(&dir)
+                    .with_context(|| format!("failed to create {}", dir.display()))?;
+                let resolved = std::fs::canonicalize(&dir)
+                    .with_context(|| format!("failed to resolve {}", dir.display()))?;
+                tracing::info!("file outputs may write under {}", resolved.display());
+                anyhow::Ok(Arc::new(resolved))
+            })
+            .transpose()
     }
 
     /// An empty server with no secrets beyond the environment, saving into
@@ -237,20 +276,28 @@ impl AppState {
         path: &Path,
         secrets: Arc<dyn SecretStore>,
     ) -> anyhow::Result<Self> {
-        Self::from_config_with(path, secrets, None)
+        Self::from_config_with(path, secrets, None, None)
     }
 
     /// As [`AppState::from_config_with_secrets`], with the connections file
-    /// named outright rather than derived from the config's name.
+    /// named outright rather than derived from the config's name, and the
+    /// directory file outputs are confined to.
     ///
     /// The connections are loaded **before** the pipelines, and that order is
     /// not incidental: a component names a connection and cannot be built
     /// without it, so a server that read them the other way round would refuse
     /// to start every pipeline in the file.
+    ///
+    /// `data_dir` is a parameter here rather than the builder
+    /// [`AppState::with_data_dir`] for the same reason: loading the config
+    /// *starts* its pipelines, so a data dir applied afterwards would arrive
+    /// too late for every file output in the file. The builder is for a state
+    /// that has no pipelines yet.
     pub fn from_config_with(
         path: &Path,
         secrets: Arc<dyn SecretStore>,
         connections_file: Option<&Path>,
+        data_dir: Option<PathBuf>,
     ) -> anyhow::Result<Self> {
         // a bare `config.json` names a file in the working directory, and
         // `parent()` of that is the empty path rather than "."
@@ -259,6 +306,7 @@ impl AppState {
             _ => PathBuf::from("."),
         };
         let mut new_state = AppState::with_secrets_in(dir, secrets);
+        new_state.data_dir = Self::resolve_data_dir(data_dir)?;
         new_state.connections_file = connections_file.map(Path::to_path_buf);
         *new_state.lock_config_path() = Some(path.to_path_buf());
         new_state.load_connections_file()?;
@@ -833,7 +881,8 @@ impl AppState {
             self.events.clone(),
             Arc::clone(&self.secrets),
         )
-        .with_connections(connections);
+        .with_connections(connections)
+        .with_data_dir(self.data_dir.clone());
         // building the runtime only fails on things the config got wrong
         // (unknown upstream, unbuildable component)
         let join_handle = pipeline.start(ctx).map_err(|e| {

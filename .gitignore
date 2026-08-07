@@ -4,3 +4,6 @@
 # anywhere — the example_config one holds only the docker-compose password and is
 # still ignored, because the rule is worth more than the one file it costs.
 secrets.json
+# what `just dev` passes as --data-dir: pipeline data written by file outputs.
+# It is output, not a fixture, and a dev run can fill it without limit.
+/dev_data

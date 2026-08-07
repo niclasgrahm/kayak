@@ -102,6 +102,28 @@
     ]
   },
   {
+    "id": "heartbeat_to_disk",
+    "inputs": [
+      {
+        "type": "pipeline",
+        "upstream": "heartbeat"
+      }
+    ],
+    "transforms": [],
+    "outputs": [
+      {
+        "type": "file",
+        "connection": "local-files",
+        "path": "heartbeat",
+        "format": "ndjson",
+        "rotate": {
+          "max_rows": 20,
+          "interval_secs": 60
+        }
+      }
+    ]
+  },
+  {
     "id": "hot_readings",
     "inputs": [
       {

@@ -38,4 +38,9 @@ ENV LEPTOS_SITE_ROOT="/app/site" \
   LEPTOS_ENV="PROD"
 
 EXPOSE 6767
-CMD ["/app/kayak", "--config", "/app/config.json"]
+# --data-dir because the sample has a file output, and without the flag that one
+# pipeline refuses to build and takes the whole load down with it. It resolves
+# against WORKDIR, as does the `dev_data/events` root the connection names, so
+# the pair lands the same way here as it does under `just dev`. Mount a volume
+# over /app/dev_data to keep what it writes.
+CMD ["/app/kayak", "--config", "/app/config.json", "--data-dir", "/app/dev_data"]

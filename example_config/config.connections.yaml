@@ -1,3 +1,6 @@
+local-files:
+  type: file
+  root: dev_data/events
 local-kafka:
   type: kafka
   brokers: localhost:9092

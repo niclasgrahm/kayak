@@ -162,12 +162,20 @@ async fn the_repository_config_file_starts_a_working_graph() -> anyhow::Result<(
         serde_json::from_str(&std::fs::read_to_string("example_config/config.json")?)?;
     // config.json references secrets, so it needs a store; the environment is
     // not something a test should depend on or write to
-    let state = AppState::from_config_with_secrets(
+    //
+    // ...and it has a file output, so it needs a `--data-dir` too, or that one
+    // pipeline refuses to build and takes the load down with it. `dev_data` is
+    // the same directory `just dev` passes and the connection's root sits
+    // inside it, so the sample behaves here exactly as it does when run by
+    // hand. It is gitignored; building the output creates it.
+    let state = AppState::from_config_with(
         std::path::Path::new("example_config/config.json"),
         std::sync::Arc::new(MapSecretStore::new(
             "the config.json test store",
             &[("POSTGRES_PASSWORD", "hunter2")],
         )),
+        None,
+        Some(std::path::PathBuf::from("dev_data")),
     )?;
 
     let mut expected: Vec<String> = declared

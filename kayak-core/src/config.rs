@@ -129,14 +129,73 @@ pub struct PipelineConfig {
     pub upstream: PipelineId,
 }
 
-/// Appends each batch to a file as JSON.
+/// How the messages in a file are laid out.
 ///
-/// Takes no settings yet: the path is currently hardcoded in the
-/// implementation, which makes this output unusable outside its author's
-/// machine. Fixing that means adding a `path` field here.
+/// Both are JSON — the difference is whether the file is one document or one
+/// document per line. `ndjson` is the one to want for anything that streams:
+/// the file is valid after every batch, so a run that is still going (or that
+/// died) is still readable, and every tool that eats logs eats it.
+#[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, JsonSchema, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum FileFormat {
+    /// one JSON message per line, appended as it arrives
+    #[default]
+    Ndjson,
+    /// the whole file is a single JSON array, closed when the file rotates
+    JsonArray,
+}
+
+/// When a file is closed and the next one started.
+///
+/// Both triggers are optional and are checked together — whichever comes first
+/// rotates. With neither, a pipeline writes one file for as long as it runs.
+///
+/// Shared with the object-store output rather than local-only: "how big does a
+/// part get" is the same question on a disk and in a bucket, and the answer
+/// belongs in one place.
+#[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, JsonSchema, PartialEq, Eq)]
+pub struct RotationConfig {
+    /// close the file once it holds this many messages
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_rows: Option<usize>,
+    /// close the file this many seconds after it was opened. Measured from the
+    /// open, not from the last write, so files line up on a predictable cadence.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub interval_secs: Option<u64>,
+}
+
+/// Writes each batch to files in a directory on the server.
+///
+/// The directory comes from a `file` connection and the `path` below is
+/// relative to it; the server's `--data-dir` is what both are confined to, so a
+/// server started without that flag cannot write files at all. Names are
+/// generated rather than configured — `<open time>-<sequence>.<ext>`, which
+/// sorts chronologically and cannot collide across rotations.
+///
+/// Meant for local development and testing. The object-store output is what
+/// this shape is being built towards for anything else.
 #[derive(Clone, Debug, Deserialize, Serialize, JsonSchema)]
 #[schemars(title = "file")]
-pub struct FileOutputConfig {}
+pub struct FileOutputConfig {
+    /// name of the file connection to write under — see "connections" in the
+    /// readme. The root directory lives there; the path below is this output's
+    /// own.
+    #[schemars(extend("x-connection" = "file"))]
+    pub connection: ConnectionId,
+    /// directory to write into, relative to the connection's root, e.g.
+    /// `orders`. Must stay inside the root: an absolute path or one containing
+    /// `..` is refused rather than trimmed.
+    pub path: String,
+    /// how the messages are laid out. Defaults to `ndjson`.
+    // omitted rather than written as `null` when absent, so a config saved back
+    // out is the file someone hand-wrote — same rule as a postgres port
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub format: Option<FileFormat>,
+    /// when to close a file and start the next one. Without this, one file per
+    /// run.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rotate: Option<RotationConfig>,
+}
 
 /// Publishes every message in the batch to a nats subject, one message per
 /// publish.
@@ -401,7 +460,8 @@ impl Config {
             OutputKind::Kafka(c) => Some(&c.connection),
             OutputKind::Nats(c) => Some(&c.connection),
             OutputKind::Postgres(c) => Some(&c.connection),
-            OutputKind::Stdout(_) | OutputKind::File(_) => None,
+            OutputKind::File(c) => Some(&c.connection),
+            OutputKind::Stdout(_) => None,
         });
         inputs.chain(outputs).collect()
     }

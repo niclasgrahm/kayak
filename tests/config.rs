@@ -71,7 +71,16 @@ fn transform_samples() -> Vec<(&'static str, Value)> {
 fn output_samples() -> Vec<(&'static str, Value)> {
     vec![
         ("stdout", json!({"type": "stdout"})),
-        ("file", json!({"type": "file"})),
+        (
+            "file",
+            json!({
+                "type": "file",
+                "connection": "local-files",
+                "path": "orders",
+                "format": "ndjson",
+                "rotate": {"max_rows": 100_000, "interval_secs": 3600}
+            }),
+        ),
         (
             "nats",
             json!({"type": "nats", "connection": "local-nats", "subject": "out.subject"}),
@@ -115,6 +124,7 @@ fn connection_samples() -> Vec<(&'static str, Value)> {
                 "port": 5432
             }),
         ),
+        ("file", json!({"type": "file", "root": "./out/events"})),
     ]
 }
 

@@ -79,6 +79,29 @@ pub struct PostgresConnection {
     pub port: Option<u16>,
 }
 
+/// A directory on the server's filesystem that file outputs write under.
+///
+/// The odd one out among the kinds: there is no host, no credentials, nothing
+/// to authenticate against. It earns its place as a connection anyway because
+/// it holds the same thing the others do — *what the system is*, as against
+/// what one pipeline wants from it. A file output names a `path` relative to
+/// this root exactly as a kafka output names a topic on those brokers, and the
+/// object-store connection that replaces it later swaps the root for a bucket
+/// without any component changing.
+///
+/// The root is **not** a boundary on its own. It arrives from `POST
+/// /api/connections` like any other connection, so a browser could name `/`
+/// here; what actually confines writes is the server's `--data-dir`, which this
+/// root has to resolve under. See `Root::resolve` in the root crate.
+#[derive(Clone, Debug, Deserialize, Serialize, JsonSchema, PartialEq, Eq)]
+#[schemars(title = "file")]
+pub struct FileConnection {
+    /// directory that file outputs write under, e.g. `./out/events`. Created if
+    /// it does not exist, and it must resolve inside the server's `--data-dir`
+    /// — a server started without that flag has file output turned off.
+    pub root: String,
+}
+
 /// Every kind of system a connection can describe.
 ///
 /// Tagged the same way the component enums are, so a connection reads like the
@@ -91,6 +114,7 @@ pub enum ConnectionKind {
     Kafka(KafkaConnection),
     Nats(NatsConnection),
     Postgres(PostgresConnection),
+    File(FileConnection),
 }
 
 impl ConnectionKind {
@@ -102,6 +126,7 @@ impl ConnectionKind {
             Self::Kafka(_) => KAFKA,
             Self::Nats(_) => NATS,
             Self::Postgres(_) => POSTGRES,
+            Self::File(_) => FILE,
         }
     }
 }
@@ -109,6 +134,7 @@ impl ConnectionKind {
 pub const KAFKA: &str = "kafka";
 pub const NATS: &str = "nats";
 pub const POSTGRES: &str = "postgres";
+pub const FILE: &str = "file";
 
 /// What `POST /api/connections` takes: a name, and the connection itself
 /// flattened alongside it.
@@ -202,6 +228,13 @@ impl Connections {
         match self.lookup(id, POSTGRES)? {
             ConnectionKind::Postgres(c) => Ok(c),
             other => Err(ConnectionError::wrong_kind(id, POSTGRES, other)),
+        }
+    }
+
+    pub fn file(&self, id: &str) -> Result<&FileConnection, ConnectionError> {
+        match self.lookup(id, FILE)? {
+            ConnectionKind::File(c) => Ok(c),
+            other => Err(ConnectionError::wrong_kind(id, FILE, other)),
         }
     }
 

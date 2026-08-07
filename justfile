@@ -4,6 +4,12 @@
 # path, so they only find each other when they sit side by side.
 example := "example_config"
 
+# Where file outputs are allowed to write in dev. The server refuses to build a
+# file output without this, on purpose — see "file output" in the readme — so a
+# dev server passes one to make the component usable without ceremony. It is
+# gitignored: the sample writes pipeline data, not fixtures.
+data := "dev_data"
+
 # `cargo leptos watch` is what sets LEPTOS_SITE_ADDR and builds the WASM, which
 # is why this doesn't just `cargo run` — that binds :3000 and serves no
 # frontend. Everything the sample connects to comes up with `docker compose up`;
@@ -12,11 +18,11 @@ example := "example_config"
 
 # dev server on :6767, hot reload, against example_config/
 dev: secrets
-  cargo leptos watch -- --config {{example}}/config.json --secrets {{example}}/secrets.json
+  cargo leptos watch -- --config {{example}}/config.json --secrets {{example}}/secrets.json --data-dir {{data}}
 
 # the same graph in its other spelling — worth running now and then so the YAML path doesn't rot
 dev-yaml: secrets
-  cargo leptos watch -- --config {{example}}/config.yaml --secrets {{example}}/secrets.json
+  cargo leptos watch -- --config {{example}}/config.yaml --secrets {{example}}/secrets.json --data-dir {{data}}
 
 # It is gitignored — nothing named secrets.json is committed, whatever is in it
 # — so a fresh checkout has the example and not the file. Copying it here is

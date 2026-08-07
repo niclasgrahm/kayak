@@ -401,7 +401,7 @@ sibling produced — starving it forever. There's a test for exactly that.
 
 | | |
 | --- | --- |
-| `config.json` | the worked example: every component kind bar the `file` output |
+| `config.json` | the worked example: every component kind |
 | `config.yaml` | the same graph, spelled as YAML |
 | `config.connections.{json,yaml}` | the systems those pipelines name |
 | `config.layout.json` | where the cards sit on the canvas |
@@ -412,6 +412,15 @@ are *derived* from the config's path, so they only find each other when they sit
 side by side. `tests/config.rs` and `tests/graph.rs` load these files, so a
 sample that stops parsing — or a component added to the JSON and not the YAML —
 fails `just test` rather than rotting quietly.
+
+`heartbeat_to_disk` is the file output's sample, and it hangs off `heartbeat`
+rather than off the nats source on purpose: the dummy input needs nothing
+running, so it is the one pipeline in here that writes real output on a bare
+`just dev` with no `docker compose up`. Twenty messages a part at one a second,
+so you see it rotate while you watch. It is also why `just dev`, `tests/graph.rs`
+and the `Dockerfile` all pass `--data-dir dev_data` — without the flag that
+pipeline refuses to build and takes the whole load down with it, which is the
+closed default working as intended.
 
 ## connections
 
@@ -472,6 +481,83 @@ the same armed delete as the pipelines. The form is generated the same way too �
 a connection kind is documented on `/docs` and gets its controls from the same
 schema reflection. Secrets are *referenced* there and never entered: a field
 takes `${NAME}`, and what that resolves to stays a deployment concern.
+
+## file output
+
+Writes each batch into rotating files in a directory. It exists for local
+development and testing — the object-store output is what this shape is being
+built towards for anything else — but the parts that will be shared with it are
+already split out: rotation, part naming and encoding live in
+`src/outputs/rotate.rs`, which touches no filesystem at all, and only the
+destination lives in `src/outputs/file.rs`.
+
+```jsonc
+// config.connections.json — where this server may write
+{ "local-files": { "type": "file", "root": "./dev_data/events" } }
+
+// config.json — what this pipeline writes there
+{ "type": "file", "connection": "local-files", "path": "orders",
+  "format": "ndjson", "rotate": { "max_rows": 100000, "interval_secs": 3600 } }
+```
+
+`format` is `ndjson` (the default — one JSON message per line) or `json_array`
+(the whole file is one array, closed when the part rotates). Prefer `ndjson` for
+anything that streams: the file is valid after every batch, so a run that is
+still going, or that died, is still readable.
+
+`rotate` closes the current file and starts the next. `max_rows` counts
+messages, `interval_secs` measures from when the part was *opened*; either may
+be omitted, and whichever comes first wins. With neither, a pipeline writes one
+file for as long as it runs. Rotation is checked **after** a batch is written,
+so a batch is never split across two files and `max_rows` is a floor rather than
+a ceiling — a batch of 500 arriving at 999 rows makes a file of 1499.
+
+Part names are generated, not configured: `2026-08-07T14-00-00Z-000001.ndjson`.
+The open timestamp makes a run's parts sort chronologically under a plain `ls`
+or an object-store prefix listing, and the sequence number keeps two parts
+opened in the same second distinct — which a row trigger on a fast pipeline will
+do, and where a collision would lose data silently.
+
+### the sandbox
+
+**A file output cannot write anywhere until the server is told where.** This is
+the same problem `persist::save_path` solves for config files, and for the same
+reason: the browser does not write to the server's disk, the *server* does, on
+request. `POST /api/pipelines` and `POST /api/connections` both take their
+contents from an HTTP body, so an unconstrained path in either would turn the
+pipeline editor into an arbitrary-write primitive — and this one writes
+attacker-influenced *content*, at whatever volume the pipeline carries.
+
+So there are two layers, and neither is sufficient alone:
+
+1. **`--data-dir <path>`**, fixed when the process starts and reachable by no
+   request. Without the flag file outputs refuse to build at all. The closed
+   default is deliberate: a disk writer is not something a deployment should get
+   without asking for it.
+2. **the connection's `root`**, which arrives over HTTP like anything else and
+   is therefore checked against layer 1 rather than trusted. It is what lets an
+   operator hand different pipelines different subtrees.
+
+The component's `path` is relative to the root. Paths are **refused, never
+normalised** — an absolute path or one containing `..` fails the build rather
+than being trimmed, because trimming leaves whoever wrote it believing it meant
+something, and a normaliser is one edge case away from being the hole it was
+written to close. After resolving, the landing directory is canonicalized and
+re-checked against both layers, which is what stops a symlink planted inside the
+root from pointing out of it.
+
+All of it is decided at **build** time, and the build creates the directory: a
+path that escapes, or a root nobody can write to, fails the pipeline that owns
+it rather than surfacing an hour into a run. `just dev` passes
+`--data-dir dev_data` so the component is usable without ceremony; the directory
+is gitignored, being output rather than a fixture.
+
+Two things it does not do yet. An `interval_secs` rotation is only noticed when
+the next batch arrives, so an idle pipeline holds its part open past the
+interval — there is no timer task closing it. And a pipeline cancelled
+mid-part leaves a `json_array` file unclosed; every batch is flushed as it is
+written, so no data is lost, but the trailing `]` is missing. `ndjson` has
+neither problem, which is another reason it is the default.
 
 ## secrets
 
@@ -633,10 +719,26 @@ which is why they weren't just fixed.
       lists a pipeline that isn't running. `join_handle` is never inspected.
       Needs a real lifecycle/status concept — running / stopped / failed —
       probably surfaced in the UI cards too.
-- [ ] **file output has a hardcoded path.** `src/outputs/file.rs` writes to an
-      absolute path under `/Users/niclas/...` and truncates it on every
-      `init()`. `FileOutputConfig` is an empty struct; it wants at least a
-      `path`, and a decision on truncate vs. append.
+- [x] **file output has a hardcoded path.** (fixed 2026-08-07: it now takes a
+      `file` connection, a `path` under it, a `format` and a `rotate` policy,
+      and is sandboxed by `--data-dir`. See "file output" above.)
+- [ ] **parquet file output.** The format is `ndjson` or `json_array` so far.
+      Parquet needs the arrow ecosystem — worth a feature gate, given what it
+      costs every build — and raises a question the JSON formats don't: messages
+      are untyped, so a writer has to infer a schema and decide what to do with
+      the batch that does not match it.
+- [ ] **object-store (s3) output.** The reason `src/outputs/rotate.rs` is split
+      out from `src/outputs/file.rs`: rotation, part naming and encoding are
+      already shared, and what is left is a destination. Its connection replaces
+      `root` with a bucket and credentials; `--data-dir` does not apply, since
+      the sandbox there is whatever the credentials can reach.
+- [ ] **date partitioning.** `dt=2026-08-07/` in the path is what makes an
+      object store queryable, and is a different thing from rotation. Needs the
+      writer to hold several open parts keyed by partition rather than one.
+- [ ] **an idle file output holds its part open.** `interval_secs` is only
+      checked when a batch arrives, so a pipeline that goes quiet does not close
+      its part on the interval. Wants a timer, which means the output needs a
+      tick it does not currently get.
 - [ ] **`--port` does nothing.** `src/main.rs` only logs it; the listener binds
       `leptos_options.site_addr` from `Cargo.toml`. Running the binary outside
       `cargo leptos` therefore falls back to port 3000. Either wire the arg into

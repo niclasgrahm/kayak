@@ -732,7 +732,11 @@ mod tests {
         let drafts = vec![
             filled(Family::Output, "stdout", &[]),
             dummy_input(),
-            filled(Family::Output, "file", &[]),
+            filled(
+                Family::Output,
+                "file",
+                &[("connection", "local-files"), ("path", "orders")],
+            ),
         ];
         let value = build_config("", &drafts, &docs()).map_err(|e| anyhow::anyhow!("{e:?}"))?;
         assert_eq!(value["inputs"].as_array().map(Vec::len), Some(1));

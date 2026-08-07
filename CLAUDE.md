@@ -46,7 +46,7 @@ Three workspace crates:
 
 ### The pipeline model
 
-A **pipeline** is one `inputs → [transforms] → outputs` chain. A pipeline may have several inputs (merged into one stream) and several outputs (each gets every batch); `inputs` and `outputs` are JSON arrays, and there is no singular form. Pipelines are identified by `id` (from config, or a random `petname` if omitted) and form a **graph**: the `pipeline` input kind subscribes to another pipeline's output, so one pipeline can fan out to several downstream ones. `example_config/config.json` (with `config.connections.json` beside it) is the worked example and deliberately covers every component kind bar the `file` output, and every connection kind: two roots (a NATS source and a dummy ticker), a fan-out of seven under the source, one pipeline (`everything`) fed by three inputs — two upstreams and a nats subject another pipeline publishes to — one pipeline with two outputs of different kinds, and one pipeline at depth 3. Keep it that way when adding a component — it's what the UI is inspected against, and `tests/graph.rs` builds the whole file.
+A **pipeline** is one `inputs → [transforms] → outputs` chain. A pipeline may have several inputs (merged into one stream) and several outputs (each gets every batch); `inputs` and `outputs` are JSON arrays, and there is no singular form. Pipelines are identified by `id` (from config, or a random `petname` if omitted) and form a **graph**: the `pipeline` input kind subscribes to another pipeline's output, so one pipeline can fan out to several downstream ones. `example_config/config.json` (with `config.connections.json` beside it) is the worked example and deliberately covers every component kind and every connection kind: two roots (a NATS source and a dummy ticker), a fan-out of seven under the source, one pipeline (`everything`) fed by three inputs — two upstreams and a nats subject another pipeline publishes to — one pipeline with two outputs of different kinds, and one pipeline at depth 3. Keep it that way when adding a component — it's what the UI is inspected against, and `tests/graph.rs` builds the whole file.
 
 Data flowing through is always `Arc<MessageBatch>` — a batch of `Arc<serde_json::Value>`. There is no typed schema; everything is untyped JSON, and transforms address fields by name.
 
@@ -103,6 +103,51 @@ has to be added there and the compiler is what says so.
 helper in `src/lib.rs`, and a wire-format sample in `tests/config.rs`. The docs
 page, the `/api/docs` output and the "add connection" form all come from the
 schema reflection and need nothing.
+
+The `file` connection is the odd one out — a directory, no host, no credentials
+— and it is a connection anyway because it holds the same thing the others do:
+*what the system is*, as against what one pipeline wants from it. A file output
+names a `path` under its root exactly as a kafka output names a topic on those
+brokers, and the object-store connection that comes later swaps the root for a
+bucket without any component changing.
+
+### The file output sandbox
+
+`--data-dir` is a **second** directory boundary, and it is not `AppState`'s
+`save_dir`: that one bounds where the server writes *configs* on request, this
+one bounds where pipelines write *data*. Don't conflate them because both are
+directories fixed at startup — pointing a data firehose at the directory holding
+the config someone is editing is not a default anyone would choose.
+
+Two layers, and the reason is `persist::save_path`'s reason: a connection's
+`root` arrives from `POST /api/connections` like anything else, so it is checked
+against `--data-dir` rather than trusted, and without the flag file outputs
+refuse to build at all. That closed default is the design, not a stub. Paths are
+**refused, never normalised** (`Root::relative_path`), and the landing directory
+is canonicalized and re-checked afterwards — that second check is what catches a
+symlink planted inside the root, and the component-wise check alone does not.
+All of it happens at build time, and the build creates the directory.
+
+`src/outputs/rotate.rs` is split from `src/outputs/file.rs` on purpose and the
+line matters: rotate.rs decides *when* a part is finished, what it is called and
+how messages are laid out inside it, and touches no filesystem — the object
+store output will take it whole. file.rs is only the destination. Keep new
+format or rotation work on the rotate.rs side of that line.
+
+Two properties there are load-bearing. Rotation is checked *after* a batch is
+written, so a batch is never split across two parts (`max_rows` is a floor, not
+a ceiling). And `Rotation::is_full` returns false at zero rows — without that, an
+interval trigger on an idle pipeline closes and reopens a part every time it is
+asked, filling the directory with empty files.
+
+The sample's file output is `heartbeat_to_disk`, and its upstream is deliberate:
+`heartbeat` is a dummy input, so it is the one pipeline in `example_config/` that
+writes real output without `docker compose up`. Its cost is that the sample no
+longer loads on a server with no `--data-dir` — so `just dev`, `tests/graph.rs`
+and the `Dockerfile` all pass `--data-dir dev_data`, and the connection's root
+(`dev_data/events`) is relative, resolving against the working directory in all
+three. Change one and change all three. `dev_data` is gitignored; the build
+creates it.
 
 ### Secrets
 

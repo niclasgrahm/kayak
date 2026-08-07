@@ -433,8 +433,12 @@ async fn a_named_connections_file_is_used_instead_of_the_derived_one() -> anyhow
             &config,
             serde_json::to_string(&json!([nats_config("sensors", "broker")]))?,
         )?;
-        let state =
-            AppState::from_config_with(&config, Arc::new(kayak::secrets::EnvStore), Some(&shared))?;
+        let state = AppState::from_config_with(
+            &config,
+            Arc::new(kayak::secrets::EnvStore),
+            Some(&shared),
+            None,
+        )?;
         assert_eq!(state.get_pipeline_ids(), ["sensors"], "{name}");
         assert!(
             !dir.path()
@@ -456,8 +460,12 @@ async fn a_named_connections_file_that_is_missing_fails_to_start() -> anyhow::Re
     std::fs::write(&config, "[]")?;
     let missing = dir.path().join("nowhere.json");
 
-    let result =
-        AppState::from_config_with(&config, Arc::new(kayak::secrets::EnvStore), Some(&missing));
+    let result = AppState::from_config_with(
+        &config,
+        Arc::new(kayak::secrets::EnvStore),
+        Some(&missing),
+        None,
+    );
     assert!(result.is_err(), "a missing --connections file was accepted");
     Ok(())
 }

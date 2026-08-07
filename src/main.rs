@@ -39,6 +39,15 @@ struct Args {
     /// several configs. Holds `${NAME}` secret references, not secrets.
     #[arg(long)]
     connections: Option<PathBuf>,
+    /// The one directory tree file outputs may write pipeline data into,
+    /// created if it is not there. **Without this flag file outputs are turned
+    /// off** — a component that writes whatever a pipeline carries onto disk is
+    /// not something a deployment should get by default, so enabling it is an
+    /// explicit act. A `file` connection's root has to resolve inside this
+    /// directory, which is what keeps a config posted over HTTP from naming an
+    /// arbitrary path. Separate from where `--config` is saved, on purpose.
+    #[arg(long)]
+    data_dir: Option<PathBuf>,
     #[arg(long, default_value_t = 6767)]
     port: u16,
 }
@@ -74,11 +83,14 @@ async fn main() -> anyhow::Result<()> {
 
     let secrets = secret_store(args.secrets.as_ref()).context("failed to load secrets")?;
     let connections = args.connections.as_deref();
+    let data_dir = args.data_dir.clone();
     let state = match &args.config {
-        Some(path) => AppState::from_config_with(path, secrets, connections)
+        Some(path) => AppState::from_config_with(path, secrets, connections, data_dir)
             .context("failed to initialize app state from config")?,
         None => AppState::with_secrets_and_connections(secrets, connections)
-            .context("failed to load connections")?,
+            .context("failed to load connections")?
+            .with_data_dir(data_dir)
+            .context("failed to prepare the data directory")?,
     };
 
     let conf = get_configuration(None)?;

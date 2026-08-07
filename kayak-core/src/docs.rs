@@ -674,7 +674,12 @@ mod tests {
             .into_iter()
             .map(|c| c.kind)
             .collect();
-        assert_eq!(kinds, ["kafka", "nats", "postgres"]);
+        assert_eq!(kinds, ["kafka", "nats", "postgres", "file"]);
+
+        // a file connection is the odd one out — a directory rather than a
+        // server — and documents itself through the same machinery regardless
+        let files = in_family("file", Family::Connection);
+        assert_eq!(field_names(&files), ["root"]);
 
         let kafka = in_family("kafka", Family::Connection);
         assert_eq!(field_names(&kafka), ["brokers"]);

@@ -39,7 +39,11 @@ use crate::handlers::{
 use crate::secrets::{EnvStore, Resolved, SecretStore};
 use crate::state::{AppState, PipelineHandle, PipelineId, UiEvent};
 use kayak_core::config::Secret;
-use kayak_core::connections::{Connections, KafkaConnection, NatsConnection, PostgresConnection};
+use std::path::PathBuf;
+
+use kayak_core::connections::{
+    Connections, FileConnection, KafkaConnection, NatsConnection, PostgresConnection,
+};
 
 /// Threaded through every `build()` call. It carries the pipeline map — needed
 /// so a `pipeline` input can look up its upstream and register an mpsc sender
@@ -60,6 +64,17 @@ pub struct BuildCtx<'a> {
     /// re-creating the pipeline — is what picks up a change, and that is the
     /// same rule the config file already has.
     pub connections: Arc<Connections>,
+    /// The one directory tree the server may write pipeline *data* into, from
+    /// `--data-dir`, canonicalized at startup.
+    ///
+    /// `None` — the default — means no file output can be built at all. That is
+    /// deliberately the closed position: a disk writer driven by whatever a
+    /// pipeline carries is not something a deployment should get without asking
+    /// for it. See [`crate::outputs::file::Root`] for what it is checked
+    /// against, and note it is a separate thing from [`AppState`]'s `save_dir`
+    /// — that one bounds where *configs* are written, and the two should not be
+    /// conflated just because they are both directories.
+    pub data_dir: Option<Arc<PathBuf>>,
 }
 
 impl<'a> BuildCtx<'a> {
@@ -87,6 +102,7 @@ impl<'a> BuildCtx<'a> {
             events,
             secrets,
             connections: Arc::new(Connections::new()),
+            data_dir: None,
         }
     }
 
@@ -94,6 +110,14 @@ impl<'a> BuildCtx<'a> {
     #[must_use]
     pub fn with_connections(mut self, connections: Arc<Connections>) -> Self {
         self.connections = connections;
+        self
+    }
+
+    /// The same, with the directory file outputs are confined to. Without this
+    /// they refuse to build.
+    #[must_use]
+    pub fn with_data_dir(mut self, data_dir: Option<Arc<PathBuf>>) -> Self {
+        self.data_dir = data_dir;
         self
     }
 
@@ -117,6 +141,10 @@ impl<'a> BuildCtx<'a> {
 
     pub fn postgres_connection(&self, id: &str) -> anyhow::Result<&PostgresConnection> {
         Ok(self.connections.postgres(id)?)
+    }
+
+    pub fn file_connection(&self, id: &str) -> anyhow::Result<&FileConnection> {
+        Ok(self.connections.file(id)?)
     }
 }
 

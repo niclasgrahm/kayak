@@ -7,6 +7,7 @@ pub mod file;
 pub mod kafka;
 pub mod nats;
 pub mod postgres;
+pub mod rotate;
 pub mod stdout;
 
 pub trait BuildOutput {
