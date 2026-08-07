@@ -1,19 +1,19 @@
 use gloo_net::http::Request;
-use serde_json::Value;
-use streamer_core::{
-    ConfigFormat, LayoutFile, SaveConfigRequest, SaveConfigResponse, SettingsDto, StreamerDto,
+use kayak_core::{
+    ConfigFormat, LayoutFile, PipelineDto, SaveConfigRequest, SaveConfigResponse, SettingsDto,
 };
+use serde_json::Value;
 
 pub struct ApiClient {
     pub base: String,
 }
 
 impl ApiClient {
-    pub async fn list_streams(&self) -> Result<Vec<StreamerDto>, ApiError> {
-        let resp = Request::get(&format!("{}/api/streams", self.base))
+    pub async fn list_pipelines(&self) -> Result<Vec<PipelineDto>, ApiError> {
+        let resp = Request::get(&format!("{}/api/pipelines", self.base))
             .send()
             .await?;
-        let dtos = resp.json::<Vec<StreamerDto>>().await?;
+        let dtos = resp.json::<Vec<PipelineDto>>().await?;
         Ok(dtos)
     }
 
@@ -33,7 +33,7 @@ impl ApiClient {
         Ok(resp.json::<LayoutFile>().await?)
     }
 
-    /// Replace the arrangement. The whole map rather than one node, because
+    /// Replace the arrangement. The whole map rather than one pipeline, because
     /// that is what makes "put it back to automatic" an ordinary save of a
     /// smaller map instead of its own endpoint.
     pub async fn save_layout(&self, layout: &LayoutFile) -> Result<(), ApiError> {
@@ -52,19 +52,19 @@ impl ApiClient {
     /// rather than a `Config` because the form assembles JSON field by field,
     /// and round-tripping it through the typed struct here would only move the
     /// same deserialization error to a place with less to say about it.
-    pub async fn create_stream(&self, config: &Value) -> Result<StreamerDto, ApiError> {
-        let resp = Request::post(&format!("{}/api/streams", self.base))
+    pub async fn create_pipeline(&self, config: &Value) -> Result<PipelineDto, ApiError> {
+        let resp = Request::post(&format!("{}/api/pipelines", self.base))
             .json(config)?
             .send()
             .await?;
         if !resp.ok() {
             return Err(rejection(resp).await);
         }
-        Ok(resp.json::<StreamerDto>().await?)
+        Ok(resp.json::<PipelineDto>().await?)
     }
 
-    pub async fn delete_stream(&self, id: &str) -> Result<(), ApiError> {
-        let resp = Request::delete(&format!("{}/api/streams/{id}", self.base))
+    pub async fn delete_pipeline(&self, id: &str) -> Result<(), ApiError> {
+        let resp = Request::delete(&format!("{}/api/pipelines/{id}", self.base))
             .send()
             .await?;
         if resp.ok() {
@@ -77,11 +77,7 @@ impl ApiClient {
     /// Write the running graph to `name`, in `format`, beside the config the
     /// server was started from. Returns the path it landed at, which is the
     /// server's to report — the UI knows the file name but not the directory.
-    pub async fn save_config(
-        &self,
-        name: &str,
-        format: ConfigFormat,
-    ) -> Result<String, ApiError> {
+    pub async fn save_config(&self, name: &str, format: ConfigFormat) -> Result<String, ApiError> {
         let resp = Request::post(&format!("{}/api/config/save", self.base))
             .json(&SaveConfigRequest {
                 name: name.to_string(),

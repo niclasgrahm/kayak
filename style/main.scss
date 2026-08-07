@@ -9,8 +9,8 @@
 }
 :root {
   --bg-canvas: #1d2129; // GraphEdit background, darkest
-  --bg-panel: #262b33; // docks, node bodies
-  --bg-titlebar: #1b1f26; // node title bars, menu bar
+  --bg-panel: #262b33; // docks, pipeline bodies
+  --bg-titlebar: #1b1f26; // pipeline title bars, menu bar
   --bg-hover: #2f3540;
   --border: #14171c; // darker than fills — key Godot trait
   --accent: #699ce8; // Godot's selection blue
@@ -66,7 +66,7 @@ body {
   transform-origin: 0 0;
 }
 
-.nodes {
+.pipelines {
   flex: 1;
   position: relative;
   overflow: hidden;
@@ -691,7 +691,7 @@ body {
 }
 
 // ---------------------------------------------------------------------------
-// Editing the graph: the sidebar's add/delete affordances and the "add node"
+// Editing the graph: the sidebar's add/delete affordances and the "add pipeline"
 // modal. Godot's inspector again — a titlebar, dim labels on the left, recessed
 // controls on the right — because the modal is editing the same things the
 // cards display, and the two should not look like different applications.

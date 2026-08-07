@@ -9,10 +9,10 @@ pub mod format;
 pub mod layout;
 
 pub use format::ConfigFormat;
-pub use layout::{EdgeEnd, LayoutFile, NodeLayout, PortLayout, Side};
+pub use layout::{EdgeEnd, LayoutFile, PipelineLayout, PortLayout, Side};
 
 #[derive(Serialize, Deserialize, Clone)]
-pub struct StreamerDto {
+pub struct PipelineDto {
     pub id: String,
     pub config: Config,
 }
@@ -58,7 +58,7 @@ pub struct SaveConfigResponse {
     pub path: String,
 }
 
-pub type StreamerId = String;
+pub type PipelineId = String;
 pub type MessageBatch = Vec<Arc<serde_json::Value>>;
 
 /// The stage of a run loop an event came from. Also what the frontend matches
@@ -84,15 +84,15 @@ pub enum EventPayload {
 
 #[derive(Clone, Serialize, Deserialize, PartialEq)]
 pub struct UiEvent {
-    pub streamer_id: StreamerId,
+    pub pipeline_id: PipelineId,
     pub stage: String,
     pub payload: EventPayload,
 }
 
 impl UiEvent {
-    pub fn batch(streamer_id: StreamerId, stage: &str, batch: Arc<MessageBatch>) -> Self {
+    pub fn batch(pipeline_id: PipelineId, stage: &str, batch: Arc<MessageBatch>) -> Self {
         Self {
-            streamer_id,
+            pipeline_id,
             stage: stage.to_string(),
             payload: EventPayload::Batch(batch),
         }
@@ -100,9 +100,9 @@ impl UiEvent {
 
     /// `error` is rendered with `{:#}`, so an `anyhow` chain arrives as the
     /// same "context: cause" line the server log shows.
-    pub fn error(streamer_id: StreamerId, stage: &str, error: &impl std::fmt::Display) -> Self {
+    pub fn error(pipeline_id: PipelineId, stage: &str, error: &impl std::fmt::Display) -> Self {
         Self {
-            streamer_id,
+            pipeline_id,
             stage: stage.to_string(),
             payload: EventPayload::Error(format!("{error:#}")),
         }

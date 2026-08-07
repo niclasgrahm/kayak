@@ -1,14 +1,17 @@
 use crate::BuildCtx;
-use streamer_core::config::Config;
+use crate::config::BuildInputConfig;
+use crate::config::BuildOutputConfig;
+use crate::config::BuildTransformConfig;
 use crate::inputs::InputSource;
 use crate::inputs::MessageBatch;
 use crate::outputs::OutputDestination;
-use crate::state::StreamerId;
+use crate::state::PipelineId;
 use crate::state::UiEvent;
-use streamer_core::stage;
 use crate::transforms::Transform;
 use anyhow::Context;
 use anyhow::Result;
+use kayak_core::config::Config;
+use kayak_core::stage;
 use serde::Serialize;
 use std::sync::{Arc, Mutex};
 use tokio::select;
@@ -16,13 +19,10 @@ use tokio::sync::broadcast;
 use tokio::sync::mpsc;
 use tracing::debug;
 use tracing::error;
-use crate::config::BuildInputConfig;
-use crate::config::BuildTransformConfig;
-use crate::config::BuildOutputConfig;
 
 #[derive(Serialize)]
-pub struct Streamer {
-    pub id: StreamerId,
+pub struct Pipeline {
+    pub id: PipelineId,
     pub config: Config,
     #[serde(skip)]
     pub cancellation_token: tokio_util::sync::CancellationToken,
@@ -30,9 +30,9 @@ pub struct Streamer {
     downstream_senders: Mutex<Vec<mpsc::Sender<Arc<MessageBatch>>>>,
 }
 
-// impl Streamer {
-//     pub fn to_dto(&self) -> anyhow::Result<StreamerDto> {
-//             Ok(StreamerDto {
+// impl Pipeline {
+//     pub fn to_dto(&self) -> anyhow::Result<PipelineDto> {
+//             Ok(PipelineDto {
 //                 id: self.id.clone(),
 //                 config: self.config.clone(),
 //             })
@@ -40,8 +40,8 @@ pub struct Streamer {
 //     }
 
 #[derive(Serialize)]
-pub struct StreamerView<'a> {
-    id: &'a StreamerId,
+pub struct PipelineView<'a> {
+    id: &'a PipelineId,
     config: &'a Config,
 }
 
@@ -59,25 +59,25 @@ fn publish(events: &broadcast::Sender<UiEvent>, event: impl FnOnce() -> UiEvent)
     }
 }
 
-pub struct StreamerRuntime {
+pub struct PipelineRuntime {
     /// Every configured input, merged into one — see [`crate::inputs::merge`].
     input: Box<dyn InputSource>,
     transforms: Vec<Box<dyn Transform>>,
     outputs: Vec<Box<dyn OutputDestination>>,
-    shared: Arc<Streamer>,
+    shared: Arc<Pipeline>,
     events: broadcast::Sender<UiEvent>,
 }
 
-impl StreamerRuntime {
+impl PipelineRuntime {
     /// Assemble a runtime from already-built components, bypassing the config
     /// layer. This is the seam integration tests use to drive the run loop with
     /// scripted inputs and collecting outputs; production code goes through
-    /// [`Streamer::start`].
+    /// [`Pipeline::start`].
     pub fn from_parts(
         inputs: Vec<Box<dyn InputSource>>,
         transforms: Vec<Box<dyn Transform>>,
         outputs: Vec<Box<dyn OutputDestination>>,
-        shared: Arc<Streamer>,
+        shared: Arc<Pipeline>,
         events: broadcast::Sender<UiEvent>,
     ) -> Result<Self> {
         Ok(Self {
@@ -89,7 +89,7 @@ impl StreamerRuntime {
         })
     }
 
-    /// Run until the input errors or the streamer is cancelled.
+    /// Run until the input errors or the pipeline is cancelled.
     pub async fn run(mut self) -> anyhow::Result<()> {
         // an output that can't be initialised is fatal: it would never accept a
         // batch, and a pipeline half-writing its outputs is worse than one that
@@ -105,7 +105,7 @@ impl StreamerRuntime {
         loop {
             let next_msg = match select! {
                 // `biased` so cancellation always wins a tie. Tearing the graph
-                // down cancels every streamer and *then* drops the upstreams,
+                // down cancels every pipeline and *then* drops the upstreams,
                 // so a downstream is woken with both its cancellation and an
                 // "upstream is gone" ready at once — and a random pick would
                 // report our own shutdown as a pipeline failure half the time.
@@ -120,7 +120,7 @@ impl StreamerRuntime {
                     // input dying because we asked it to is not news, and
                     // reporting it would put a red line on a card that is on
                     // its way out — or, after a revert, on the card of the
-                    // freshly built streamer that inherited its id.
+                    // freshly built pipeline that inherited its id.
                     if self.shared.cancellation_token.is_cancelled() {
                         debug!(
                             "[{}]\t input stopped while shutting down: {:#}",
@@ -128,18 +128,19 @@ impl StreamerRuntime {
                         );
                         break;
                     }
-                    error!("[{}]\t input error, stopping streamer: {:?}", self.shared.id, e);
-                    publish(&self.events, || UiEvent::error(self.shared.id.clone(), stage::INPUT, &e));
+                    error!(
+                        "[{}]\t input error, stopping pipeline: {:?}",
+                        self.shared.id, e
+                    );
+                    publish(&self.events, || {
+                        UiEvent::error(self.shared.id.clone(), stage::INPUT, &e)
+                    });
                     break;
                 }
             };
             // NOTE this is temporary! Send input to web client
             publish(&self.events, || {
-                UiEvent::batch(
-                    self.shared.id.clone(),
-                    stage::INPUT,
-                    Arc::clone(&next_msg),
-                )
+                UiEvent::batch(self.shared.id.clone(), stage::INPUT, Arc::clone(&next_msg))
             });
             // END NOTE this is temporary! Send input to web client
             let mut batches = vec![next_msg];
@@ -171,7 +172,7 @@ impl StreamerRuntime {
 
             for b in &batches {
                 // every output gets every batch. a failing one shouldn't tear
-                // the pipeline down — its siblings and the downstream streamers
+                // the pipeline down — its siblings and the downstream pipelines
                 // are still fed, same as we do for transform errors
                 for output in &mut self.outputs {
                     if let Err(e) = output.emit(b.clone()).await {
@@ -196,11 +197,11 @@ impl StreamerRuntime {
     }
 }
 
-impl Streamer {
+impl Pipeline {
     pub fn new(config: Config) -> Result<Self> {
         let id = match config.id.clone() {
             Some(id) => id,
-            None => petname::petname(3, "-").context("failed to generate a random streamer id")?,
+            None => petname::petname(3, "-").context("failed to generate a random pipeline id")?,
         };
         let cancellation_token = tokio_util::sync::CancellationToken::new();
         Ok(Self {
@@ -211,12 +212,12 @@ impl Streamer {
         })
     }
 
-    fn create_runtime(self: &Arc<Self>, mut ctx: BuildCtx) -> Result<StreamerRuntime> {
+    fn create_runtime(self: &Arc<Self>, mut ctx: BuildCtx) -> Result<PipelineRuntime> {
         let mut transforms = Vec::with_capacity(self.config.transforms.len());
         for t in self.config.transforms.iter().cloned() {
             transforms.push(t.build(&mut ctx)?);
         }
-        // inputs first: a `streamer` input registers itself on its upstream as
+        // inputs first: a `pipeline` input registers itself on its upstream as
         // it builds, and an output that fails to build shouldn't leave half a
         // subscription behind — building it last keeps that window as small as
         // the old single-input code had it
@@ -228,7 +229,7 @@ impl Streamer {
         for o in self.config.outputs.iter().cloned() {
             outputs.push(o.build(&mut ctx)?);
         }
-        StreamerRuntime::from_parts(
+        PipelineRuntime::from_parts(
             inputs,
             transforms,
             outputs,
@@ -241,8 +242,8 @@ impl Streamer {
         Ok(tokio::task::spawn(async move {
             let shared = Arc::clone(&runtime.shared);
             match runtime.run().await {
-                Ok(()) => debug!("streamer {} exited successfully", shared.id),
-                Err(e) => error!("streamer {} exited with error: {:?}", shared.id, e),
+                Ok(()) => debug!("pipeline {} exited successfully", shared.id),
+                Err(e) => error!("pipeline {} exited with error: {:?}", shared.id, e),
             }
         }))
     }
@@ -251,7 +252,10 @@ impl Streamer {
     /// recover rather than propagate a panic into every downstream send.
     fn lock_senders(&self) -> std::sync::MutexGuard<'_, Vec<mpsc::Sender<Arc<MessageBatch>>>> {
         self.downstream_senders.lock().unwrap_or_else(|poisoned| {
-            tracing::warn!("[{}]\t downstream senders lock was poisoned; recovering", self.id);
+            tracing::warn!(
+                "[{}]\t downstream senders lock was poisoned; recovering",
+                self.id
+            );
             poisoned.into_inner()
         })
     }
@@ -263,8 +267,8 @@ impl Streamer {
     pub fn subscribe(&self, tx: mpsc::Sender<Arc<MessageBatch>>) {
         self.lock_senders().push(tx);
     }
-    pub fn view(&self) -> StreamerView<'_> {
-        StreamerView {
+    pub fn view(&self) -> PipelineView<'_> {
+        PipelineView {
             id: &self.id,
             config: &self.config,
         }

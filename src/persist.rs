@@ -8,7 +8,7 @@
 //!
 //! That goal is what dictates the two rules here:
 //!
-//! - **The order is derived, not remembered.** A `streamer` input can only be
+//! - **The order is derived, not remembered.** A `pipeline` input can only be
 //!   built once its upstream exists, so the file has to declare parents before
 //!   children; [`ordered`] topologically sorts them and breaks every tie by id.
 //!   Nothing depends on the order pipelines happened to be created in, and the
@@ -21,7 +21,7 @@
 //! Secrets are safe here for the reason they're safe on the wire: a `Config`
 //! only ever holds the unresolved `${NAME}` template.
 //!
-//! A file can be JSON or YAML — see [`streamer_core::ConfigFormat`]. That is a
+//! A file can be JSON or YAML — see [`kayak_core::ConfigFormat`]. That is a
 //! property of the file and nothing else: the format is decided by the name at
 //! the two edges ([`read`] and [`write`]), and every other function here works
 //! on `Config`s that no longer remember which one they came from.
@@ -30,8 +30,8 @@ use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::path::Path;
 
 use anyhow::Context;
-use streamer_core::config::Config;
-use streamer_core::{ConfigFormat, StreamerId};
+use kayak_core::config::Config;
+use kayak_core::{ConfigFormat, PipelineId};
 
 /// The pipelines in an order the config file can be replayed in: every pipeline
 /// after all of the ones it names as upstream, and alphabetical among the ones
@@ -50,15 +50,15 @@ pub fn ordered(configs: Vec<Config>) -> Vec<Config> {
     let empty = String::new();
     let id_of = |c: &Config| c.id.clone().unwrap_or_else(|| empty.clone());
 
-    let mut remaining: BTreeMap<StreamerId, Config> =
+    let mut remaining: BTreeMap<PipelineId, Config> =
         configs.into_iter().map(|c| (id_of(&c), c)).collect();
-    let mut placed: HashSet<StreamerId> = HashSet::new();
+    let mut placed: HashSet<PipelineId> = HashSet::new();
     let mut out: Vec<Config> = Vec::with_capacity(remaining.len());
 
     // Kahn's algorithm over a BTreeMap, so "the ones that are ready" is always
     // considered in id order and the output is fully determined by the graph.
     loop {
-        let ready: Vec<StreamerId> = remaining
+        let ready: Vec<PipelineId> = remaining
             .iter()
             .filter(|(_, config)| {
                 config.upstreams().into_iter().all(|up| {
@@ -96,8 +96,8 @@ pub fn render(configs: Vec<Config>, format: ConfigFormat) -> anyhow::Result<Stri
     let ordered = ordered(configs);
     match format {
         ConfigFormat::Json => {
-            let mut json =
-                serde_json::to_string_pretty(&ordered).context("failed to serialize the pipelines")?;
+            let mut json = serde_json::to_string_pretty(&ordered)
+                .context("failed to serialize the pipelines")?;
             json.push('\n');
             Ok(json)
         }
@@ -214,12 +214,9 @@ pub fn save_path(dir: &Path, name: &str) -> anyhow::Result<std::path::PathBuf> {
 /// of them. A file like that can't be started, so the caller can refuse to
 /// write one rather than persisting a graph that won't come back.
 #[must_use]
-pub fn dangling_upstreams(configs: &[Config]) -> Vec<StreamerId> {
-    let known: HashSet<&str> = configs
-        .iter()
-        .filter_map(|c| c.id.as_deref())
-        .collect();
-    let missing: BTreeSet<&StreamerId> = configs
+pub fn dangling_upstreams(configs: &[Config]) -> Vec<PipelineId> {
+    let known: HashSet<&str> = configs.iter().filter_map(|c| c.id.as_deref()).collect();
+    let missing: BTreeSet<&PipelineId> = configs
         .iter()
         .flat_map(Config::upstreams)
         .filter(|up| !known.contains(up.as_str()))
@@ -230,15 +227,15 @@ pub fn dangling_upstreams(configs: &[Config]) -> Vec<StreamerId> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use streamer_core::config::{
-        DummyConfig, InputConfig, InputKind, StreamerConfig, TransformConfig,
+    use kayak_core::config::{
+        DummyConfig, InputConfig, InputKind, PipelineConfig, TransformConfig,
     };
 
     fn pipeline(id: &str, upstreams: &[&str]) -> Config {
         let mut inputs: Vec<InputConfig> = upstreams
             .iter()
             .map(|up| InputConfig {
-                kind: InputKind::Streamer(StreamerConfig {
+                kind: InputKind::Pipeline(PipelineConfig {
                     upstream: (*up).to_string(),
                 }),
                 buffer: None,
@@ -265,7 +262,7 @@ mod tests {
             .collect()
     }
 
-    /// The whole point of the ordering: a `streamer` input can't be built
+    /// The whole point of the ordering: a `pipeline` input can't be built
     /// before its upstream exists, so a file that lists them the other way
     /// round fails to start.
     #[test]
@@ -288,7 +285,7 @@ mod tests {
         assert_eq!(ids(&out), ["a", "b", "c"]);
     }
 
-    /// A node with several parents goes after the last of them, not the first.
+    /// A pipeline with several parents goes after the last of them, not the first.
     #[test]
     fn a_pipeline_with_several_upstreams_waits_for_all_of_them() {
         let out = ordered(vec![
@@ -349,7 +346,9 @@ mod tests {
 
     #[test]
     fn a_graph_with_every_upstream_present_has_no_dangling_references() {
-        assert!(dangling_upstreams(&[pipeline("root", &[]), pipeline("child", &["root"])]).is_empty());
+        assert!(
+            dangling_upstreams(&[pipeline("root", &[]), pipeline("child", &["root"])]).is_empty()
+        );
     }
 
     /// A cycle can't be created through the API, but a hand-edited file can
@@ -395,10 +394,7 @@ mod tests {
         let graph = || vec![pipeline("child", &["root"]), pipeline("root", &[])];
         let json = parse(&render(graph(), ConfigFormat::Json)?, ConfigFormat::Json)?;
         let yaml = parse(&render(graph(), ConfigFormat::Yaml)?, ConfigFormat::Yaml)?;
-        assert_eq!(
-            serde_json::to_value(&json)?,
-            serde_json::to_value(&yaml)?,
-        );
+        assert_eq!(serde_json::to_value(&json)?, serde_json::to_value(&yaml)?,);
         Ok(())
     }
 
@@ -504,7 +500,10 @@ mod tests {
 
         let reloaded: Vec<Config> = serde_json::from_str(&std::fs::read_to_string(&path)?)?;
         assert_eq!(ids(&reloaded), ["root", "child"]);
-        assert!(!temporary_path(&path).exists(), "the staging file was left behind");
+        assert!(
+            !temporary_path(&path).exists(),
+            "the staging file was left behind"
+        );
         Ok(())
     }
 }

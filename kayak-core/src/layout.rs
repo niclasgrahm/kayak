@@ -9,7 +9,7 @@
 //!
 //! It is still meant to be committed, though, which is why the file is written
 //! deterministically (a `BTreeMap`, so ids come out in one order) and why an
-//! entry only exists once someone has actually moved the node. A graph nobody
+//! entry only exists once someone has actually moved the pipeline. A graph nobody
 //! has arranged by hand has an empty layout file, or none at all, and the
 //! canvas lays it out automatically.
 
@@ -17,7 +17,7 @@ use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
 
-use crate::StreamerId;
+use crate::PipelineId;
 
 /// Bumped if the shape below ever changes incompatibly. A file from the future
 /// is still read — every field is optional or defaulted — so this exists to be
@@ -33,7 +33,7 @@ pub const LAYOUT_VERSION: u32 = 1;
 /// only an explicit resize pins it. `None` means "however tall it needs to be",
 /// which is what you want a card to go back to when its config grows.
 #[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq)]
-pub struct NodeLayout {
+pub struct PipelineLayout {
     pub x: f64,
     pub y: f64,
     pub width: f64,
@@ -144,24 +144,24 @@ fn is_zero(value: &f64) -> bool {
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
 pub struct EdgeLayout {
-    pub from: StreamerId,
-    pub to: StreamerId,
+    pub from: PipelineId,
+    pub to: PipelineId,
     #[serde(flatten)]
     pub adjustment: EdgeAdjustment,
 }
 
-/// The whole file: every node someone has placed by hand, and every edge whose
+/// The whole file: every pipeline someone has placed by hand, and every edge whose
 /// route they have adjusted.
 ///
 /// Absent ids are the normal case, not a gap to be filled — the canvas lays
-/// those out itself. A node is added here the first time it is dragged and
+/// those out itself. A pipeline is added here the first time it is dragged and
 /// removed when the arrangement is reset.
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
 pub struct LayoutFile {
     #[serde(default = "default_version")]
     pub version: u32,
     #[serde(default)]
-    pub nodes: BTreeMap<StreamerId, NodeLayout>,
+    pub pipelines: BTreeMap<PipelineId, PipelineLayout>,
     /// Kept sorted by `(from, to)` — see [`LayoutFile::set_edge_offset`] — so
     /// the file stays diffable.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -176,7 +176,7 @@ impl Default for LayoutFile {
     fn default() -> Self {
         Self {
             version: LAYOUT_VERSION,
-            nodes: BTreeMap::new(),
+            pipelines: BTreeMap::new(),
             edges: Vec::new(),
         }
     }
@@ -184,13 +184,13 @@ impl Default for LayoutFile {
 
 impl LayoutFile {
     #[must_use]
-    pub fn get(&self, id: &str) -> Option<NodeLayout> {
-        self.nodes.get(id).copied()
+    pub fn get(&self, id: &str) -> Option<PipelineLayout> {
+        self.pipelines.get(id).copied()
     }
 
     #[must_use]
     pub fn is_empty(&self) -> bool {
-        self.nodes.is_empty() && self.edges.is_empty()
+        self.pipelines.is_empty() && self.edges.is_empty()
     }
 
     /// Everything that has been adjusted about one edge. All defaults for an
@@ -252,9 +252,7 @@ impl LayoutFile {
     }
 
     fn find_edge(&self, from: &str, to: &str) -> Option<usize> {
-        self.edges
-            .iter()
-            .position(|e| e.from == from && e.to == to)
+        self.edges.iter().position(|e| e.from == from && e.to == to)
     }
 }
 
@@ -267,18 +265,18 @@ mod tests {
     #[test]
     fn a_layout_round_trips_and_omits_an_unset_height() -> serde_json::Result<()> {
         let mut layout = LayoutFile::default();
-        layout.nodes.insert(
+        layout.pipelines.insert(
             "zed".to_string(),
-            NodeLayout {
+            PipelineLayout {
                 x: 40.0,
                 y: 80.0,
                 width: 360.0,
                 height: None,
             },
         );
-        layout.nodes.insert(
+        layout.pipelines.insert(
             "alpha".to_string(),
-            NodeLayout {
+            PipelineLayout {
                 x: 0.0,
                 y: 0.0,
                 width: 360.0,
@@ -287,7 +285,10 @@ mod tests {
         );
 
         let json = serde_json::to_string_pretty(&layout)?;
-        assert!(!json.contains("null"), "an unset height was written: {json}");
+        assert!(
+            !json.contains("null"),
+            "an unset height was written: {json}"
+        );
         assert!(
             json.find("alpha") < json.find("zed"),
             "ids are not in a stable order: {json}"
@@ -297,7 +298,7 @@ mod tests {
     }
 
     /// The list is kept in one order however the adjustments were made, same
-    /// reason as the nodes: the file is committed, and a diff should mean the
+    /// reason as the pipelines: the file is committed, and a diff should mean the
     /// arrangement changed.
     #[test]
     fn adjusted_edges_are_stored_in_a_stable_order() {
@@ -364,7 +365,11 @@ mod tests {
         layout.set_edge_port("a", "b", EdgeEnd::From, Some(port(Side::Bottom, 60.0)));
 
         layout.set_edge_offset("a", "b", 0.0);
-        assert_eq!(layout.edges.len(), 1, "the pinned port was dropped with the offset");
+        assert_eq!(
+            layout.edges.len(),
+            1,
+            "the pinned port was dropped with the offset"
+        );
         assert_eq!(
             layout.edge("a", "b").port(EdgeEnd::From),
             Some(port(Side::Bottom, 60.0))
@@ -410,11 +415,11 @@ mod tests {
         assert_eq!(parsed, LayoutFile::default());
 
         let parsed: LayoutFile =
-            serde_json::from_str(r#"{"nodes":{"a":{"x":1,"y":2,"width":3}}}"#)?;
+            serde_json::from_str(r#"{"pipelines":{"a":{"x":1,"y":2,"width":3}}}"#)?;
         assert_eq!(parsed.version, LAYOUT_VERSION);
         assert_eq!(
             parsed.get("a"),
-            Some(NodeLayout {
+            Some(PipelineLayout {
                 x: 1.0,
                 y: 2.0,
                 width: 3.0,

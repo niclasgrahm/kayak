@@ -4,47 +4,47 @@ use crate::{
     BuildCtx,
     inputs::MessageBatch,
     outputs::{BuildOutput, OutputDestination},
-    state::StreamerId,
+    state::PipelineId,
 };
 use anyhow::Result;
 use chrono::{DateTime, SecondsFormat, Utc};
+use kayak_core::config::StdoutOutputConfig;
 use serde::Serialize;
-use streamer_core::config::StdoutOutputConfig;
 
 impl BuildOutput for StdoutOutputConfig {
     fn build(self, ctx: &mut BuildCtx) -> Result<Box<dyn OutputDestination>> {
         Ok(Box::new(StdoutOutput {
-            streamer_id: ctx.streamer_id.clone(),
+            pipeline_id: ctx.pipeline_id.clone(),
         }))
     }
 }
 
 pub struct StdoutOutput {
-    streamer_id: StreamerId,
+    pipeline_id: PipelineId,
 }
 
 /// What a batch looks like on the terminal: the batch itself plus enough
-/// context to tell rows apart once several streamers are printing to the same
+/// context to tell rows apart once several pipelines are printing to the same
 /// stdout. Serialized compact, so one batch is one row.
 #[derive(Serialize)]
 struct Row<'a> {
     /// RFC 3339, millisecond precision — the time the batch was emitted, not
     /// the time any message in it was produced.
     ts: String,
-    streamer: &'a StreamerId,
+    pipeline: &'a PipelineId,
     /// Number of messages in the batch, so a long row can be read at a glance.
     count: usize,
     batch: &'a MessageBatch,
 }
 
 fn format_batch(
-    streamer_id: &StreamerId,
+    pipeline_id: &PipelineId,
     at: DateTime<Utc>,
     message_batch: &MessageBatch,
 ) -> Result<String> {
     let row = Row {
         ts: at.to_rfc3339_opts(SecondsFormat::Millis, true),
-        streamer: streamer_id,
+        pipeline: pipeline_id,
         count: message_batch.len(),
         batch: message_batch,
     };
@@ -56,7 +56,7 @@ impl OutputDestination for StdoutOutput {
     async fn emit(&mut self, message_batch: Arc<MessageBatch>) -> anyhow::Result<()> {
         println!(
             "{}",
-            format_batch(&self.streamer_id, Utc::now(), &message_batch)?
+            format_batch(&self.pipeline_id, Utc::now(), &message_batch)?
         );
         Ok(())
     }
@@ -77,7 +77,7 @@ mod tests {
     }
 
     #[test]
-    fn a_batch_is_one_row_labelled_with_its_streamer_and_time() -> anyhow::Result<()> {
+    fn a_batch_is_one_row_labelled_with_its_pipeline_and_time() -> anyhow::Result<()> {
         let batch = vec![
             Arc::new(json!({"a": 1, "nested": {"b": [1, 2]}})),
             Arc::new(json!({"a": 2})),
@@ -92,7 +92,7 @@ mod tests {
         assert!(!line.contains('\n'), "expected a single row, got: {line}");
         assert_eq!(
             line,
-            r#"{"ts":"2026-08-04T09:30:00.123Z","streamer":"witty-crab","count":2,"batch":[{"a":1,"nested":{"b":[1,2]}},{"a":2}]}"#
+            r#"{"ts":"2026-08-04T09:30:00.123Z","pipeline":"witty-crab","count":2,"batch":[{"a":1,"nested":{"b":[1,2]}},{"a":2}]}"#
         );
         Ok(())
     }
@@ -106,7 +106,7 @@ mod tests {
         )?;
         assert_eq!(
             line,
-            r#"{"ts":"2026-08-04T09:30:00.000Z","streamer":"witty-crab","count":0,"batch":[]}"#
+            r#"{"ts":"2026-08-04T09:30:00.000Z","pipeline":"witty-crab","count":0,"batch":[]}"#
         );
         Ok(())
     }

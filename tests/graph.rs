@@ -1,13 +1,13 @@
-//! Tests for `AppState` and the streamer *graph*: registering pipelines,
-//! wiring a `streamer` input onto its upstream, and the lifecycle rules the
+//! Tests for `AppState` and the pipeline *graph*: registering pipelines,
+//! wiring a `pipeline` input onto its upstream, and the lifecycle rules the
 //! HTTP layer maps onto status codes.
 
 use std::time::Duration;
 
+use kayak::state::{AppState, PipelineError};
+use kayak::testing::MapSecretStore;
+use kayak_core::config::{Config, InputKind};
 use serde_json::json;
-use streamer::state::{AppState, StreamerError};
-use streamer::testing::MapSecretStore;
-use streamer_core::config::{Config, InputKind};
 
 /// A pipeline that sits idle — the dummy input only ticks once an hour, so
 /// nothing is emitted while the test runs.
@@ -33,19 +33,19 @@ fn chatty(id: &str) -> anyhow::Result<Config> {
 fn downstream_of(id: &str, upstream: &str) -> anyhow::Result<Config> {
     Ok(serde_json::from_value(json!({
         "id": id,
-        "inputs": [{ "type": "streamer", "upstream": upstream }],
+        "inputs": [{ "type": "pipeline", "upstream": upstream }],
         "transforms": [],
         "outputs": [{ "type": "stdout" }]
     }))?)
 }
 
 #[tokio::test]
-async fn creating_a_streamer_registers_it_under_its_configured_id() -> anyhow::Result<()> {
+async fn creating_a_pipeline_registers_it_under_its_configured_id() -> anyhow::Result<()> {
     let state = AppState::new();
-    let created = state.create_streamer(idle("p1")?)?;
+    let created = state.create_pipeline(idle("p1")?)?;
 
     assert_eq!(created.id, "p1");
-    assert_eq!(state.get_streamer_ids(), vec!["p1".to_string()]);
+    assert_eq!(state.get_pipeline_ids(), vec!["p1".to_string()]);
     Ok(())
 }
 
@@ -55,7 +55,7 @@ async fn an_omitted_id_is_generated() -> anyhow::Result<()> {
     let mut config = idle("p1")?;
     config.id = None;
 
-    let created = AppState::new().create_streamer(config)?;
+    let created = AppState::new().create_pipeline(config)?;
     assert_eq!(
         created.id.split('-').count(),
         3,
@@ -68,47 +68,50 @@ async fn an_omitted_id_is_generated() -> anyhow::Result<()> {
 #[tokio::test]
 async fn a_duplicate_id_is_refused() -> anyhow::Result<()> {
     let state = AppState::new();
-    state.create_streamer(idle("p1")?)?;
+    state.create_pipeline(idle("p1")?)?;
 
-    let err = state.create_streamer(idle("p1")?);
+    let err = state.create_pipeline(idle("p1")?);
     assert!(
-        matches!(err, Err(StreamerError::DuplicateId(ref id)) if id == "p1"),
+        matches!(err, Err(PipelineError::DuplicateId(ref id)) if id == "p1"),
         "expected DuplicateId, got {:?}",
         err.map(|s| s.id.clone())
     );
     // the original is untouched
-    assert_eq!(state.get_streamer_ids(), vec!["p1".to_string()]);
+    assert_eq!(state.get_pipeline_ids(), vec!["p1".to_string()]);
     Ok(())
 }
 
-/// A `streamer` input names its upstream by id; naming one that isn't running
+/// A `pipeline` input names its upstream by id; naming one that isn't running
 /// is a config error, not a server error.
 #[tokio::test]
-async fn a_streamer_input_with_an_unknown_upstream_is_an_invalid_config() -> anyhow::Result<()> {
+async fn a_pipeline_input_with_an_unknown_upstream_is_an_invalid_config() -> anyhow::Result<()> {
     let state = AppState::new();
-    let err = state.create_streamer(downstream_of("child", "missing")?);
+    let err = state.create_pipeline(downstream_of("child", "missing")?);
 
     assert!(
-        matches!(err, Err(StreamerError::InvalidConfig(_))),
+        matches!(err, Err(PipelineError::InvalidConfig(_))),
         "expected InvalidConfig for an unknown upstream"
     );
-    // the half-built streamer must not be left in the map
-    assert!(state.get_streamer_ids().is_empty());
+    // the half-built pipeline must not be left in the map
+    assert!(state.get_pipeline_ids().is_empty());
     Ok(())
 }
 
 /// The fan-out case from `config.json`: one source feeding several downstream
 /// pipelines. All of them must actually receive the source's batches.
 #[tokio::test]
-async fn one_upstream_can_feed_several_downstream_streamers() -> anyhow::Result<()> {
+async fn one_upstream_can_feed_several_downstream_pipelines() -> anyhow::Result<()> {
     let state = AppState::new();
-    let upstream = state.create_streamer(chatty("source")?)?;
-    state.create_streamer(downstream_of("a", "source")?)?;
-    state.create_streamer(downstream_of("b", "source")?)?;
+    let upstream = state.create_pipeline(chatty("source")?)?;
+    state.create_pipeline(downstream_of("a", "source")?)?;
+    state.create_pipeline(downstream_of("b", "source")?)?;
 
-    let mut ids = state.get_streamer_ids();
+    let mut ids = state.get_pipeline_ids();
     ids.sort_unstable();
-    assert_eq!(ids, vec!["a".to_string(), "b".to_string(), "source".to_string()]);
+    assert_eq!(
+        ids,
+        vec!["a".to_string(), "b".to_string(), "source".to_string()]
+    );
 
     // subscribing after the fact is the same mechanism the downstreams used, so
     // receiving here proves the source is really fanning out
@@ -120,24 +123,24 @@ async fn one_upstream_can_feed_several_downstream_streamers() -> anyhow::Result<
 }
 
 #[tokio::test]
-async fn deleting_an_unknown_streamer_reports_not_found() {
+async fn deleting_an_unknown_pipeline_reports_not_found() {
     let state = AppState::new();
-    let err = state.delete_streamer("nope");
+    let err = state.delete_pipeline("nope");
     assert!(
-        matches!(err, Err(StreamerError::NotFound(ref id)) if id == "nope"),
+        matches!(err, Err(PipelineError::NotFound(ref id)) if id == "nope"),
         "expected NotFound"
     );
 }
 
 /// Deleting cancels the run loop rather than just dropping the handle.
 #[tokio::test]
-async fn deleting_a_streamer_cancels_its_run_loop() -> anyhow::Result<()> {
+async fn deleting_a_pipeline_cancels_its_run_loop() -> anyhow::Result<()> {
     let state = AppState::new();
-    let created = state.create_streamer(idle("p1")?)?;
+    let created = state.create_pipeline(idle("p1")?)?;
 
-    state.delete_streamer("p1")?;
+    state.delete_pipeline("p1")?;
 
-    assert!(state.get_streamer_ids().is_empty());
+    assert!(state.get_pipeline_ids().is_empty());
     assert!(
         created.cancellation_token.is_cancelled(),
         "the run loop was never signalled to stop"
@@ -145,7 +148,7 @@ async fn deleting_a_streamer_cancels_its_run_loop() -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Loading the whole of `config.json` exercises the multi-streamer graph in one
+/// Loading the whole of `config.json` exercises the multi-pipeline graph in one
 /// go: every upstream must be registered before the pipelines that name it, or
 /// building them fails.
 ///
@@ -175,15 +178,16 @@ async fn the_repository_config_file_starts_a_working_graph() -> anyhow::Result<(
         .collect::<anyhow::Result<_>>()?;
     expected.sort_unstable();
 
-    let mut ids = state.get_streamer_ids();
+    let mut ids = state.get_pipeline_ids();
     ids.sort_unstable();
     assert_eq!(ids, expected);
 
     assert!(
-        declared
+        declared.iter().any(|c| c
+            .inputs
             .iter()
-            .any(|c| c.inputs.iter().any(|i| matches!(i.kind, InputKind::Streamer(_)))),
-        "config.json has no `streamer` input left, so it no longer exercises upstream wiring"
+            .any(|i| matches!(i.kind, InputKind::Pipeline(_)))),
+        "config.json has no `pipeline` input left, so it no longer exercises upstream wiring"
     );
     Ok(())
 }

@@ -1,9 +1,9 @@
 use std::sync::Arc;
 
-use streamer_core::config::FilterTransformConfig;
-use streamer_core::config::FilterKind;
-use streamer_core::config::NumericFilterOperatorKind;
-use streamer_core::config::StringFilterOperatorKind;
+use kayak_core::config::FilterKind;
+use kayak_core::config::FilterTransformConfig;
+use kayak_core::config::NumericFilterOperatorKind;
+use kayak_core::config::StringFilterOperatorKind;
 
 use crate::{
     BuildCtx,
@@ -135,7 +135,10 @@ mod tests {
     async fn numeric_equal_to_matches_across_int_and_float_encodings() {
         let mut t = transform(numeric(NumericFilterOperatorKind::EqualTo, 10.0));
         let out = kept(&mut t, vec![json!({"value": 10}), json!({"value": 10.0})]).await;
-        assert_eq!(out, vec![vec![json!({"value": 10}), json!({"value": 10.0})]]);
+        assert_eq!(
+            out,
+            vec![vec![json!({"value": 10}), json!({"value": 10.0})]]
+        );
     }
 
     #[tokio::test]
@@ -145,7 +148,11 @@ mod tests {
             operator: StringFilterOperatorKind::EqualTo,
             value: "kayak".to_string(),
         });
-        let out = kept(&mut equals, vec![json!({"name": "kayak"}), json!({"name": "kayaking"})]).await;
+        let out = kept(
+            &mut equals,
+            vec![json!({"name": "kayak"}), json!({"name": "kayaking"})],
+        )
+        .await;
         assert_eq!(out, vec![vec![json!({"name": "kayak"})]]);
 
         let mut contains = transform(FilterKind::String {
@@ -153,7 +160,11 @@ mod tests {
             operator: StringFilterOperatorKind::Contains,
             value: "kayak".to_string(),
         });
-        let out = kept(&mut contains, vec![json!({"name": "kayak"}), json!({"name": "kayaking"})]).await;
+        let out = kept(
+            &mut contains,
+            vec![json!({"name": "kayak"}), json!({"name": "kayaking"})],
+        )
+        .await;
         assert_eq!(
             out,
             vec![vec![json!({"name": "kayak"}), json!({"name": "kayaking"})]]

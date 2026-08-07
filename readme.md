@@ -2,12 +2,12 @@
 
 ## the canvas
 
-Cards are laid out automatically as a top-to-bottom hierarchy — a `streamer`
+Cards are laid out automatically as a top-to-bottom hierarchy — a `pipeline`
 input makes its pipeline a child of the one it names as upstream — until you
 drag one somewhere else, at which point that card stays put and everything else
 carries on being placed for you. See "arranging the canvas" below.
 
-It is a DAG rather than a tree: a pipeline with several `streamer` inputs has
+It is a DAG rather than a tree: a pipeline with several `pipeline` inputs has
 several parents, and sits one row below the deepest of them so that every edge
 still points downwards.
 
@@ -64,7 +64,7 @@ graph glows rather than strobes (and doesn't animate at all under
 `prefers-reduced-motion`). The signal is the *downstream's* `input` UI event,
 which means a pipeline whose input is buffered blinks once per closed window
 rather than once per message — its upstream is feeding it continuously, but
-nothing observable happens until the buffer closes. A node with several
+nothing observable happens until the buffer closes. A pipeline with several
 upstreams lights *all* its incoming edges: the event says a batch arrived, not
 which input carried it.
 
@@ -72,9 +72,9 @@ which input carried it.
 | --- | --- |
 | wheel / trackpad scroll | zoom about the cursor, 20%–250% (shown in the navbar) |
 | drag empty canvas | pan (dragging *on* a card selects its text instead) |
-| click a name in the sidebar | glide the camera to centre that node |
+| click a name in the sidebar | glide the camera to centre that pipeline |
 | `edit` in the navbar | switch out of read-only, revealing the controls below |
-| `+` in the sidebar header | open the "add node" modal |
+| `+` in the sidebar header | open the "add pipeline" modal |
 | `×` on a sidebar row | delete that pipeline (click twice — the first click arms it) |
 | drag a card's title bar (edit mode) | move it; it snaps to the grid |
 | drag a card's bottom-right corner (edit mode) | resize it; also snapped |
@@ -86,7 +86,7 @@ which input carried it.
 Each card shows its config as a tabbed property list — inputs / transforms /
 outputs — over a live message log. The log carries failures as well as messages:
 a `UiEvent` is either a `batch` or an `error`, and an error is logged in red as
-`<stage> error: <cause>` on the card of the streamer it happened in. That covers
+`<stage> error: <cause>` on the card of the pipeline it happened in. That covers
 the three places the run loop tolerates a failure — a transform that threw, an
 output that couldn't emit, an input that died — and it's the same text the
 server log shows, so a card no longer just goes quiet for reasons only visible
@@ -112,13 +112,13 @@ controls are not disabled in read-only, they are absent.
 `edit` in the navbar reveals them. The `+` in the sidebar header opens a modal
 that builds a pipeline: an id, then any number of inputs, transforms and
 outputs, each picked from a dropdown and configured field by field. Submitting
-it is a `POST /api/streams`; the `×` on a sidebar row is a `DELETE`, armed by
+it is a `POST /api/pipelines`; the `×` on a sidebar row is a `DELETE`, armed by
 the first click and fired by the second.
 
 **Edits are live, not staged.** Creating a pipeline starts it running
 immediately; deleting one cancels its run loop immediately. The canvas stays a
-true window onto the server — a node you just added streams messages like any
-other — which is the whole reason the editor and the live view are the same
+true window onto the server — a pipeline you just added streams messages like
+any other — which is the whole reason the editor and the live view are the same
 screen. The price is that there is no draft to throw away, so `revert` (below)
 is the undo.
 
@@ -128,7 +128,7 @@ its documented interface. If you ever want the mode enforced, that belongs on
 the server as a flag, not in the UI.
 
 **The form is generated, like the docs are.** It is built from the same
-`streamer_core::docs` reflection over the config schemas, so a new component
+`kayak_core::docs` reflection over the config schemas, so a new component
 appears in the dropdown with the right fields, the right required markers, the
 right dropdowns for closed-value fields, and the right validation — without
 anyone touching the frontend. Field doc comments become the labels' tooltips.
@@ -237,16 +237,16 @@ two run loops for the same pipeline would share a kafka consumer group or a nats
 subscription and double up on every output.
 
 That teardown is also where a subtle bug lived, worth knowing about because the
-shape recurs. Cancelling every streamer and *then* dropping the upstreams wakes
+shape recurs. Cancelling every pipeline and *then* dropping the upstreams wakes
 each downstream with two things ready at once — its own cancellation, and an
-"upstream streamer 'x' is gone" from the closing channel. `select!` picks
+"upstream pipeline 'x' is gone" from the closing channel. `select!` picks
 randomly between ready branches, so a third of the time the run loop reported
 the shutdown *it had been asked to perform* as a pipeline failure. Those errors
-went to the UI, where they landed on the cards of the newly built streamers that
+went to the UI, where they landed on the cards of the newly built pipelines that
 had just inherited the same ids — so a perfectly good revert looked like it had
 produced a broken graph. The fix is `biased;` in the run loop's `select!` plus a
 cancellation check before reporting any input failure: an input dying because we
-asked it to is not news. An input dying on a streamer that is *still running*
+asked it to is not news. An input dying on a pipeline that is *still running*
 still is, which is the distinction the check makes.
 
 `GET /api/settings` reports the file name, the directory saves land in, and
@@ -270,7 +270,7 @@ the cards someone has actually moved:
 ```json
 {
   "version": 1,
-  "nodes": {
+  "pipelines": {
     "everything": { "x": 760, "y": 1180, "width": 360, "height": 320 }
   },
   "edges": [
@@ -321,12 +321,12 @@ user's business in the same way it is in any other editor with a canvas.
 
 `/docs` is a generated reference for every input, transform and output: field
 names, types, which are required, and what each one does. Nothing about it is
-written by hand — `streamer_core::docs` reflects over the same `JsonSchema`
+written by hand — `kayak_core::docs` reflects over the same `JsonSchema`
 derives the config types already carry, and `schemars` carries the doc comments
 through as descriptions.
 
 What that means in practice: **the doc comments on the config structs in
-`streamer-core/src/config.rs` are the documentation**. Add a component and it
+`kayak-core/src/config.rs` are the documentation**. Add a component and it
 appears; add a field and it appears; leave the doc comment off and a unit test
 fails (`every_component_has_a_description_from_its_doc_comment`). Two things are
 worth knowing when writing them: blank lines start a new paragraph and single
@@ -388,12 +388,12 @@ file format, and `secrets.json` is gitignored.
 
 A value with no `${...}` in it is passed through untouched, so fields that hold
 nothing sensitive need no special handling. An unknown name is an error, not an
-empty string — the streamer fails to start (or the `POST /api/streams` gets a
+empty string — the pipeline fails to start (or the `POST /api/pipelines` gets a
 4xx) rather than quietly connecting without credentials.
 
 The resolved value never leaves the runtime component that needs it. `Secret`
-(in `streamer-core`, so wasm-safe) only ever holds the unresolved template, and
-that is what `GET /api/streams` returns and what the UI shows. `Resolved` (in
+(in `kayak-core`, so wasm-safe) only ever holds the unresolved template, and
+that is what `GET /api/pipelines` returns and what the UI shows. `Resolved` (in
 `src/secrets.rs`) holds the real value but prints the *template* from `Display`
 and `Debug`, so a connection error logs
 `nats://app:${NATS_PASSWORD}@broker:4222` and nothing worth leaking. Getting at
@@ -429,7 +429,7 @@ Two things to know when adding a component:
   sample for the new one. That's deliberate — it's the guard rail that keeps the
   wire format covered as the component list grows.
 - `src/testing.rs` has the test doubles: `ScriptedInput`, `CollectingOutput`,
-  `FailOnNth`, and `StreamerRuntime::from_parts` to assemble a pipeline without
+  `FailOnNth`, and `PipelineRuntime::from_parts` to assemble a pipeline without
   going through a config. Prefer these over touching the network in a test.
 
 Timing-dependent tests use `#[tokio::test(start_paused = true)]` so a 10-second
@@ -483,14 +483,14 @@ cargo run -- --config config.json --secrets ./secrets.json
       (2026-08-04: `/docs` and `templates/docs.html` are gone — Askama is now
       only used by the dead `/ui` index handler, which is all that's left)
 - [ ] add time based buffer for the transform buffer
-- [ ] make outputs optional (for example, when a parent node is only used to push data to children)
+- [ ] make outputs optional (for example, when a parent pipeline is only used to push data to children)
 - [ ] think about necessary metadata to add to each message
 - [x] deal with all unwraps -- this will bite us in the ass soon otherwise
       (done 2026-08-03: no unwrap/expect left in src/; see "known issues" below
       for the things that pass turned up but didn't change)
 - [x] show config in the "cards" in the web ui
       (done 2026-08-04: tabbed property list, see "the canvas" above)
-- [x] give streamer ability to have multiple inputs
+- [x] give pipeline ability to have multiple inputs
       (done 2026-08-04: and multiple outputs. `inputs` and `outputs` are arrays
       in the config now — a breaking wire-format change, the singular `input`
       and `output` keys are gone. See "pipelines" below.)
@@ -511,8 +511,8 @@ which is why they weren't just fixed.
 - [ ] **the http transform ignores `verb`.** Every request is a POST regardless
       of what the config says. Honouring it would change behaviour for existing
       configs, so it needs a decision first.
-- [ ] **dead streamers stay in the map.** When a run loop exits (e.g. its input
-      errored), the `StreamerHandle` stays in `AppState`, so `GET /api/streams`
+- [ ] **dead pipelines stay in the map.** When a run loop exits (e.g. its input
+      errored), the `PipelineHandle` stays in `AppState`, so `GET /api/pipelines`
       lists a pipeline that isn't running. `join_handle` is never inspected.
       Needs a real lifecycle/status concept — running / stopped / failed —
       probably surfaced in the UI cards too.
@@ -525,5 +525,5 @@ which is why they weren't just fixed.
       `cargo leptos` therefore falls back to port 3000. Either wire the arg into
       the leptos options or drop it.
 - [x] **hurl tests are stale.** (fixed 2026-08-03: replaced with
-      `hurl/tests/streams-crud.hurl`, which hits `/api/streams` and asserts the
+      `hurl/tests/pipelines-crud.hurl`, which hits `/api/pipelines` and asserts the
       409/422/204 codes. Its old job is now done in-process by `tests/api.rs`.)

@@ -1,6 +1,6 @@
 use anyhow::{Context, Result, anyhow, bail};
+use kayak_core::config::PostgresOutputConfig;
 use std::sync::Arc;
-use streamer_core::config::PostgresOutputConfig;
 use tokio_postgres::NoTls;
 use tracing::error;
 
@@ -16,7 +16,7 @@ const DEFAULT_PORT: u16 = 5432;
 impl BuildOutput for PostgresOutputConfig {
     fn build(self, ctx: &mut BuildCtx) -> Result<Box<dyn OutputDestination>> {
         // rejected at build time rather than on first insert: a bad table name
-        // should fail the streamer that owns it, not surface an hour later
+        // should fail the pipeline that owns it, not surface an hour later
         let table = Table::parse(&self.table)?;
         Ok(Box::new(PostgresOutput {
             host: self.host,
@@ -55,10 +55,7 @@ impl Table {
             if part.is_empty() {
                 bail!("invalid postgres table name '{name}': it has an empty part");
             }
-            if !part
-                .chars()
-                .all(|c| c.is_ascii_alphanumeric() || c == '_')
-            {
+            if !part.chars().all(|c| c.is_ascii_alphanumeric() || c == '_') {
                 bail!(
                     "invalid postgres table name '{name}': only letters, digits and underscores are allowed"
                 );
@@ -91,7 +88,10 @@ impl Table {
 
     #[must_use]
     pub fn insert_sql(&self) -> String {
-        format!("INSERT INTO {table} (payload) VALUES ($1)", table = self.quoted)
+        format!(
+            "INSERT INTO {table} (payload) VALUES ($1)",
+            table = self.quoted
+        )
     }
 }
 

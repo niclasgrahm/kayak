@@ -3,8 +3,8 @@
 //! Pure so it can be tested without a DOM — the component in `app.rs` only
 //! appends what this produces and renders it.
 
+use kayak_core::{EventPayload, UiEvent};
 use std::collections::VecDeque;
-use streamer_core::{EventPayload, UiEvent};
 
 /// How many lines a card keeps. Older lines are dropped from the front, so the
 /// log reads like a tail.
@@ -18,7 +18,7 @@ pub struct Line {
     pub error: bool,
 }
 
-/// The lines an event contributes to the log of the streamer it names.
+/// The lines an event contributes to the log of the pipeline it names.
 ///
 /// A batch logs one line per message, which is what makes the log a view of
 /// data rather than of batches. A failure logs one line naming the stage that
@@ -55,10 +55,10 @@ pub fn append(log: &mut VecDeque<(u64, Line)>, next_id: &mut u64, lines: Vec<Lin
 #[cfg(test)]
 mod tests {
     use super::{LOG_CAPACITY, Line, append, lines_for};
+    use kayak_core::{UiEvent, stage};
     use serde_json::json;
     use std::collections::VecDeque;
     use std::sync::Arc;
-    use streamer_core::{UiEvent, stage};
 
     #[test]
     fn a_batch_logs_one_line_per_message() {
@@ -113,7 +113,7 @@ mod tests {
         assert_eq!(log.back().map(|(_, l)| l.text.as_str()), Some("12"));
     }
 
-    /// Keys have to stay unique across the whole run, or `<For>` reuses a node
+    /// Keys have to stay unique across the whole run, or `<For>` reuses a pipeline
     /// for a different line and the log shows stale text.
     #[test]
     fn every_line_gets_its_own_key_even_after_lines_are_dropped() {

@@ -1,6 +1,5 @@
+use kayak_core::config::HttpTransformConfig;
 use std::sync::Arc;
-use streamer_core::config::HttpTransformConfig;
-
 
 use crate::{
     inputs::MessageBatch,

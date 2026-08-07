@@ -1,12 +1,12 @@
 //! Arranging the generated component reference for the `/docs` page.
 //!
-//! The docs themselves come from `streamer_core::docs`, which reflects them out
+//! The docs themselves come from `kayak_core::docs`, which reflects them out
 //! of the config schemas. This module only decides what the page shows: which
 //! components survive the search box, how they're grouped, and what each one is
 //! called in the URL. Like `graph` and `inspector`, it's pure and unit-tested —
 //! the Leptos components in `app.rs` just render what it returns.
 
-use streamer_core::docs::{ComponentDoc, Family};
+use kayak_core::docs::{ComponentDoc, Family};
 
 /// The families in pipeline order, which is the order the sidebar lists them.
 pub const FAMILIES: [Family; 3] = [Family::Input, Family::Transform, Family::Output];
@@ -123,7 +123,7 @@ fn segments(paragraph: &str) -> Vec<Segment> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use streamer_core::docs::all_components;
+    use kayak_core::docs::all_components;
 
     fn kinds(groups: &[Group]) -> Vec<String> {
         groups

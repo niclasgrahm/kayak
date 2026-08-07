@@ -1,4 +1,4 @@
-use crate::StreamerId;
+use crate::PipelineId;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
@@ -13,7 +13,7 @@ use serde::{Deserialize, Serialize};
 /// ```
 ///
 /// The unresolved form is the only one this type ever holds. That is what makes
-/// it safe to commit, safe to hand back from `GET /api/streams` and safe to show
+/// it safe to commit, safe to hand back from `GET /api/pipelines` and safe to show
 /// in the UI — a resolved value exists only inside the built runtime component,
 /// never in a `Config`. Resolution deliberately lives in the root crate: this
 /// crate compiles to wasm for the frontend, which must not be able to hold a
@@ -112,15 +112,16 @@ pub struct DummyConfig {
     pub duration: u64,
 }
 
-/// Takes another streamer's output as its input. This is what makes the
-/// pipelines a graph: several streamers can read from the same upstream, and it
-/// fans out to all of them. The upstream must already exist when this streamer
+/// Takes another pipeline's output as its input. This is what makes the
+/// pipelines a graph: several pipelines can read from the same upstream, and it
+/// fans out to all of them. The upstream must already exist when this pipeline
 /// is created, so declare it earlier in the config file.
 #[derive(Clone, Debug, Deserialize, Serialize, JsonSchema)]
-#[schemars(title = "streamer")]
-pub struct StreamerConfig {
-    /// id of the streamer to read from
-    pub upstream: StreamerId,
+#[schemars(title = "pipeline")]
+pub struct PipelineConfig {
+    /// id of the pipeline to read from
+    #[schemars(extend("x-pipeline-id" = true))]
+    pub upstream: PipelineId,
 }
 
 /// Appends each batch to a file as JSON.
@@ -287,7 +288,7 @@ pub enum InputKind {
     Dummy(DummyConfig),
     Kafka(KafkaConfig),
     Nats(NatsConfig),
-    Streamer(StreamerConfig),
+    Pipeline(PipelineConfig),
 }
 #[derive(Clone, Debug, Deserialize, Serialize, JsonSchema)]
 #[serde(tag = "type", rename_all = "snake_case")]
@@ -305,7 +306,7 @@ pub struct InputConfig {
     /// count (`static`) or by time (`tumbling`). Available on every input kind.
     /// Not to be confused with the `buffer` transform.
     // omitted rather than emitted as `null` when absent, so a config that comes
-    // back out of `GET /api/streams` is byte-identical to the one that went in
+    // back out of `GET /api/pipelines` is byte-identical to the one that went in
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub buffer: Option<BufferConfig>,
 }
@@ -357,7 +358,7 @@ pub struct Config {
 }
 
 impl Config {
-    /// The pipelines this one reads from: one per `streamer` input, in the
+    /// The pipelines this one reads from: one per `pipeline` input, in the
     /// order they're declared. That is the whole of what makes the pipelines a
     /// graph rather than a list, so both the canvas layout and the config-file
     /// writer ask the question here rather than each matching on `InputKind`.
@@ -365,14 +366,14 @@ impl Config {
     /// The same upstream named twice comes back twice — de-duplicating is the
     /// caller's business, and both callers want a different answer.
     #[must_use]
-    pub fn upstreams(&self) -> Vec<&StreamerId> {
+    pub fn upstreams(&self) -> Vec<&PipelineId> {
         self.inputs
             .iter()
             // spelled out rather than wildcarded: a new input kind that names
             // another pipeline has to be added here, and the compiler is the
             // only thing that will say so
             .filter_map(|input| match &input.kind {
-                InputKind::Streamer(c) => Some(&c.upstream),
+                InputKind::Pipeline(c) => Some(&c.upstream),
                 InputKind::Dummy(_) | InputKind::Kafka(_) | InputKind::Nats(_) => None,
             })
             .collect()

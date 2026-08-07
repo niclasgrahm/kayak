@@ -1,36 +1,36 @@
 use std::sync::Arc;
 
+use crate::{handlers::error::AppError, state::AppState};
 use axum::{
     Json,
     extract::{Path, State},
     response::IntoResponse,
 };
+use kayak_core::config::Config;
 use reqwest::StatusCode;
-use streamer_core::config::Config;
-use crate::{handlers::error::AppError, state::AppState};
 
-pub async fn create_stream(
+pub async fn create_pipeline(
     State(state): State<Arc<AppState>>,
     Json(payload): Json<Config>,
 ) -> Result<impl IntoResponse, AppError> {
-    let streamer = state.create_streamer(payload)?;
-    let body = serde_json::to_value(streamer.view())?;
+    let pipeline = state.create_pipeline(payload)?;
+    let body = serde_json::to_value(pipeline.view())?;
     Ok((StatusCode::CREATED, Json(body)))
 }
 
-pub async fn delete_stream(
+pub async fn delete_pipeline(
     State(state): State<Arc<AppState>>,
-    Path(stream_id): Path<String>,
+    Path(pipeline_id): Path<String>,
 ) -> Result<StatusCode, AppError> {
     // AppError maps NotFound to 404; anything else is a genuine 500 rather
     // than a misleading "not found"
-    state.delete_streamer(&stream_id)?;
+    state.delete_pipeline(&pipeline_id)?;
     Ok(StatusCode::NO_CONTENT)
 }
 
-pub async fn get_streams(
+pub async fn get_pipelines(
     State(state): State<Arc<AppState>>,
 ) -> Result<impl IntoResponse, AppError> {
-    let streamers = state.get_streamers()?;
-    Ok((StatusCode::OK, Json(streamers)))
+    let pipelines = state.get_pipelines()?;
+    Ok((StatusCode::OK, Json(pipelines)))
 }

@@ -1,12 +1,4 @@
 - id: foo
   inputs:
-  - type: dummy
-    duration: 2
-  transforms: []
-  outputs: []
-- id: foo2
-  inputs:
-  - type: streamer
-    upstream: foo
-  transforms: []
-  outputs: []
+    - type: dummy
+      duration: 2

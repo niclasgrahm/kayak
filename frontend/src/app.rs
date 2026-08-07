@@ -1,3 +1,8 @@
+use kayak_core::docs::{Family, FieldType, all_components};
+use kayak_core::{
+    ConfigFormat, EdgeEnd, LayoutFile, PipelineDto, PipelineId, PortLayout, Side, UiEvent,
+    config::Config,
+};
 use leptos::prelude::*;
 use leptos_meta::*;
 use leptos_router::components::{A, Route, Router, Routes};
@@ -9,22 +14,17 @@ use leptos_use::{
     use_window,
 };
 use std::collections::{HashMap, VecDeque};
-use streamer_core::docs::{Family, FieldType, all_components};
-use streamer_core::{
-    ConfigFormat, EdgeEnd, LayoutFile, PortLayout, Side, StreamerDto, StreamerId, UiEvent,
-    config::Config,
-};
 
 use crate::api_client::{ApiClient, ApiError};
 use crate::docs;
 use crate::form;
+use crate::graph::{
+    Camera, CardGeom, Channel, Edge, FALLBACK_CARD_HEIGHT, GRID, PULSE_TICK_MS, PULSE_TICKS,
+    PortHandle, approach, bounds, dragged, dragged_channel, dragged_port, edge_paths, focus_camera,
+    layout, pipelines_from, pulsed_edges, resized, tick_pulses, wheel_delta_pixels, zoom_at,
+};
 use crate::inspector;
 use crate::log;
-use crate::graph::{
-    CardGeom, Camera, Channel, Edge, FALLBACK_CARD_HEIGHT, GRID, PULSE_TICK_MS, PULSE_TICKS,
-    PortHandle, approach, bounds, dragged, dragged_channel, dragged_port, edge_paths, focus_camera,
-    layout, nodes_from, pulsed_edges, resized, tick_pulses, wheel_delta_pixels, zoom_at,
-};
 
 /// How hard the wheel zooms. Small, because the factor is exponential in the
 /// scroll distance.
@@ -44,7 +44,7 @@ pub fn shell(options: LeptosOptions) -> impl IntoView {
                 <meta name="viewport" content="width=device-width,initial-scale=1" />
                 <AutoReload options=options.clone() />
                 <HydrationScripts options />
-                <Stylesheet id="leptos" href="/pkg/streamer.css" />
+                <Stylesheet id="leptos" href="/pkg/kayak.css" />
                 <MetaTags />
             </head>
             <body>
@@ -74,10 +74,10 @@ impl Mode {
 
 #[derive(Clone, Copy)]
 pub struct AppState {
-    pub streams: LocalResource<Result<Vec<StreamerDto>, ApiError>>,
+    pub pipelines: LocalResource<Result<Vec<PipelineDto>, ApiError>>,
     pub events: Signal<Option<UiEvent>>,
     pub canvas_state: CanvasState,
-    /// Bumped after a pipeline is created or deleted. `streams` and `settings`
+    /// Bumped after a pipeline is created or deleted. `pipelines` and `settings`
     /// both read it, so bumping it re-fetches them — there is no `refetch()` on
     /// a `LocalResource`, and re-reading the server beats patching a local copy
     /// that could disagree with it.
@@ -94,7 +94,7 @@ pub struct AppState {
     /// afternoon's work and a restart.
     pub unsaved: Signal<bool>,
     pub mode: RwSignal<Mode>,
-    /// Whether the "add node" modal is open.
+    /// Whether the "add pipeline" modal is open.
     pub adding: RwSignal<bool>,
     /// Whether the "save as" modal is open.
     pub saving: RwSignal<bool>,
@@ -125,7 +125,7 @@ pub enum Grab {
 
 #[derive(Clone, PartialEq)]
 pub struct Dragging {
-    pub id: StreamerId,
+    pub id: PipelineId,
     pub grab: Grab,
     /// Pointer position when the press landed, in client (screen) pixels.
     pub origin: (f64, f64),
@@ -173,7 +173,7 @@ pub struct DraggingPort {
 pub struct CanvasState {
     /// Where each card sits — computed by `graph::layout` from the automatic
     /// layout and `arrangement`, never written to directly.
-    pub placements: RwSignal<HashMap<StreamerId, CardGeom>>,
+    pub placements: RwSignal<HashMap<PipelineId, CardGeom>>,
     /// The cards someone has dragged or resized, as loaded from — and saved
     /// back to — the server's layout file. Absent ids are laid out
     /// automatically, which is the normal state of most graphs.
@@ -188,12 +188,12 @@ pub struct CanvasState {
     /// The port drag currently in flight, if any.
     pub dragging_port: RwSignal<Option<DraggingPort>>,
     /// Card heights as actually rendered, fed back into the layout.
-    pub measured: RwSignal<HashMap<StreamerId, f64>>,
+    pub measured: RwSignal<HashMap<PipelineId, f64>>,
     pub camera: RwSignal<Camera>,
-    /// Size of the canvas viewport in css pixels; needed to centre a node.
+    /// Size of the canvas viewport in css pixels; needed to centre a pipeline.
     pub viewport: RwSignal<(f64, f64)>,
     /// Set by the sidebar; consumed by the animation loop.
-    pub focus_request: RwSignal<Option<StreamerId>>,
+    pub focus_request: RwSignal<Option<PipelineId>>,
     /// Where the camera is gliding to, if anywhere.
     pub focus_target: RwSignal<Option<Camera>>,
 }
@@ -214,7 +214,7 @@ impl CanvasState {
         }
     }
 
-    fn geom_of(&self, id: &StreamerId) -> Option<CardGeom> {
+    fn geom_of(&self, id: &PipelineId) -> Option<CardGeom> {
         self.placements.with(|p| p.get(id).copied())
     }
 
@@ -237,12 +237,12 @@ impl CanvasState {
         let zoom = self.camera.get_untracked().zoom;
         let dx = (client.0 - drag.origin.0) / zoom;
         let dy = (client.1 - drag.origin.1) / zoom;
-        let node = match drag.grab {
+        let pipeline = match drag.grab {
             Grab::Move => dragged(drag.start, dx, dy, drag.pinned_height),
             Grab::Resize => resized(drag.start, dx, dy),
         };
         self.arrangement.update(|a| {
-            a.nodes.insert(drag.id.clone(), node);
+            a.pipelines.insert(drag.id.clone(), pipeline);
         });
     }
 
@@ -294,8 +294,10 @@ impl CanvasState {
     }
 
     /// Put a card back under the automatic layout.
-    fn unpin(&self, id: &StreamerId) {
-        let removed = self.arrangement.try_update(|a| a.nodes.remove(id).is_some());
+    fn unpin(&self, id: &PipelineId) {
+        let removed = self
+            .arrangement
+            .try_update(|a| a.pipelines.remove(id).is_some());
         if removed == Some(true) {
             self.save_arrangement();
         }
@@ -338,20 +340,20 @@ pub fn App() -> impl IntoView {
     }
 }
 
-/// The pipeline graph: every streamer the server is running, as a pannable,
+/// The pipeline graph: every pipeline the server is running, as a pannable,
 /// zoomable canvas of cards.
 #[component]
 pub fn CanvasPage() -> impl IntoView {
     // read *before* the async block so the resource depends on it: bumping it
     // is how an edit gets the list re-fetched
     let reload = RwSignal::new(0u32);
-    let streams = LocalResource::new(move || {
+    let pipelines = LocalResource::new(move || {
         reload.track();
         async move {
             ApiClient {
                 base: String::new(),
             }
-            .list_streams()
+            .list_pipelines()
             .await
         }
     });
@@ -391,7 +393,7 @@ pub fn CanvasPage() -> impl IntoView {
 
     let canvas_state = CanvasState::new();
     let state = AppState {
-        streams,
+        pipelines,
         events: data,
         canvas_state,
         reload,
@@ -422,18 +424,18 @@ pub fn CanvasPage() -> impl IntoView {
     // the graph itself: re-laid out whenever the pipeline list changes or a
     // card reports a new height
     Effect::new(move |_| {
-        let Some(res) = streams.get() else {
+        let Some(res) = pipelines.get() else {
             return;
         };
         let Ok(list) = res.as_ref() else {
             return;
         };
-        let pairs: Vec<(StreamerId, Config)> = list
+        let pairs: Vec<(PipelineId, Config)> = list
             .iter()
             .map(|s| (s.id.clone(), s.config.clone()))
             .collect();
         let placed = layout(
-            &nodes_from(&pairs),
+            &pipelines_from(&pairs),
             &canvas_state.measured.get(),
             &canvas_state.arrangement.get(),
         );
@@ -528,8 +530,8 @@ pub fn CanvasPage() -> impl IntoView {
         }
     });
 
-    // a click in the sidebar names a node; turn that into a camera target once
-    // we know where the node ended up
+    // a click in the sidebar names a pipeline; turn that into a camera target once
+    // we know where the pipeline ended up
     Effect::new(move |_| {
         let Some(id) = canvas_state.focus_request.get() else {
             return;
@@ -576,12 +578,12 @@ pub fn CanvasPage() -> impl IntoView {
     let dragging = RwSignal::new(Option::<(f64, f64)>::None);
 
     view! {
-        <Suspense fallback=move || view! { <p>"Loading streams..."</p> }>
+        <Suspense fallback=move || view! { <p>"Loading pipelines..."</p> }>
             <Navbar />
             <div class="main-content">
                 <Sidebar />
                 <div
-                    class="nodes"
+                    class="pipelines"
                     class:panning=move || dragging.get().is_some()
                     node_ref=canvas_ref
                     style:background-position=move || {
@@ -626,7 +628,7 @@ pub fn CanvasPage() -> impl IntoView {
                     on:mouseleave=move |_| dragging.set(None)
                 >
                     {move || {
-                        streams
+                        pipelines
                             .get()
                             .map(|res| match res {
                                 Ok(list) => {
@@ -643,10 +645,10 @@ pub fn CanvasPage() -> impl IntoView {
                                                 )
                                             }
                                         >
-                                            <Edges streamers=list.clone() />
+                                            <Edges pipelines=list.clone() />
                                             <For each=move || list.clone() key=|s| s.id.clone() let:s>
                                                 <Card
-                                                    streamer_id=s.id.clone()
+                                                    pipeline_id=s.id.clone()
                                                     events=data
                                                     config=s.config.clone()
                                                 />
@@ -666,7 +668,7 @@ pub fn CanvasPage() -> impl IntoView {
                 </div>
             </div>
             <Show when=move || state.adding.get()>
-                <AddNodeModal />
+                <AddPipelineModal />
             </Show>
             <Show when=move || state.saving.get()>
                 <SaveAsModal />
@@ -709,24 +711,24 @@ fn canvas_offset(canvas: &NodeRef<leptos::html::Div>, client_x: i32, client_y: i
 /// here as a tick count per edge; the fade itself is a CSS transition, so this
 /// only has to say *when* an edge is lit, not how bright it is.
 #[component]
-pub fn Edges(streamers: Vec<StreamerDto>) -> impl IntoView {
+pub fn Edges(pipelines: Vec<PipelineDto>) -> impl IntoView {
     let state = expect_context::<AppState>();
 
     // the graph shape only changes when the pipeline list does, which is the
     // one thing this component is rebuilt for
-    let nodes = nodes_from(
-        &streamers
+    let pipelines = pipelines_from(
+        &pipelines
             .iter()
             .map(|s| (s.id.clone(), s.config.clone()))
-            .collect::<Vec<(StreamerId, Config)>>(),
+            .collect::<Vec<(PipelineId, Config)>>(),
     );
 
     let canvas = state.canvas_state;
     let paths = {
-        let nodes = nodes.clone();
+        let pipelines = pipelines.clone();
         Memo::new(move |_| {
             edge_paths(
-                &nodes,
+                &pipelines,
                 &canvas.placements.get(),
                 &canvas.arrangement.get(),
             )
@@ -742,7 +744,7 @@ pub fn Edges(streamers: Vec<StreamerDto>) -> impl IntoView {
         let Some(event) = state.events.get() else {
             return;
         };
-        let lit = pulsed_edges(&event, &nodes);
+        let lit = pulsed_edges(&event, &pipelines);
         if lit.is_empty() {
             return;
         }
@@ -843,9 +845,19 @@ fn ChannelGrip(edge: Edge, channel: Channel) -> impl IntoView {
     // so the line is what the hand should be able to take hold of.
     let half = channel.length / 2.0;
     let (x1, y1, x2, y2) = if channel.vertical {
-        (channel.at.0 - half, channel.at.1, channel.at.0 + half, channel.at.1)
+        (
+            channel.at.0 - half,
+            channel.at.1,
+            channel.at.0 + half,
+            channel.at.1,
+        )
     } else {
-        (channel.at.0, channel.at.1 - half, channel.at.0, channel.at.1 + half)
+        (
+            channel.at.0,
+            channel.at.1 - half,
+            channel.at.0,
+            channel.at.1 + half,
+        )
     };
 
     let stored_edge = StoredValue::new(edge);
@@ -869,9 +881,10 @@ fn ChannelGrip(edge: Edge, channel: Channel) -> impl IntoView {
     };
 
     let held = Memo::new(move |_| {
-        canvas
-            .dragging_channel
-            .with(|d| d.as_ref().is_some_and(|d| d.edge == stored_edge.get_value()))
+        canvas.dragging_channel.with(|d| {
+            d.as_ref()
+                .is_some_and(|d| d.edge == stored_edge.get_value())
+        })
     });
 
     view! {
@@ -976,24 +989,24 @@ fn PortGrip(edge: Edge, end: EdgeEnd, port: PortHandle) -> impl IntoView {
 }
 
 /// The pipeline list, and the two ways to change it: the `+` that opens the
-/// "add node" modal, and a delete on each row.
+/// "add pipeline" modal, and a delete on each row.
 #[component]
 pub fn Sidebar() -> impl IntoView {
     let state = expect_context::<AppState>();
     // Deleting stops a running pipeline and can't be undone, so the button
     // arms rather than fires. One row at a time: arming a second disarms the
     // first, and clicking anywhere else in the list disarms it too.
-    let armed = RwSignal::new(Option::<StreamerId>::None);
+    let armed = RwSignal::new(Option::<PipelineId>::None);
     let failure = RwSignal::new(Option::<String>::None);
 
-    let delete = move |id: StreamerId| {
+    let delete = move |id: PipelineId| {
         armed.set(None);
         failure.set(None);
         leptos::task::spawn_local(async move {
             let result = ApiClient {
                 base: String::new(),
             }
-            .delete_stream(&id)
+            .delete_pipeline(&id)
             .await;
             match result {
                 Ok(()) => state.refresh(),
@@ -1009,7 +1022,7 @@ pub fn Sidebar() -> impl IntoView {
                 <Show when=move || state.editing()>
                     <button
                         class="icon-button"
-                        title="add node"
+                        title="add pipeline"
                         on:click=move |_| state.adding.set(true)
                     >
                         "+"
@@ -1023,7 +1036,7 @@ pub fn Sidebar() -> impl IntoView {
             }}
             {move || {
                 state
-                    .streams
+                    .pipelines
                     .get()
                     .map(|res| match res {
                         Ok(list) => {
@@ -1115,7 +1128,7 @@ struct DraftSignals {
 }
 
 impl DraftSignals {
-    fn new(doc: &streamer_core::docs::ComponentDoc) -> Self {
+    fn new(doc: &kayak_core::docs::ComponentDoc) -> Self {
         let draft = form::draft_of(doc);
         Self {
             family: draft.family,
@@ -1139,12 +1152,12 @@ impl DraftSignals {
 /// Add a pipeline: pick its components, fill in their settings, post it.
 ///
 /// Nothing about the form is written by hand — every control comes from
-/// `streamer_core::docs`, which reflects the fields out of the config schemas,
+/// `kayak_core::docs`, which reflects the fields out of the config schemas,
 /// so a new component shows up here for the same reason it shows up on `/docs`.
 /// The validation is [`crate::form`]'s, which is pure and unit tested; this
 /// component only renders drafts and shows what comes back.
 #[component]
-fn AddNodeModal() -> impl IntoView {
+fn AddPipelineModal() -> impl IntoView {
     let state = expect_context::<AppState>();
     let docs = StoredValue::new(all_components());
 
@@ -1155,6 +1168,19 @@ fn AddNodeModal() -> impl IntoView {
     // duplicate id, an upstream that doesn't exist
     let rejected = RwSignal::new(Option::<String>::None);
     let submitting = RwSignal::new(false);
+
+    // What a field that names another pipeline can be set to: the ids the
+    // server is running right now. The one being added is not among them — it
+    // doesn't exist yet, and could not feed itself if it did.
+    let pipelines = Signal::derive(move || {
+        let Some(res) = state.pipelines.get() else {
+            return Vec::new();
+        };
+        let Ok(list) = res.as_ref() else {
+            return Vec::new();
+        };
+        list.iter().map(|s| s.id.clone()).collect::<Vec<String>>()
+    });
 
     let close = move || {
         state.adding.set(false);
@@ -1189,7 +1215,8 @@ fn AddNodeModal() -> impl IntoView {
             .into_iter()
             .map(DraftSignals::snapshot)
             .collect();
-        let built = docs.with_value(|docs| form::build_config(&id.get_untracked(), &snapshots, docs));
+        let built =
+            docs.with_value(|docs| form::build_config(&id.get_untracked(), &snapshots, docs));
         let body = match built {
             Ok(body) => body,
             Err(found) => {
@@ -1203,7 +1230,7 @@ fn AddNodeModal() -> impl IntoView {
             let result = ApiClient {
                 base: String::new(),
             }
-            .create_stream(&body)
+            .create_pipeline(&body)
             .await;
             submitting.set(false);
             match result {
@@ -1222,7 +1249,7 @@ fn AddNodeModal() -> impl IntoView {
         <div class="modal-backdrop" on:click=move |_| close()>
             <div class="modal" on:click=move |ev| ev.stop_propagation()>
                 <header>
-                    <span class="modal-title">"add node"</span>
+                    <span class="modal-title">"add pipeline"</span>
                     <button class="icon-button" title="close" on:click=move |_| close()>
                         "×"
                     </button>
@@ -1239,9 +1266,27 @@ fn AddNodeModal() -> impl IntoView {
                         />
                     </div>
 
-                    <StageEditor family=Family::Input drafts=drafts errors=errors docs=docs />
-                    <StageEditor family=Family::Transform drafts=drafts errors=errors docs=docs />
-                    <StageEditor family=Family::Output drafts=drafts errors=errors docs=docs />
+                    <StageEditor
+                        family=Family::Input
+                        drafts=drafts
+                        errors=errors
+                        docs=docs
+                        pipelines=pipelines
+                    />
+                    <StageEditor
+                        family=Family::Transform
+                        drafts=drafts
+                        errors=errors
+                        docs=docs
+                        pipelines=pipelines
+                    />
+                    <StageEditor
+                        family=Family::Output
+                        drafts=drafts
+                        errors=errors
+                        docs=docs
+                        pipelines=pipelines
+                    />
                 </div>
 
                 <footer>
@@ -1295,7 +1340,9 @@ fn StageEditor(
     family: Family,
     drafts: RwSignal<Vec<DraftSignals>>,
     errors: RwSignal<Vec<form::FormError>>,
-    docs: StoredValue<Vec<streamer_core::docs::ComponentDoc>>,
+    docs: StoredValue<Vec<kayak_core::docs::ComponentDoc>>,
+    /// The pipelines a field naming one can point at.
+    pipelines: Signal<Vec<String>>,
 ) -> impl IntoView {
     let add = move |_| {
         docs.with_value(|docs| {
@@ -1324,7 +1371,14 @@ fn StageEditor(
                     .filter(|(_, draft)| draft.family == family)
                     .map(|(index, draft)| {
                         view! {
-                            <ComponentEditor index=index draft=draft drafts=drafts errors=errors docs=docs />
+                            <ComponentEditor
+                                index=index
+                                draft=draft
+                                drafts=drafts
+                                errors=errors
+                                docs=docs
+                                pipelines=pipelines
+                            />
                         }
                     })
                     .collect_view()
@@ -1340,10 +1394,12 @@ fn ComponentEditor(
     draft: DraftSignals,
     drafts: RwSignal<Vec<DraftSignals>>,
     errors: RwSignal<Vec<form::FormError>>,
-    docs: StoredValue<Vec<streamer_core::docs::ComponentDoc>>,
+    docs: StoredValue<Vec<kayak_core::docs::ComponentDoc>>,
+    pipelines: Signal<Vec<String>>,
 ) -> impl IntoView {
     let family = draft.family;
-    let doc = move || docs.with_value(|docs| form::doc_for(docs, family, &draft.kind.get()).cloned());
+    let doc =
+        move || docs.with_value(|docs| form::doc_for(docs, family, &draft.kind.get()).cloned());
 
     // Changing the kind changes which fields exist, so whatever was typed into
     // the old ones has nowhere to go. Clearing is the honest option: keeping
@@ -1351,7 +1407,8 @@ fn ComponentEditor(
     let choose_kind = move |ev: leptos::ev::Event| {
         let kind = event_target_value(&ev);
         let variant = docs.with_value(|docs| {
-            form::doc_for(docs, family, &kind).and_then(|d| d.variants.first().map(|v| v.name.clone()))
+            form::doc_for(docs, family, &kind)
+                .and_then(|d| d.variants.first().map(|v| v.name.clone()))
         });
         draft.values.set(HashMap::new());
         draft.variant.set(variant);
@@ -1454,6 +1511,7 @@ fn ComponentEditor(
                                         index=index
                                         values=draft.values
                                         errors=errors
+                                        pipelines=pipelines
                                     />
                                 }
                             })
@@ -1471,10 +1529,11 @@ fn ComponentEditor(
 /// had to say about it.
 #[component]
 fn FieldEditor(
-    field: streamer_core::docs::FieldDoc,
+    field: kayak_core::docs::FieldDoc,
     index: usize,
     values: RwSignal<HashMap<String, String>>,
     errors: RwSignal<Vec<form::FormError>>,
+    pipelines: Signal<Vec<String>>,
 ) -> impl IntoView {
     let name = field.name.clone();
     // read once, on purpose: the control is uncontrolled from here on, so that
@@ -1532,6 +1591,50 @@ fn FieldEditor(
             }
             .into_any()
         }
+        // The set of valid answers is the running graph, not anything the
+        // schema could list, so it comes from the pipeline list rather than
+        // from the field. Unlike every other control here this one reads its
+        // options back: they arrive with the pipeline list, which may land
+        // after the modal opened, so the chosen id is re-marked on each
+        // rebuild rather than lost.
+        FieldType::PipelineId => {
+            let chosen = field.name.clone();
+            let picked =
+                move || values.with_untracked(|v| v.get(&chosen).cloned().unwrap_or_default());
+            view! {
+                <select class="select" on:change=write>
+                    {move || {
+                        let selected = picked();
+                        let available = pipelines.get();
+                        // a blank entry for the same reason the enum above has
+                        // one, and because "there is nothing to point at yet"
+                        // has to be said somewhere
+                        let blank = if available.is_empty() {
+                            "no other pipelines yet"
+                        } else {
+                            ""
+                        };
+                        view! {
+                            <option value="" selected=selected.is_empty()>
+                                {blank}
+                            </option>
+                            {available
+                                .into_iter()
+                                .map(|id| {
+                                    let label = id.clone();
+                                    view! {
+                                        <option value=id.clone() selected=id == selected>
+                                            {label}
+                                        </option>
+                                    }
+                                })
+                                .collect_view()}
+                        }
+                    }}
+                </select>
+            }
+            .into_any()
+        }
         _ => view! {
             <input
                 class="text-input"
@@ -1569,9 +1672,7 @@ fn FieldEditor(
 pub fn Navbar() -> impl IntoView {
     let state = use_context::<AppState>();
     let canvas = state.map(|state| state.canvas_state);
-    let zoom = move || {
-        canvas.map(|c| format!("{:.0}%", c.camera.get().zoom * 100.0))
-    };
+    let zoom = move || canvas.map(|c| format!("{:.0}%", c.camera.get().zoom * 100.0));
     view! {
         <aside class="navbar">
             <div class="brand">"kayak"</div>
@@ -2011,7 +2112,7 @@ fn DocsSidebar(
 /// One component's entry in the reference.
 #[component]
 fn ComponentDoc(
-    component: streamer_core::docs::ComponentDoc,
+    component: kayak_core::docs::ComponentDoc,
     selected: RwSignal<Option<String>>,
 ) -> impl IntoView {
     let anchor = docs::anchor_id(&component);
@@ -2055,7 +2156,7 @@ fn ComponentDoc(
 
 /// The settings table: name, type, whether it has to be there, and what it does.
 #[component]
-fn FieldTable(fields: Vec<streamer_core::docs::FieldDoc>) -> impl IntoView {
+fn FieldTable(fields: Vec<kayak_core::docs::FieldDoc>) -> impl IntoView {
     if fields.is_empty() {
         return ().into_any();
     }
@@ -2127,7 +2228,7 @@ enum Tab {
 
 /// A card's config, as a tabbed property list rather than raw JSON.
 ///
-/// The config of a running streamer never changes, so all three tabs are built
+/// The config of a running pipeline never changes, so all three tabs are built
 /// once and only the selected one is rendered.
 #[component]
 fn Inspector(config: Config) -> impl IntoView {
@@ -2246,20 +2347,21 @@ fn SectionView(
 
 #[component]
 pub fn Card(
-    streamer_id: StreamerId,
+    pipeline_id: PipelineId,
     config: Config,
     events: Signal<Option<UiEvent>>,
 ) -> impl IntoView {
     let state = expect_context::<AppState>();
     let canvas = state.canvas_state;
-    let messages =
-        RwSignal::new(VecDeque::<(u64, log::Line)>::with_capacity(log::LOG_CAPACITY));
+    let messages = RwSignal::new(VecDeque::<(u64, log::Line)>::with_capacity(
+        log::LOG_CAPACITY,
+    ));
     let next_id = RwSignal::new(0u64);
-    let id = streamer_id.clone();
+    let id = pipeline_id.clone();
 
     Effect::new(move |_| {
         if let Some(ev) = events.get()
-            && ev.streamer_id == id
+            && ev.pipeline_id == id
         {
             let lines = log::lines_for(&ev);
             let mut id = next_id.get_untracked();
@@ -2291,15 +2393,16 @@ pub fn Card(
         card_ref,
         UseElementSizeOptions::default().box_(leptos::web_sys::ResizeObserverBoxOptions::BorderBox),
     );
-    let measure_id = streamer_id.clone();
+    let measure_id = pipeline_id.clone();
     Effect::new(move |_| {
         let height = measured_height.get();
         if height <= 0.0 {
             return;
         }
-        let changed = canvas
-            .measured
-            .with_untracked(|m| m.get(&measure_id).is_none_or(|old| (old - height).abs() > 1.0));
+        let changed = canvas.measured.with_untracked(|m| {
+            m.get(&measure_id)
+                .is_none_or(|old| (old - height).abs() > 1.0)
+        });
         if changed {
             canvas.measured.update(|m| {
                 m.insert(measure_id.clone(), height);
@@ -2307,7 +2410,7 @@ pub fn Card(
         }
     });
 
-    let position_id = streamer_id.clone();
+    let position_id = pipeline_id.clone();
     let position = Memo::new(move |_| {
         canvas
             .placements
@@ -2323,7 +2426,7 @@ pub fn Card(
     // Whether this card's height was chosen rather than measured. It decides
     // between `height` and `min-height` below, which is the difference between
     // a card that scrolls its content and one that grows to fit it.
-    let pinned_id = streamer_id.clone();
+    let pinned_id = pipeline_id.clone();
     let pinned_height = Memo::new(move |_| {
         canvas
             .arrangement
@@ -2337,7 +2440,7 @@ pub fn Card(
     // The id is stored rather than captured so that this closure stays `Copy`:
     // the resize handle lives inside a `<Show>`, whose children are rebuilt
     // whenever the mode changes and so can't consume what they capture.
-    let stored_id = StoredValue::new(streamer_id.clone());
+    let stored_id = StoredValue::new(pipeline_id.clone());
     let grab = move |ev: leptos::ev::MouseEvent, grab: Grab| {
         if ev.button() != 0 {
             return;
@@ -2354,14 +2457,14 @@ pub fn Card(
         }));
     };
 
-    let dragging_id = streamer_id.clone();
+    let dragging_id = pipeline_id.clone();
     let is_dragging = Memo::new(move |_| {
         canvas
             .dragging
             .with(|d| d.as_ref().is_some_and(|d| d.id == dragging_id))
     });
 
-    let reset_id = streamer_id.clone();
+    let reset_id = pipeline_id.clone();
 
     view! {
         <div
@@ -2408,7 +2511,7 @@ pub fn Card(
                     }
                 }
             >
-                {streamer_id.clone()}
+                {pipeline_id.clone()}
             </header>
             <Inspector config=config />
             <div class="messages" node_ref=log_ref>

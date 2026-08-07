@@ -8,8 +8,7 @@ use tokio_stream::StreamExt;
 
 use std::sync::Arc;
 
-use streamer_core::config::NatsConfig;
-
+use kayak_core::config::NatsConfig;
 
 impl BuildInput for NatsConfig {
     fn build(self, ctx: &mut BuildCtx) -> Result<Box<dyn InputSource>> {
@@ -39,7 +38,9 @@ impl InputSource for NatsInput {
             let subscriber = client
                 .subscribe(self.subject.clone())
                 .await
-                .with_context(|| format!("failed to subscribe to nats subject '{}'", self.subject))?;
+                .with_context(|| {
+                    format!("failed to subscribe to nats subject '{}'", self.subject)
+                })?;
             self.sub = Some(subscriber);
         }
         let subscriber = self
@@ -48,9 +49,10 @@ impl InputSource for NatsInput {
             .ok_or_else(|| anyhow::anyhow!("nats subscriber not initialized"))?;
 
         loop {
-            let msg = subscriber.next().await.ok_or_else(|| {
-                anyhow::anyhow!("nats subscription on '{}' ended", self.subject)
-            })?;
+            let msg = subscriber
+                .next()
+                .await
+                .ok_or_else(|| anyhow::anyhow!("nats subscription on '{}' ended", self.subject))?;
             // a single malformed payload shouldn't kill the pipeline; skip it
             // and wait for the next message
             match serde_json::from_slice(&msg.payload) {

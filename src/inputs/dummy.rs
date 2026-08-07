@@ -8,7 +8,7 @@ use serde_json::json;
 use std::sync::Arc;
 use std::time::Duration;
 
-use streamer_core::config::DummyConfig;
+use kayak_core::config::DummyConfig;
 
 impl BuildInput for DummyConfig {
     fn build(self, _ctx: &mut BuildCtx) -> Result<Box<dyn InputSource>> {
@@ -28,7 +28,7 @@ impl InputSource for DummyInput {
         tokio::time::sleep(self.interval).await;
         tracing::debug!("Emitting dummy message inside dummy input");
         Ok(Arc::new(vec![Arc::new(json!({
-            "hello": "streamer",
+            "hello": "pipeline",
             "current_time": Utc::now().to_string(),
         }))]))
     }

@@ -1,6 +1,6 @@
-use std::sync::Arc;
 use anyhow::Context;
-use streamer_core::config::{ReduceFnKind, ReduceTransformConfig};
+use kayak_core::config::{ReduceFnKind, ReduceTransformConfig};
+use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
 

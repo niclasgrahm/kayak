@@ -12,8 +12,8 @@
 //! Like `graph`, this is pure and unit-tested; `app.rs` only renders what it
 //! returns.
 
+use kayak_core::config::Config;
 use serde_json::Value;
-use streamer_core::config::Config;
 
 /// Shown when a config doesn't carry a `type` tag. Every current one does; this
 /// is only here so a malformed config renders as a row rather than vanishing.
@@ -153,7 +153,7 @@ fn render(value: &Value) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use streamer_core::config::{
+    use kayak_core::config::{
         BufferConfig, BufferTransformConfig, DummyConfig, InputConfig, InputKind, NatsOutputConfig,
         OutputConfig, OutputKind, ReduceFnKind, ReduceTransformConfig, SplitterTransformConfig,
         StdoutOutputConfig, TransformConfig, TransformKind,
@@ -257,7 +257,10 @@ mod tests {
             outputs: vec![],
         };
         assert!(output_sections(&config).is_empty());
-        assert_eq!(tab_label("outputs", output_sections(&config).len()), "outputs (0)");
+        assert_eq!(
+            tab_label("outputs", output_sections(&config).len()),
+            "outputs (0)"
+        );
     }
 
     fn value_of(section: &Section, name: &str) -> String {

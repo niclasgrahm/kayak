@@ -11,9 +11,9 @@ use axum::Router;
 use axum::body::Body;
 use axum::http::{Request, StatusCode, header};
 use http_body_util::BodyExt;
+use kayak::api_router;
+use kayak::state::AppState;
 use serde_json::{Value, json};
-use streamer::api_router;
-use streamer::state::AppState;
 use tower::ServiceExt;
 
 fn app() -> Router {
@@ -48,29 +48,29 @@ async fn send(app: &Router, req: Request<Body>) -> anyhow::Result<(StatusCode, V
 async fn post_stream(app: &Router, config: &Value) -> anyhow::Result<(StatusCode, Value)> {
     let req = Request::builder()
         .method("POST")
-        .uri("/api/streams")
+        .uri("/api/pipelines")
         .header(header::CONTENT_TYPE, "application/json")
         .body(Body::from(serde_json::to_vec(config)?))?;
     send(app, req).await
 }
 
-async fn get_streams(app: &Router) -> anyhow::Result<(StatusCode, Value)> {
+async fn get_pipelines(app: &Router) -> anyhow::Result<(StatusCode, Value)> {
     let req = Request::builder()
-        .uri("/api/streams")
+        .uri("/api/pipelines")
         .body(Body::empty())?;
     send(app, req).await
 }
 
-async fn delete_stream(app: &Router, id: &str) -> anyhow::Result<(StatusCode, Value)> {
+async fn delete_pipeline(app: &Router, id: &str) -> anyhow::Result<(StatusCode, Value)> {
     let req = Request::builder()
         .method("DELETE")
-        .uri(format!("/api/streams/{id}"))
+        .uri(format!("/api/pipelines/{id}"))
         .body(Body::empty())?;
     send(app, req).await
 }
 
 #[tokio::test]
-async fn creating_a_stream_returns_201_and_the_created_streamer() -> anyhow::Result<()> {
+async fn creating_a_stream_returns_201_and_the_created_pipeline() -> anyhow::Result<()> {
     let app = app();
     let (status, body) = post_stream(&app, &idle_config("p1")).await?;
 
@@ -102,7 +102,7 @@ async fn a_created_stream_shows_up_in_the_listing() -> anyhow::Result<()> {
     post_stream(&app, &idle_config("p1")).await?;
     post_stream(&app, &idle_config("p2")).await?;
 
-    let (status, body) = get_streams(&app).await?;
+    let (status, body) = get_pipelines(&app).await?;
     assert_eq!(status, StatusCode::OK);
     let Some(items) = body.as_array() else {
         panic!("expected an array, got {body}");
@@ -115,7 +115,7 @@ async fn a_created_stream_shows_up_in_the_listing() -> anyhow::Result<()> {
 
 #[tokio::test]
 async fn an_empty_server_lists_no_streams() -> anyhow::Result<()> {
-    let (status, body) = get_streams(&app()).await?;
+    let (status, body) = get_pipelines(&app()).await?;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(body, json!([]));
     Ok(())
@@ -143,7 +143,7 @@ async fn a_duplicate_id_is_rejected_with_409() -> anyhow::Result<()> {
 async fn an_unbuildable_config_is_rejected_with_422() -> anyhow::Result<()> {
     let config = json!({
         "id": "downstream",
-        "inputs": [{ "type": "streamer", "upstream": "does-not-exist" }],
+        "inputs": [{ "type": "pipeline", "upstream": "does-not-exist" }],
         "transforms": [],
         "outputs": [{ "type": "stdout" }]
     });
@@ -161,7 +161,7 @@ async fn an_unbuildable_config_is_rejected_with_422() -> anyhow::Result<()> {
 }
 
 /// Malformed JSON is rejected by axum's extractor before it reaches us; this
-/// pins that a bad body can't reach `create_streamer` at all.
+/// pins that a bad body can't reach `create_pipeline` at all.
 #[tokio::test]
 async fn a_body_that_is_not_a_valid_config_is_rejected() -> anyhow::Result<()> {
     let app = app();
@@ -178,7 +178,7 @@ async fn a_body_that_is_not_a_valid_config_is_rejected() -> anyhow::Result<()> {
         );
     }
     // nothing was created
-    let (_, body) = get_streams(&app).await?;
+    let (_, body) = get_pipelines(&app).await?;
     assert_eq!(body, json!([]));
     Ok(())
 }
@@ -188,17 +188,17 @@ async fn deleting_a_stream_returns_204_and_removes_it() -> anyhow::Result<()> {
     let app = app();
     post_stream(&app, &idle_config("p1")).await?;
 
-    let (status, _) = delete_stream(&app, "p1").await?;
+    let (status, _) = delete_pipeline(&app, "p1").await?;
     assert_eq!(status, StatusCode::NO_CONTENT);
 
-    let (_, body) = get_streams(&app).await?;
+    let (_, body) = get_pipelines(&app).await?;
     assert_eq!(body, json!([]));
     Ok(())
 }
 
 #[tokio::test]
 async fn deleting_an_unknown_stream_returns_404() -> anyhow::Result<()> {
-    let (status, body) = delete_stream(&app(), "nope").await?;
+    let (status, body) = delete_pipeline(&app(), "nope").await?;
     assert_eq!(status, StatusCode::NOT_FOUND);
     assert!(
         body["error"].as_str().unwrap_or_default().contains("nope"),
@@ -213,7 +213,7 @@ async fn deleting_an_unknown_stream_returns_404() -> anyhow::Result<()> {
 async fn an_id_can_be_reused_after_deletion() -> anyhow::Result<()> {
     let app = app();
     post_stream(&app, &idle_config("p1")).await?;
-    delete_stream(&app, "p1").await?;
+    delete_pipeline(&app, "p1").await?;
 
     let (status, _) = post_stream(&app, &idle_config("p1")).await?;
     assert_eq!(status, StatusCode::CREATED);
@@ -222,7 +222,7 @@ async fn an_id_can_be_reused_after_deletion() -> anyhow::Result<()> {
 
 /// The component reference is generated by reflecting over the config schemas,
 /// so it breaks the moment a component's config stops deriving `JsonSchema`.
-/// What each component documents is covered by unit tests in `streamer-core`;
+/// What each component documents is covered by unit tests in `kayak-core`;
 /// this pins the HTTP contract.
 #[tokio::test]
 async fn the_docs_endpoint_serves_every_component_kind() -> anyhow::Result<()> {
@@ -233,7 +233,7 @@ async fn the_docs_endpoint_serves_every_component_kind() -> anyhow::Result<()> {
     let bytes = res.into_body().collect().await?.to_bytes();
     let docs: Vec<Value> = serde_json::from_slice(&bytes)?;
     let kinds: Vec<&str> = docs.iter().filter_map(|d| d["kind"].as_str()).collect();
-    for component in ["dummy", "nats", "streamer", "filter", "reducer", "stdout"] {
+    for component in ["dummy", "nats", "pipeline", "filter", "reducer", "stdout"] {
         assert!(
             kinds.contains(&component),
             "/api/docs should document '{component}', got {kinds:?}"
@@ -248,7 +248,10 @@ async fn the_docs_endpoint_serves_every_component_kind() -> anyhow::Result<()> {
             ["input", "transform", "output"].contains(&doc["family"].as_str().unwrap_or_default()),
             "'{kind}' has no family"
         );
-        assert!(doc["description"].is_string(), "'{kind}' has no description");
+        assert!(
+            doc["description"].is_string(),
+            "'{kind}' has no description"
+        );
     }
     Ok(())
 }

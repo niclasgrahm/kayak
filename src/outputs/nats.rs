@@ -1,8 +1,7 @@
 use anyhow::Context;
 use bytes::Bytes;
+use kayak_core::config::NatsOutputConfig;
 use std::sync::Arc;
-use streamer_core::config::NatsOutputConfig;
-
 
 use crate::{
     BuildCtx,
@@ -10,7 +9,6 @@ use crate::{
     outputs::{BuildOutput, OutputDestination},
     secrets::Resolved,
 };
-
 
 impl BuildOutput for NatsOutputConfig {
     fn build(self, ctx: &mut BuildCtx) -> anyhow::Result<Box<dyn OutputDestination>> {
@@ -35,13 +33,13 @@ impl OutputDestination for NatsOutput {
     async fn emit(&mut self, message_batch: Arc<MessageBatch>) -> anyhow::Result<()> {
         // silently doing nothing when init() never ran would look like the
         // messages were published, so make it an error instead
-        let client = self
-            .client
-            .as_ref()
-            .ok_or_else(|| anyhow::anyhow!("nats output is not connected; init() was not called"))?;
+        let client = self.client.as_ref().ok_or_else(|| {
+            anyhow::anyhow!("nats output is not connected; init() was not called")
+        })?;
 
         for msg in message_batch.iter() {
-            let payload = serde_json::to_vec(msg).context("failed to serialize message for nats")?;
+            let payload =
+                serde_json::to_vec(msg).context("failed to serialize message for nats")?;
             client
                 .publish(self.subject.clone(), Bytes::from(payload))
                 .await

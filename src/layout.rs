@@ -4,13 +4,13 @@
 //! file describes what the server *runs*, this one describes where someone
 //! dragged the cards. Keeping them apart is what lets the config file stay
 //! reviewable, and what lets this one be written far more freely — moving a
-//! node is not a change to the system, so it does not wait for an explicit save
+//! pipeline is not a change to the system, so it does not wait for an explicit save
 //! and does not count as an unsaved change.
 //!
 //! Two things are shared with `persist` on purpose. The write is atomic, for
 //! the same reason: a crash mid-write must not lose an arrangement. And the
 //! render is deterministic, because the file is meant to be committed — see
-//! [`streamer_core::layout`].
+//! [`kayak_core::layout`].
 //!
 //! Always JSON, whatever the config file is written in. Nobody hand-writes this
 //! one, so there is nothing for a second format to buy.
@@ -18,7 +18,7 @@
 use std::path::{Path, PathBuf};
 
 use anyhow::Context;
-use streamer_core::LayoutFile;
+use kayak_core::LayoutFile;
 
 /// The layout file that belongs to a given config file: `config.json` is
 /// arranged by `config.layout.json`, `pipelines.yaml` by
@@ -29,16 +29,17 @@ use streamer_core::LayoutFile;
 /// yet, which is exactly right.
 #[must_use]
 pub fn layout_path(config_path: &Path) -> PathBuf {
-    let stem = config_path
-        .file_stem()
-        .map_or_else(|| "config".to_string(), |s| s.to_string_lossy().into_owned());
+    let stem = config_path.file_stem().map_or_else(
+        || "config".to_string(),
+        |s| s.to_string_lossy().into_owned(),
+    );
     config_path.with_file_name(format!("{stem}.layout.json"))
 }
 
 /// The arrangement in `path`.
 ///
 /// **A missing file is not an error**: it is the ordinary state of a graph
-/// nobody has arranged yet, and the answer — "no node has been placed" — is the
+/// nobody has arranged yet, and the answer — "no pipeline has been placed" — is the
 /// same one an empty file gives. A file that exists but won't parse *is* an
 /// error, because silently discarding someone's arrangement is worse than
 /// refusing to start.
@@ -58,7 +59,8 @@ pub fn read(path: &Path) -> anyhow::Result<LayoutFile> {
 /// The file's contents: pretty-printed with a trailing newline, because it is
 /// committed and diffed by a human even though it is written by the program.
 pub fn render(layout: &LayoutFile) -> anyhow::Result<String> {
-    let mut json = serde_json::to_string_pretty(layout).context("failed to serialize the layout")?;
+    let mut json =
+        serde_json::to_string_pretty(layout).context("failed to serialize the layout")?;
     json.push('\n');
     Ok(json)
 }
@@ -82,10 +84,10 @@ pub fn write(path: &Path, layout: &LayoutFile) -> anyhow::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use streamer_core::NodeLayout;
+    use kayak_core::PipelineLayout;
 
-    fn placed(x: f64, y: f64) -> NodeLayout {
-        NodeLayout {
+    fn placed(x: f64, y: f64) -> PipelineLayout {
+        PipelineLayout {
             x,
             y,
             width: 360.0,
@@ -134,8 +136,10 @@ mod tests {
         let path = dir.path().join("config.layout.json");
 
         let mut layout = LayoutFile::default();
-        layout.nodes.insert("a".to_string(), placed(0.0, 0.0));
-        layout.nodes.insert("b".to_string(), placed(400.0, 200.0));
+        layout.pipelines.insert("a".to_string(), placed(0.0, 0.0));
+        layout
+            .pipelines
+            .insert("b".to_string(), placed(400.0, 200.0));
 
         write(&path, &layout)?;
         assert_eq!(read(&path)?, layout);
@@ -152,14 +156,14 @@ mod tests {
     fn the_same_arrangement_renders_the_same_bytes() -> anyhow::Result<()> {
         let one = {
             let mut l = LayoutFile::default();
-            l.nodes.insert("z".to_string(), placed(1.0, 2.0));
-            l.nodes.insert("a".to_string(), placed(3.0, 4.0));
+            l.pipelines.insert("z".to_string(), placed(1.0, 2.0));
+            l.pipelines.insert("a".to_string(), placed(3.0, 4.0));
             render(&l)?
         };
         let two = {
             let mut l = LayoutFile::default();
-            l.nodes.insert("a".to_string(), placed(3.0, 4.0));
-            l.nodes.insert("z".to_string(), placed(1.0, 2.0));
+            l.pipelines.insert("a".to_string(), placed(3.0, 4.0));
+            l.pipelines.insert("z".to_string(), placed(1.0, 2.0));
             render(&l)?
         };
         assert_eq!(one, two);

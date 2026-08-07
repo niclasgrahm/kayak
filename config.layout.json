@@ -1,9 +1,9 @@
 {
   "version": 1,
-  "nodes": {
+  "pipelines": {
     "everything": {
-      "x": -120.0,
-      "y": 900.0,
+      "x": -340.0,
+      "y": 1120.0,
       "width": 360.0
     },
     "heartbeat": {
@@ -13,14 +13,21 @@
       "height": 520.0
     },
     "kafka_events": {
-      "x": 2060.0,
+      "x": 2120.0,
       "y": -940.0,
       "width": 360.0
     },
     "sensors": {
-      "x": 3220.0,
-      "y": -540.0,
-      "width": 360.0
+      "x": 3180.0,
+      "y": -340.0,
+      "width": 520.0,
+      "height": 420.0
+    },
+    "tagged_readings": {
+      "x": 3780.0,
+      "y": -340.0,
+      "width": 520.0,
+      "height": 420.0
     }
   },
   "edges": [
@@ -37,6 +44,11 @@
       "from": "heartbeat",
       "to": "heartbeat_pairs",
       "offset": -660.0
+    },
+    {
+      "from": "sensors",
+      "to": "everything",
+      "offset": -720.0
     },
     {
       "from": "sensors",

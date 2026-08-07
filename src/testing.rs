@@ -10,11 +10,11 @@
 use std::sync::{Arc, Mutex, MutexGuard};
 
 use anyhow::{Result, anyhow};
-use serde_json::Value;
-use streamer_core::config::{
+use kayak_core::config::{
     Config, DummyConfig, InputConfig, InputKind, OutputConfig, OutputKind, StdoutOutputConfig,
     TransformConfig,
 };
+use serde_json::Value;
 
 use crate::inputs::{InputSource, MessageBatch};
 use crate::outputs::OutputDestination;
@@ -78,7 +78,7 @@ pub enum WhenExhausted {
     /// use this when the test is about cancellation or about staying up.
     Pend,
     /// Return an error, which makes the run loop log and exit. Use this when
-    /// the test wants to await the streamer's completion.
+    /// the test wants to await the pipeline's completion.
     Fail,
 }
 
@@ -268,8 +268,8 @@ impl Transform for FailOnNth {
     }
 }
 
-/// A minimal valid `Config`. `Streamer` only reads the config for its id and for
-/// `/api/streams` output, so tests that drive a runtime directly can use this
+/// A minimal valid `Config`. `Pipeline` only reads the config for its id and for
+/// `/api/pipelines` output, so tests that drive a runtime directly can use this
 /// regardless of which components they actually wire up.
 #[must_use]
 pub fn stub_config(id: &str) -> Config {

@@ -8,7 +8,7 @@
 //! particular component.
 //!
 //! This module is pure — schema in, [`ComponentDoc`] out — and lives in
-//! `streamer-core` so both consumers can use it: the Leptos `/docs` page
+//! `kayak-core` so both consumers can use it: the Leptos `/docs` page
 //! renders it, and `GET /api/docs` serves it as JSON.
 
 use crate::config::{InputConfig, InputKind, OutputKind, TransformKind};
@@ -40,7 +40,7 @@ impl Family {
 /// What a field actually accepts, as something a form can be built from.
 ///
 /// [`FieldDoc::type_name`] is the same information rendered for a human to
-/// read; this is the machine-readable half, and it is what the "add node"
+/// read; this is the machine-readable half, and it is what the "add pipeline"
 /// modal picks a widget and a validation rule from. Keeping it here rather
 /// than in the frontend is the same bargain as the rest of this module: the
 /// config schema stays the single source of truth, so a new field gets a
@@ -54,6 +54,11 @@ pub enum FieldType {
     Boolean,
     /// A closed set of accepted values — rendered as a dropdown, not a box.
     Enum(Vec<String>),
+    /// The id of another pipeline. A string on the wire, but the set of valid
+    /// answers is the graph the server is currently running, which only the UI
+    /// knows — so it renders as a dropdown of the pipelines that exist rather
+    /// than as a box to retype an id into.
+    PipelineId,
     /// Something with a shape of its own (an object, a list, a tagged union
     /// like an input's `buffer`). There is no general widget for those, so the
     /// form takes them as literal JSON.
@@ -280,6 +285,9 @@ fn variants_of(root: &Value, def: &Value) -> Vec<VariantDoc> {
 /// contain. That covers both plain string enums and the tagged-object kind like
 /// a buffer's `static | tumbling`.
 fn type_name_of(root: &Value, schema: &Value) -> String {
+    if is_pipeline_id(schema) {
+        return "pipeline id".to_string();
+    }
     // how an `Option<T>` arrives: T or null. The null half is already said by
     // the field being optional, so it would only add noise here.
     if let Some(branches) = schema["anyOf"].as_array() {
@@ -302,9 +310,8 @@ fn type_name_of(root: &Value, schema: &Value) -> String {
     }
     // a `$ref` carries no type of its own; the definition it points at does
     if schema["$ref"].is_string() {
-        return resolve_ref(root, schema).map_or_else(|| "object".to_string(), |def| {
-            type_name_of(root, def)
-        });
+        return resolve_ref(root, schema)
+            .map_or_else(|| "object".to_string(), |def| type_name_of(root, def));
     }
     scalar_type_of(schema).unwrap_or("object").to_string()
 }
@@ -319,7 +326,10 @@ fn scalar_type_of(schema: &Value) -> Option<&str> {
     match &schema["type"] {
         Value::String(name) => Some(name),
         Value::Array(names) => {
-            let mut real = names.iter().filter_map(Value::as_str).filter(|n| *n != "null");
+            let mut real = names
+                .iter()
+                .filter_map(Value::as_str)
+                .filter(|n| *n != "null");
             match (real.next(), real.next()) {
                 (Some(only), None) => Some(only),
                 _ => None,
@@ -327,6 +337,19 @@ fn scalar_type_of(schema: &Value) -> Option<&str> {
         }
         _ => None,
     }
+}
+
+/// The schema extension a config field carries when its value is the id of
+/// another pipeline: `#[schemars(extend("x-pipeline-id" = true))]`.
+///
+/// A marker on the schema rather than a field name here, because the rule that
+/// nothing in this module knows the name of any component applies just as much
+/// to the names of their fields. Any component that grows a reference to
+/// another pipeline gets the dropdown by saying so where the field is declared.
+const PIPELINE_ID_MARKER: &str = "x-pipeline-id";
+
+fn is_pipeline_id(schema: &Value) -> bool {
+    schema[PIPELINE_ID_MARKER] == Value::Bool(true)
 }
 
 fn join_values<'a>(values: impl Iterator<Item = &'a str>) -> String {
@@ -340,6 +363,9 @@ fn join_values<'a>(values: impl Iterator<Item = &'a str>) -> String {
 /// `static | tumbling` reads well as a type name, but there is no single
 /// control that edits it, so it comes back as [`FieldType::Json`].
 fn field_type_of(root: &Value, schema: &Value) -> FieldType {
+    if is_pipeline_id(schema) {
+        return FieldType::PipelineId;
+    }
     // `Option<T>` is T here too: whether it may be omitted is the `required`
     // flag's job, not the widget's
     if let Some(branches) = schema["anyOf"].as_array() {
@@ -415,7 +441,10 @@ mod tests {
 
         let documented: Vec<String> = all_components().iter().map(|c| c.kind.clone()).collect();
         assert_eq!(documented, declared);
-        assert!(!documented.is_empty(), "no components were documented at all");
+        assert!(
+            !documented.is_empty(),
+            "no components were documented at all"
+        );
     }
 
     /// The docs are only as good as the doc comments, so an undocumented
@@ -447,7 +476,10 @@ mod tests {
     /// writing the config would fill them in.
     #[test]
     fn required_fields_come_first_in_declaration_order() {
-        assert_eq!(field_names(&component("nats")), ["urls", "subject", "buffer"]);
+        assert_eq!(
+            field_names(&component("nats")),
+            ["urls", "subject", "buffer"]
+        );
     }
 
     #[test]
@@ -479,7 +511,10 @@ mod tests {
     /// the field being optional.
     #[test]
     fn an_optional_field_is_named_by_its_inner_type() {
-        assert_eq!(field(&component("dummy"), "buffer").type_name, "static | tumbling");
+        assert_eq!(
+            field(&component("dummy"), "buffer").type_name,
+            "static | tumbling"
+        );
     }
 
     /// `buffer` lives on `InputConfig`, not on any `InputKind`, but every input
@@ -514,10 +549,17 @@ mod tests {
 
         let numeric = &filter.variants[0];
         assert_eq!(
-            numeric.fields.iter().map(|f| f.name.as_str()).collect::<Vec<_>>(),
+            numeric
+                .fields
+                .iter()
+                .map(|f| f.name.as_str())
+                .collect::<Vec<_>>(),
             ["field", "operator", "value"]
         );
-        assert_eq!(numeric.fields[1].type_name, "GreaterThan | LessThan | EqualTo");
+        assert_eq!(
+            numeric.fields[1].type_name,
+            "GreaterThan | LessThan | EqualTo"
+        );
         assert_eq!(numeric.fields[2].type_name, "number");
     }
 
@@ -525,16 +567,42 @@ mod tests {
     /// as the wrong kind gets the wrong widget and the wrong validation.
     #[test]
     fn a_field_carries_a_machine_readable_type_beside_its_rendered_one() {
-        assert_eq!(field(&component("nats"), "subject").field_type, FieldType::Text);
+        assert_eq!(
+            field(&component("nats"), "subject").field_type,
+            FieldType::Text
+        );
         // a `Secret` is transparently a string, so it edits like one
-        assert_eq!(field(&component("nats"), "urls").field_type, FieldType::Text);
-        assert_eq!(field(&component("dummy"), "duration").field_type, FieldType::Integer);
+        assert_eq!(
+            field(&component("nats"), "urls").field_type,
+            FieldType::Text
+        );
+        assert_eq!(
+            field(&component("dummy"), "duration").field_type,
+            FieldType::Integer
+        );
         let filter = component("filter");
         let numeric = &filter.variants[0];
         match numeric.fields.iter().find(|f| f.name == "value") {
             Some(f) => assert_eq!(f.field_type, FieldType::Number),
             None => panic!("the numeric filter has no 'value' field"),
         }
+    }
+
+    /// A field naming another pipeline is a string on the wire and would
+    /// otherwise be indistinguishable from one, since `PipelineId` *is* a
+    /// `String`. The marker on its schema is what lets a form offer the
+    /// pipelines that exist instead of a box to retype an id into.
+    #[test]
+    fn a_field_that_names_another_pipeline_says_so() {
+        let pipeline = component("pipeline");
+        let upstream = field(&pipeline, "upstream");
+        assert_eq!(upstream.field_type, FieldType::PipelineId);
+        assert_eq!(upstream.type_name, "pipeline id");
+        // and nothing else claims to be one
+        assert_eq!(
+            field(&component("nats"), "subject").field_type,
+            FieldType::Text
+        );
     }
 
     /// A closed set of values is a dropdown, and it has to carry the values —
@@ -615,7 +683,10 @@ mod tests {
     #[test]
     fn search_matches_a_variant_field_of_an_enum_shaped_component() {
         let filter = component("filter");
-        assert!(filter.matches("operator"), "should reach into variant fields");
+        assert!(
+            filter.matches("operator"),
+            "should reach into variant fields"
+        );
         assert!(filter.matches("numeric"), "should match a variant name");
     }
 }

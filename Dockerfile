@@ -11,7 +11,7 @@ copy . .
 RUN --mount=type=cache,target=/usr/local/cargo/registry \
   --mount=type=cache,target=/app/target \
   cargo leptos build --release \
-  && cp target/release/streamer /app/streamer-bin \
+  && cp target/release/kayak /app/kayak-bin \
   && cp -r target/site /app/site
 
 # ---- Stage 2: runtime ----
@@ -25,7 +25,7 @@ RUN useradd -m app
 USER app
 WORKDIR /app
 
-COPY --from=builder /app/streamer-bin /app/streamer
+COPY --from=builder /app/kayak-bin /app/kayak
 COPY --from=builder /app/site /app/site
 COPY config.json /app/config.json
 
@@ -35,4 +35,4 @@ ENV LEPTOS_SITE_ROOT="/app/site" \
   LEPTOS_ENV="PROD"
 
 EXPOSE 6767
-CMD ["/app/streamer", "--config", "/app/config.json"]
+CMD ["/app/kayak", "--config", "/app/config.json"]

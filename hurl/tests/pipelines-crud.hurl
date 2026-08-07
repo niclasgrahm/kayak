@@ -5,7 +5,7 @@
 # merged in, still serves the API. Keep it small.
 
 # a pipeline that stays idle: the dummy input only ticks once an hour
-POST http://localhost:6767/api/streams
+POST http://localhost:6767/api/pipelines
 Content-Type: application/json
 {
     "id": "hurl-smoke-test",
@@ -16,21 +16,21 @@ Content-Type: application/json
 
 HTTP 201
 [Captures]
-streamer_id: jsonpath "$.id"
+pipeline_id: jsonpath "$.id"
 [Asserts]
 jsonpath "$.id" == "hurl-smoke-test"
 jsonpath "$.config.input.type" == "dummy"
 
 
 # it shows up in the listing
-GET http://localhost:6767/api/streams
+GET http://localhost:6767/api/pipelines
 HTTP 200
 [Asserts]
-jsonpath "$[?(@.id=='{{streamer_id}}')]" count == 1
+jsonpath "$[?(@.id=='{{pipeline_id}}')]" count == 1
 
 
 # ids are unique
-POST http://localhost:6767/api/streams
+POST http://localhost:6767/api/pipelines
 Content-Type: application/json
 {
     "id": "hurl-smoke-test",
@@ -42,11 +42,11 @@ HTTP 409
 
 
 # an unknown upstream is the caller's mistake, not a server error
-POST http://localhost:6767/api/streams
+POST http://localhost:6767/api/pipelines
 Content-Type: application/json
 {
     "id": "hurl-orphan",
-    "inputs": [{ "type": "streamer", "upstream": "does-not-exist" }],
+    "inputs": [{ "type": "pipeline", "upstream": "does-not-exist" }],
     "transforms": [],
     "outputs": [{ "type": "stdout" }]
 }
@@ -54,9 +54,9 @@ HTTP 422
 
 
 # cleanup
-DELETE http://localhost:6767/api/streams/{{streamer_id}}
+DELETE http://localhost:6767/api/pipelines/{{pipeline_id}}
 HTTP 204
 
 
-DELETE http://localhost:6767/api/streams/{{streamer_id}}
+DELETE http://localhost:6767/api/pipelines/{{pipeline_id}}
 HTTP 404

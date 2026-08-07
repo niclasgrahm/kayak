@@ -24,16 +24,16 @@ pub async fn index_handler(
     #[derive(Template)]
     #[template(path = "index.html")]
     struct Tmpl {
-        streamers: Vec<String>,
+        pipelines: Vec<String>,
     }
     let template = Tmpl {
-        streamers: state.get_streamer_ids(),
+        pipelines: state.get_pipeline_ids(),
     };
     Ok(Html(template.render()?))
 }
 
 // pub async fn topology_handler(State(state): State<Arc<AppState>>) -> impl IntoResponse {
-//     // returns nodes and edges
+//     // returns pipelines and edges
 //     todo!()
 // }
 pub async fn events_handler(

@@ -15,5 +15,5 @@ Content-Type: application/json
 
 HTTP 201
 [Captures]
-dummy_streamer_id: jsonpath "$.id"
+dummy_pipeline_id: jsonpath "$.id"
 

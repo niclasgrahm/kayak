@@ -1,63 +1,62 @@
-//! Tests for the streamer run loop itself: transform chaining, the
+//! Tests for the pipeline run loop itself: transform chaining, the
 //! error-tolerance rules, downstream fan-out, cancellation and UI events.
 //!
-//! These drive `StreamerRuntime::from_parts` with test doubles, so they touch
+//! These drive `PipelineRuntime::from_parts` with test doubles, so they touch
 //! no network, no filesystem and (where it matters) no real clock.
 
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 
-use serde_json::json;
-use streamer::BuildCtx;
-use streamer::config::BuildTransformConfig;
-use streamer::inputs::{BufferKind, Buffered, InputSource, MessageBatch};
-use streamer::state::UiEvent;
-use streamer_core::EventPayload;
-use streamer::streamer::{Streamer, StreamerRuntime};
-use streamer::testing::{
-    CollectingOutput, Emitted, FailOnNth, ScriptedInput, Ticking, WhenExhausted, batch,
-    stub_config,
+use kayak::BuildCtx;
+use kayak::config::BuildTransformConfig;
+use kayak::inputs::{BufferKind, Buffered, InputSource, MessageBatch};
+use kayak::outputs::OutputDestination;
+use kayak::pipeline::{Pipeline, PipelineRuntime};
+use kayak::state::UiEvent;
+use kayak::testing::{
+    CollectingOutput, Emitted, FailOnNth, ScriptedInput, Ticking, WhenExhausted, batch, stub_config,
 };
-use streamer::outputs::OutputDestination;
-use streamer::transforms::Transform;
-use streamer_core::config::{
+use kayak::transforms::Transform;
+use kayak_core::EventPayload;
+use kayak_core::config::{
     ReduceFnKind, ReduceTransformConfig, SplitterTransformConfig, TransformConfig, TransformKind,
 };
+use serde_json::json;
 use tokio::sync::{broadcast, mpsc};
 
-/// `StreamerRuntime::from_parts` only fails when a pipeline has no inputs at
+/// `PipelineRuntime::from_parts` only fails when a pipeline has no inputs at
 /// all, which is its own test — everything else here wires up at least one.
 fn runtime(
     inputs: Vec<Box<dyn InputSource>>,
     transforms: Vec<Box<dyn Transform>>,
     outputs: Vec<Box<dyn OutputDestination>>,
-    shared: Arc<Streamer>,
+    shared: Arc<Pipeline>,
     events: broadcast::Sender<UiEvent>,
-) -> StreamerRuntime {
-    match StreamerRuntime::from_parts(inputs, transforms, outputs, shared, events) {
+) -> PipelineRuntime {
+    match PipelineRuntime::from_parts(inputs, transforms, outputs, shared, events) {
         Ok(r) => r,
         Err(e) => panic!("building the runtime: {e:#}"),
     }
 }
 
-fn streamer(id: &str) -> Arc<Streamer> {
-    match Streamer::new(stub_config(id)) {
+fn pipeline(id: &str) -> Arc<Pipeline> {
+    match Pipeline::new(stub_config(id)) {
         Ok(s) => Arc::new(s),
-        Err(e) => panic!("building streamer '{id}': {e:#}"),
+        Err(e) => panic!("building pipeline '{id}': {e:#}"),
     }
 }
 
 /// Build a transform the way the server does — through the config layer — but
-/// without a live streamer map, which no transform needs.
+/// without a live pipeline map, which no transform needs.
 fn transform_from_config(kind: TransformKind) -> anyhow::Result<Box<dyn Transform>> {
-    let mut streamers = HashMap::new();
+    let mut pipelines = HashMap::new();
     let (events, _rx) = broadcast::channel(16);
-    let mut ctx = BuildCtx::new(&mut streamers, "test".to_string(), events);
+    let mut ctx = BuildCtx::new(&mut pipelines, "test".to_string(), events);
     TransformConfig { kind }.build(&mut ctx)
 }
 
-/// Run a streamer over a finite script and return what the output collected.
+/// Run a pipeline over a finite script and return what the output collected.
 /// The script fails once exhausted, so `run()` returns on its own.
 async fn run_to_completion(
     input: Vec<Arc<MessageBatch>>,
@@ -70,7 +69,7 @@ async fn run_to_completion(
         vec![Box::new(ScriptedInput::new(input, WhenExhausted::Fail))],
         transforms,
         vec![Box::new(output)],
-        streamer("test"),
+        pipeline("test"),
         events,
     );
     // an exhausted input is a clean stop here, not a failure of run()
@@ -151,11 +150,11 @@ async fn a_transform_error_drops_one_batch_but_keeps_the_pipeline_running() {
     );
 }
 
-/// A broken output must not tear the pipeline down — downstream streamers are
+/// A broken output must not tear the pipeline down — downstream pipelines are
 /// still fed, same as we do for transform errors.
 #[tokio::test]
 async fn an_output_error_does_not_stop_downstream_delivery() {
-    let shared = streamer("upstream");
+    let shared = pipeline("upstream");
     let (tx, mut rx) = mpsc::channel(8);
     shared.subscribe(tx);
 
@@ -187,7 +186,7 @@ async fn an_output_error_does_not_stop_downstream_delivery() {
 /// is what lets one pipeline feed several others.
 #[tokio::test]
 async fn a_batch_reaches_the_output_and_all_downstreams() {
-    let shared = streamer("upstream");
+    let shared = pipeline("upstream");
     let (tx_a, mut rx_a) = mpsc::channel(8);
     let (tx_b, mut rx_b) = mpsc::channel(8);
     shared.subscribe(tx_a);
@@ -214,17 +213,19 @@ async fn a_batch_reaches_the_output_and_all_downstreams() {
 }
 
 /// Cancelling the token stops a run loop parked on its input — this is what
-/// `DELETE /api/streams/{id}` relies on.
+/// `DELETE /api/pipelines/{id}` relies on.
 #[tokio::test]
 async fn cancelling_the_token_stops_a_running_pipeline() {
-    let shared = streamer("cancel-me");
+    let shared = pipeline("cancel-me");
     let (events, _events_rx) = broadcast::channel(16);
     let runtime = runtime(
-        vec![// never resolves again after the first batch
-        Box::new(ScriptedInput::new(
-            vec![batch(vec![json!({"n": 1})])],
-            WhenExhausted::Pend,
-        ))],
+        vec![
+            // never resolves again after the first batch
+            Box::new(ScriptedInput::new(
+                vec![batch(vec![json!({"n": 1})])],
+                WhenExhausted::Pend,
+            )),
+        ],
         vec![],
         vec![Box::new(CollectingOutput::new())],
         Arc::clone(&shared),
@@ -248,14 +249,14 @@ async fn ui_events_are_published_for_the_input_and_output_stages() {
         ))],
         vec![],
         vec![Box::new(CollectingOutput::new())],
-        streamer("events"),
+        pipeline("events"),
         events,
     );
     let _ = runtime.run().await;
 
     let mut stages = Vec::new();
     while let Ok(ev) = rx.try_recv() {
-        assert_eq!(ev.streamer_id, "events");
+        assert_eq!(ev.pipeline_id, "events");
         if matches!(ev.payload, EventPayload::Batch(_)) {
             stages.push(ev.stage);
         }
@@ -275,7 +276,7 @@ async fn a_failing_transform_publishes_an_error_event_for_that_stage() {
         ))],
         vec![Box::new(FailOnNth::new(0))],
         vec![Box::new(CollectingOutput::new())],
-        streamer("events"),
+        pipeline("events"),
         events,
     );
     let _ = runtime.run().await;
@@ -283,7 +284,9 @@ async fn a_failing_transform_publishes_an_error_event_for_that_stage() {
     // the trailing error is the script running out, which the run loop reports
     // as an input failure like any other
     let errors = collect_errors(&mut rx);
-    let first = errors.first().unwrap_or_else(|| panic!("no error was published"));
+    let first = errors
+        .first()
+        .unwrap_or_else(|| panic!("no error was published"));
     assert_eq!(first.0, "transform");
     assert!(
         first.1.contains("transform failed on batch 0"),
@@ -304,13 +307,15 @@ async fn a_failing_output_publishes_an_error_event_for_that_stage() {
         ))],
         vec![],
         vec![Box::new(CollectingOutput::failing())],
-        streamer("events"),
+        pipeline("events"),
         events,
     );
     let _ = runtime.run().await;
 
     let errors = collect_errors(&mut rx);
-    let first = errors.first().unwrap_or_else(|| panic!("no error was published"));
+    let first = errors
+        .first()
+        .unwrap_or_else(|| panic!("no error was published"));
     assert_eq!(first.0, "output");
     assert!(
         first.1.contains("collecting output was told to fail"),
@@ -319,7 +324,7 @@ async fn a_failing_output_publishes_an_error_event_for_that_stage() {
     );
 }
 
-/// An input that dies takes the streamer with it, which is the case where the
+/// An input that dies takes the pipeline with it, which is the case where the
 /// card most needs to say why it went quiet.
 #[tokio::test]
 async fn a_failing_input_publishes_an_error_event_before_the_loop_ends() {
@@ -328,7 +333,7 @@ async fn a_failing_input_publishes_an_error_event_before_the_loop_ends() {
         vec![Box::new(ScriptedInput::new(vec![], WhenExhausted::Fail))],
         vec![],
         vec![Box::new(CollectingOutput::new())],
-        streamer("events"),
+        pipeline("events"),
         events,
     );
     let _ = runtime.run().await;
@@ -368,7 +373,7 @@ async fn the_output_is_initialised_once_before_the_first_emit() {
     assert_eq!(calls, 1);
 }
 
-/// An input error ends this streamer's loop. Downstream streamers detect it
+/// An input error ends this pipeline's loop. Downstream pipelines detect it
 /// through their channel closing — see `graph.rs`.
 #[tokio::test]
 async fn an_input_error_ends_the_run_loop() {
@@ -377,31 +382,31 @@ async fn an_input_error_ends_the_run_loop() {
         vec![Box::new(ScriptedInput::new(vec![], WhenExhausted::Fail))],
         vec![],
         vec![Box::new(CollectingOutput::new())],
-        streamer("dies"),
+        pipeline("dies"),
         events,
     );
     let finished = tokio::time::timeout(Duration::from_secs(5), runtime.run()).await;
     assert!(finished.is_ok(), "run loop hung on a failing input");
 }
 
-/// An input that fails *because we cancelled the streamer* is not a pipeline
+/// An input that fails *because we cancelled the pipeline* is not a pipeline
 /// failure and must not be reported as one.
 ///
 /// This is the shape of a real bug: tearing the graph down cancels every
-/// streamer and then drops the upstreams, so a downstream wakes with both its
+/// pipeline and then drops the upstreams, so a downstream wakes with both its
 /// cancellation and an "upstream is gone" ready at once. Reporting the latter
 /// put a red error on a card — and on a revert, on the card of the *new*
-/// streamer that had just inherited the id, which read as the fresh pipeline
+/// pipeline that had just inherited the id, which read as the fresh pipeline
 /// being broken.
 /// Repeated because the bug was a coin toss: `select!` chooses randomly between
 /// two ready branches, so one run reproduced it only about a third of the time.
 /// Twenty makes a regression essentially certain to be caught rather than
 /// noticed three CI runs later.
 #[tokio::test]
-async fn a_cancelled_streamer_does_not_report_its_input_dying() {
+async fn a_cancelled_pipeline_does_not_report_its_input_dying() {
     for attempt in 0..20 {
         let (events, mut rx) = broadcast::channel(16);
-        let shared = streamer("going-away");
+        let shared = pipeline("going-away");
         // cancelled before it ever runs, so the very first iteration has both
         // the cancellation and the input failure ready — the exact tie
         shared.cancellation_token.cancel();
@@ -419,28 +424,32 @@ async fn a_cancelled_streamer_does_not_report_its_input_dying() {
         let errors = collect_errors(&mut rx);
         assert!(
             errors.is_empty(),
-            "attempt {attempt}: shutting a streamer down reported itself as a failure: {errors:?}"
+            "attempt {attempt}: shutting a pipeline down reported itself as a failure: {errors:?}"
         );
     }
 }
 
 /// The other half of the rule: an input that dies on its own, while the
-/// streamer is very much alive, still has to be reported. The check above is
+/// pipeline is very much alive, still has to be reported. The check above is
 /// "was *I* cancelled", not "did something go quiet".
 #[tokio::test]
-async fn a_running_streamer_still_reports_its_input_dying() {
+async fn a_running_pipeline_still_reports_its_input_dying() {
     let (events, mut rx) = broadcast::channel(16);
     let runtime = runtime(
         vec![Box::new(ScriptedInput::new(vec![], WhenExhausted::Fail))],
         vec![],
         vec![Box::new(CollectingOutput::new())],
-        streamer("still-here"),
+        pipeline("still-here"),
         events,
     );
     let _ = tokio::time::timeout(Duration::from_secs(5), runtime.run()).await;
 
     let errors = collect_errors(&mut rx);
-    assert_eq!(errors.len(), 1, "expected the failure to be reported: {errors:?}");
+    assert_eq!(
+        errors.len(),
+        1,
+        "expected the failure to be reported: {errors:?}"
+    );
     assert_eq!(errors[0].0, "input");
 }
 
@@ -509,7 +518,7 @@ async fn every_input_feeds_the_same_transform_chain_and_output() {
         ],
         vec![],
         vec![Box::new(output)],
-        streamer("merged"),
+        pipeline("merged"),
         events,
     );
     let _ = tokio::time::timeout(Duration::from_secs(5), runtime.run()).await;
@@ -538,7 +547,7 @@ async fn a_slow_input_is_not_starved_by_a_chatty_one() {
         ],
         vec![],
         vec![Box::new(output)],
-        streamer("starved"),
+        pipeline("starved"),
         events,
     );
     let handle = tokio::spawn(runtime.run());
@@ -552,7 +561,10 @@ async fn a_slow_input_is_not_starved_by_a_chatty_one() {
         .into_iter()
         .flatten()
         .any(|m| m == json!({"slow": true}));
-    assert!(saw_slow, "the one-minute input never got through in ten minutes");
+    assert!(
+        saw_slow,
+        "the one-minute input never got through in ten minutes"
+    );
 }
 
 /// Every output receives every batch — that's the whole point of allowing more
@@ -570,7 +582,7 @@ async fn every_output_receives_every_batch() {
         ))],
         vec![],
         vec![Box::new(first), Box::new(second)],
-        streamer("tee"),
+        pipeline("tee"),
         events,
     );
     let _ = runtime.run().await;
@@ -595,7 +607,7 @@ async fn a_failing_output_does_not_stop_its_siblings() {
         vec![],
         // the broken one first, so a short-circuit would be visible
         vec![Box::new(CollectingOutput::failing()), Box::new(healthy)],
-        streamer("half-broken"),
+        pipeline("half-broken"),
         events,
     );
     let _ = runtime.run().await;
@@ -604,15 +616,15 @@ async fn a_failing_output_does_not_stop_its_siblings() {
 }
 
 /// A pipeline with no inputs can never produce anything, so it's a config
-/// error rather than a streamer that sits there looking healthy.
+/// error rather than a pipeline that sits there looking healthy.
 #[tokio::test]
 async fn a_pipeline_with_no_inputs_is_rejected() {
     let (events, _events_rx) = broadcast::channel(16);
-    let built = StreamerRuntime::from_parts(
+    let built = PipelineRuntime::from_parts(
         vec![],
         vec![],
         vec![Box::new(CollectingOutput::new())],
-        streamer("empty"),
+        pipeline("empty"),
         events,
     );
     let err = match built {
@@ -626,7 +638,7 @@ async fn a_pipeline_with_no_inputs_is_rejected() {
 /// below it, and must still run and fan out.
 #[tokio::test]
 async fn a_pipeline_with_no_outputs_still_feeds_its_downstreams() {
-    let shared = streamer("relay");
+    let shared = pipeline("relay");
     let (tx, mut rx) = mpsc::channel(8);
     shared.subscribe(tx);
 
@@ -662,7 +674,7 @@ async fn one_input_failing_does_not_stop_the_others() {
         ],
         vec![],
         vec![Box::new(output)],
-        streamer("survivor"),
+        pipeline("survivor"),
         events,
     );
     let handle = tokio::spawn(runtime.run());
@@ -681,7 +693,11 @@ async fn one_input_failing_does_not_stop_the_others() {
     );
 
     let errors = collect_errors(&mut rx);
-    assert_eq!(errors.len(), 1, "expected the dead input to be reported once");
+    assert_eq!(
+        errors.len(),
+        1,
+        "expected the dead input to be reported once"
+    );
     assert_eq!(errors[0].0, "input");
     assert!(
         errors[0].1.contains("scripted input exhausted"),

@@ -4,12 +4,12 @@ use crate::{
     secrets::Resolved,
 };
 use anyhow::{Context, Result};
+use kayak_core::config::{KafkaConfig, KafkaStartAt};
 use rdkafka::{
     ClientConfig, Message,
     consumer::{Consumer, StreamConsumer},
 };
 use std::sync::Arc;
-use streamer_core::config::{KafkaConfig, KafkaStartAt};
 
 impl BuildInput for KafkaConfig {
     fn build(self, ctx: &mut BuildCtx) -> Result<Box<dyn InputSource>> {

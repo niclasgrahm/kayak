@@ -4,7 +4,7 @@ use axum::{
     response::{IntoResponse, Response},
 };
 
-use crate::state::StreamerError;
+use crate::state::PipelineError;
 
 pub struct AppError {
     status: StatusCode,
@@ -36,11 +36,11 @@ where
         let err = err.into();
         // downcast_ref walks the whole cause chain, so added context doesn't
         // hide the classification
-        let status = match err.downcast_ref::<StreamerError>() {
-            Some(StreamerError::NotFound(_)) => StatusCode::NOT_FOUND,
-            Some(StreamerError::DuplicateId(_)) => StatusCode::CONFLICT,
-            Some(StreamerError::InvalidConfig(_)) => StatusCode::UNPROCESSABLE_ENTITY,
-            Some(StreamerError::Internal(_)) | None => StatusCode::INTERNAL_SERVER_ERROR,
+        let status = match err.downcast_ref::<PipelineError>() {
+            Some(PipelineError::NotFound(_)) => StatusCode::NOT_FOUND,
+            Some(PipelineError::DuplicateId(_)) => StatusCode::CONFLICT,
+            Some(PipelineError::InvalidConfig(_)) => StatusCode::UNPROCESSABLE_ENTITY,
+            Some(PipelineError::Internal(_)) | None => StatusCode::INTERNAL_SERVER_ERROR,
         };
         Self { status, err }
     }

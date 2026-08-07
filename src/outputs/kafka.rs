@@ -5,6 +5,7 @@ use crate::{
     secrets::Resolved,
 };
 use anyhow::{Context, Result};
+use kayak_core::config::KafkaOutputConfig;
 use rdkafka::{
     ClientConfig,
     producer::{FutureProducer, FutureRecord},
@@ -12,7 +13,6 @@ use rdkafka::{
 };
 use std::sync::Arc;
 use std::time::Duration;
-use streamer_core::config::KafkaOutputConfig;
 
 /// How long a single record may take to reach the broker. Long enough to ride
 /// out a leader election, short enough that a broker that is simply gone fails
@@ -42,10 +42,9 @@ impl OutputDestination for KafkaOutput {
     async fn emit(&mut self, message_batch: Arc<MessageBatch>) -> Result<()> {
         // as in the nats and postgres outputs: doing nothing here would look
         // like the records were published
-        let producer = self
-            .producer
-            .as_ref()
-            .ok_or_else(|| anyhow::anyhow!("kafka output is not connected; init() was not called"))?;
+        let producer = self.producer.as_ref().ok_or_else(|| {
+            anyhow::anyhow!("kafka output is not connected; init() was not called")
+        })?;
 
         for msg in message_batch.iter() {
             let payload =
@@ -69,7 +68,9 @@ impl OutputDestination for KafkaOutput {
             ClientConfig::new()
                 .set("bootstrap.servers", self.brokers.expose())
                 .create()
-                .with_context(|| format!("failed to create a kafka producer for {}", self.brokers))?,
+                .with_context(|| {
+                    format!("failed to create a kafka producer for {}", self.brokers)
+                })?,
         );
         Ok(())
     }

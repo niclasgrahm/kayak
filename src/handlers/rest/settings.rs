@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use axum::{Json, extract::State, http::StatusCode, response::IntoResponse};
-use streamer_core::{SaveConfigRequest, SaveConfigResponse, SettingsDto};
+use kayak_core::{SaveConfigRequest, SaveConfigResponse, SettingsDto};
 
 use crate::{handlers::error::AppError, state::AppState};
 

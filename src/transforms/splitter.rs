@@ -1,5 +1,5 @@
+use kayak_core::config::SplitterTransformConfig;
 use std::sync::Arc;
-use streamer_core::config::SplitterTransformConfig;
 
 use crate::{
     BuildCtx,
@@ -80,6 +80,9 @@ mod tests {
     #[tokio::test]
     async fn known_bug_the_remainder_is_currently_discarded() {
         let out = split(3, 4).await;
-        assert_eq!(out, vec![vec![json!({"i": 0}), json!({"i": 1}), json!({"i": 2})]]);
+        assert_eq!(
+            out,
+            vec![vec![json!({"i": 0}), json!({"i": 1}), json!({"i": 2})]]
+        );
     }
 }

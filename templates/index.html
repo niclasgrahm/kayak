@@ -1,10 +1,10 @@
 <html>
-  <title>streamer</title>
+  <title>kayak</title>
   <body>
-    <h1>streamer</h1>
+    <h1>kayak</h1>
     <div class="cards">
-        {% for s in streamers %}
-        <div class="card" data-streamer="{{ s }}">
+        {% for s in pipelines %}
+        <div class="card" data-pipeline="{{ s }}">
           <strong>{{ s }}</strong>     
           <pre></pre>
         </div>
@@ -14,7 +14,7 @@
       const MAX_LINES = 10;
 
       function logFor(id) {
-        let card = document.querySelector(`[data-streamer="${CSS.escape(id)}"]`);
+        let card = document.querySelector(`[data-pipeline="${CSS.escape(id)}"]`);
         return card?.querySelector("pre");
       }
 
@@ -31,7 +31,7 @@
 
       es.onmessage = (e) => {
         const ev = JSON.parse(e.data);
-        const pre = logFor(ev.streamer_id);
+        const pre = logFor(ev.pipeline_id);
         if (pre) append(pre, `[${ev.stage}] ${JSON.stringify(ev.batch)}`);
       };
 

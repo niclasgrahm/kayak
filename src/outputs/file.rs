@@ -7,7 +7,7 @@ use tokio::io::{AsyncWriteExt, BufWriter};
 use crate::BuildCtx;
 use crate::inputs::MessageBatch;
 use crate::outputs::{BuildOutput, OutputDestination};
-use streamer_core::config::FileOutputConfig;
+use kayak_core::config::FileOutputConfig;
 
 // we have nats both as input and output; lets differentiate their configs like this
 // for now; perhaps we can consolidate later
@@ -32,7 +32,7 @@ impl Default for FileOutput {
 }
 
 impl FileOutput {
-    #[must_use] 
+    #[must_use]
     pub fn new() -> Self {
         Self { writer: None }
     }
@@ -57,7 +57,7 @@ impl OutputDestination for FileOutput {
     }
 
     async fn init(&mut self) -> Result<()> {
-        let path = std::path::PathBuf::from("/Users/niclas/projects/rust/streamer/data.csv");
+        let path = std::path::PathBuf::from("/Users/niclas/projects/rust/pipeline/data.csv");
         let file = tokio::fs::File::create(path).await?;
         self.writer = Some(BufWriter::new(file));
         Ok(())

@@ -11,9 +11,9 @@
 
 use std::collections::BTreeSet;
 
+use kayak_core::config::{Config, InputConfig, InputKind, OutputKind, TransformKind};
 use schemars::schema_for;
 use serde_json::{Value, json};
-use streamer_core::config::{Config, InputConfig, InputKind, OutputKind, TransformKind};
 
 /// These samples all declare exactly one input; reach for it without a panic
 /// path at every call site.
@@ -31,7 +31,7 @@ fn input_samples() -> Vec<(&'static str, Value)> {
             "nats",
             json!({"type": "nats", "urls": "nats://localhost:4222", "subject": "test.subject"}),
         ),
-        ("streamer", json!({"type": "streamer", "upstream": "p1"})),
+        ("pipeline", json!({"type": "pipeline", "upstream": "p1"})),
         (
             "kafka",
             json!({
@@ -117,7 +117,11 @@ fn sample_tags(samples: &[(&'static str, Value)]) -> BTreeSet<String> {
 #[test]
 fn every_component_kind_has_a_wire_format_sample() -> anyhow::Result<()> {
     let cases = [
-        ("InputKind", serde_json::to_value(schema_for!(InputKind))?, sample_tags(&input_samples())),
+        (
+            "InputKind",
+            serde_json::to_value(schema_for!(InputKind))?,
+            sample_tags(&input_samples()),
+        ),
         (
             "TransformKind",
             serde_json::to_value(schema_for!(TransformKind))?,
@@ -132,7 +136,10 @@ fn every_component_kind_has_a_wire_format_sample() -> anyhow::Result<()> {
 
     for (name, schema, samples) in cases {
         let declared = tags_in_schema(&schema);
-        assert!(!declared.is_empty(), "{name}: could not read any type tags out of the schema");
+        assert!(
+            !declared.is_empty(),
+            "{name}: could not read any type tags out of the schema"
+        );
         assert_eq!(
             declared, samples,
             "{name}: the variants and the samples in tests/config.rs have drifted apart — \
@@ -149,7 +156,11 @@ fn every_component_sample_round_trips_unchanged() -> anyhow::Result<()> {
     for (tag, input) in input_samples() {
         let config = json!({"id": "x", "inputs": [input], "transforms": [], "outputs": [{"type": "stdout"}]});
         let parsed: Config = serde_json::from_value(config.clone())?;
-        assert_eq!(serde_json::to_value(&parsed)?, config, "input '{tag}' changed shape");
+        assert_eq!(
+            serde_json::to_value(&parsed)?,
+            config,
+            "input '{tag}' changed shape"
+        );
     }
     for (tag, transform) in transform_samples() {
         let config = json!({
@@ -159,7 +170,11 @@ fn every_component_sample_round_trips_unchanged() -> anyhow::Result<()> {
             "outputs": [{"type": "stdout"}]
         });
         let parsed: Config = serde_json::from_value(config.clone())?;
-        assert_eq!(serde_json::to_value(&parsed)?, config, "transform '{tag}' changed shape");
+        assert_eq!(
+            serde_json::to_value(&parsed)?,
+            config,
+            "transform '{tag}' changed shape"
+        );
     }
     for (tag, output) in output_samples() {
         let config = json!({
@@ -169,7 +184,11 @@ fn every_component_sample_round_trips_unchanged() -> anyhow::Result<()> {
             "outputs": [output]
         });
         let parsed: Config = serde_json::from_value(config.clone())?;
-        assert_eq!(serde_json::to_value(&parsed)?, config, "output '{tag}' changed shape");
+        assert_eq!(
+            serde_json::to_value(&parsed)?,
+            config,
+            "output '{tag}' changed shape"
+        );
     }
     Ok(())
 }
@@ -181,7 +200,7 @@ fn an_input_buffer_parses_alongside_the_input_fields() -> anyhow::Result<()> {
     let config: Config = serde_json::from_value(json!({
         "id": "x",
         "inputs": [{
-            "type": "streamer",
+            "type": "pipeline",
             "upstream": "p1",
             "buffer": { "type": "tumbling", "window_seconds": 60 }
         }],
@@ -191,7 +210,7 @@ fn an_input_buffer_parses_alongside_the_input_fields() -> anyhow::Result<()> {
 
     let input = only_input(&config);
     assert!(input.buffer.is_some(), "buffer config was dropped");
-    assert!(matches!(input.kind, InputKind::Streamer(_)));
+    assert!(matches!(input.kind, InputKind::Pipeline(_)));
     Ok(())
 }
 
@@ -230,7 +249,10 @@ fn unknown_component_types_are_rejected() {
 fn the_repository_config_file_parses() -> anyhow::Result<()> {
     let raw = std::fs::read_to_string("config.json")?;
     let configs: Vec<Config> = serde_json::from_str(&raw)?;
-    assert!(!configs.is_empty(), "config.json should describe at least one pipeline");
+    assert!(
+        !configs.is_empty(),
+        "config.json should describe at least one pipeline"
+    );
     Ok(())
 }
 
@@ -253,8 +275,8 @@ fn the_repository_yaml_config_describes_the_same_graph() -> anyhow::Result<()> {
     let as_json: Vec<Config> = serde_json::from_str(&std::fs::read_to_string("config.json")?)?;
     let as_yaml: Vec<Config> = serde_norway::from_str(&std::fs::read_to_string("config.yaml")?)?;
     assert_eq!(
-        serde_json::to_value(streamer::persist::ordered(as_yaml))?,
-        serde_json::to_value(streamer::persist::ordered(as_json))?,
+        serde_json::to_value(kayak::persist::ordered(as_yaml))?,
+        serde_json::to_value(kayak::persist::ordered(as_json))?,
         "config.yaml has drifted from config.json; regenerate it"
     );
     Ok(())

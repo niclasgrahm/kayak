@@ -1,3 +1,4 @@
+use crate::BuildCtx;
 use crate::inputs::BufferKind;
 use crate::inputs::Buffered;
 use crate::inputs::BuildInput;
@@ -6,14 +7,13 @@ use crate::outputs::BuildOutput;
 use crate::outputs::OutputDestination;
 use crate::transforms::BuildTransform;
 use crate::transforms::Transform;
-use crate::BuildCtx;
-use streamer_core::config::BufferConfig;
-use streamer_core::config::InputConfig;
-use streamer_core::config::InputKind;
-use streamer_core::config::OutputConfig;
-use streamer_core::config::OutputKind;
-use streamer_core::config::TransformConfig;
-use streamer_core::config::TransformKind;
+use kayak_core::config::BufferConfig;
+use kayak_core::config::InputConfig;
+use kayak_core::config::InputKind;
+use kayak_core::config::OutputConfig;
+use kayak_core::config::OutputKind;
+use kayak_core::config::TransformConfig;
+use kayak_core::config::TransformKind;
 
 use anyhow::Result;
 
@@ -27,7 +27,7 @@ impl BuildInputConfig for InputKind {
             InputKind::Dummy(c) => c.build(ctx),
             InputKind::Kafka(c) => c.build(ctx),
             InputKind::Nats(c) => c.build(ctx),
-            InputKind::Streamer(c) => c.build(ctx),
+            InputKind::Pipeline(c) => c.build(ctx),
         }
     }
 }

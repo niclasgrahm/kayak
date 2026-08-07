@@ -2,40 +2,40 @@ use anyhow::Context;
 use serde::Serialize;
 use tokio::sync::broadcast;
 
-use crate::secrets::{EnvStore, SecretStore};
-use crate::streamer::Streamer;
 use crate::BuildCtx;
+use crate::pipeline::Pipeline;
+use crate::secrets::{EnvStore, SecretStore};
+use kayak_core::config::Config;
+pub use kayak_core::{ConfigFormat, LayoutFile, PipelineId, UiEvent};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, MutexGuard};
-use streamer_core::config::Config;
-pub use streamer_core::{ConfigFormat, LayoutFile, StreamerId, UiEvent};
 
 #[derive(Serialize)]
-pub struct StreamerHandle {
+pub struct PipelineHandle {
     #[serde(skip)]
     pub join_handle: tokio::task::JoinHandle<()>,
-    pub shared: Arc<Streamer>,
+    pub shared: Arc<Pipeline>,
 }
 
 /// Errors that callers need to distinguish between — the HTTP layer maps these
 /// onto status codes, everything else becomes a 500.
 #[derive(Debug)]
-pub enum StreamerError {
-    NotFound(StreamerId),
-    DuplicateId(StreamerId),
+pub enum PipelineError {
+    NotFound(PipelineId),
+    DuplicateId(PipelineId),
     /// The config parsed, but describes a pipeline that can't be built — e.g.
-    /// it names an upstream streamer that doesn't exist. That's the caller's
+    /// it names an upstream pipeline that doesn't exist. That's the caller's
     /// mistake, not ours.
     InvalidConfig(anyhow::Error),
     Internal(anyhow::Error),
 }
 
-impl std::fmt::Display for StreamerError {
+impl std::fmt::Display for PipelineError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::NotFound(id) => write!(f, "streamer with id '{id}' not found"),
-            Self::DuplicateId(id) => write!(f, "streamer with id '{id}' already exists"),
+            Self::NotFound(id) => write!(f, "pipeline with id '{id}' not found"),
+            Self::DuplicateId(id) => write!(f, "pipeline with id '{id}' already exists"),
             // only this layer — the rest of the chain is reachable through
             // source(), so printing it here too would duplicate it
             Self::InvalidConfig(err) | Self::Internal(err) => write!(f, "{err}"),
@@ -43,7 +43,7 @@ impl std::fmt::Display for StreamerError {
     }
 }
 
-impl std::error::Error for StreamerError {
+impl std::error::Error for PipelineError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
             // Display above already prints the inner error's own layer, so the
@@ -54,13 +54,13 @@ impl std::error::Error for StreamerError {
     }
 }
 
-impl From<anyhow::Error> for StreamerError {
+impl From<anyhow::Error> for PipelineError {
     fn from(err: anyhow::Error) -> Self {
         Self::Internal(err)
     }
 }
 
-impl From<serde_json::Error> for StreamerError {
+impl From<serde_json::Error> for PipelineError {
     fn from(err: serde_json::Error) -> Self {
         Self::Internal(err.into())
     }
@@ -72,11 +72,11 @@ impl From<serde_json::Error> for StreamerError {
 const TEARDOWN_GRACE: std::time::Duration = std::time::Duration::from_secs(5);
 
 pub struct AppState {
-    streamers: Mutex<HashMap<StreamerId, StreamerHandle>>,
+    pipelines: Mutex<HashMap<PipelineId, PipelineHandle>>,
     events: broadcast::Sender<UiEvent>,
     /// What `${NAME}` references in an incoming config resolve against. Held
     /// here rather than passed per request because it's fixed at startup — a
-    /// pipeline posted to `/api/streams` gets the same secrets as one loaded
+    /// pipeline posted to `/api/pipelines` gets the same secrets as one loaded
     /// from the config file.
     secrets: Arc<dyn SecretStore>,
     /// The config file this server is working against: the `--config` file it
@@ -114,7 +114,7 @@ pub struct AppState {
     /// it: no pipeline behaves differently for having a position, and an entry
     /// for a pipeline that has since been deleted is harmless. Unlike the
     /// config file, this one *is* written as a side effect of an edit — moving
-    /// a node changes nothing about the running system, so making someone save
+    /// a pipeline changes nothing about the running system, so making someone save
     /// it would be ceremony over a cosmetic act. See [`crate::layout`].
     layout: Mutex<LayoutFile>,
 }
@@ -153,7 +153,7 @@ impl AppState {
         tracing::debug!("Initializing empty server state...");
         let (events, _) = broadcast::channel(1024);
         Self {
-            streamers: Mutex::new(HashMap::new()),
+            pipelines: Mutex::new(HashMap::new()),
             events,
             secrets,
             config_path: Mutex::new(None),
@@ -219,7 +219,7 @@ impl AppState {
         if !layout.is_empty() {
             tracing::debug!(
                 "loaded {} card positions from {}",
-                layout.nodes.len(),
+                layout.pipelines.len(),
                 path.display()
             );
         }
@@ -260,7 +260,7 @@ impl AppState {
     /// lands. Without a `--config` file there is nowhere to put it, and the
     /// arrangement lives only as long as the process — which is honest, and
     /// better than refusing to let someone tidy up the canvas.
-    pub fn set_layout(&self, layout: LayoutFile) -> Result<(), StreamerError> {
+    pub fn set_layout(&self, layout: LayoutFile) -> Result<(), PipelineError> {
         let mut held = self.lock_layout();
         if let Some(config_path) = self.config_path() {
             let path = crate::layout::layout_path(&config_path);
@@ -280,11 +280,11 @@ impl AppState {
         tracing::debug!("Loading configuration from {}...", path.display());
         let configs = crate::persist::read(&path)?;
 
-        let mut app = self.lock_streamers();
+        let mut app = self.lock_pipelines();
         for c in configs {
             let id = c.id.clone().unwrap_or_else(|| "<generated>".to_string());
             Self::create_locked(self, &mut app, c)
-                .with_context(|| format!("failed to start streamer '{id}' from config"))?;
+                .with_context(|| format!("failed to start pipeline '{id}' from config"))?;
         }
         // what came off disk is, by definition, in sync with disk
         self.mark_saved(&app);
@@ -319,7 +319,7 @@ impl AppState {
         // Cancel everything and take the join handles out, then drop the guard:
         // this is a `std::sync::Mutex` and must not be held across an await.
         let waiting: Vec<tokio::task::JoinHandle<()>> = {
-            let mut app = self.lock_streamers();
+            let mut app = self.lock_pipelines();
             app.drain()
                 .map(|(_, handle)| {
                     handle.shared.cancellation_token.cancel();
@@ -347,8 +347,9 @@ impl AppState {
             );
         }
 
-        self.load_from_config_file()
-            .context("the running pipelines were stopped, but the config file could not be reloaded")?;
+        self.load_from_config_file().context(
+            "the running pipelines were stopped, but the config file could not be reloaded",
+        )?;
         // Reverting is "go back to what is on disk", and the arrangement is on
         // disk too. It only warns: the graph is already running by this point,
         // and refusing the revert over a cosmetic file would be the wrong trade.
@@ -361,15 +362,15 @@ impl AppState {
     /// A poisoned lock means another thread panicked while holding it. None of
     /// the code under this lock can leave the map half-updated, so recovering
     /// the guard is safe and keeps one panic from taking down every request.
-    fn lock_streamers(&self) -> MutexGuard<'_, HashMap<StreamerId, StreamerHandle>> {
-        self.streamers.lock().unwrap_or_else(|poisoned| {
-            tracing::warn!("streamers lock was poisoned; recovering");
+    fn lock_pipelines(&self) -> MutexGuard<'_, HashMap<PipelineId, PipelineHandle>> {
+        self.pipelines.lock().unwrap_or_else(|poisoned| {
+            tracing::warn!("pipelines lock was poisoned; recovering");
             poisoned.into_inner()
         })
     }
 
-    pub fn get_streamer_ids(&self) -> Vec<StreamerId> {
-        self.lock_streamers().keys().cloned().collect()
+    pub fn get_pipeline_ids(&self) -> Vec<PipelineId> {
+        self.lock_pipelines().keys().cloned().collect()
     }
 
     /// The name of the config file the server is working against, if it has one
@@ -401,7 +402,7 @@ impl AppState {
         if self.config_path().is_none() {
             return false;
         }
-        let app = self.lock_streamers();
+        let app = self.lock_pipelines();
         let current = Self::fingerprint(&app);
         let saved = self.lock_saved();
         match (&current, &*saved) {
@@ -421,7 +422,7 @@ impl AppState {
 
     /// Record the current graph as the one on disk. Takes the held guard so the
     /// snapshot can't be of a map that changed in between.
-    fn mark_saved(&self, app: &HashMap<StreamerId, StreamerHandle>) {
+    fn mark_saved(&self, app: &HashMap<PipelineId, PipelineHandle>) {
         *self.lock_saved() = Self::fingerprint(app);
     }
 
@@ -431,8 +432,8 @@ impl AppState {
     /// and the answer to that doesn't change with the format a file happens to
     /// be written in. `None` if it can't be rendered, which callers read as
     /// "can't tell" rather than as an answer.
-    fn fingerprint(app: &HashMap<StreamerId, StreamerHandle>) -> Option<String> {
-        crate::persist::render(Self::configs_of(app), streamer_core::ConfigFormat::Json).ok()
+    fn fingerprint(app: &HashMap<PipelineId, PipelineHandle>) -> Option<String> {
+        crate::persist::render(Self::configs_of(app), kayak_core::ConfigFormat::Json).ok()
     }
 
     /// Write the running graph to `name`, a file in the server's save
@@ -458,12 +459,12 @@ impl AppState {
         &self,
         name: &str,
         format: Option<ConfigFormat>,
-    ) -> Result<PathBuf, StreamerError> {
+    ) -> Result<PathBuf, PipelineError> {
         let target = crate::persist::save_path(&self.save_dir, name)
-            .map_err(StreamerError::InvalidConfig)?;
+            .map_err(PipelineError::InvalidConfig)?;
         let format = format.unwrap_or_else(|| crate::persist::format_of(&target));
 
-        let app = self.lock_streamers();
+        let app = self.lock_pipelines();
         let configs = Self::configs_of(&app);
         // saved anyway — refusing would strand the user's work — but the file
         // won't start as it is, so it can't pass silently
@@ -517,7 +518,7 @@ impl AppState {
     /// A config posted without an `id` got a random petname, and that name is
     /// the only thing a downstream pipeline's `upstream` reference can point
     /// at — so the *resolved* id is what gets written, not the absent one.
-    fn configs_of(app: &HashMap<StreamerId, StreamerHandle>) -> Vec<Config> {
+    fn configs_of(app: &HashMap<PipelineId, PipelineHandle>) -> Vec<Config> {
         app.values()
             .map(|handle| Config {
                 id: Some(handle.shared.id.clone()),
@@ -526,31 +527,31 @@ impl AppState {
             .collect()
     }
 
-    pub fn get_streamers(&self) -> anyhow::Result<serde_json::Value> {
+    pub fn get_pipelines(&self) -> anyhow::Result<serde_json::Value> {
         // the views borrow from the handles, so the guard has to outlive them
-        let app = self.lock_streamers();
+        let app = self.lock_pipelines();
         let views: Vec<_> = app.values().map(|h| h.shared.view()).collect();
-        serde_json::to_value(views).context("failed to serialize streamers")
+        serde_json::to_value(views).context("failed to serialize pipelines")
     }
 
-    pub fn create_streamer(&self, config: Config) -> Result<Arc<Streamer>, StreamerError> {
-        let mut app = self.lock_streamers();
+    pub fn create_pipeline(&self, config: Config) -> Result<Arc<Pipeline>, PipelineError> {
+        let mut app = self.lock_pipelines();
         Self::create_locked(self, &mut app, config)
     }
 
-    /// The body of [`AppState::create_streamer`], against a guard the caller
+    /// The body of [`AppState::create_pipeline`], against a guard the caller
     /// already holds. Loading a whole config file is a run of these under one
     /// lock, so it can't interleave with a request halfway through.
     fn create_locked(
         &self,
-        app: &mut HashMap<StreamerId, StreamerHandle>,
+        app: &mut HashMap<PipelineId, PipelineHandle>,
         config: Config,
-    ) -> Result<Arc<Streamer>, StreamerError> {
-        let streamer = Arc::new(Streamer::new(config)?);
-        let id = streamer.id.clone();
+    ) -> Result<Arc<Pipeline>, PipelineError> {
+        let pipeline = Arc::new(Pipeline::new(config)?);
+        let id = pipeline.id.clone();
         // we require unique ids, so if this id already exists we should error out
         if app.contains_key(id.as_str()) {
-            return Err(StreamerError::DuplicateId(id));
+            return Err(PipelineError::DuplicateId(id));
         }
         let ctx = BuildCtx::with_secrets(
             app,
@@ -560,28 +561,28 @@ impl AppState {
         );
         // building the runtime only fails on things the config got wrong
         // (unknown upstream, unbuildable component)
-        let join_handle = streamer.start(ctx).map_err(|e| {
-            StreamerError::InvalidConfig(e.context(format!("failed to start streamer '{id}'")))
+        let join_handle = pipeline.start(ctx).map_err(|e| {
+            PipelineError::InvalidConfig(e.context(format!("failed to start pipeline '{id}'")))
         })?;
 
-        let streamer_handle = StreamerHandle {
+        let pipeline_handle = PipelineHandle {
             join_handle,
-            shared: Arc::clone(&streamer),
+            shared: Arc::clone(&pipeline),
         };
-        app.insert(id, streamer_handle);
-        tracing::debug!("streamer created: {}", streamer.id);
-        Ok(streamer)
+        app.insert(id, pipeline_handle);
+        tracing::debug!("pipeline created: {}", pipeline.id);
+        Ok(pipeline)
     }
 
-    pub fn delete_streamer(&self, id: &str) -> Result<(), StreamerError> {
-        let mut app = self.lock_streamers();
+    pub fn delete_pipeline(&self, id: &str) -> Result<(), PipelineError> {
+        let mut app = self.lock_pipelines();
         let Some(handle) = app.remove(id) else {
-            tracing::debug!("failed to delete streamer: {} (not found)", id);
-            return Err(StreamerError::NotFound(id.to_string()));
+            tracing::debug!("failed to delete pipeline: {} (not found)", id);
+            return Err(PipelineError::NotFound(id.to_string()));
         };
         // signal cancellation here; the run loop drops out on its own
         handle.shared.cancellation_token.cancel();
-        tracing::debug!("streamer deleted: {}", id);
+        tracing::debug!("pipeline deleted: {}", id);
         Ok(())
     }
 }

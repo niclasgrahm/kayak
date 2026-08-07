@@ -1,10 +1,10 @@
-//! Building a pipeline config from what someone typed into the "add node"
+//! Building a pipeline config from what someone typed into the "add pipeline"
 //! modal.
 //!
-//! The form is not written by hand. `streamer_core::docs` already reflects
+//! The form is not written by hand. `kayak_core::docs` already reflects
 //! every component's fields out of its JSON schema — name, type, required —
 //! and this turns that into a draft the UI can edit and, when it validates,
-//! into the JSON that `POST /api/streams` takes. So a new component, or a new
+//! into the JSON that `POST /api/pipelines` takes. So a new component, or a new
 //! field on one, gets a working form control and the right validation without
 //! anyone touching the frontend, exactly as it gets a docs entry.
 //!
@@ -20,8 +20,8 @@
 
 use std::collections::HashMap;
 
+use kayak_core::docs::{ComponentDoc, Family, FieldDoc, FieldType};
 use serde_json::{Map, Value};
-use streamer_core::docs::{ComponentDoc, Family, FieldDoc, FieldType};
 
 /// One component being filled in.
 ///
@@ -114,7 +114,11 @@ pub fn kinds_in(docs: &[ComponentDoc], family: Family) -> Vec<&ComponentDoc> {
 /// The documentation for one component, or `None` if nothing by that name
 /// exists — which can only happen if the UI is older than the server.
 #[must_use]
-pub fn doc_for<'a>(docs: &'a [ComponentDoc], family: Family, kind: &str) -> Option<&'a ComponentDoc> {
+pub fn doc_for<'a>(
+    docs: &'a [ComponentDoc],
+    family: Family,
+    kind: &str,
+) -> Option<&'a ComponentDoc> {
     docs.iter().find(|c| c.family == family && c.kind == kind)
 }
 
@@ -179,6 +183,9 @@ pub fn parse_field(field: &FieldDoc, raw: &str) -> Result<Option<Value>, String>
                 .parse::<bool>()
                 .map_err(|_| format!("'{trimmed}' is not true or false"))?,
         ),
+        // an id: it goes in a URL path, so surrounding whitespace can only be a
+        // slip of the keyboard
+        FieldType::PipelineId => Value::String(trimmed.to_string()),
         FieldType::Enum(values) => {
             if values.iter().any(|v| v == trimmed) {
                 Value::String(trimmed.to_string())
@@ -231,14 +238,14 @@ pub fn component_json(
 }
 
 /// Characters an id may contain. It ends up in a URL path
-/// (`DELETE /api/streams/{id}`) and in another pipeline's `upstream`, so it is
+/// (`DELETE /api/pipelines/{id}`) and in another pipeline's `upstream`, so it is
 /// kept to the set that needs no escaping anywhere.
 fn is_id_char(c: char) -> bool {
     c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.')
 }
 
 /// The whole form: an id and a flat list of drafts, in, and the body of
-/// `POST /api/streams` out.
+/// `POST /api/pipelines` out.
 ///
 /// A blank id is not an error — the server generates a petname, which is the
 /// documented way to not care what a pipeline is called.
@@ -270,20 +277,26 @@ pub fn build_config(
         };
         match component_json(doc, draft) {
             Ok(value) => stages.entry(draft.family).or_default().push(value),
-            Err(field_errors) => errors.extend(field_errors.into_iter().map(|(field, message)| {
-                FormError::Field {
-                    component: index,
-                    field,
-                    message,
-                }
-            })),
+            Err(field_errors) => {
+                errors.extend(
+                    field_errors
+                        .into_iter()
+                        .map(|(field, message)| FormError::Field {
+                            component: index,
+                            field,
+                            message,
+                        }),
+                )
+            }
         }
     }
 
     // a pipeline with no input could never produce anything; the server rejects
     // one too, but saying so before the round trip is the point of this module
     if !drafts.iter().any(|d| d.family == Family::Input) {
-        errors.push(FormError::Pipeline("a pipeline needs at least one input".to_string()));
+        errors.push(FormError::Pipeline(
+            "a pipeline needs at least one input".to_string(),
+        ));
     }
 
     if !errors.is_empty() {
@@ -320,9 +333,9 @@ pub fn singular(family: Family) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use kayak_core::config::Config;
+    use kayak_core::docs::all_components;
     use serde_json::json;
-    use streamer_core::config::Config;
-    use streamer_core::docs::all_components;
 
     fn docs() -> Vec<ComponentDoc> {
         all_components()
@@ -376,7 +389,10 @@ mod tests {
         let draft = filled(
             Family::Input,
             "nats",
-            &[("urls", "nats://localhost:4222"), ("subject", "test.subject")],
+            &[
+                ("urls", "nats://localhost:4222"),
+                ("subject", "test.subject"),
+            ],
         );
         let json = component_json(&component(Family::Input, "nats"), &draft)
             .map_err(|e| anyhow::anyhow!("{e:?}"))?;
@@ -385,6 +401,38 @@ mod tests {
             json!({"type": "nats", "urls": "nats://localhost:4222", "subject": "test.subject"})
         );
         Ok(())
+    }
+
+    /// A `pipeline` input names another pipeline. The modal renders that as a
+    /// dropdown of the pipelines that exist, but the wire format is the plain
+    /// id — and since it is an id, stray whitespace around it is a slip rather
+    /// than part of the name.
+    #[test]
+    fn a_pipeline_reference_is_built_as_the_id_it_names() -> anyhow::Result<()> {
+        let pipeline = component(Family::Input, "pipeline");
+        assert_eq!(
+            fields_of(&pipeline, None)
+                .iter()
+                .find(|f| f.name == "upstream")
+                .map(|f| f.field_type.clone()),
+            Some(FieldType::PipelineId),
+            "the form would render a text box for it"
+        );
+
+        let draft = filled(Family::Input, "pipeline", &[("upstream", " source ")]);
+        let json = component_json(&pipeline, &draft).map_err(|e| anyhow::anyhow!("{e:?}"))?;
+        assert_eq!(json, json!({"type": "pipeline", "upstream": "source"}));
+        Ok(())
+    }
+
+    /// Nothing picked is still nothing picked: a pipeline with no upstream
+    /// can't be built, and the message belongs on that field.
+    #[test]
+    fn a_pipeline_reference_left_unpicked_is_reported_as_required() {
+        let draft = filled(Family::Input, "pipeline", &[]);
+        let errors = component_json(&component(Family::Input, "pipeline"), &draft)
+            .expect_err("a pipeline input with no upstream should not validate");
+        assert_eq!(errors, [("upstream".to_string(), "required".to_string())]);
     }
 
     /// An untouched optional field is left out entirely. Emitting `""` would be
@@ -456,13 +504,20 @@ mod tests {
         let draft = filled(
             Family::Input,
             "dummy",
-            &[("duration", "5"), ("buffer", r#"{"type": "static", "size": 10}"#)],
+            &[
+                ("duration", "5"),
+                ("buffer", r#"{"type": "static", "size": 10}"#),
+            ],
         );
         let json = component_json(&component(Family::Input, "dummy"), &draft)
             .map_err(|e| anyhow::anyhow!("{e:?}"))?;
         assert_eq!(json["buffer"], json!({"type": "static", "size": 10}));
 
-        let broken = filled(Family::Input, "dummy", &[("duration", "5"), ("buffer", "{")]);
+        let broken = filled(
+            Family::Input,
+            "dummy",
+            &[("duration", "5"), ("buffer", "{")],
+        );
         let errors = component_json(&component(Family::Input, "dummy"), &broken)
             .expect_err("'{' is not JSON");
         assert!(errors[0].1.contains("JSON"), "got: {}", errors[0].1);
@@ -475,10 +530,18 @@ mod tests {
     fn an_enum_shaped_component_is_built_from_the_selected_variant() -> anyhow::Result<()> {
         let filter = component(Family::Transform, "filter");
         let mut draft = draft_of(&filter);
-        assert_eq!(draft.variant.as_deref(), Some("Numeric"), "the first is preselected");
+        assert_eq!(
+            draft.variant.as_deref(),
+            Some("Numeric"),
+            "the first is preselected"
+        );
 
         draft.variant = Some("String".to_string());
-        for (name, value) in [("field", "level"), ("operator", "Contains"), ("value", "warn")] {
+        for (name, value) in [
+            ("field", "level"),
+            ("operator", "Contains"),
+            ("value", "warn"),
+        ] {
             draft.values.insert(name.to_string(), value.to_string());
         }
         let json = component_json(&filter, &draft).map_err(|e| anyhow::anyhow!("{e:?}"))?;
@@ -509,7 +572,7 @@ mod tests {
         assert_eq!(value_type(&string), Some(FieldType::Text));
     }
 
-    /// The end to end shape: this is the body of `POST /api/streams`, and it
+    /// The end to end shape: this is the body of `POST /api/pipelines`, and it
     /// has to deserialize as the very `Config` the server takes.
     #[test]
     fn a_valid_form_builds_a_config_the_server_accepts() -> anyhow::Result<()> {
@@ -518,8 +581,8 @@ mod tests {
             filled(Family::Transform, "buffer", &[("size", "10")]),
             filled(Family::Output, "stdout", &[]),
         ];
-        let value = build_config("my-pipeline", &drafts, &docs())
-            .map_err(|e| anyhow::anyhow!("{e:?}"))?;
+        let value =
+            build_config("my-pipeline", &drafts, &docs()).map_err(|e| anyhow::anyhow!("{e:?}"))?;
 
         let config: Config = serde_json::from_value(value.clone())?;
         assert_eq!(config.id.as_deref(), Some("my-pipeline"));
@@ -549,8 +612,8 @@ mod tests {
     /// gives it a petname.
     #[test]
     fn a_blank_id_is_sent_as_null_rather_than_rejected() -> anyhow::Result<()> {
-        let value = build_config("   ", &[dummy_input()], &docs())
-            .map_err(|e| anyhow::anyhow!("{e:?}"))?;
+        let value =
+            build_config("   ", &[dummy_input()], &docs()).map_err(|e| anyhow::anyhow!("{e:?}"))?;
         assert_eq!(value["id"], Value::Null);
         let config: Config = serde_json::from_value(value)?;
         assert!(config.id.is_none());
@@ -638,7 +701,7 @@ mod tests {
                     continue;
                 }
                 let sample = match field.field_type {
-                    FieldType::Text => "x".to_string(),
+                    FieldType::Text | FieldType::PipelineId => "x".to_string(),
                     FieldType::Integer => "1".to_string(),
                     FieldType::Number => "1.5".to_string(),
                     FieldType::Boolean => "true".to_string(),

@@ -8,10 +8,10 @@
 
 use std::sync::Arc;
 
-use streamer::secrets::{ChainStore, EnvStore, FileStore, SecretStore, resolve};
-use streamer::state::{AppState, StreamerError};
-use streamer::testing::MapSecretStore;
-use streamer_core::config::{Config, Secret};
+use kayak::secrets::{ChainStore, EnvStore, FileStore, SecretStore, resolve};
+use kayak::state::{AppState, PipelineError};
+use kayak::testing::MapSecretStore;
+use kayak_core::config::{Config, Secret};
 
 fn store(values: &[(&str, &str)]) -> MapSecretStore {
     MapSecretStore::new("the test store", values)
@@ -182,21 +182,21 @@ fn a_config_that_references_a_secret_round_trips_unchanged() -> anyhow::Result<(
 /// Building the pipeline is where resolution happens. The nats input connects
 /// lazily, so this exercises the build without needing a broker.
 #[tokio::test]
-async fn a_streamer_builds_from_a_config_that_references_a_secret() -> anyhow::Result<()> {
+async fn a_pipeline_builds_from_a_config_that_references_a_secret() -> anyhow::Result<()> {
     let state = AppState::with_secrets(Arc::new(store(&[("NATS_PASSWORD", "hunter2")])));
-    state.create_streamer(config_referencing_a_secret("with-secret")?)?;
-    assert_eq!(state.get_streamer_ids(), vec!["with-secret".to_string()]);
+    state.create_pipeline(config_referencing_a_secret("with-secret")?)?;
+    assert_eq!(state.get_pipeline_ids(), vec!["with-secret".to_string()]);
     Ok(())
 }
 
 /// The whole point: a pipeline that has been built with a real secret still
-/// hands the *reference* back to `GET /api/streams` and the UI.
+/// hands the *reference* back to `GET /api/pipelines` and the UI.
 #[tokio::test]
-async fn the_api_view_of_a_streamer_never_shows_a_resolved_secret() -> anyhow::Result<()> {
+async fn the_api_view_of_a_pipeline_never_shows_a_resolved_secret() -> anyhow::Result<()> {
     let state = AppState::with_secrets(Arc::new(store(&[("NATS_PASSWORD", "hunter2")])));
-    state.create_streamer(config_referencing_a_secret("with-secret")?)?;
+    state.create_pipeline(config_referencing_a_secret("with-secret")?)?;
 
-    let view = serde_json::to_string(&state.get_streamers()?)?;
+    let view = serde_json::to_string(&state.get_pipelines()?)?;
     assert!(
         !view.contains("hunter2"),
         "the resolved secret leaked into the API view: {view}"
@@ -211,14 +211,14 @@ async fn the_api_view_of_a_streamer_never_shows_a_resolved_secret() -> anyhow::R
 /// A config naming a secret the server doesn't have is the caller's mistake, so
 /// it must fail the build rather than start a pipeline that can't authenticate.
 #[tokio::test]
-async fn a_streamer_whose_secret_is_missing_fails_to_start() -> anyhow::Result<()> {
+async fn a_pipeline_whose_secret_is_missing_fails_to_start() -> anyhow::Result<()> {
     let state = AppState::with_secrets(Arc::new(MapSecretStore::empty()));
     // InvalidConfig is what the HTTP layer turns into a 4xx — a config naming an
     // unknown secret is the caller's mistake, not a server fault
-    let err = match state.create_streamer(config_referencing_a_secret("no-secret")?) {
-        Err(StreamerError::InvalidConfig(e)) => format!("{e:#}"),
+    let err = match state.create_pipeline(config_referencing_a_secret("no-secret")?) {
+        Err(PipelineError::InvalidConfig(e)) => format!("{e:#}"),
         Err(e) => panic!("expected InvalidConfig, got: {e}"),
-        Ok(_) => panic!("a streamer built despite its secret being missing"),
+        Ok(_) => panic!("a pipeline built despite its secret being missing"),
     };
 
     assert!(
@@ -226,8 +226,8 @@ async fn a_streamer_whose_secret_is_missing_fails_to_start() -> anyhow::Result<(
         "the failure should name the missing secret, got: {err}"
     );
     assert!(
-        state.get_streamer_ids().is_empty(),
-        "a streamer that failed to build should not be registered"
+        state.get_pipeline_ids().is_empty(),
+        "a pipeline that failed to build should not be registered"
     );
     Ok(())
 }

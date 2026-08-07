@@ -14,9 +14,9 @@ use std::sync::Arc;
 use tracing::Level;
 
 use clap::Parser;
-use streamer::api_router;
-use streamer::secrets::{ChainStore, EnvStore, FileStore, SecretStore};
-use streamer::state::AppState;
+use kayak::api_router;
+use kayak::secrets::{ChainStore, EnvStore, FileStore, SecretStore};
+use kayak::state::AppState;
 
 #[derive(Parser)]
 struct Args {
@@ -58,7 +58,7 @@ async fn main() -> anyhow::Result<()> {
 
     tracing_subscriber::fmt()
         .with_env_filter(match level {
-            Level::DEBUG => "info,streamer=debug",
+            Level::DEBUG => "info,pipeline=debug",
             _ => "info",
         })
         .init();

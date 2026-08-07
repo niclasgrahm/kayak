@@ -1,21 +1,21 @@
 //! Resolving `${NAME}` references in config into real secret values.
 //!
 //! Config files are version controlled, so they carry *references* to secrets
-//! rather than the secrets themselves (see [`Secret`] in `streamer-core`).
+//! rather than the secrets themselves (see [`Secret`] in `kayak-core`).
 //! Where those references resolve from is a deployment concern, not a config
 //! one, which is why it lives behind the [`SecretStore`] trait: environment
 //! variables suit a local `cargo leptos watch`, a mounted JSON file suits
 //! Docker and Kubernetes, and neither choice reaches the config format.
 //!
-//! Resolution happens once, while a streamer is being built, and yields a
+//! Resolution happens once, while a pipeline is being built, and yields a
 //! [`Resolved`] — which keeps the original template alongside the real value so
 //! that logs and error messages can name a connection without printing its
 //! password.
 
 use anyhow::{Context, Result, bail};
+use kayak_core::config::Secret;
 use std::collections::HashMap;
 use std::path::Path;
-use streamer_core::config::Secret;
 
 /// Where resolved secret values come from.
 ///

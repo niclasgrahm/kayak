@@ -16,9 +16,9 @@ use axum::Router;
 use axum::body::Body;
 use axum::http::{Request, StatusCode, header};
 use http_body_util::BodyExt;
+use kayak::api_router;
+use kayak::state::AppState;
 use serde_json::{Value, json};
-use streamer::api_router;
-use streamer::state::AppState;
 use tower::ServiceExt;
 
 /// A pipeline that will sit idle: the dummy input only ticks once an hour.
@@ -49,7 +49,11 @@ async fn send(app: &Router, req: Request<Body>) -> anyhow::Result<(StatusCode, V
 }
 
 async fn get_layout(app: &Router) -> anyhow::Result<(StatusCode, Value)> {
-    send(app, Request::builder().uri("/api/layout").body(Body::empty())?).await
+    send(
+        app,
+        Request::builder().uri("/api/layout").body(Body::empty())?,
+    )
+    .await
 }
 
 async fn put_layout(app: &Router, layout: &Value) -> anyhow::Result<(StatusCode, Value)> {
@@ -64,7 +68,9 @@ async fn put_layout(app: &Router, layout: &Value) -> anyhow::Result<(StatusCode,
 async fn settings(app: &Router) -> anyhow::Result<Value> {
     Ok(send(
         app,
-        Request::builder().uri("/api/settings").body(Body::empty())?,
+        Request::builder()
+            .uri("/api/settings")
+            .body(Body::empty())?,
     )
     .await?
     .1)
@@ -92,7 +98,7 @@ async fn a_graph_that_has_never_been_arranged_has_an_empty_layout() -> anyhow::R
 
     let (status, body) = get_layout(&app).await?;
     assert_eq!(status, StatusCode::OK);
-    assert_eq!(body["nodes"], json!({}));
+    assert_eq!(body["pipelines"], json!({}));
     assert!(
         !dir.path().join("config.layout.json").exists(),
         "a layout file was written by merely starting up"
@@ -110,7 +116,7 @@ async fn an_arrangement_is_written_immediately_and_read_back() -> anyhow::Result
 
     let arrangement = json!({
         "version": 1,
-        "nodes": { "a": placed(0.0, 0.0), "b": placed(400.0, 300.0) }
+        "pipelines": { "a": placed(0.0, 0.0), "b": placed(400.0, 300.0) }
     });
     let (status, _) = put_layout(&app, &arrangement).await?;
     assert_eq!(status, StatusCode::NO_CONTENT);
@@ -118,11 +124,14 @@ async fn an_arrangement_is_written_immediately_and_read_back() -> anyhow::Result
     let layout_file = dir.path().join("config.layout.json");
     assert!(layout_file.exists(), "nothing was written");
     let on_disk: Value = serde_json::from_str(&std::fs::read_to_string(&layout_file)?)?;
-    assert_eq!(on_disk["nodes"]["b"]["x"], json!(400.0));
+    assert_eq!(on_disk["pipelines"]["b"]["x"], json!(400.0));
 
     // and the next start picks it up
     let restarted = app_from(&path)?;
-    assert_eq!(get_layout(&restarted).await?.1["nodes"]["b"]["y"], json!(300.0));
+    assert_eq!(
+        get_layout(&restarted).await?.1["pipelines"]["b"]["y"],
+        json!(300.0)
+    );
     Ok(())
 }
 
@@ -135,7 +144,7 @@ async fn arranging_the_canvas_is_not_an_unsaved_change() -> anyhow::Result<()> {
     let app = app_from(&path)?;
     assert_eq!(settings(&app).await?["unsaved_changes"], json!(false));
 
-    put_layout(&app, &json!({ "nodes": { "a": placed(600.0, 600.0) } })).await?;
+    put_layout(&app, &json!({ "pipelines": { "a": placed(600.0, 600.0) } })).await?;
     assert_eq!(
         settings(&app).await?["unsaved_changes"],
         json!(false),
@@ -153,14 +162,17 @@ async fn sending_a_smaller_arrangement_drops_what_is_missing() -> anyhow::Result
 
     put_layout(
         &app,
-        &json!({ "nodes": { "a": placed(0.0, 0.0), "b": placed(400.0, 0.0) } }),
+        &json!({ "pipelines": { "a": placed(0.0, 0.0), "b": placed(400.0, 0.0) } }),
     )
     .await?;
-    put_layout(&app, &json!({ "nodes": { "a": placed(0.0, 0.0) } })).await?;
+    put_layout(&app, &json!({ "pipelines": { "a": placed(0.0, 0.0) } })).await?;
 
     let (_, body) = get_layout(&app).await?;
-    assert!(body["nodes"]["b"].is_null(), "'b' was not unpinned: {body}");
-    assert!(!body["nodes"]["a"].is_null());
+    assert!(
+        body["pipelines"]["b"].is_null(),
+        "'b' was not unpinned: {body}"
+    );
+    assert!(!body["pipelines"]["a"].is_null());
     Ok(())
 }
 
@@ -175,15 +187,16 @@ async fn an_adjusted_edge_is_written_and_read_back() -> anyhow::Result<()> {
     let (status, _) = put_layout(
         &app,
         &json!({
-            "nodes": {},
+            "pipelines": {},
             "edges": [{ "from": "a", "to": "b", "offset": -60.0 }]
         }),
     )
     .await?;
     assert_eq!(status, StatusCode::NO_CONTENT);
 
-    let on_disk: Value =
-        serde_json::from_str(&std::fs::read_to_string(dir.path().join("config.layout.json"))?)?;
+    let on_disk: Value = serde_json::from_str(&std::fs::read_to_string(
+        dir.path().join("config.layout.json"),
+    )?)?;
     assert_eq!(on_disk["edges"][0]["offset"], json!(-60.0));
 
     let restarted = app_from(&path)?;
@@ -204,7 +217,7 @@ async fn a_pinned_connection_point_keeps_the_face_it_was_measured_on() -> anyhow
     put_layout(
         &app,
         &json!({
-            "nodes": {},
+            "pipelines": {},
             "edges": [{
                 "from": "a",
                 "to": "b",
@@ -235,7 +248,7 @@ async fn an_arrangement_with_no_adjusted_edges_writes_none() -> anyhow::Result<(
     let (dir, path) = config_dir(&[idle_config("a")])?;
     let app = app_from(&path)?;
 
-    put_layout(&app, &json!({ "nodes": { "a": placed(40.0, 40.0) } })).await?;
+    put_layout(&app, &json!({ "pipelines": { "a": placed(40.0, 40.0) } })).await?;
 
     let written = std::fs::read_to_string(dir.path().join("config.layout.json"))?;
     assert!(!written.contains("edges"), "got: {written}");
@@ -244,15 +257,22 @@ async fn an_arrangement_with_no_adjusted_edges_writes_none() -> anyhow::Result<(
 
 /// A position for a pipeline that no longer exists is harmless — the canvas
 /// simply has nothing to apply it to — and dropping it would lose the
-/// arrangement of a node someone is about to re-create.
+/// arrangement of a pipeline someone is about to re-create.
 #[tokio::test]
 async fn a_position_for_an_unknown_pipeline_is_kept() -> anyhow::Result<()> {
     let (_dir, path) = config_dir(&[idle_config("a")])?;
     let app = app_from(&path)?;
 
-    let (status, _) = put_layout(&app, &json!({ "nodes": { "ghost": placed(20.0, 20.0) } })).await?;
+    let (status, _) = put_layout(
+        &app,
+        &json!({ "pipelines": { "ghost": placed(20.0, 20.0) } }),
+    )
+    .await?;
     assert_eq!(status, StatusCode::NO_CONTENT);
-    assert_eq!(get_layout(&app).await?.1["nodes"]["ghost"]["x"], json!(20.0));
+    assert_eq!(
+        get_layout(&app).await?.1["pipelines"]["ghost"]["x"],
+        json!(20.0)
+    );
     Ok(())
 }
 
@@ -263,9 +283,13 @@ async fn a_position_for_an_unknown_pipeline_is_kept() -> anyhow::Result<()> {
 async fn an_arrangement_without_a_config_file_is_kept_in_memory() -> anyhow::Result<()> {
     let app = api_router(Arc::new(AppState::new()));
 
-    let (status, _) = put_layout(&app, &json!({ "nodes": { "a": placed(80.0, 80.0) } })).await?;
+    let (status, _) =
+        put_layout(&app, &json!({ "pipelines": { "a": placed(80.0, 80.0) } })).await?;
     assert_eq!(status, StatusCode::NO_CONTENT);
-    assert_eq!(get_layout(&app).await?.1["nodes"]["a"]["x"], json!(80.0));
+    assert_eq!(
+        get_layout(&app).await?.1["pipelines"]["a"]["x"],
+        json!(80.0)
+    );
     Ok(())
 }
 
@@ -276,17 +300,20 @@ async fn reverting_reloads_the_arrangement_from_disk() -> anyhow::Result<()> {
     let (dir, path) = config_dir(&[idle_config("a")])?;
     std::fs::write(
         dir.path().join("config.layout.json"),
-        json!({ "nodes": { "a": placed(100.0, 100.0) } }).to_string(),
+        json!({ "pipelines": { "a": placed(100.0, 100.0) } }).to_string(),
     )?;
     let app = app_from(&path)?;
 
-    put_layout(&app, &json!({ "nodes": { "a": placed(999.0, 999.0) } })).await?;
-    assert_eq!(get_layout(&app).await?.1["nodes"]["a"]["x"], json!(999.0));
+    put_layout(&app, &json!({ "pipelines": { "a": placed(999.0, 999.0) } })).await?;
+    assert_eq!(
+        get_layout(&app).await?.1["pipelines"]["a"]["x"],
+        json!(999.0)
+    );
 
     // the file is the thing being reverted *to*, so change it underneath
     std::fs::write(
         dir.path().join("config.layout.json"),
-        json!({ "nodes": { "a": placed(40.0, 40.0) } }).to_string(),
+        json!({ "pipelines": { "a": placed(40.0, 40.0) } }).to_string(),
     )?;
     let req = Request::builder()
         .method("POST")
@@ -295,7 +322,7 @@ async fn reverting_reloads_the_arrangement_from_disk() -> anyhow::Result<()> {
     assert_eq!(send(&app, req).await?.0, StatusCode::NO_CONTENT);
 
     assert_eq!(
-        get_layout(&app).await?.1["nodes"]["a"]["x"],
+        get_layout(&app).await?.1["pipelines"]["a"]["x"],
         json!(40.0),
         "reverting kept the arrangement that was only in memory"
     );

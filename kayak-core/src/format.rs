@@ -90,9 +90,15 @@ mod tests {
 
     #[test]
     fn a_yaml_extension_names_a_yaml_file() {
-        assert_eq!(ConfigFormat::of_file_name("config.yaml"), ConfigFormat::Yaml);
+        assert_eq!(
+            ConfigFormat::of_file_name("config.yaml"),
+            ConfigFormat::Yaml
+        );
         assert_eq!(ConfigFormat::of_file_name("config.yml"), ConfigFormat::Yaml);
-        assert_eq!(ConfigFormat::of_file_name("CONFIG.YAML"), ConfigFormat::Yaml);
+        assert_eq!(
+            ConfigFormat::of_file_name("CONFIG.YAML"),
+            ConfigFormat::Yaml
+        );
         assert_eq!(
             ConfigFormat::of_file_name("  spaced.yaml  "),
             ConfigFormat::Yaml

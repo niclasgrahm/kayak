@@ -9,8 +9,8 @@
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 
-use streamer_core::{
-    EdgeEnd, EventPayload, LayoutFile, NodeLayout, PortLayout, Side, StreamerId, UiEvent,
+use kayak_core::{
+    EdgeEnd, EventPayload, LayoutFile, PipelineId, PipelineLayout, PortLayout, Side, UiEvent,
     config::Config, stage,
 };
 
@@ -91,8 +91,8 @@ impl Default for Camera {
 /// An edge runs from a parent's bottom edge to its child's top edge.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct Edge {
-    pub from: StreamerId,
-    pub to: StreamerId,
+    pub from: PipelineId,
+    pub to: PipelineId,
 }
 
 /// How many ticks an edge stays lit. The visible fade is a CSS transition on
@@ -106,29 +106,29 @@ pub const PULSE_TICK_MS: u64 = 50;
 ///
 /// A batch crossing an edge is observed at the *receiving* end: a downstream
 /// pipeline logging an `input` event has just been handed a batch by the
-/// pipeline above it. An output event is not enough on its own — a streamer
+/// pipeline above it. An output event is not enough on its own — a pipeline
 /// emits to its output whether or not anything is subscribed. A failure moves
 /// no data and so lights nothing, whatever stage it came from.
 ///
-/// A node with several upstreams lights *all* of its incoming edges, because
+/// A pipeline with several upstreams lights *all* of its incoming edges, because
 /// the event says a batch arrived and not which input carried it. Attributing
 /// it would need the input's index on the event; until then over-lighting beats
 /// picking one edge and being wrong about it.
 #[must_use]
-pub fn pulsed_edges(event: &UiEvent, nodes: &[(StreamerId, Vec<StreamerId>)]) -> Vec<Edge> {
+pub fn pulsed_edges(event: &UiEvent, pipelines: &[(PipelineId, Vec<PipelineId>)]) -> Vec<Edge> {
     if event.stage != stage::INPUT || !matches!(event.payload, EventPayload::Batch(_)) {
         return Vec::new();
     }
     // a root's inputs come from outside the graph, so no edge lights up
-    nodes
+    pipelines
         .iter()
-        .find(|(id, _)| *id == event.streamer_id)
+        .find(|(id, _)| *id == event.pipeline_id)
         .map(|(_, parents)| {
             parents
                 .iter()
                 .map(|parent| Edge {
                     from: parent.clone(),
-                    to: event.streamer_id.clone(),
+                    to: event.pipeline_id.clone(),
                 })
                 .collect()
         })
@@ -145,25 +145,25 @@ pub fn tick_pulses(pulses: &mut HashMap<Edge, u8>) -> bool {
     !pulses.is_empty()
 }
 
-/// A streamer's parents in the graph are whatever its `streamer` inputs name as
+/// A pipeline's parents in the graph are whatever its `pipeline` inputs name as
 /// upstream. A pipeline with none of those is a root; a pipeline can also mix
 /// them, being fed by another pipeline *and* by NATS.
 ///
 /// The answer comes from `Config` itself, so the canvas and the server's
 /// config-file writer read the graph the same way.
 #[must_use]
-pub fn upstreams_of(config: &Config) -> Vec<&StreamerId> {
+pub fn upstreams_of(config: &Config) -> Vec<&PipelineId> {
     config.upstreams()
 }
 
 /// `(id, upstreams)` pairs — the only thing the layout needs to know about a
 /// pipeline. An upstream that isn't in the list is dropped, so a dangling
-/// reference lays out as a root rather than vanishing; a node naming the same
+/// reference lays out as a root rather than vanishing; a pipeline naming the same
 /// upstream twice gets one edge, not two.
 #[must_use]
-pub fn nodes_from(streamers: &[(StreamerId, Config)]) -> Vec<(StreamerId, Vec<StreamerId>)> {
-    let known: HashSet<&StreamerId> = streamers.iter().map(|(id, _)| id).collect();
-    streamers
+pub fn pipelines_from(pipelines: &[(PipelineId, Config)]) -> Vec<(PipelineId, Vec<PipelineId>)> {
+    let known: HashSet<&PipelineId> = pipelines.iter().map(|(id, _)| id).collect();
+    pipelines
         .iter()
         .map(|(id, config)| {
             let mut seen = HashSet::new();
@@ -178,23 +178,25 @@ pub fn nodes_from(streamers: &[(StreamerId, Config)]) -> Vec<(StreamerId, Vec<St
         .collect()
 }
 
-/// Depth of every node, where a root is 0 and a node with parents sits one row
+/// Depth of every pipeline, where a root is 0 and a pipeline with parents sits one row
 /// below its *deepest* parent — so every edge points downwards, which is what
-/// makes the drawing readable once a node can have several parents.
+/// makes the drawing readable once a pipeline can have several parents.
 ///
-/// A node with no parents, or one sitting in a cycle (which the server
+/// A pipeline with no parents, or one sitting in a cycle (which the server
 /// shouldn't allow, but we don't get to assume), is treated as a root rather
 /// than recursing forever.
-fn depths(nodes: &[(StreamerId, Vec<StreamerId>)]) -> HashMap<StreamerId, usize> {
-    let parents: HashMap<&StreamerId, &Vec<StreamerId>> =
-        nodes.iter().map(|(id, parents)| (id, parents)).collect();
+fn depths(pipelines: &[(PipelineId, Vec<PipelineId>)]) -> HashMap<PipelineId, usize> {
+    let parents: HashMap<&PipelineId, &Vec<PipelineId>> = pipelines
+        .iter()
+        .map(|(id, parents)| (id, parents))
+        .collect();
 
     fn depth_of<'a>(
-        id: &'a StreamerId,
-        parents: &HashMap<&'a StreamerId, &'a Vec<StreamerId>>,
-        resolved: &mut HashMap<StreamerId, usize>,
-        // the path being walked right now; a node reappearing on it is a cycle
-        on_path: &mut HashSet<StreamerId>,
+        id: &'a PipelineId,
+        parents: &HashMap<&'a PipelineId, &'a Vec<PipelineId>>,
+        resolved: &mut HashMap<PipelineId, usize>,
+        // the path being walked right now; a pipeline reappearing on it is a cycle
+        on_path: &mut HashSet<PipelineId>,
     ) -> usize {
         if let Some(known) = resolved.get(id) {
             return *known;
@@ -217,7 +219,7 @@ fn depths(nodes: &[(StreamerId, Vec<StreamerId>)]) -> HashMap<StreamerId, usize>
     }
 
     let mut resolved = HashMap::new();
-    for (id, _) in nodes {
+    for (id, _) in pipelines {
         depth_of(id, &parents, &mut resolved, &mut HashSet::new());
     }
     resolved
@@ -231,9 +233,9 @@ fn depths(nodes: &[(StreamerId, Vec<StreamerId>)]) -> HashMap<StreamerId, usize>
 /// wins and the content scrolls, which is the only way a resize handle can mean
 /// anything on a card whose content decides its own size.
 fn height_of(
-    id: &StreamerId,
-    heights: &HashMap<StreamerId, f64>,
-    placed: Option<NodeLayout>,
+    id: &PipelineId,
+    heights: &HashMap<PipelineId, f64>,
+    placed: Option<PipelineLayout>,
 ) -> f64 {
     if let Some(pinned) = placed.and_then(|p| p.height) {
         return snap_up(pinned.max(MIN_CARD_HEIGHT));
@@ -254,18 +256,18 @@ fn height_of(
 /// once the cards report their real size.
 ///
 /// `placed` is what the user has arranged by hand, and it simply overwrites the
-/// automatic answer for the nodes it names. Notably it does *not* take those
-/// nodes out of the automatic flow: the row a pinned card came from keeps its
+/// automatic answer for the pipelines it names. Notably it does *not* take those
+/// pipelines out of the automatic flow: the row a pinned card came from keeps its
 /// slot, so dragging one card doesn't rearrange every other card on the canvas.
 /// Moving a card on top of another is then possible — and is the user's
 /// business, in the same way that it is in every other editor with a canvas.
 #[must_use]
 pub fn layout(
-    nodes: &[(StreamerId, Vec<StreamerId>)],
-    heights: &HashMap<StreamerId, f64>,
+    pipelines: &[(PipelineId, Vec<PipelineId>)],
+    heights: &HashMap<PipelineId, f64>,
     placed: &LayoutFile,
-) -> HashMap<StreamerId, CardGeom> {
-    let mut out = auto_layout(nodes, heights, placed);
+) -> HashMap<PipelineId, CardGeom> {
+    let mut out = auto_layout(pipelines, heights, placed);
     for (id, geom) in &mut out {
         if let Some(pinned) = placed.get(id) {
             geom.x = snap(pinned.x);
@@ -276,32 +278,34 @@ pub fn layout(
     out
 }
 
-/// The automatic layout, which is what every node gets until it is dragged.
+/// The automatic layout, which is what every pipeline gets until it is dragged.
 fn auto_layout(
-    nodes: &[(StreamerId, Vec<StreamerId>)],
-    heights: &HashMap<StreamerId, f64>,
+    pipelines: &[(PipelineId, Vec<PipelineId>)],
+    heights: &HashMap<PipelineId, f64>,
     placed: &LayoutFile,
-) -> HashMap<StreamerId, CardGeom> {
-    let depths = depths(nodes);
+) -> HashMap<PipelineId, CardGeom> {
+    let depths = depths(pipelines);
 
-    let mut rows: BTreeMap<usize, Vec<StreamerId>> = BTreeMap::new();
-    for (id, _) in nodes {
+    let mut rows: BTreeMap<usize, Vec<PipelineId>> = BTreeMap::new();
+    for (id, _) in pipelines {
         let depth = depths.get(id).copied().unwrap_or(0);
         rows.entry(depth).or_default().push(id.clone());
     }
 
-    let parents: HashMap<&StreamerId, &Vec<StreamerId>> =
-        nodes.iter().map(|(id, parents)| (id, parents)).collect();
+    let parents: HashMap<&PipelineId, &Vec<PipelineId>> = pipelines
+        .iter()
+        .map(|(id, parents)| (id, parents))
+        .collect();
 
     // position within its own row, used to order the row below
-    let mut order: HashMap<StreamerId, usize> = HashMap::new();
+    let mut order: HashMap<PipelineId, usize> = HashMap::new();
     let mut row_widths: Vec<(usize, f64)> = Vec::new();
 
     for (depth, ids) in &mut rows {
         ids.sort_by(|a, b| {
-            // a node with several parents sits under the leftmost of them,
+            // a pipeline with several parents sits under the leftmost of them,
             // which keeps its edges from crossing the whole row
-            let key = |id: &StreamerId| {
+            let key = |id: &PipelineId| {
                 parents
                     .get(id)
                     .and_then(|ps| ps.iter().filter_map(|p| order.get(p)).min())
@@ -319,10 +323,7 @@ fn auto_layout(
         row_widths.push((*depth, count * CARD_WIDTH + (count - 1.0).max(0.0) * H_GAP));
     }
 
-    let widest = row_widths
-        .iter()
-        .map(|(_, w)| *w)
-        .fold(0.0_f64, f64::max);
+    let widest = row_widths.iter().map(|(_, w)| *w).fold(0.0_f64, f64::max);
 
     let mut out = HashMap::new();
     let mut y = 0.0;
@@ -363,7 +364,7 @@ fn auto_layout(
 /// Padded by a cell: a route leaves the bottom-most card by a stub before it
 /// turns, and the svg is what would clip it.
 #[must_use]
-pub fn bounds(placements: &HashMap<StreamerId, CardGeom>) -> (f64, f64) {
+pub fn bounds(placements: &HashMap<PipelineId, CardGeom>) -> (f64, f64) {
     let (w, h) = placements.values().fold((0.0_f64, 0.0_f64), |(w, h), g| {
         (w.max(g.x + g.width), h.max(g.y + g.height))
     });
@@ -380,8 +381,8 @@ pub fn bounds(placements: &HashMap<StreamerId, CardGeom>) -> (f64, f64) {
 /// already off-grid — one from an older layout file, say — come back onto it
 /// the first time it is touched.
 #[must_use]
-pub fn dragged(geom: CardGeom, dx: f64, dy: f64, pinned_height: Option<f64>) -> NodeLayout {
-    NodeLayout {
+pub fn dragged(geom: CardGeom, dx: f64, dy: f64, pinned_height: Option<f64>) -> PipelineLayout {
+    PipelineLayout {
         x: snap(geom.x + dx),
         y: snap(geom.y + dy),
         width: snap(geom.width),
@@ -396,8 +397,8 @@ pub fn dragged(geom: CardGeom, dx: f64, dy: f64, pinned_height: Option<f64>) -> 
 /// sprang back to its content height the moment it was let go would read as the
 /// handle not working.
 #[must_use]
-pub fn resized(geom: CardGeom, dx: f64, dy: f64) -> NodeLayout {
-    NodeLayout {
+pub fn resized(geom: CardGeom, dx: f64, dy: f64) -> PipelineLayout {
+    PipelineLayout {
         x: snap(geom.x),
         y: snap(geom.y),
         width: snap((geom.width + dx).max(MIN_CARD_WIDTH)),
@@ -760,11 +761,11 @@ pub struct EdgePath {
 /// first, and only then a place on it.
 #[must_use]
 pub fn edge_paths(
-    nodes: &[(StreamerId, Vec<StreamerId>)],
-    placements: &HashMap<StreamerId, CardGeom>,
+    pipelines: &[(PipelineId, Vec<PipelineId>)],
+    placements: &HashMap<PipelineId, CardGeom>,
     arrangement: &LayoutFile,
 ) -> Vec<EdgePath> {
-    let assigned: Vec<Assigned> = edges(nodes)
+    let assigned: Vec<Assigned> = edges(pipelines)
         .into_iter()
         .filter_map(|edge| {
             let from = *placements.get(&edge.from)?;
@@ -799,7 +800,8 @@ pub fn edge_paths(
         .zip(slots)
         .map(|(a, (out_slot, in_slot))| {
             let end = |geom: CardGeom, side: Side, pinned: Option<f64>, slot: Slot| {
-                let along = pinned.unwrap_or_else(|| auto_along(geom, side, slot.index, slot.count));
+                let along =
+                    pinned.unwrap_or_else(|| auto_along(geom, side, slot.index, slot.count));
                 PortHandle {
                     at: port_at(geom, side, along),
                     side,
@@ -898,7 +900,7 @@ fn slots_on_faces(assigned: &[Assigned]) -> Vec<(Slot, Slot)> {
         outgoing: bool,
     }
 
-    let mut faces: BTreeMap<(&StreamerId, Side), Vec<Landing>> = BTreeMap::new();
+    let mut faces: BTreeMap<(&PipelineId, Side), Vec<Landing>> = BTreeMap::new();
     // where along the face's own axis the other card sits
     let across = |side: Side, other: CardGeom| {
         if side.is_vertical() {
@@ -929,7 +931,11 @@ fn slots_on_faces(assigned: &[Assigned]) -> Vec<(Slot, Slot)> {
     let mut out = vec![(Slot::default(), Slot::default()); assigned.len()];
     for mut using in faces.into_values() {
         // ties broken by edge index, which `edges` already sorted by id
-        using.sort_by(|a, b| a.across.total_cmp(&b.across).then_with(|| a.edge.cmp(&b.edge)));
+        using.sort_by(|a, b| {
+            a.across
+                .total_cmp(&b.across)
+                .then_with(|| a.edge.cmp(&b.edge))
+        });
         let count = using.len();
         for (index, landing) in using.into_iter().enumerate() {
             let slot = Slot { index, count };
@@ -945,8 +951,8 @@ fn slots_on_faces(assigned: &[Assigned]) -> Vec<(Slot, Slot)> {
 
 /// Parent → child pairs, in a stable order.
 #[must_use]
-pub fn edges(nodes: &[(StreamerId, Vec<StreamerId>)]) -> Vec<Edge> {
-    let mut edges: Vec<Edge> = nodes
+pub fn edges(pipelines: &[(PipelineId, Vec<PipelineId>)]) -> Vec<Edge> {
+    let mut edges: Vec<Edge> = pipelines
         .iter()
         .flat_map(|(id, parents)| {
             parents.iter().map(|p| Edge {
@@ -1031,40 +1037,44 @@ pub fn approach(camera: Camera, target: Camera, delta_ms: f64) -> (Camera, bool)
     let arrived = (target.x - next.x).abs() < 0.5
         && (target.y - next.y).abs() < 0.5
         && (target.zoom - next.zoom).abs() < 0.001;
-    if arrived { (target, true) } else { (next, false) }
+    if arrived {
+        (target, true)
+    } else {
+        (next, false)
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use streamer_core::config::InputKind;
+    use kayak_core::config::InputKind;
 
-    fn node(id: &str, parent: Option<&str>) -> (StreamerId, Vec<StreamerId>) {
+    fn pipeline(id: &str, parent: Option<&str>) -> (PipelineId, Vec<PipelineId>) {
         (
             id.to_string(),
             parent.map(ToString::to_string).into_iter().collect(),
         )
     }
 
-    /// A node fed by several upstreams at once.
-    fn node_with(id: &str, parents: &[&str]) -> (StreamerId, Vec<StreamerId>) {
+    /// A pipeline fed by several upstreams at once.
+    fn pipeline_with(id: &str, parents: &[&str]) -> (PipelineId, Vec<PipelineId>) {
         (
             id.to_string(),
             parents.iter().map(ToString::to_string).collect(),
         )
     }
 
-    fn no_heights() -> HashMap<StreamerId, f64> {
+    fn no_heights() -> HashMap<PipelineId, f64> {
         HashMap::new()
     }
 
     /// The automatic layout, which is what these tests are about — hand-placed
-    /// nodes get their own tests below.
+    /// pipelines get their own tests below.
     fn lay(
-        nodes: &[(StreamerId, Vec<StreamerId>)],
-        heights: &HashMap<StreamerId, f64>,
-    ) -> HashMap<StreamerId, CardGeom> {
-        layout(nodes, heights, &LayoutFile::default())
+        pipelines: &[(PipelineId, Vec<PipelineId>)],
+        heights: &HashMap<PipelineId, f64>,
+    ) -> HashMap<PipelineId, CardGeom> {
+        layout(pipelines, heights, &LayoutFile::default())
     }
 
     /// An automatically placed port: the `index`-th of `count` on a face.
@@ -1109,7 +1119,7 @@ mod tests {
         near(value % GRID, 0.0) || near((value % GRID).abs(), GRID)
     }
 
-    fn geom(placed: &HashMap<StreamerId, CardGeom>, id: &str) -> CardGeom {
+    fn geom(placed: &HashMap<PipelineId, CardGeom>, id: &str) -> CardGeom {
         match placed.get(id) {
             Some(g) => *g,
             None => panic!("'{id}' was not placed; got {:?}", placed.keys()),
@@ -1118,7 +1128,7 @@ mod tests {
 
     #[test]
     fn a_single_root_sits_at_the_origin() {
-        let placed = lay(&[node("a", None)], &no_heights());
+        let placed = lay(&[pipeline("a", None)], &no_heights());
         assert_eq!(geom(&placed, "a").x, 0.0);
         assert_eq!(geom(&placed, "a").y, 0.0);
     }
@@ -1126,7 +1136,10 @@ mod tests {
     /// The whole point of the hierarchy: a child is strictly below its parent.
     #[test]
     fn a_child_is_placed_below_its_parent() {
-        let placed = lay(&[node("a", None), node("b", Some("a"))], &no_heights());
+        let placed = lay(
+            &[pipeline("a", None), pipeline("b", Some("a"))],
+            &no_heights(),
+        );
         assert!(
             geom(&placed, "b").y > geom(&placed, "a").y + geom(&placed, "a").height,
             "child overlaps or sits above its parent: {placed:?}"
@@ -1137,7 +1150,11 @@ mod tests {
     #[test]
     fn depth_accumulates_down_a_chain() {
         let placed = lay(
-            &[node("a", None), node("b", Some("a")), node("c", Some("b"))],
+            &[
+                pipeline("a", None),
+                pipeline("b", Some("a")),
+                pipeline("c", Some("b")),
+            ],
             &no_heights(),
         );
         assert!(geom(&placed, "a").y < geom(&placed, "b").y);
@@ -1150,18 +1167,27 @@ mod tests {
     fn siblings_share_a_row_and_are_centred_under_their_parent() {
         let placed = lay(
             &[
-                node("source", None),
-                node("a", Some("source")),
-                node("b", Some("source")),
-                node("c", Some("source")),
+                pipeline("source", None),
+                pipeline("a", Some("source")),
+                pipeline("b", Some("source")),
+                pipeline("c", Some("source")),
             ],
             &no_heights(),
         );
 
-        let row: Vec<f64> = ["a", "b", "c"].iter().map(|id| geom(&placed, id).y).collect();
-        assert!(row.windows(2).all(|w| w[0] == w[1]), "siblings not on one row");
+        let row: Vec<f64> = ["a", "b", "c"]
+            .iter()
+            .map(|id| geom(&placed, id).y)
+            .collect();
+        assert!(
+            row.windows(2).all(|w| w[0] == w[1]),
+            "siblings not on one row"
+        );
 
-        let mut xs: Vec<f64> = ["a", "b", "c"].iter().map(|id| geom(&placed, id).x).collect();
+        let mut xs: Vec<f64> = ["a", "b", "c"]
+            .iter()
+            .map(|id| geom(&placed, id).x)
+            .collect();
         xs.sort_by(f64::total_cmp);
         assert!(
             xs.windows(2).all(|w| w[1] - w[0] >= CARD_WIDTH),
@@ -1176,33 +1202,30 @@ mod tests {
         );
     }
 
-    /// The API returns streamers in HashMap order, so the layout must not
+    /// The API returns pipelines in HashMap order, so the layout must not
     /// depend on the order it gets them in — cards would shuffle on refresh.
     #[test]
     fn the_layout_is_independent_of_input_order() {
         let forward = [
-            node("source", None),
-            node("a", Some("source")),
-            node("b", Some("source")),
+            pipeline("source", None),
+            pipeline("a", Some("source")),
+            pipeline("b", Some("source")),
         ];
         let mut reversed = forward.clone();
         reversed.reverse();
 
-        assert_eq!(
-            lay(&forward, &no_heights()),
-            lay(&reversed, &no_heights())
-        );
+        assert_eq!(lay(&forward, &no_heights()), lay(&reversed, &no_heights()));
     }
 
     /// Measured heights push the next row further down, so tall cards don't
     /// overlap the row below.
     #[test]
     fn a_measured_row_height_pushes_the_next_row_down() {
-        let nodes = [node("a", None), node("b", Some("a"))];
+        let pipelines = [pipeline("a", None), pipeline("b", Some("a"))];
         let tall = HashMap::from([("a".to_string(), 900.0)]);
 
-        let default_y = geom(&lay(&nodes, &no_heights()), "b").y;
-        let pushed_y = geom(&lay(&nodes, &tall), "b").y;
+        let default_y = geom(&lay(&pipelines, &no_heights()), "b").y;
+        let pushed_y = geom(&lay(&pipelines, &tall), "b").y;
         assert!(
             pushed_y > default_y,
             "a 900px card did not push the row below it down"
@@ -1213,28 +1236,28 @@ mod tests {
     /// and must lay out as a root rather than disappearing.
     #[test]
     fn an_unknown_upstream_lays_out_as_a_root() {
-        let streamers = vec![(
+        let pipelines = vec![(
             "orphan".to_string(),
             config_of(vec![upstream_input("was-deleted")]),
         )];
-        let nodes = nodes_from(&streamers);
-        assert_eq!(nodes, vec![node("orphan", None)]);
+        let pipelines = pipelines_from(&pipelines);
+        assert_eq!(pipelines, vec![pipeline("orphan", None)]);
 
-        let placed = lay(&nodes, &no_heights());
+        let placed = lay(&pipelines, &no_heights());
         assert_eq!(geom(&placed, "orphan").y, 0.0);
     }
 
-    /// With several parents a node has to sit below the deepest of them, or an
+    /// With several parents a pipeline has to sit below the deepest of them, or an
     /// edge would run upwards from a parent in a lower row.
     #[test]
-    fn a_node_sits_below_its_deepest_parent() {
-        let nodes = [
-            node("root", None),
-            node("mid", Some("root")),
+    fn a_pipeline_sits_below_its_deepest_parent() {
+        let pipelines = [
+            pipeline("root", None),
+            pipeline("mid", Some("root")),
             // fed by both the root and the row below it
-            node_with("joined", &["root", "mid"]),
+            pipeline_with("joined", &["root", "mid"]),
         ];
-        let placed = lay(&nodes, &no_heights());
+        let placed = lay(&pipelines, &no_heights());
 
         let (root_y, mid_y, joined_y) = (
             geom(&placed, "root").y,
@@ -1244,7 +1267,7 @@ mod tests {
         assert!(mid_y > root_y, "mid should be a row below root");
         assert!(
             joined_y > mid_y,
-            "a node fed by root and mid should sit below mid, not beside it"
+            "a pipeline fed by root and mid should sit below mid, not beside it"
         );
     }
 
@@ -1252,9 +1275,13 @@ mod tests {
     /// hide half the graph's shape.
     #[test]
     fn a_join_draws_one_edge_per_parent() {
-        let nodes = [node("a", None), node("b", None), node_with("c", &["a", "b"])];
+        let pipelines = [
+            pipeline("a", None),
+            pipeline("b", None),
+            pipeline_with("c", &["a", "b"]),
+        ];
         assert_eq!(
-            edges(&nodes),
+            edges(&pipelines),
             vec![
                 Edge {
                     from: "a".to_string(),
@@ -1266,15 +1293,26 @@ mod tests {
                 },
             ]
         );
-        assert_eq!(edge_paths(&nodes, &lay(&nodes, &no_heights()), &LayoutFile::default()).len(), 2);
+        assert_eq!(
+            edge_paths(
+                &pipelines,
+                &lay(&pipelines, &no_heights()),
+                &LayoutFile::default()
+            )
+            .len(),
+            2
+        );
     }
 
     /// The server shouldn't be able to produce a cycle, but the layout runs on
     /// whatever the API returned and must not hang if one shows up.
     #[test]
     fn a_cycle_does_not_hang_the_layout() {
-        let placed = lay(&[node("a", Some("b")), node("b", Some("a"))], &no_heights());
-        assert_eq!(placed.len(), 2, "both nodes should still be placed");
+        let placed = lay(
+            &[pipeline("a", Some("b")), pipeline("b", Some("a"))],
+            &no_heights(),
+        );
+        assert_eq!(placed.len(), 2, "both pipelines should still be placed");
     }
 
     /// The edge overlay is sized from this; if it under-reports, edges get
@@ -1283,9 +1321,9 @@ mod tests {
     fn bounds_cover_every_card() {
         let placed = lay(
             &[
-                node("source", None),
-                node("a", Some("source")),
-                node("b", Some("source")),
+                pipeline("source", None),
+                pipeline("a", Some("source")),
+                pipeline("b", Some("source")),
             ],
             &no_heights(),
         );
@@ -1303,16 +1341,16 @@ mod tests {
         assert_eq!(bounds(&HashMap::new()), (0.0, 0.0));
     }
 
-    fn arranged(entries: &[(&str, NodeLayout)]) -> LayoutFile {
+    fn arranged(entries: &[(&str, PipelineLayout)]) -> LayoutFile {
         let mut file = LayoutFile::default();
-        for (id, node) in entries {
-            file.nodes.insert((*id).to_string(), *node);
+        for (id, pipeline) in entries {
+            file.pipelines.insert((*id).to_string(), *pipeline);
         }
         file
     }
 
-    fn at(x: f64, y: f64) -> NodeLayout {
-        NodeLayout {
+    fn at(x: f64, y: f64) -> PipelineLayout {
+        PipelineLayout {
             x,
             y,
             width: CARD_WIDTH,
@@ -1324,26 +1362,37 @@ mod tests {
     /// put, however the automatic layout would have placed it.
     #[test]
     fn a_hand_placed_card_overrides_the_automatic_layout() {
-        let nodes = [node("a", None), node("b", Some("a"))];
-        let placed = layout(&nodes, &no_heights(), &arranged(&[("b", at(900.0, 40.0))]));
+        let pipelines = [pipeline("a", None), pipeline("b", Some("a"))];
+        let placed = layout(
+            &pipelines,
+            &no_heights(),
+            &arranged(&[("b", at(900.0, 40.0))]),
+        );
 
         assert_eq!(geom(&placed, "b").x, 900.0);
         assert_eq!(geom(&placed, "b").y, 40.0);
         // ...and the card nobody touched is where it always was
-        assert_eq!(geom(&placed, "a"), geom(&lay(&nodes, &no_heights()), "a"));
+        assert_eq!(
+            geom(&placed, "a"),
+            geom(&lay(&pipelines, &no_heights()), "a")
+        );
     }
 
     /// Moving one card must not shuffle every other card on the canvas: the row
     /// a pinned card came out of keeps its slot.
     #[test]
     fn pinning_one_card_leaves_its_siblings_alone() {
-        let nodes = [
-            node("root", None),
-            node("a", Some("root")),
-            node("b", Some("root")),
+        let pipelines = [
+            pipeline("root", None),
+            pipeline("a", Some("root")),
+            pipeline("b", Some("root")),
         ];
-        let before = lay(&nodes, &no_heights());
-        let after = layout(&nodes, &no_heights(), &arranged(&[("a", at(2000.0, 2000.0))]));
+        let before = lay(&pipelines, &no_heights());
+        let after = layout(
+            &pipelines,
+            &no_heights(),
+            &arranged(&[("a", at(2000.0, 2000.0))]),
+        );
 
         assert_eq!(geom(&after, "b"), geom(&before, "b"));
         assert_eq!(geom(&after, "root"), geom(&before, "root"));
@@ -1355,7 +1404,7 @@ mod tests {
     #[test]
     fn an_off_grid_entry_is_snapped_when_it_is_used() {
         let placed = layout(
-            &[node("a", None)],
+            &[pipeline("a", None)],
             &no_heights(),
             &arranged(&[("a", at(103.0, 217.0))]),
         );
@@ -1368,18 +1417,21 @@ mod tests {
     /// content.
     #[test]
     fn a_pinned_height_beats_the_measured_one() {
-        let nodes = [node("a", None)];
+        let pipelines = [pipeline("a", None)];
         let measured = HashMap::from([("a".to_string(), 400.0)]);
-        assert_eq!(geom(&lay(&nodes, &measured), "a").height, 400.0);
+        assert_eq!(geom(&lay(&pipelines, &measured), "a").height, 400.0);
 
         let pinned = arranged(&[(
             "a",
-            NodeLayout {
+            PipelineLayout {
                 height: Some(160.0),
                 ..at(0.0, 0.0)
             },
         )]);
-        assert_eq!(geom(&layout(&nodes, &measured, &pinned), "a").height, 160.0);
+        assert_eq!(
+            geom(&layout(&pipelines, &measured, &pinned), "a").height,
+            160.0
+        );
     }
 
     /// Heights come from measuring content, so they arrive at arbitrary pixel
@@ -1387,8 +1439,12 @@ mod tests {
     /// sides off-grid too. Rounding *up* is what keeps the content fitting.
     #[test]
     fn a_measured_height_is_rounded_up_onto_the_grid() {
-        let nodes = [node("a", None)];
-        let height = geom(&lay(&nodes, &HashMap::from([("a".to_string(), 253.0)])), "a").height;
+        let pipelines = [pipeline("a", None)];
+        let height = geom(
+            &lay(&pipelines, &HashMap::from([("a".to_string(), 253.0)])),
+            "a",
+        )
+        .height;
         assert_eq!(height, 260.0);
         assert!(height >= 253.0, "the card would be clipped");
     }
@@ -1397,9 +1453,17 @@ mod tests {
     /// into itself, so rounding has to be idempotent or the card oscillates.
     #[test]
     fn rounding_a_height_that_is_already_on_the_grid_changes_nothing() {
-        let nodes = [node("a", None)];
-        let once = geom(&lay(&nodes, &HashMap::from([("a".to_string(), 253.0)])), "a").height;
-        let twice = geom(&lay(&nodes, &HashMap::from([("a".to_string(), once)])), "a").height;
+        let pipelines = [pipeline("a", None)];
+        let once = geom(
+            &lay(&pipelines, &HashMap::from([("a".to_string(), 253.0)])),
+            "a",
+        )
+        .height;
+        let twice = geom(
+            &lay(&pipelines, &HashMap::from([("a".to_string(), once)])),
+            "a",
+        )
+        .height;
         assert_eq!(once, twice);
     }
 
@@ -1450,24 +1514,24 @@ mod tests {
     fn a_pinned_width_is_used_by_the_layout() {
         let wide = arranged(&[(
             "a",
-            NodeLayout {
+            PipelineLayout {
                 width: 500.0,
                 ..at(0.0, 0.0)
             },
         )]);
-        let placed = layout(&[node("a", None)], &no_heights(), &wide);
+        let placed = layout(&[pipeline("a", None)], &no_heights(), &wide);
         assert_eq!(geom(&placed, "a").width, 500.0);
     }
 
     #[test]
     fn edges_connect_every_child_to_its_parent() {
-        let nodes = [
-            node("source", None),
-            node("a", Some("source")),
-            node("b", Some("source")),
+        let pipelines = [
+            pipeline("source", None),
+            pipeline("a", Some("source")),
+            pipeline("b", Some("source")),
         ];
         assert_eq!(
-            edges(&nodes),
+            edges(&pipelines),
             vec![
                 Edge {
                     from: "source".to_string(),
@@ -1506,14 +1570,14 @@ mod tests {
     fn every_route_is_made_of_horizontal_and_vertical_segments() {
         let from = card(200.0, 200.0, 360.0, 200.0);
         for to in [
-            card(200.0, 600.0, 360.0, 200.0),   // directly below
-            card(900.0, 640.0, 360.0, 200.0),   // below and to the right
-            card(-500.0, 620.0, 360.0, 200.0),  // below and to the left
-            card(900.0, 200.0, 360.0, 200.0),   // directly to the right
-            card(-500.0, 240.0, 360.0, 200.0),  // to the left
-            card(200.0, -300.0, 360.0, 200.0),  // above: a backwards edge
-            card(220.0, 220.0, 360.0, 200.0),   // overlapping
-            card(560.0, 400.0, 360.0, 200.0),   // corner to corner, no clearance
+            card(200.0, 600.0, 360.0, 200.0),  // directly below
+            card(900.0, 640.0, 360.0, 200.0),  // below and to the right
+            card(-500.0, 620.0, 360.0, 200.0), // below and to the left
+            card(900.0, 200.0, 360.0, 200.0),  // directly to the right
+            card(-500.0, 240.0, 360.0, 200.0), // to the left
+            card(200.0, -300.0, 360.0, 200.0), // above: a backwards edge
+            card(220.0, 220.0, 360.0, 200.0),  // overlapping
+            card(560.0, 400.0, 360.0, 200.0),  // corner to corner, no clearance
         ] {
             let (from_side, to_side) = sides_between(from, to);
             let points = auto_route(
@@ -1557,9 +1621,9 @@ mod tests {
     fn a_child_a_row_below_is_joined_downwards_however_far_to_the_side_it_is() {
         let from = card(0.0, 0.0, 360.0, 200.0);
         for to in [
-            card(0.0, 400.0, 360.0, 200.0),      // straight below
-            card(2000.0, 400.0, 360.0, 200.0),   // below, far to the right
-            card(-2000.0, 400.0, 360.0, 200.0),  // below, far to the left
+            card(0.0, 400.0, 360.0, 200.0),     // straight below
+            card(2000.0, 400.0, 360.0, 200.0),  // below, far to the right
+            card(-2000.0, 400.0, 360.0, 200.0), // below, far to the left
         ] {
             assert_eq!(
                 sides_between(from, to),
@@ -1647,8 +1711,14 @@ mod tests {
         let path = rounded_path(&tight, CORNER);
         assert!(path.starts_with("M 0 0"), "{path}");
         // the bend is at most half of the 4px segments, so nothing runs past x=4
-        for token in path.split_whitespace().filter_map(|t| t.parse::<f64>().ok()) {
-            assert!((0.0..=4.0).contains(&token), "{token} is outside the route: {path}");
+        for token in path
+            .split_whitespace()
+            .filter_map(|t| t.parse::<f64>().ok())
+        {
+            assert!(
+                (0.0..=4.0).contains(&token),
+                "{token} is outside the route: {path}"
+            );
         }
     }
 
@@ -1817,19 +1887,19 @@ mod tests {
     /// A fan-out: one source feeding three children, which is the shape where
     /// pinning one port could plausibly disturb the others.
     struct Fan {
-        nodes: Vec<(StreamerId, Vec<StreamerId>)>,
-        placed: HashMap<StreamerId, CardGeom>,
+        pipelines: Vec<(PipelineId, Vec<PipelineId>)>,
+        placed: HashMap<PipelineId, CardGeom>,
     }
 
     fn fan() -> Fan {
-        let nodes = vec![
-            node("root", None),
-            node("a", Some("root")),
-            node("b", Some("root")),
-            node("c", Some("root")),
+        let pipelines = vec![
+            pipeline("root", None),
+            pipeline("a", Some("root")),
+            pipeline("b", Some("root")),
+            pipeline("c", Some("root")),
         ];
-        let placed = lay(&nodes, &no_heights());
-        Fan { nodes, placed }
+        let placed = lay(&pipelines, &no_heights());
+        Fan { pipelines, placed }
     }
 
     fn drawn(paths: &[EdgePath], to: &str) -> EdgePath {
@@ -1844,7 +1914,7 @@ mod tests {
     /// route starts from there.
     #[test]
     fn a_pinned_port_puts_the_edge_where_it_was_told() {
-        let Fan { nodes, placed } = fan();
+        let Fan { pipelines, placed } = fan();
         let mut arrangement = LayoutFile::default();
         arrangement.set_edge_port(
             "root",
@@ -1856,12 +1926,14 @@ mod tests {
             }),
         );
 
-        let pinned = drawn(&edge_paths(&nodes, &placed, &arrangement), "a");
+        let pinned = drawn(&edge_paths(&pipelines, &placed, &arrangement), "a");
         let root = placed["root"];
         assert!(pinned.from_port.pinned);
         assert_eq!(pinned.from_port.at, (root.x + 40.0, root.y + root.height));
         assert!(
-            pinned.path.starts_with(&format!("M {} {}", root.x + 40.0, root.y + root.height)),
+            pinned
+                .path
+                .starts_with(&format!("M {} {}", root.x + 40.0, root.y + root.height)),
             "the route does not start at the pinned port: {}",
             pinned.path
         );
@@ -1872,8 +1944,8 @@ mod tests {
     /// there, rather than counting it and squeezing up around a gap.
     #[test]
     fn pinning_one_port_does_not_move_the_others() {
-        let Fan { nodes, placed } = fan();
-        let automatic = edge_paths(&nodes, &placed, &LayoutFile::default());
+        let Fan { pipelines, placed } = fan();
+        let automatic = edge_paths(&pipelines, &placed, &LayoutFile::default());
 
         let mut arrangement = LayoutFile::default();
         arrangement.set_edge_port(
@@ -1885,7 +1957,7 @@ mod tests {
                 along: 20.0,
             }),
         );
-        let adjusted = edge_paths(&nodes, &placed, &arrangement);
+        let adjusted = edge_paths(&pipelines, &placed, &arrangement);
 
         // 'b' moved to where it was put...
         assert_ne!(
@@ -1908,7 +1980,7 @@ mod tests {
     /// which is self-healing, and needs no cleanup pass over the file.
     #[test]
     fn a_pinned_port_on_a_face_the_route_no_longer_uses_is_ignored() {
-        let Fan { nodes, placed } = fan();
+        let Fan { pipelines, placed } = fan();
         // pinned on the left face; the route actually leaves by the bottom
         let mut stale = LayoutFile::default();
         stale.set_edge_port(
@@ -1921,8 +1993,11 @@ mod tests {
             }),
         );
 
-        let automatic = drawn(&edge_paths(&nodes, &placed, &LayoutFile::default()), "a");
-        let with_stale = drawn(&edge_paths(&nodes, &placed, &stale), "a");
+        let automatic = drawn(
+            &edge_paths(&pipelines, &placed, &LayoutFile::default()),
+            "a",
+        );
+        let with_stale = drawn(&edge_paths(&pipelines, &placed, &stale), "a");
         assert_eq!(with_stale.from_port.at, automatic.from_port.at);
         assert!(!with_stale.from_port.pinned);
     }
@@ -1931,7 +2006,7 @@ mod tests {
     /// is as likely to be the confusing one as the leaving end.
     #[test]
     fn the_arriving_end_can_be_pinned_too() {
-        let Fan { nodes, placed } = fan();
+        let Fan { pipelines, placed } = fan();
         let mut arrangement = LayoutFile::default();
         arrangement.set_edge_port(
             "root",
@@ -1943,7 +2018,7 @@ mod tests {
             }),
         );
 
-        let edge = drawn(&edge_paths(&nodes, &placed, &arrangement), "a");
+        let edge = drawn(&edge_paths(&pipelines, &placed, &arrangement), "a");
         let child = placed["a"];
         assert_eq!(edge.to_port.at, (child.x + 300.0, child.y));
         assert!(edge.to_port.pinned);
@@ -1974,8 +2049,11 @@ mod tests {
     /// a drag has nothing to clamp against.
     #[test]
     fn a_port_handle_describes_the_face_it_is_on() {
-        let Fan { nodes, placed } = fan();
-        let edge = drawn(&edge_paths(&nodes, &placed, &LayoutFile::default()), "a");
+        let Fan { pipelines, placed } = fan();
+        let edge = drawn(
+            &edge_paths(&pipelines, &placed, &LayoutFile::default()),
+            "a",
+        );
 
         assert_eq!(edge.from_port.side, Side::Bottom);
         assert_eq!(edge.from_port.length, placed["root"].width);
@@ -1992,17 +2070,17 @@ mod tests {
     /// and its neighbours are not.
     #[test]
     fn an_adjusted_edge_is_the_only_one_that_moves() {
-        let nodes = [
-            node("root", None),
-            node("a", Some("root")),
-            node("b", Some("root")),
+        let pipelines = [
+            pipeline("root", None),
+            pipeline("a", Some("root")),
+            pipeline("b", Some("root")),
         ];
-        let placed = lay(&nodes, &no_heights());
+        let placed = lay(&pipelines, &no_heights());
 
-        let automatic = edge_paths(&nodes, &placed, &LayoutFile::default());
+        let automatic = edge_paths(&pipelines, &placed, &LayoutFile::default());
         let mut arrangement = LayoutFile::default();
         arrangement.set_edge_offset("root", "a", 60.0);
-        let adjusted = edge_paths(&nodes, &placed, &arrangement);
+        let adjusted = edge_paths(&pipelines, &placed, &arrangement);
 
         let path_to = |paths: &[EdgePath], to: &str| {
             paths
@@ -2020,16 +2098,20 @@ mod tests {
     /// the edge above it and the ones below it.
     #[test]
     fn edge_paths_follow_a_card_that_changes_height() {
-        let nodes = [
-            node("source", None),
-            node("a", Some("source")),
-            node("b", Some("a")),
+        let pipelines = [
+            pipeline("source", None),
+            pipeline("a", Some("source")),
+            pipeline("b", Some("a")),
         ];
 
-        let small = edge_paths(&nodes, &lay(&nodes, &no_heights()), &LayoutFile::default());
+        let small = edge_paths(
+            &pipelines,
+            &lay(&pipelines, &no_heights()),
+            &LayoutFile::default(),
+        );
         let grown = edge_paths(
-            &nodes,
-            &lay(&nodes, &HashMap::from([("a".to_string(), 600.0)])),
+            &pipelines,
+            &lay(&pipelines, &HashMap::from([("a".to_string(), 600.0)])),
             &LayoutFile::default(),
         );
 
@@ -2044,13 +2126,13 @@ mod tests {
     /// be dropped rather than drawn from the origin.
     #[test]
     fn an_edge_to_an_unplaced_card_is_skipped() {
-        let nodes = [node("a", None), node("b", Some("a"))];
-        assert!(edge_paths(&nodes, &HashMap::new(), &LayoutFile::default()).is_empty());
+        let pipelines = [pipeline("a", None), pipeline("b", Some("a"))];
+        assert!(edge_paths(&pipelines, &HashMap::new(), &LayoutFile::default()).is_empty());
     }
 
-    fn batch_event(streamer_id: &str, stage: &str) -> UiEvent {
+    fn batch_event(pipeline_id: &str, stage: &str) -> UiEvent {
         UiEvent::batch(
-            streamer_id.to_string(),
+            pipeline_id.to_string(),
             stage,
             std::sync::Arc::new(Vec::new()),
         )
@@ -2060,9 +2142,9 @@ mod tests {
     /// edge above it, which is the whole signal the blink is built on.
     #[test]
     fn an_input_event_lights_the_edge_from_its_upstream() {
-        let nodes = [node("a", None), node("b", Some("a"))];
+        let pipelines = [pipeline("a", None), pipeline("b", Some("a"))];
         assert_eq!(
-            pulsed_edges(&batch_event("b", stage::INPUT), &nodes),
+            pulsed_edges(&batch_event("b", stage::INPUT), &pipelines),
             vec![Edge {
                 from: "a".to_string(),
                 to: "b".to_string()
@@ -2070,17 +2152,17 @@ mod tests {
         );
     }
 
-    /// The event says a batch arrived, not which input brought it, so a node
+    /// The event says a batch arrived, not which input brought it, so a pipeline
     /// with two upstreams lights both edges rather than guessing.
     #[test]
     fn an_input_event_lights_every_incoming_edge() {
-        let nodes = [
-            node("a", None),
-            node("b", None),
-            node_with("c", &["a", "b"]),
+        let pipelines = [
+            pipeline("a", None),
+            pipeline("b", None),
+            pipeline_with("c", &["a", "b"]),
         ];
         assert_eq!(
-            pulsed_edges(&batch_event("c", stage::INPUT), &nodes),
+            pulsed_edges(&batch_event("c", stage::INPUT), &pipelines),
             vec![
                 Edge {
                     from: "a".to_string(),
@@ -2094,31 +2176,31 @@ mod tests {
         );
     }
 
-    /// A streamer emits to its output whether or not anything is listening, so
+    /// A pipeline emits to its output whether or not anything is listening, so
     /// an output event says nothing about an edge.
     #[test]
     fn an_output_event_lights_nothing() {
-        let nodes = [node("a", None), node("b", Some("a"))];
-        assert!(pulsed_edges(&batch_event("b", stage::OUTPUT), &nodes).is_empty());
+        let pipelines = [pipeline("a", None), pipeline("b", Some("a"))];
+        assert!(pulsed_edges(&batch_event("b", stage::OUTPUT), &pipelines).is_empty());
     }
 
     /// A failure at the input stage is the *absence* of a batch, so it must not
     /// light the edge an arriving batch would have.
     #[test]
     fn an_error_event_lights_nothing() {
-        let nodes = [node("a", None), node("b", Some("a"))];
+        let pipelines = [pipeline("a", None), pipeline("b", Some("a"))];
         let failed = UiEvent::error("b".to_string(), stage::INPUT, &"upstream went away");
-        assert!(pulsed_edges(&failed, &nodes).is_empty());
+        assert!(pulsed_edges(&failed, &pipelines).is_empty());
     }
 
     /// A root is fed from outside the graph — NATS, a timer — and has no edge
     /// coming into it to light up.
     #[test]
     fn an_input_event_on_a_root_lights_nothing() {
-        let nodes = [node("a", None), node("b", Some("a"))];
-        assert!(pulsed_edges(&batch_event("a", stage::INPUT), &nodes).is_empty());
+        let pipelines = [pipeline("a", None), pipeline("b", Some("a"))];
+        assert!(pulsed_edges(&batch_event("a", stage::INPUT), &pipelines).is_empty());
         // and a pipeline that isn't on the canvas at all can't light anything
-        assert!(pulsed_edges(&batch_event("ghost", stage::INPUT), &nodes).is_empty());
+        assert!(pulsed_edges(&batch_event("ghost", stage::INPUT), &pipelines).is_empty());
     }
 
     /// Pulses have to burn out on their own, or an edge that saw one batch
@@ -2306,7 +2388,7 @@ mod tests {
     }
 
     #[test]
-    fn a_streamer_input_is_the_only_kind_with_an_upstream() {
+    fn a_pipeline_input_is_the_only_kind_with_an_upstream() {
         assert_eq!(
             upstreams_of(&config_of(vec![upstream_input("p1")])),
             vec![&"p1".to_string()]
@@ -2319,10 +2401,9 @@ mod tests {
     #[test]
     fn a_pipeline_reports_every_upstream_it_names() {
         assert_eq!(
-            upstreams_of(&config_of(vec![
-                upstream_input("p1"),
-                upstream_input("p2"),
-            ])),
+            upstreams_of(&config_of(
+                vec![upstream_input("p1"), upstream_input("p2"),]
+            )),
             vec![&"p1".to_string(), &"p2".to_string()]
         );
         assert_eq!(
@@ -2335,7 +2416,7 @@ mod tests {
     /// would otherwise draw the edge twice and pulse it twice.
     #[test]
     fn the_same_upstream_named_twice_yields_one_edge() {
-        let streamers = vec![
+        let pipelines = vec![
             ("p1".to_string(), config_of(vec![dummy_input()])),
             (
                 "child".to_string(),
@@ -2343,7 +2424,7 @@ mod tests {
             ),
         ];
         assert_eq!(
-            nodes_from(&streamers),
+            pipelines_from(&pipelines),
             vec![
                 ("p1".to_string(), vec![]),
                 ("child".to_string(), vec!["p1".to_string()]),
@@ -2351,26 +2432,26 @@ mod tests {
         );
     }
 
-    fn upstream_input(upstream: &str) -> streamer_core::config::InputConfig {
-        use streamer_core::config::StreamerConfig;
-        streamer_core::config::InputConfig {
-            kind: InputKind::Streamer(StreamerConfig {
+    fn upstream_input(upstream: &str) -> kayak_core::config::InputConfig {
+        use kayak_core::config::PipelineConfig;
+        kayak_core::config::InputConfig {
+            kind: InputKind::Pipeline(PipelineConfig {
                 upstream: upstream.to_string(),
             }),
             buffer: None,
         }
     }
 
-    fn dummy_input() -> streamer_core::config::InputConfig {
-        use streamer_core::config::DummyConfig;
-        streamer_core::config::InputConfig {
+    fn dummy_input() -> kayak_core::config::InputConfig {
+        use kayak_core::config::DummyConfig;
+        kayak_core::config::InputConfig {
             kind: InputKind::Dummy(DummyConfig { duration: 1 }),
             buffer: None,
         }
     }
 
-    fn config_of(inputs: Vec<streamer_core::config::InputConfig>) -> Config {
-        use streamer_core::config::{OutputConfig, OutputKind, StdoutOutputConfig};
+    fn config_of(inputs: Vec<kayak_core::config::InputConfig>) -> Config {
+        use kayak_core::config::{OutputConfig, OutputKind, StdoutOutputConfig};
         Config {
             id: None,
             inputs,

@@ -1,13 +1,13 @@
 use std::sync::Arc;
 
 use axum::{Json, extract::State, http::StatusCode, response::IntoResponse};
-use streamer_core::LayoutFile;
+use kayak_core::LayoutFile;
 
 use crate::{handlers::error::AppError, state::AppState};
 
 /// Where the cards sit on the canvas.
 ///
-/// Served separately from `/api/streams` because it is a different kind of
+/// Served separately from `/api/pipelines` because it is a different kind of
 /// thing: the stream list is what the server is running, this is how someone
 /// chose to look at it. A client that ignores this endpoint gets an
 /// automatically laid out graph, which is the point.

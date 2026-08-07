@@ -1,8 +1,8 @@
 [workspace]
-members = ["streamer-core", "frontend"]
+members = ["kayak-core", "frontend"]
 
 [package]
-name = "streamer"
+name = "kayak"
 version = "0.1.0"
 edition = "2024"
 
@@ -36,8 +36,8 @@ split-debuginfo = "packed"
 debug = "line-tables-only"
 
 [[workspace.metadata.leptos]]
-name = "streamer"
-bin-package = "streamer"
+name = "kayak"
+bin-package = "kayak"
 lib-package = "frontend"
 bin-features = []
 lib-features = ["hydrate"]
@@ -48,7 +48,7 @@ site-pkg-dir = "pkg"
 style-file = "style/main.scss"
 
 [dependencies]
-streamer-core = { path = "streamer-core" }
+kayak-core = { path = "kayak-core" }
 anyhow = "1.0.102"
 askama = "0.16.0"
 async-nats = "0.48.0"

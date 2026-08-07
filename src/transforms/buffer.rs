@@ -1,13 +1,12 @@
 use std::sync::Arc;
 
-use streamer_core::config::BufferTransformConfig;
+use kayak_core::config::BufferTransformConfig;
 
 use crate::{
     BuildCtx,
     inputs::MessageBatch,
     transforms::{BuildTransform, Transform},
 };
-
 
 impl BuildTransform for BufferTransformConfig {
     fn build(self, _ctx: &mut BuildCtx) -> anyhow::Result<Box<dyn Transform>> {
