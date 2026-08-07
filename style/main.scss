@@ -1097,6 +1097,43 @@ body {
   }
 }
 
+// A connection's settings, beside the name that was clicked. The sidebar is
+// 220px wide and scrolls, and `overflow-y: auto` computes overflow-x to `auto`
+// as well — so a card positioned inside the list would be clipped at the
+// sidebar's edge rather than reaching over the canvas. `fixed` is what gets it
+// out, and the `top` comes from the row's rect at click time.
+.connection-card {
+  position: fixed;
+  left: 226px;
+  z-index: 10;
+  width: 260px;
+  background: var(--bg-panel);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  // the same lift the modal has, so the card reads as being above the canvas
+  // rather than drawn on it
+  box-shadow: 0 4px 14px rgba(0, 0, 0, 0.45);
+  padding: 6px;
+  // a postgres connection is five rows; anything longer scrolls rather than
+  // running off the bottom of the window
+  max-height: 60vh;
+  overflow-y: auto;
+
+  .connection-card-name {
+    font-family: var(--font-mono);
+    font-size: 12px;
+    padding: 0 2px 5px;
+    margin-bottom: 5px;
+    border-bottom: 1px solid var(--border);
+  }
+
+  // the value column carries urls and `${SECRET}` references, which are the
+  // reason the card exists — give them the room the name column doesn't need
+  .property {
+    grid-template-columns: 34% 1fr;
+  }
+}
+
 .modal-backdrop {
   position: fixed;
   inset: 0;

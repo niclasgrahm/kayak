@@ -8,10 +8,10 @@ use leptos_meta::*;
 use leptos_router::components::{A, Route, Router, Routes};
 use leptos_router::path;
 use leptos_use::{
-    UseElementSizeOptions, UseElementSizeReturn, UseEventSourceReturn, UseIntervalFnOptions,
-    UseRafFnCallbackArgs, UseRafFnOptions, use_element_size, use_element_size_with_options,
-    use_event_listener, use_event_source, use_interval_fn_with_options, use_raf_fn_with_options,
-    use_window,
+    UseElementSizeOptions, UseElementSizeReturn, UseEventListenerOptions, UseEventSourceReturn,
+    UseIntervalFnOptions, UseRafFnCallbackArgs, UseRafFnOptions, use_element_size,
+    use_element_size_with_options, use_event_listener, use_event_listener_with_options,
+    use_event_source, use_interval_fn_with_options, use_raf_fn_with_options, use_window,
 };
 use std::collections::{HashMap, HashSet};
 
@@ -1419,19 +1419,28 @@ fn PipelineList() -> impl IntoView {
 
 /// The connections, with the same `+` and the same armed delete.
 ///
-/// A row is a name and a kind and nothing else: what is *in* a connection is
-/// often a credential reference, and the sidebar is the wrong place to put
-/// those. There is no camera to move either — a connection isn't on the canvas
-/// — so unlike a pipeline row this one doesn't click through to anything.
+/// A row is a name and a kind; clicking one opens its settings in a card
+/// beside it. There is no camera to move — a connection isn't on the canvas —
+/// so the card *is* what a row clicks through to, and it is the only place the
+/// settings can be read at all. Showing a credential there is safe for the
+/// reason `Secret` exists: what is stored is the `${NAME}` reference, and that
+/// is what the row renders.
 #[component]
 fn ConnectionList() -> impl IntoView {
     let state = expect_context::<AppState>();
     let armed = RwSignal::new(Option::<String>::None);
     let failure = RwSignal::new(Option::<String>::None);
+    // which connection's card is open, and the viewport y its row was at when
+    // it opened. The card is `position: fixed` because the sidebar scrolls —
+    // `overflow-y: auto` computes overflow-x to `auto` too, so an absolutely
+    // positioned card escaping to the right would be clipped by it instead.
+    let opened = RwSignal::new(Option::<OpenConnection>::None);
 
     let delete = move |id: String| {
         armed.set(None);
         failure.set(None);
+        // the card is about to be about a connection that no longer exists
+        opened.set(None);
         leptos::task::spawn_local(async move {
             let result = ApiClient {
                 base: String::new(),
@@ -1447,8 +1456,28 @@ fn ConnectionList() -> impl IntoView {
         });
     };
 
+    // The card is pinned to a row's position at the moment it opened, so a
+    // scroll would strand it beside the wrong name. The element that scrolls is
+    // the sidebar, an ancestor this component doesn't own, and scroll events
+    // don't bubble — so this listens on the document in the capture phase,
+    // which is the one way to hear a scroll anywhere above.
+    let list = NodeRef::<leptos::html::Div>::new();
+    let _ = use_event_listener_with_options(
+        document(),
+        leptos::ev::scroll,
+        move |ev| {
+            // ...but every card on the canvas has a log that scrolls itself as
+            // messages arrive, and capturing at the document hears all of them.
+            // Only a scroll of something the list is *inside* can move the row.
+            if scrolled_above(&ev, list) {
+                opened.set(None);
+            }
+        },
+        UseEventListenerOptions::default().capture(true),
+    );
+
     view! {
-        <div class="sidebar-list">
+        <div class="sidebar-list" node_ref=list>
             <div class="sidebar-header">
                 <span class="sidebar-title">"connections"</span>
                 <Show when=move || state.editing()>
@@ -1477,11 +1506,35 @@ fn ConnectionList() -> impl IntoView {
                 list.into_iter()
                     .map(|(id, kind)| {
                         let (arm_id, delete_id, is_armed) = (id.clone(), id.clone(), id.clone());
+                        let open_id = StoredValue::new(id.clone());
                         let armed_here = Memo::new(move |_| {
                             armed.get().as_deref() == Some(is_armed.as_str())
                         });
+                        let open_here = Memo::new(move |_| {
+                            opened.with(|o| {
+                                o.as_ref().is_some_and(|o| {
+                                    open_id.with_value(|id| o.id == *id)
+                                })
+                            })
+                        });
                         view! {
-                            <div class="tree-item" on:click=move |_| armed.set(None)>
+                            <div
+                                class="tree-item"
+                                class:selected=move || open_here.get()
+                                on:click=move |ev| {
+                                    armed.set(None);
+                                    if open_here.get() {
+                                        opened.set(None);
+                                    } else {
+                                        opened
+                                            .set(
+                                                Some(
+                                                    OpenConnection::at(open_id.get_value(), &ev),
+                                                ),
+                                            );
+                                    }
+                                }
+                            >
                                 <span class="tree-label">{id.clone()}</span>
                                 <span class="section-kind">{kind}</span>
                                 <Show when=move || state.editing()>
@@ -1518,6 +1571,78 @@ fn ConnectionList() -> impl IntoView {
                     })
                     .collect_view()
                     .into_any()
+            }}
+            {move || {
+                opened.get().map(|open| view! { <ConnectionCard open=open /> })
+            }}
+        </div>
+    }
+}
+
+/// Whether a scroll happened in something `inside` sits within — which is to
+/// say, whether it moved `inside` on the screen. `Node::contains` reports true
+/// of a node and itself, which is right here: a list that scrolls its own
+/// content moves its rows too.
+fn scrolled_above(ev: &leptos::ev::Event, inside: NodeRef<leptos::html::Div>) -> bool {
+    use wasm_bindgen::JsCast;
+    let Some(el) = inside.get_untracked() else {
+        return false;
+    };
+    ev.target()
+        .and_then(|t| t.dyn_into::<leptos::web_sys::Node>().ok())
+        .is_some_and(|scrolled| scrolled.contains(Some(&el)))
+}
+
+/// The connection whose settings are on show, and where to put the card.
+///
+/// The row's position is captured when it is clicked rather than measured on
+/// render: the card is `position: fixed`, and a rect read during rendering
+/// would be a rect the row may not have yet.
+#[derive(Clone, Debug, PartialEq)]
+struct OpenConnection {
+    id: String,
+    /// viewport y of the row's top edge
+    top: f64,
+}
+
+impl OpenConnection {
+    /// Placed against the row the click landed on — `current_target`, not
+    /// `target`, since the click may well have landed on the label inside it.
+    fn at(id: String, ev: &leptos::ev::MouseEvent) -> Self {
+        use wasm_bindgen::JsCast;
+        let top = ev
+            .current_target()
+            .and_then(|t| t.dyn_into::<leptos::web_sys::Element>().ok())
+            .map_or(0.0, |el| el.get_bounding_client_rect().top());
+        Self { id, top }
+    }
+}
+
+/// A connection's settings, beside the name in the list.
+///
+/// The card is the inspector's section renderer pointed at a connection, so a
+/// new connection kind — or a new field on one — shows up here with no change:
+/// the rows come from the same reflection the "add connection" form does.
+#[component]
+fn ConnectionCard(open: OpenConnection) -> impl IntoView {
+    let state = expect_context::<AppState>();
+    let id = StoredValue::new(open.id.clone());
+
+    let section = Memo::new(move |_| {
+        let connections = state.connections.get()?;
+        let connections = connections.as_ref().ok()?;
+        id.with_value(|id| connections.get(id))
+            .map(inspector::connection_section)
+    });
+
+    view! {
+        <div class="connection-card" style:top=format!("{}px", open.top)>
+            <div class="connection-card-name">{open.id}</div>
+            {move || match section.get() {
+                Some(section) => view! { <SectionView section=section /> }.into_any(),
+                // the list and the card read the same resource, so this is only
+                // the moment between a delete landing and the list reloading
+                None => view! { <div class="empty">"connection is gone"</div> }.into_any(),
             }}
         </div>
     }

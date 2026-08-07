@@ -13,6 +13,7 @@
 //! returns.
 
 use kayak_core::config::Config;
+use kayak_core::connections::ConnectionKind;
 use serde_json::Value;
 
 /// Shown when a config doesn't carry a `type` tag. Every current one does; this
@@ -55,6 +56,21 @@ pub fn input_sections(config: &Config) -> Vec<Section> {
         .iter()
         .map(|i| section_of(serde_json::to_value(i)))
         .collect()
+}
+
+/// A connection's settings, as the same kind-plus-rows a component gets.
+///
+/// A connection is tagged and flattened exactly like a component config is, so
+/// it flattens through the same code and gains the same property for free: a
+/// new connection kind, or a new field on one, shows up without touching this
+/// file. Credentials are safe to render because a [`Secret`] only ever holds
+/// the unresolved `${NAME}` template — the row shows the reference, never the
+/// value.
+///
+/// [`Secret`]: kayak_core::config::Secret
+#[must_use]
+pub fn connection_section(connection: &ConnectionKind) -> Section {
+    section_of(serde_json::to_value(connection))
 }
 
 /// One section per output. Every output receives every batch, so this order is
@@ -155,9 +171,10 @@ mod tests {
     use super::*;
     use kayak_core::config::{
         BufferConfig, BufferTransformConfig, DummyConfig, InputConfig, InputKind, NatsOutputConfig,
-        OutputConfig, OutputKind, ReduceFnKind, ReduceTransformConfig, SplitterTransformConfig,
-        StdoutOutputConfig, TransformConfig, TransformKind,
+        OutputConfig, OutputKind, ReduceFnKind, ReduceTransformConfig, Secret,
+        SplitterTransformConfig, StdoutOutputConfig, TransformConfig, TransformKind,
     };
+    use kayak_core::connections::{KafkaConnection, PostgresConnection};
 
     fn config(input: InputConfig, transforms: Vec<TransformKind>, output: OutputKind) -> Config {
         Config {
@@ -367,5 +384,53 @@ mod tests {
 
         assert_eq!(value_of(&section, "connection"), "local-nats");
         assert_eq!(value_of(&section, "subject"), "test.subject");
+    }
+
+    /// The sidebar's connection card is the component flattener pointed at a
+    /// connection, so the kind heading and the rows have to come out the same
+    /// shape a component's do.
+    #[test]
+    fn a_connection_flattens_to_a_kind_and_its_settings() {
+        let section = connection_section(&ConnectionKind::Postgres(PostgresConnection {
+            host: "localhost".to_string(),
+            database: "events".to_string(),
+            user: "kayak".to_string(),
+            password: Secret::new("${PG_PASSWORD}"),
+            port: Some(5432),
+        }));
+
+        assert_eq!(section.kind, "postgres");
+        assert_eq!(value_of(&section, "host"), "localhost");
+        assert_eq!(value_of(&section, "database"), "events");
+        assert_eq!(value_of(&section, "port"), "5432");
+        // no row for the tag itself: it is the heading
+        assert!(!section.properties.iter().any(|p| p.name == "type"));
+    }
+
+    /// The whole reason a connection is safe to show at all: a `Secret` holds
+    /// the reference, never the value, so the card shows `${PG_PASSWORD}`.
+    #[test]
+    fn a_connection_shows_the_secret_reference_and_not_a_value() {
+        let section = connection_section(&ConnectionKind::Kafka(KafkaConnection {
+            brokers: Secret::new("${KAFKA_BROKERS}"),
+        }));
+
+        assert_eq!(value_of(&section, "brokers"), "${KAFKA_BROKERS}");
+    }
+
+    /// A field left out of the file is left out of the card too, rather than
+    /// showing as an em dash — `port` is `skip_serializing_if`, and a row
+    /// saying "—" would read as "no port" instead of "the default".
+    #[test]
+    fn an_omitted_optional_field_gets_no_row() {
+        let section = connection_section(&ConnectionKind::Postgres(PostgresConnection {
+            host: "localhost".to_string(),
+            database: "events".to_string(),
+            user: "kayak".to_string(),
+            password: Secret::new("${PG_PASSWORD}"),
+            port: None,
+        }));
+
+        assert!(!section.properties.iter().any(|p| p.name == "port"));
     }
 }
