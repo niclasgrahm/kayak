@@ -3,13 +3,61 @@
 ## the canvas
 
 Cards are laid out automatically as a top-to-bottom hierarchy — a `streamer`
-input makes its pipeline a child of the one it names as upstream — with curved
-edges from each parent's bottom edge to its child's top edge. Positions are
-computed, not stored: there is no card dragging yet.
+input makes its pipeline a child of the one it names as upstream — until you
+drag one somewhere else, at which point that card stays put and everything else
+carries on being placed for you. See "arranging the canvas" below.
 
 It is a DAG rather than a tree: a pipeline with several `streamer` inputs has
 several parents, and sits one row below the deepest of them so that every edge
 still points downwards.
+
+Edges are **orthogonal and grid-aligned**: they leave a card's face, run along a
+grid line to a channel between the two cards, and turn in. Vertical wins
+whenever there is room for it, because the graph is a flow and down the page is
+what the flow means — a child one row below its parent is joined bottom to top
+whether it sits underneath or right across the canvas. The side faces are for
+cards that are *level* with each other, which is exactly when a sideways line is
+the one that reads right; a card dragged above its parent leaves by the top, and
+the line reads as running backwards because it does. Edges sharing a face fan
+out along it rather than piling onto one point, in the order of the cards they
+lead to.
+
+**Three parts of a route are draggable in edit mode**, and each is the answer to
+something automatic routing can't get right on its own. Double-click any of them
+to put that part back to automatic.
+
+*The channel* — the middle segment, the part between the two cards and the only
+one not pinned to a port. A dozen edges between the same two rows all choose the
+same half-way line and lie on top of each other; pull them apart and each is
+followable. Stored as an *offset* from that half-way line rather than a
+coordinate, so it survives either card being moved, and clamped to the gap
+between the cards, since past either end the route would double back. A route
+with no middle to move — a straight line between two aligned cards, an L-shape
+between perpendicular faces — has no handle, because one that did nothing would
+be worse than none.
+
+*The two ends.* Which *face* an edge uses stays automatic — that answer is
+nearly always right and it has to keep up as cards move — but where along that
+face it attaches is yours. The fan-out spreads ends evenly, which is a good
+default and a poor answer when two of the lines need to cross to get where they
+are going. Stored as a distance from the start of the face (its left end across
+the top and bottom, its top end up the sides) rather than a fraction of it,
+because that is what the drag meant: "a card's width in from the corner" should
+stay put when the card is made taller.
+
+Each stored end carries the face it was measured on. When the router changes its
+mind — a card moves, and an edge that left by the bottom now leaves by the side
+— the old number means nothing on the new face, so it is ignored and that end
+goes back to automatic. Self-healing, and no cleanup pass over the file.
+
+A pinned end still takes up its slot in the fan-out, even though its position is
+then thrown away. That is what keeps nudging one line from shifting its
+siblings out from under you; it costs an unused gap in the fan, which is a much
+smaller surprise.
+
+One known rough edge, visible rather than wrong: a channel can run straight
+through a card that happens to sit between the two ends. That used to need an
+obstacle-aware router to fix; now it needs a drag.
 
 An edge lights up when a batch crosses it and fades back over ~700ms, so a busy
 graph glows rather than strobes (and doesn't animate at all under
@@ -28,6 +76,12 @@ which input carried it.
 | `edit` in the navbar | switch out of read-only, revealing the controls below |
 | `+` in the sidebar header | open the "add node" modal |
 | `×` on a sidebar row | delete that pipeline (click twice — the first click arms it) |
+| drag a card's title bar (edit mode) | move it; it snaps to the grid |
+| drag a card's bottom-right corner (edit mode) | resize it; also snapped |
+| double-click a card's title bar (edit mode) | put it back under the automatic layout |
+| drag the middle of a line (edit mode) | move that line's channel closer to one card or the other |
+| drag the end of a line (edit mode) | slide where it connects along the card's face |
+| double-click either (edit mode) | put that part of the line back to automatic |
 
 Each card shows its config as a tabbed property list — inputs / transforms /
 outputs — over a live message log. The log carries failures as well as messages:
@@ -186,6 +240,70 @@ still is, which is the distinction the check makes.
 `GET /api/settings` reports the file name and whether there are unsaved changes.
 Without `--config` there is nowhere to save, and the UI says so rather than
 offering a button that can only fail.
+
+## arranging the canvas
+
+Where the cards sit is **not configuration**, and it is deliberately kept out of
+the config file. A config file with pixel coordinates in it stops being
+reviewable, and nothing about a position changes what the server runs. So it
+lives in its own file beside the config: `config.json` is arranged by
+`config.layout.json`, `pipelines.yaml` by `pipelines.layout.json`. Derived from
+the config path rather than configured, so the pair travels together.
+
+It is generated and maintained by the program, and meant to be committed —
+which is why it is written deterministically (ids in one order, no `null`s for
+things nobody set) and atomically, the same as the config file. It holds only
+the cards someone has actually moved:
+
+```json
+{
+  "version": 1,
+  "nodes": {
+    "everything": { "x": 760, "y": 1180, "width": 360, "height": 320 }
+  },
+  "edges": [
+    {
+      "from": "sensors",
+      "to": "hot_readings",
+      "offset": -60,
+      "from_port": { "side": "bottom", "along": 260 }
+    }
+  ]
+}
+```
+
+An absent id is the normal case, not a gap: that card is laid out
+automatically. `height` is absent unless the card was resized, because the two
+are different things — normally a card is as tall as its content, and only an
+explicit resize pins it. `edges` is absent entirely unless a line
+has been adjusted, each of the three adjustments is absent unless it was made,
+and an entry disappears once *all* of them are back to automatic — an undone
+adjustment shouldn't leave a no-op behind in a committed file. An entry naming a
+pipeline that no longer exists is kept rather than pruned; it costs nothing and
+it is still there if the pipeline comes back.
+
+Here the write-through rule is the *opposite* of the config file's, and for the
+same reason: moving a card changes nothing the server runs, so `PUT
+/api/layout` writes immediately (on release, not per frame) and arranging the
+canvas never counts as an unsaved change. There is no save step because there is
+nothing worth reviewing before it lands. It is a full replacement rather than a
+patch, which is what makes "put everything back to automatic" an ordinary send
+of a smaller map. Without a `--config` there is nowhere to put the file and the
+arrangement lasts only as long as the process — honest, and better than refusing
+to let someone tidy the canvas.
+
+**The grid is the unit.** `GRID` in `frontend/src/graph.rs` is 20px, the card
+width is 18 cells, positions and sizes snap to it, ports sit on its lines, and
+edge channels run along them — the background grid you can see is the same one
+things land on. A route only reads as "along the grid" if the things it connects
+are on the grid too, which is also why measured card heights are rounded *up* to
+the next line (up, so content still fits; and idempotent, so the measure → lay
+out → render loop doesn't oscillate between two heights).
+
+Pinning a card does *not* take it out of the automatic flow: the row it came
+from keeps its slot, so dragging one card doesn't rearrange every other card on
+the canvas. Two cards can then be dragged on top of each other, which is the
+user's business in the same way it is in any other editor with a canvas.
 
 ## the component reference
 

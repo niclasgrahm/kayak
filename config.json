@@ -1,5 +1,38 @@
 [
   {
+    "id": "heartbeat",
+    "inputs": [
+      {
+        "type": "dummy",
+        "duration": 1
+      }
+    ],
+    "transforms": [],
+    "outputs": [
+      {
+        "type": "stdout"
+      }
+    ]
+  },
+  {
+    "id": "kafka_events",
+    "inputs": [
+      {
+        "type": "kafka",
+        "brokers": "localhost:9092",
+        "topic": "test.events",
+        "group": "kayak-sample",
+        "start_at": "latest"
+      }
+    ],
+    "transforms": [],
+    "outputs": [
+      {
+        "type": "stdout"
+      }
+    ]
+  },
+  {
     "id": "sensors",
     "inputs": [
       {
@@ -16,73 +49,85 @@
     ]
   },
   {
-    "id": "heartbeat",
+    "id": "everything",
     "inputs": [
       {
-        "type": "dummy",
-        "duration": 1
+        "type": "streamer",
+        "upstream": "sensors"
+      },
+      {
+        "type": "streamer",
+        "upstream": "heartbeat"
+      },
+      {
+        "type": "nats",
+        "urls": "nats://localhost:4222",
+        "subject": "test.aggregated.max"
       }
     ],
     "transforms": [],
     "outputs": [
       {
         "type": "stdout"
+      },
+      {
+        "type": "nats",
+        "urls": "nats://localhost:4222",
+        "subject": "test.everything"
       }
     ]
   },
   {
-    "id": "sensors_60s_sum",
+    "id": "heartbeat_pairs",
     "inputs": [
       {
         "type": "streamer",
-        "upstream": "sensors",
-        "buffer": {
-          "type": "tumbling",
-          "window_seconds": 60
-        }
+        "upstream": "heartbeat"
       }
     ],
     "transforms": [
       {
-        "type": "reducer",
-        "function": "sum",
-        "field": "value"
+        "type": "buffer",
+        "size": 6
+      },
+      {
+        "type": "splitter",
+        "out_size": 2
+      }
+    ],
+    "outputs": [
+      {
+        "type": "stdout"
+      }
+    ]
+  },
+  {
+    "id": "hot_readings",
+    "inputs": [
+      {
+        "type": "streamer",
+        "upstream": "sensors"
+      }
+    ],
+    "transforms": [
+      {
+        "type": "filter",
+        "Numeric": {
+          "field": "value",
+          "operator": "GreaterThan",
+          "value": 90.0
+        }
       }
     ],
     "outputs": [
       {
         "type": "postgres",
         "host": "localhost",
-        "port": 5432,
         "database": "kayak",
         "user": "kayak",
         "password": "${POSTGRES_PASSWORD}",
-        "table": "sensor_sums"
-      }
-    ]
-  },
-  {
-    "id": "sensors_10s_avg",
-    "inputs": [
-      {
-        "type": "streamer",
-        "upstream": "sensors",
-        "buffer": {
-          "type": "tumbling",
-          "window_seconds": 10
-        }
-      }
-    ],
-    "transforms": [
-      {
-        "type": "reducer",
-        "function": "avg",
-        "field": "value"
-      }
-    ],
-    "outputs": [
-      {
-        "type": "stdout"
+        "table": "hot_readings",
+        "port": 5432
       }
     ]
   },
@@ -114,32 +159,115 @@
     ]
   },
   {
-    "id": "hot_readings",
+    "id": "sensors_10s_avg",
     "inputs": [
       {
         "type": "streamer",
-        "upstream": "sensors"
+        "upstream": "sensors",
+        "buffer": {
+          "type": "tumbling",
+          "window_seconds": 10
+        }
       }
     ],
     "transforms": [
       {
-        "type": "filter",
-        "Numeric": {
-          "field": "value",
-          "operator": "GreaterThan",
-          "value": 90.0
+        "type": "reducer",
+        "function": "avg",
+        "field": "value"
+      }
+    ],
+    "outputs": [
+      {
+        "type": "stdout"
+      }
+    ]
+  },
+  {
+    "id": "sensors_60s_sum",
+    "inputs": [
+      {
+        "type": "streamer",
+        "upstream": "sensors",
+        "buffer": {
+          "type": "tumbling",
+          "window_seconds": 60
         }
+      }
+    ],
+    "transforms": [
+      {
+        "type": "reducer",
+        "function": "sum",
+        "field": "value"
       }
     ],
     "outputs": [
       {
         "type": "postgres",
         "host": "localhost",
-        "port": 5432,
         "database": "kayak",
         "user": "kayak",
         "password": "${POSTGRES_PASSWORD}",
-        "table": "hot_readings"
+        "table": "sensor_sums",
+        "port": 5432
+      }
+    ]
+  },
+  {
+    "id": "sensors_archive",
+    "inputs": [
+      {
+        "type": "streamer",
+        "upstream": "sensors",
+        "buffer": {
+          "type": "static",
+          "size": 10
+        }
+      }
+    ],
+    "transforms": [],
+    "outputs": [
+      {
+        "type": "postgres",
+        "host": "localhost",
+        "database": "kayak",
+        "user": "kayak",
+        "password": "${POSTGRES_PASSWORD}",
+        "table": "readings",
+        "port": 5432
+      },
+      {
+        "type": "stdout"
+      }
+    ]
+  },
+  {
+    "id": "slow_requests",
+    "inputs": [
+      {
+        "type": "streamer",
+        "upstream": "kafka_events"
+      }
+    ],
+    "transforms": [
+      {
+        "type": "filter",
+        "Numeric": {
+          "field": "latency_ms",
+          "operator": "GreaterThan",
+          "value": 400.0
+        }
+      }
+    ],
+    "outputs": [
+      {
+        "type": "kafka",
+        "brokers": "localhost:9092",
+        "topic": "test.slow"
+      },
+      {
+        "type": "stdout"
       }
     ]
   },
@@ -184,134 +312,6 @@
         "type": "http",
         "url": "http://localhost:8080/alerts",
         "verb": "POST"
-      }
-    ],
-    "outputs": [
-      {
-        "type": "stdout"
-      }
-    ]
-  },
-  {
-    "id": "sensors_archive",
-    "inputs": [
-      {
-        "type": "streamer",
-        "upstream": "sensors",
-        "buffer": {
-          "type": "static",
-          "size": 10
-        }
-      }
-    ],
-    "transforms": [],
-    "outputs": [
-      {
-        "type": "postgres",
-        "host": "localhost",
-        "port": 5432,
-        "database": "kayak",
-        "user": "kayak",
-        "password": "${POSTGRES_PASSWORD}",
-        "table": "readings"
-      },
-      {
-        "type": "stdout"
-      }
-    ]
-  },
-  {
-    "id": "everything",
-    "inputs": [
-      {
-        "type": "streamer",
-        "upstream": "sensors"
-      },
-      {
-        "type": "streamer",
-        "upstream": "heartbeat"
-      },
-      {
-        "type": "nats",
-        "urls": "nats://localhost:4222",
-        "subject": "test.aggregated.max"
-      }
-    ],
-    "transforms": [],
-    "outputs": [
-      {
-        "type": "stdout"
-      },
-      {
-        "type": "nats",
-        "urls": "nats://localhost:4222",
-        "subject": "test.everything"
-      }
-    ]
-  },
-  {
-    "id": "kafka_events",
-    "inputs": [
-      {
-        "type": "kafka",
-        "brokers": "localhost:9092",
-        "topic": "test.events",
-        "group": "kayak-sample",
-        "start_at": "latest"
-      }
-    ],
-    "transforms": [],
-    "outputs": [
-      {
-        "type": "stdout"
-      }
-    ]
-  },
-  {
-    "id": "slow_requests",
-    "inputs": [
-      {
-        "type": "streamer",
-        "upstream": "kafka_events"
-      }
-    ],
-    "transforms": [
-      {
-        "type": "filter",
-        "Numeric": {
-          "field": "latency_ms",
-          "operator": "GreaterThan",
-          "value": 400.0
-        }
-      }
-    ],
-    "outputs": [
-      {
-        "type": "kafka",
-        "brokers": "localhost:9092",
-        "topic": "test.slow"
-      },
-      {
-        "type": "stdout"
-      }
-    ]
-  },
-  {
-    "id": "heartbeat_pairs",
-    "inputs": [
-      {
-        "type": "streamer",
-        "upstream": "heartbeat"
-      }
-    ],
-    "transforms": [
-      {
-        "type": "buffer",
-        "size": 6
-      },
-      {
-        "type": "splitter",
-        "out_size": 2
       }
     ],
     "outputs": [

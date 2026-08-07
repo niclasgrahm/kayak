@@ -6,8 +6,10 @@ use serde::{Deserialize, Serialize};
 pub mod config;
 pub mod docs;
 pub mod format;
+pub mod layout;
 
 pub use format::ConfigFormat;
+pub use layout::{EdgeEnd, LayoutFile, NodeLayout, PortLayout, Side};
 
 #[derive(Serialize, Deserialize, Clone)]
 pub struct StreamerDto {

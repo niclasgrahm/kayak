@@ -75,7 +75,9 @@ body {
   background-image:
     linear-gradient(rgba(255, 255, 255, 0.045) 1px, transparent 1px),
     linear-gradient(90deg, rgba(255, 255, 255, 0.045) 1px, transparent 1px);
-  background-size: 24px 24px;
+  // overridden inline with the zoomed size; this is the unzoomed `graph::GRID`,
+  // and the two have to agree — the grid is what cards snap to
+  background-size: 20px 20px;
 
   &.panning {
     cursor: grabbing;
@@ -126,6 +128,70 @@ body {
   }
 }
 
+// The two edge handles, in edit mode only: the middle of a route, and each end
+// of it. Both are two lines in the same place — a fat transparent one that
+// catches the pointer, because a 2px stroke is not something anyone can reliably
+// hit, and a visible grip that says the thing can be moved. The svg above sets
+// `pointer-events: none`, so the hit lines turn it back on for themselves.
+.channel-grip,
+.port-grip {
+  .hit {
+    stroke: transparent;
+    stroke-width: 14;
+    stroke-linecap: butt;
+    pointer-events: stroke;
+  }
+
+  // Understated until wanted: the graph is the thing being looked at, and a
+  // handle on every edge shouting for attention would bury it.
+  .grip {
+    stroke: var(--accent);
+    stroke-width: 4;
+    stroke-linecap: round;
+    opacity: 0;
+    pointer-events: none;
+    transition: opacity 120ms ease-out;
+  }
+
+  &:hover .grip,
+  &.held .grip {
+    opacity: 0.7;
+  }
+
+  &.held .grip {
+    opacity: 1;
+  }
+}
+
+// `.vertical` means opposite things on the two handles, because it describes
+// different things: on a channel it is the *route's* direction, and a vertical
+// route's channel is a horizontal bar that slides up and down. On a port it is
+// the *face*, and a top or bottom face is one you slide along sideways.
+.channel-grip .hit {
+  cursor: ew-resize;
+
+  &.vertical {
+    cursor: ns-resize;
+  }
+}
+
+.port-grip {
+  .hit {
+    cursor: ns-resize;
+
+    &.vertical {
+      cursor: ew-resize;
+    }
+  }
+
+  // A port that was placed by hand stays faintly visible rather than waiting to
+  // be hovered: it is the one that will need moving again when the graph
+  // changes around it, and it should be findable without hunting.
+  &.pinned .grip {
+    opacity: 0.35;
+  }
+}
+
 .sidebar {
   width: 220px;
   background: var(--bg-panel);
@@ -147,9 +213,13 @@ body {
   }
 }
 
+// Width, and either height or min-height, come from `graph::layout` as inline
+// styles: a card is a grid-aligned box, and the grid has to agree with the
+// geometry the edges are routed against. Which of the two height properties is
+// set is the difference between a card sized by its content and one someone has
+// resized — see the `Card` component.
 .card {
   position: absolute;
-  width: 340px;
   background: var(--bg-panel);
   border: 1px solid var(--border);
   border-radius: var(--radius);
@@ -163,6 +233,67 @@ body {
     padding: 8px 10px;
     font-weight: 600;
     border-bottom: 1px solid var(--border);
+
+    // In edit mode the title bar is the drag handle, so it says so. Read-only
+    // cards get none of this: the handler isn't attached either.
+    &.draggable {
+      cursor: grab;
+      user-select: none;
+    }
+  }
+
+  // A resized card is the one case where the box is the given size and the
+  // content has to fit *it*, rather than the other way round. The log takes
+  // whatever is left over, so making a card taller buys more log rather than
+  // empty space under one.
+  &.pinned {
+    > .inspector {
+      min-height: 0;
+      overflow: hidden;
+    }
+
+    > .messages {
+      flex: 1;
+      max-height: none;
+    }
+  }
+
+  &.dragging {
+    cursor: grabbing;
+    // lifted off the canvas while it moves, and above its neighbours so it
+    // isn't dragged underneath one of them
+    z-index: 10;
+    box-shadow: 0 10px 28px rgba(0, 0, 0, 0.6);
+    border-color: var(--accent);
+
+    > header.draggable {
+      cursor: grabbing;
+    }
+  }
+}
+
+// Bottom-right corner, in the usual place. Deliberately understated until it is
+// wanted: it only exists in edit mode at all, and shouldn't compete with the
+// card's content for attention once it's there.
+.resize-handle {
+  position: absolute;
+  right: 0;
+  bottom: 0;
+  width: 14px;
+  height: 14px;
+  cursor: nwse-resize;
+  background: linear-gradient(
+    135deg,
+    transparent 0 50%,
+    var(--text-dim) 50% 60%,
+    transparent 60% 70%,
+    var(--text-dim) 70% 80%,
+    transparent 80%
+  );
+  opacity: 0.5;
+
+  &:hover {
+    opacity: 1;
   }
 }
 

@@ -9,7 +9,7 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, MutexGuard};
 use streamer_core::config::Config;
-pub use streamer_core::{ConfigFormat, StreamerId, UiEvent};
+pub use streamer_core::{ConfigFormat, LayoutFile, StreamerId, UiEvent};
 
 #[derive(Serialize)]
 pub struct StreamerHandle {
@@ -96,6 +96,15 @@ pub struct AppState {
     /// is a fingerprint of the *graph*, and saving the same pipelines as YAML
     /// instead of JSON hasn't changed them.
     saved: Mutex<Option<String>>,
+    /// Where the cards have been dragged to on the canvas.
+    ///
+    /// Held beside the graph rather than inside it because it is not part of
+    /// it: no pipeline behaves differently for having a position, and an entry
+    /// for a pipeline that has since been deleted is harmless. Unlike the
+    /// config file, this one *is* written as a side effect of an edit — moving
+    /// a node changes nothing about the running system, so making someone save
+    /// it would be ceremony over a cosmetic act. See [`crate::layout`].
+    layout: Mutex<LayoutFile>,
 }
 
 impl Default for AppState {
@@ -120,6 +129,7 @@ impl AppState {
             secrets,
             config_path: None,
             saved: Mutex::new(None),
+            layout: Mutex::new(LayoutFile::default()),
         }
     }
 
@@ -147,7 +157,62 @@ impl AppState {
         let mut new_state = AppState::with_secrets(secrets);
         new_state.config_path = Some(path.to_path_buf());
         new_state.load_from_config_file()?;
+        new_state.load_layout_file()?;
         Ok(new_state)
+    }
+
+    /// Read the arrangement that belongs to the config file, if there is one.
+    ///
+    /// Separate from [`AppState::load_from_config_file`] because the two fail
+    /// differently: a config that won't load means the server has nothing to
+    /// run, while a layout that won't load only costs the arrangement. It is
+    /// still surfaced rather than swallowed — see [`crate::layout::read`].
+    fn load_layout_file(&self) -> anyhow::Result<()> {
+        let Some(path) = &self.config_path else {
+            return Ok(());
+        };
+        let path = crate::layout::layout_path(path);
+        let layout = crate::layout::read(&path)?;
+        if !layout.is_empty() {
+            tracing::debug!(
+                "loaded {} card positions from {}",
+                layout.nodes.len(),
+                path.display()
+            );
+        }
+        *self.lock_layout() = layout;
+        Ok(())
+    }
+
+    fn lock_layout(&self) -> MutexGuard<'_, LayoutFile> {
+        self.layout.lock().unwrap_or_else(|poisoned| {
+            tracing::warn!("layout lock was poisoned; recovering");
+            poisoned.into_inner()
+        })
+    }
+
+    /// The canvas arrangement, as the UI reads it on load.
+    #[must_use]
+    pub fn layout(&self) -> LayoutFile {
+        self.lock_layout().clone()
+    }
+
+    /// Replace the canvas arrangement and write it to disk.
+    ///
+    /// The write is the point: this is the one thing the UI changes that has no
+    /// "save" step, because there is nothing here worth reviewing before it
+    /// lands. Without a `--config` file there is nowhere to put it, and the
+    /// arrangement lives only as long as the process — which is honest, and
+    /// better than refusing to let someone tidy up the canvas.
+    pub fn set_layout(&self, layout: LayoutFile) -> Result<(), StreamerError> {
+        let mut held = self.lock_layout();
+        if let Some(config_path) = &self.config_path {
+            let path = crate::layout::layout_path(config_path);
+            crate::layout::write(&path, &layout)
+                .with_context(|| format!("failed to save the layout to {}", path.display()))?;
+        }
+        *held = layout;
+        Ok(())
     }
 
     /// Read the config file and start everything in it. Shared by startup and
@@ -225,7 +290,14 @@ impl AppState {
         }
 
         self.load_from_config_file()
-            .context("the running pipelines were stopped, but the config file could not be reloaded")
+            .context("the running pipelines were stopped, but the config file could not be reloaded")?;
+        // Reverting is "go back to what is on disk", and the arrangement is on
+        // disk too. It only warns: the graph is already running by this point,
+        // and refusing the revert over a cosmetic file would be the wrong trade.
+        if let Err(err) = self.load_layout_file() {
+            tracing::warn!("reverted the pipelines, but could not reload the layout: {err:#}");
+        }
+        Ok(())
     }
 
     /// A poisoned lock means another thread panicked while holding it. None of

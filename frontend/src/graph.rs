@@ -9,17 +9,51 @@
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 
-use streamer_core::{EventPayload, StreamerId, UiEvent, config::Config, stage};
+use streamer_core::{
+    EdgeEnd, EventPayload, LayoutFile, NodeLayout, PortLayout, Side, StreamerId, UiEvent,
+    config::Config, stage,
+};
 
-/// Cards are a fixed width; only their height varies with the config they show.
-pub const CARD_WIDTH: f64 = 340.0;
+/// The canvas' grid, in surface pixels.
+///
+/// It used to be decoration. It is now the unit everything is measured in:
+/// cards are placed and sized in multiples of it, ports sit on its lines, and
+/// edges run along them. That is what makes the drawing look deliberate rather
+/// than merely tidy — a route only reads as "along the grid" if the things it
+/// connects are on the grid too.
+pub const GRID: f64 = 20.0;
+
+/// Default card width — 18 grid cells, so a card's centre line lands on a grid
+/// line rather than half way between two.
+pub const CARD_WIDTH: f64 = 18.0 * GRID;
 /// Used until a card has been rendered and measured.
-pub const FALLBACK_CARD_HEIGHT: f64 = 260.0;
-const H_GAP: f64 = 60.0;
-const V_GAP: f64 = 90.0;
+pub const FALLBACK_CARD_HEIGHT: f64 = 13.0 * GRID;
+/// Small enough to be worth dragging to, large enough that the header and one
+/// row of the inspector still fit.
+pub const MIN_CARD_WIDTH: f64 = 9.0 * GRID;
+pub const MIN_CARD_HEIGHT: f64 = 5.0 * GRID;
+const H_GAP: f64 = 4.0 * GRID;
+const V_GAP: f64 = 5.0 * GRID;
 
 pub const MIN_ZOOM: f64 = 0.2;
 pub const MAX_ZOOM: f64 = 2.5;
+
+/// The nearest grid line to `value`.
+#[must_use]
+pub fn snap(value: f64) -> f64 {
+    (value / GRID).round() * GRID
+}
+
+/// The next grid line at or after `value`.
+///
+/// Used for heights, which are *measured* rather than chosen: a card has to be
+/// at least as tall as its content, so rounding down would clip it. Rounding up
+/// is also idempotent, which is what keeps the measure → lay out → render loop
+/// from oscillating between two heights.
+#[must_use]
+pub fn snap_up(value: f64) -> f64 {
+    (value / GRID).ceil() * GRID
+}
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct CardGeom {
@@ -189,6 +223,28 @@ fn depths(nodes: &[(StreamerId, Vec<StreamerId>)]) -> HashMap<StreamerId, usize>
     resolved
 }
 
+/// The height a card occupies, given what it has reported measuring and what
+/// the user may have pinned it to.
+///
+/// The two are different in kind: a measurement is "this is how much content
+/// there is", a pinned height is "this is how tall I want it". A pinned height
+/// wins and the content scrolls, which is the only way a resize handle can mean
+/// anything on a card whose content decides its own size.
+fn height_of(
+    id: &StreamerId,
+    heights: &HashMap<StreamerId, f64>,
+    placed: Option<NodeLayout>,
+) -> f64 {
+    if let Some(pinned) = placed.and_then(|p| p.height) {
+        return snap_up(pinned.max(MIN_CARD_HEIGHT));
+    }
+    heights
+        .get(id)
+        .copied()
+        .filter(|h| *h > 0.0)
+        .map_or(FALLBACK_CARD_HEIGHT, snap_up)
+}
+
 /// Lay the graph out top-to-bottom: one row per depth, rows ordered so that
 /// children follow their parent's order, and every row centred against the
 /// widest one.
@@ -196,10 +252,35 @@ fn depths(nodes: &[(StreamerId, Vec<StreamerId>)]) -> HashMap<StreamerId, usize>
 /// `heights` holds measured card heights; anything not measured yet falls back
 /// to [`FALLBACK_CARD_HEIGHT`], so a first render is roughly right and settles
 /// once the cards report their real size.
+///
+/// `placed` is what the user has arranged by hand, and it simply overwrites the
+/// automatic answer for the nodes it names. Notably it does *not* take those
+/// nodes out of the automatic flow: the row a pinned card came from keeps its
+/// slot, so dragging one card doesn't rearrange every other card on the canvas.
+/// Moving a card on top of another is then possible — and is the user's
+/// business, in the same way that it is in every other editor with a canvas.
 #[must_use]
 pub fn layout(
     nodes: &[(StreamerId, Vec<StreamerId>)],
     heights: &HashMap<StreamerId, f64>,
+    placed: &LayoutFile,
+) -> HashMap<StreamerId, CardGeom> {
+    let mut out = auto_layout(nodes, heights, placed);
+    for (id, geom) in &mut out {
+        if let Some(pinned) = placed.get(id) {
+            geom.x = snap(pinned.x);
+            geom.y = snap(pinned.y);
+            geom.width = snap(pinned.width.max(MIN_CARD_WIDTH));
+        }
+    }
+    out
+}
+
+/// The automatic layout, which is what every node gets until it is dragged.
+fn auto_layout(
+    nodes: &[(StreamerId, Vec<StreamerId>)],
+    heights: &HashMap<StreamerId, f64>,
+    placed: &LayoutFile,
 ) -> HashMap<StreamerId, CardGeom> {
     let depths = depths(nodes);
 
@@ -250,15 +331,14 @@ pub fn layout(
             .iter()
             .find(|(d, _)| d == depth)
             .map_or(0.0, |(_, w)| *w);
-        let left = (widest - row_width) / 2.0;
+        // snapped, not merely centred: a row that starts half a cell off the
+        // grid puts every port on it half a cell off too, and the edges then
+        // jog on their way out of every card in the row
+        let left = snap((widest - row_width) / 2.0);
 
         let mut tallest = 0.0_f64;
         for (i, id) in ids.iter().enumerate() {
-            let height = heights
-                .get(id)
-                .copied()
-                .filter(|h| *h > 0.0)
-                .unwrap_or(FALLBACK_CARD_HEIGHT);
+            let height = height_of(id, heights, placed.get(id));
             tallest = tallest.max(height);
             out.insert(
                 id.clone(),
@@ -279,32 +359,588 @@ pub fn layout(
 ///
 /// The edge overlay needs this: a zero-sized `<svg>` isn't painted at all, even
 /// with `overflow: visible`, so it has to be given the graph's real extent.
+///
+/// Padded by a cell: a route leaves the bottom-most card by a stub before it
+/// turns, and the svg is what would clip it.
 #[must_use]
 pub fn bounds(placements: &HashMap<StreamerId, CardGeom>) -> (f64, f64) {
-    placements.values().fold((0.0_f64, 0.0_f64), |(w, h), g| {
+    let (w, h) = placements.values().fold((0.0_f64, 0.0_f64), |(w, h), g| {
         (w.max(g.x + g.width), h.max(g.y + g.height))
-    })
+    });
+    if w <= 0.0 && h <= 0.0 {
+        return (0.0, 0.0);
+    }
+    (w + GRID, h + GRID)
+}
+
+/// Where a card lands after being dragged by `(dx, dy)` surface pixels, snapped
+/// to the grid.
+///
+/// Snapping the *result* rather than the delta is what makes a card that was
+/// already off-grid — one from an older layout file, say — come back onto it
+/// the first time it is touched.
+#[must_use]
+pub fn dragged(geom: CardGeom, dx: f64, dy: f64, pinned_height: Option<f64>) -> NodeLayout {
+    NodeLayout {
+        x: snap(geom.x + dx),
+        y: snap(geom.y + dy),
+        width: snap(geom.width),
+        height: pinned_height,
+    }
+}
+
+/// Where a card's bottom-right corner lands after being dragged by `(dx, dy)`.
+///
+/// Resizing always pins the height, including when the card was previously
+/// sized by its content: the gesture means "be this tall", and a card that
+/// sprang back to its content height the moment it was let go would read as the
+/// handle not working.
+#[must_use]
+pub fn resized(geom: CardGeom, dx: f64, dy: f64) -> NodeLayout {
+    NodeLayout {
+        x: snap(geom.x),
+        y: snap(geom.y),
+        width: snap((geom.width + dx).max(MIN_CARD_WIDTH)),
+        height: Some(snap((geom.height + dy).max(MIN_CARD_HEIGHT))),
+    }
+}
+
+/// The direction a route travels on its way *out* of a face.
+fn outward(side: Side) -> (f64, f64) {
+    match side {
+        Side::Top => (0.0, -1.0),
+        Side::Right => (1.0, 0.0),
+        Side::Bottom => (0.0, 1.0),
+        Side::Left => (-1.0, 0.0),
+    }
+}
+
+/// How much clear space a route needs on a side before it will use it. Three
+/// cells: one for the stub out of each card, one for the channel between them.
+const CLEARANCE: f64 = 3.0 * GRID;
+
+/// How far a route runs straight out of a card before it is allowed to turn.
+/// Without it a line leaving the bottom of a card and immediately turning right
+/// looks like it is coming out of the corner.
+const STUB: f64 = GRID;
+
+/// The faces an edge should leave and arrive by.
+///
+/// **Vertical wins whenever it is available**, because the graph is a flow and
+/// down the page is what the flow means. A child one row below its parent reads
+/// as being fed by it whether it sits directly underneath or right across the
+/// canvas, so it is joined bottom-to-top either way; joining it side to side
+/// merely because it happened to be further away horizontally than vertically
+/// turns a row of siblings into a row of lines that all arrive sideways.
+///
+/// So the side faces are what you get when the cards are *level* with each
+/// other — their vertical extents overlap, so there is no room to route between
+/// them — which is exactly when a sideways line is the one that reads right. A
+/// child dragged *above* its parent leaves by the top, and the line reads as
+/// running backwards, which it does.
+///
+/// A face is only used when there is room in front of it: the whole point is
+/// straight lines, and a line squeezed through a two-pixel gap is not one. When
+/// nothing is clear (cards overlapping, or touching) it falls back to
+/// bottom-to-top, which is at least the direction the graph flows in.
+#[must_use]
+pub fn sides_between(from: CardGeom, to: CardGeom) -> (Side, Side) {
+    let below = to.y - (from.y + from.height);
+    let above = from.y - (to.y + to.height);
+    let right = to.x - (from.x + from.width);
+    let left = from.x - (to.x + to.width);
+
+    if below >= CLEARANCE {
+        (Side::Bottom, Side::Top)
+    } else if right >= CLEARANCE {
+        (Side::Right, Side::Left)
+    } else if left >= CLEARANCE {
+        (Side::Left, Side::Right)
+    } else if above >= CLEARANCE {
+        (Side::Top, Side::Bottom)
+    } else {
+        (Side::Bottom, Side::Top)
+    }
+}
+
+/// How long a face is: a card's width across the top and bottom, its height up
+/// the sides.
+#[must_use]
+pub fn face_length(geom: CardGeom, side: Side) -> f64 {
+    if side.is_vertical() {
+        geom.width
+    } else {
+        geom.height
+    }
+}
+
+/// A position along a face that is actually on the card, with a cell of margin
+/// at each corner. A route attaching at the very corner reads as coming out of
+/// the card's edge rather than its face.
+#[must_use]
+pub fn clamp_along(along: f64, length: f64) -> f64 {
+    let (lo, hi) = (GRID, length - GRID);
+    snap(along).clamp(lo.min(hi), hi.max(lo))
+}
+
+/// The point `along` a face, in surface coordinates.
+///
+/// `along` is measured from the face's start — its left end across the top and
+/// bottom, its top end up the sides — so it is a property of the *card*, not of
+/// where the card happens to be, and survives the card being dragged.
+#[must_use]
+pub fn port_at(geom: CardGeom, side: Side, along: f64) -> (f64, f64) {
+    let along = clamp_along(along, face_length(geom, side));
+    match side {
+        Side::Top => (geom.x + along, geom.y),
+        Side::Bottom => (geom.x + along, geom.y + geom.height),
+        Side::Left => (geom.x, geom.y + along),
+        Side::Right => (geom.x + geom.width, geom.y + along),
+    }
+}
+
+/// Where on a face a route attaches when nobody has said: the `index`-th of
+/// `count` edges sharing it, spread evenly.
+///
+/// Sharing matters more than it sounds. A source with seven children would
+/// otherwise have seven routes leaving the same point, and the fan-out — the
+/// most informative thing about that part of the graph — would be invisible
+/// until the lines had travelled a whole channel apart.
+#[must_use]
+pub fn auto_along(geom: CardGeom, side: Side, index: usize, count: usize) -> f64 {
+    let fraction = (index + 1) as f64 / (count + 1) as f64;
+    clamp_along(face_length(geom, side) * fraction, face_length(geom, side))
+}
+
+/// Where a port ends up after being dragged `delta` surface pixels along its
+/// face. Snapped and kept on the card, like every other gesture on the canvas.
+#[must_use]
+pub fn dragged_port(start_along: f64, delta: f64, length: f64) -> f64 {
+    clamp_along(start_along + delta, length)
+}
+
+/// The middle segment of a route: the part that runs *between* the two cards
+/// rather than out of one of them, and the only part free to be anywhere.
+///
+/// That freedom is what makes it the thing to grab. Every other segment is
+/// pinned to a port, so the shape a crowded graph needs — this route passing
+/// above that one instead of along the same line — is entirely a question of
+/// where the channels sit.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Channel {
+    /// Midpoint of the segment, which is where its handle goes.
+    pub at: (f64, f64),
+    /// How long the segment is, so the handle can span it rather than being a
+    /// dot somewhere on it.
+    pub length: f64,
+    /// The route runs vertically, so the channel is a horizontal bar that
+    /// slides up and down. (A horizontal route's channel is the mirror image.)
+    pub vertical: bool,
+}
+
+/// One route: the corners it turns, and the segment in the middle that can be
+/// dragged.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Route {
+    pub points: Vec<(f64, f64)>,
+    /// `None` when the route has no middle segment to speak of — a straight
+    /// line between two aligned cards, or an L-shaped one between faces at
+    /// right angles. Dragging either would have nothing to move.
+    pub channel: Option<Channel>,
+}
+
+/// The route from a port on `from` to a port on `to`.
+///
+/// Always three segments at most: out of the card, along a channel between the
+/// two, and into the other card. Every segment is axis-aligned, and the channel
+/// is snapped to a grid line — that is the whole trick, and it is why two routes
+/// running between the same pair of rows share a channel instead of each finding
+/// their own diagonal.
+///
+/// `offset` moves that channel off the half-way line, and is what the user is
+/// changing when they drag it. It is clamped to the gap between the two stubs:
+/// past either end the route would have to double back on itself, so there is
+/// nothing there worth reaching.
+///
+/// The corner case this does *not* solve is a channel running straight through
+/// a third card — which is now something the user can drag their way out of,
+/// rather than something only an obstacle-aware router could fix.
+#[must_use]
+pub fn route(
+    from: (f64, f64),
+    from_side: Side,
+    to: (f64, f64),
+    to_side: Side,
+    offset: f64,
+) -> Route {
+    let step = |p: (f64, f64), side: Side| {
+        let (dx, dy) = outward(side);
+        (p.0 + dx * STUB, p.1 + dy * STUB)
+    };
+    let a = step(from, from_side);
+    let b = step(to, to_side);
+
+    let mut points = vec![from, a];
+    let mut channel = None;
+    if from_side.is_vertical() == to_side.is_vertical() {
+        let vertical = from_side.is_vertical();
+        let (start, end) = if vertical { (a.1, b.1) } else { (a.0, b.0) };
+        let along = channel_at(start, end, offset);
+        // A channel with nothing either side of it is a straight line, and
+        // moving it would change nothing — so there is nothing to grab.
+        let (across_from, across_to) = if vertical { (a.0, b.0) } else { (a.1, b.1) };
+        if vertical {
+            points.push((a.0, along));
+            points.push((b.0, along));
+        } else {
+            points.push((along, a.1));
+            points.push((along, b.1));
+        }
+        if !near(across_from, across_to) {
+            let mid = (across_from + across_to) / 2.0;
+            channel = Some(Channel {
+                at: if vertical { (mid, along) } else { (along, mid) },
+                length: (across_to - across_from).abs(),
+                vertical,
+            });
+        }
+    } else if from_side.is_vertical() {
+        // one turn is enough when the faces are at right angles to each other
+        points.push((b.0, a.1));
+    } else {
+        points.push((a.0, b.1));
+    }
+    points.push(b);
+    points.push(to);
+
+    Route {
+        points: simplify(points),
+        channel,
+    }
+}
+
+/// Where a channel sits between two stubs: half way, plus however far it has
+/// been dragged, on a grid line, and never outside the gap.
+fn channel_at(start: f64, end: f64, offset: f64) -> f64 {
+    let (lo, hi) = (start.min(end), start.max(end));
+    snap((start + end) / 2.0 + offset).clamp(lo, hi)
+}
+
+/// Where a channel ends up after being dragged by `delta` surface pixels.
+///
+/// Snapped, like everything else on the canvas, and snapped on the *result* so
+/// a channel that was pulled to an odd place by an older layout comes back onto
+/// the grid the first time it is touched. [`route`] does the clamping, because
+/// only it knows where the two cards are.
+#[must_use]
+pub fn dragged_channel(start_offset: f64, delta: f64) -> f64 {
+    snap(start_offset + delta)
+}
+
+/// Drop the points a route doesn't need: repeats, and corners where the line
+/// carries straight on. Both occur constantly — an edge between two cards that
+/// happen to line up is a single straight segment described by six points — and
+/// a "corner" with nothing to turn puts a rounded joint in the middle of a
+/// straight line.
+fn simplify(points: Vec<(f64, f64)>) -> Vec<(f64, f64)> {
+    let mut out: Vec<(f64, f64)> = Vec::with_capacity(points.len());
+    for p in points {
+        if out.last().is_some_and(|last| close(*last, p)) {
+            continue;
+        }
+        // a middle point on a straight run: replace it rather than keep it
+        if out.len() >= 2 {
+            let (a, b) = (out[out.len() - 2], out[out.len() - 1]);
+            let straight = (near(a.0, b.0) && near(b.0, p.0)) || (near(a.1, b.1) && near(b.1, p.1));
+            if straight {
+                out.pop();
+            }
+        }
+        out.push(p);
+    }
+    out
+}
+
+fn near(a: f64, b: f64) -> bool {
+    (a - b).abs() < 0.01
+}
+
+fn close(a: (f64, f64), b: (f64, f64)) -> bool {
+    near(a.0, b.0) && near(a.1, b.1)
+}
+
+/// Radius of the bend at a corner. Small enough that the route still reads as
+/// following the grid, large enough not to look like an aliasing artefact.
+const CORNER: f64 = 8.0;
+
+/// An SVG path through `points`, with the corners rounded off.
+///
+/// The rounding is cosmetic and is allowed to eat into the segments either side
+/// of a corner, so it is clamped to half the shorter of them — otherwise two
+/// corners a few pixels apart would each round past the other and the line
+/// would double back.
+#[must_use]
+pub fn rounded_path(points: &[(f64, f64)], radius: f64) -> String {
+    let Some(first) = points.first() else {
+        return String::new();
+    };
+    let mut d = format!("M {} {}", round(first.0), round(first.1));
+    for i in 1..points.len().saturating_sub(1) {
+        let (prev, corner, next) = (points[i - 1], points[i], points[i + 1]);
+        let r = radius
+            .min(distance(prev, corner) / 2.0)
+            .min(distance(corner, next) / 2.0);
+        if r < 0.5 {
+            d.push_str(&format!(" L {} {}", round(corner.0), round(corner.1)));
+            continue;
+        }
+        let enter = along(corner, prev, r);
+        let leave = along(corner, next, r);
+        d.push_str(&format!(
+            " L {} {} Q {} {} {} {}",
+            round(enter.0),
+            round(enter.1),
+            round(corner.0),
+            round(corner.1),
+            round(leave.0),
+            round(leave.1)
+        ));
+    }
+    if points.len() > 1 {
+        let last = points[points.len() - 1];
+        d.push_str(&format!(" L {} {}", round(last.0), round(last.1)));
+    }
+    d
+}
+
+/// The point `distance` away from `from` in the direction of `towards`.
+fn along(from: (f64, f64), towards: (f64, f64), distance: f64) -> (f64, f64) {
+    let (dx, dy) = (towards.0 - from.0, towards.1 - from.1);
+    let length = dx.hypot(dy);
+    if length < f64::EPSILON {
+        return from;
+    }
+    (
+        from.0 + dx / length * distance,
+        from.1 + dy / length * distance,
+    )
+}
+
+fn distance(a: (f64, f64), b: (f64, f64)) -> f64 {
+    (b.0 - a.0).hypot(b.1 - a.1)
+}
+
+/// Path data is read by nobody and diffed by nothing, but a fractional pixel in
+/// it is still noise; two decimals is more than a screen can show.
+fn round(value: f64) -> f64 {
+    (value * 100.0).round() / 100.0
+}
+
+/// One drawn edge: which pipelines it connects, the path to paint, and the
+/// channel the user can grab to move it out of the way of another.
+#[derive(Clone, Debug, PartialEq)]
+pub struct EdgePath {
+    pub edge: Edge,
+    pub path: String,
+    pub channel: Option<Channel>,
+    pub from_port: PortHandle,
+    pub to_port: PortHandle,
 }
 
 /// Every edge that has both ends placed, with its SVG path, in a stable order.
 ///
-/// This is recomputed from `placements`, so it follows cards as they grow: a
-/// card that gets taller moves its own bottom edge and pushes every row below
-/// it down, and both ends of the affected edges have to move with it.
+/// This is recomputed from `placements`, so it follows cards as they move and
+/// grow: a card that gets taller moves its own bottom edge and pushes every row
+/// below it down, and a card that is dragged to the side of its parent changes
+/// which faces its edges use.
+///
+/// The two passes are what the ports need. Which face an edge uses depends only
+/// on the pair of cards, but *where* on that face it attaches depends on how
+/// many other edges chose the same one — so every edge is assigned a face
+/// first, and only then a place on it.
 #[must_use]
 pub fn edge_paths(
     nodes: &[(StreamerId, Vec<StreamerId>)],
     placements: &HashMap<StreamerId, CardGeom>,
-) -> Vec<(Edge, String)> {
-    edges(nodes)
+    arrangement: &LayoutFile,
+) -> Vec<EdgePath> {
+    let assigned: Vec<Assigned> = edges(nodes)
         .into_iter()
-        .filter_map(|e| {
-            let from = placements.get(&e.from)?;
-            let to = placements.get(&e.to)?;
-            let path = edge_path(*from, *to);
-            Some((e, path))
+        .filter_map(|edge| {
+            let from = *placements.get(&edge.from)?;
+            let to = *placements.get(&edge.to)?;
+            let (from_side, to_side) = sides_between(from, to);
+            // A pinned position only means something on the face it was
+            // measured against: move a card and an edge that left by the bottom
+            // may now leave by the side, where the old number is meaningless.
+            let adjustment = arrangement.edge(&edge.from, &edge.to);
+            let pinned = |end, side| {
+                adjustment
+                    .port(end)
+                    .filter(|p: &PortLayout| p.side == side)
+                    .map(|p| p.along)
+            };
+            Some(Assigned {
+                edge,
+                from,
+                from_side,
+                to,
+                to_side,
+                pinned_from: pinned(EdgeEnd::From, from_side),
+                pinned_to: pinned(EdgeEnd::To, to_side),
+            })
+        })
+        .collect();
+
+    let slots = slots_on_faces(&assigned);
+
+    assigned
+        .into_iter()
+        .zip(slots)
+        .map(|(a, (out_slot, in_slot))| {
+            let end = |geom: CardGeom, side: Side, pinned: Option<f64>, slot: Slot| {
+                let along = pinned.unwrap_or_else(|| auto_along(geom, side, slot.index, slot.count));
+                PortHandle {
+                    at: port_at(geom, side, along),
+                    side,
+                    along: clamp_along(along, face_length(geom, side)),
+                    length: face_length(geom, side),
+                    pinned: pinned.is_some(),
+                }
+            };
+            let from_port = end(a.from, a.from_side, a.pinned_from, out_slot);
+            let to_port = end(a.to, a.to_side, a.pinned_to, in_slot);
+
+            let routed = route(
+                from_port.at,
+                a.from_side,
+                to_port.at,
+                a.to_side,
+                arrangement.edge_offset(&a.edge.from, &a.edge.to),
+            );
+            EdgePath {
+                path: rounded_path(&routed.points, CORNER),
+                channel: routed.channel,
+                from_port,
+                to_port,
+                edge: a.edge,
+            }
         })
         .collect()
+}
+
+/// Where an edge attaches to a card, as drawn.
+///
+/// Carries what a drag on it needs — the face, how far along it is now, and how
+/// long the face is — so the handle can move it without knowing anything about
+/// the card behind it.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct PortHandle {
+    pub at: (f64, f64),
+    pub side: Side,
+    pub along: f64,
+    pub length: f64,
+    /// Whether this position was chosen by hand rather than by the fan-out.
+    pub pinned: bool,
+}
+
+/// An edge that knows which faces it will use, but not yet where on them.
+struct Assigned {
+    edge: Edge,
+    from: CardGeom,
+    from_side: Side,
+    to: CardGeom,
+    to_side: Side,
+    /// A hand-placed position on the face this edge actually ended up using.
+    /// A stored one for a *different* face is dropped here rather than
+    /// carried — see [`PortLayout`].
+    pinned_from: Option<f64>,
+    pinned_to: Option<f64>,
+}
+
+/// Where an edge attaches on a face: the `index`-th of the `count` edges
+/// sharing it.
+#[derive(Clone, Copy)]
+struct Slot {
+    index: usize,
+    count: usize,
+}
+
+impl Default for Slot {
+    /// The only edge on its face, which is what an edge gets if nothing else
+    /// claims one — and a `count` of zero would divide by it.
+    fn default() -> Self {
+        Self { index: 0, count: 1 }
+    }
+}
+
+/// For each edge in `assigned`, in the same order: its place on the face it
+/// leaves by, and its place on the face it arrives at.
+///
+/// Edges on a face are ordered by where the *other* end sits along that face's
+/// axis, so the fan under a source comes out in the same left-to-right order as
+/// the children it feeds and the lines don't cross each other on their way out.
+///
+/// **A hand-placed end still takes up its slot here**, even though the slot's
+/// position is then thrown away for it. That is what keeps pinning one edge
+/// from moving any other: drop it from the count instead and the remaining ends
+/// re-spread over the whole face, so nudging one line would shift its siblings
+/// out from under the user. It costs an unused gap in the fan, which is a much
+/// smaller surprise. Two ports can then coincide — a pinned one dragged onto an
+/// automatic one — and the fix for that is another drag.
+fn slots_on_faces(assigned: &[Assigned]) -> Vec<(Slot, Slot)> {
+    /// One end of one edge, as the face it lands on sees it: where the edge's
+    /// other end sits along this face's axis (which is what the ends are sorted
+    /// by), which edge it belongs to, and whether it is that edge's outgoing end.
+    struct Landing {
+        across: f64,
+        edge: usize,
+        outgoing: bool,
+    }
+
+    let mut faces: BTreeMap<(&StreamerId, Side), Vec<Landing>> = BTreeMap::new();
+    // where along the face's own axis the other card sits
+    let across = |side: Side, other: CardGeom| {
+        if side.is_vertical() {
+            other.centre().0
+        } else {
+            other.centre().1
+        }
+    };
+    for (edge, a) in assigned.iter().enumerate() {
+        faces
+            .entry((&a.edge.from, a.from_side))
+            .or_default()
+            .push(Landing {
+                across: across(a.from_side, a.to),
+                edge,
+                outgoing: true,
+            });
+        faces
+            .entry((&a.edge.to, a.to_side))
+            .or_default()
+            .push(Landing {
+                across: across(a.to_side, a.from),
+                edge,
+                outgoing: false,
+            });
+    }
+
+    let mut out = vec![(Slot::default(), Slot::default()); assigned.len()];
+    for mut using in faces.into_values() {
+        // ties broken by edge index, which `edges` already sorted by id
+        using.sort_by(|a, b| a.across.total_cmp(&b.across).then_with(|| a.edge.cmp(&b.edge)));
+        let count = using.len();
+        for (index, landing) in using.into_iter().enumerate() {
+            let slot = Slot { index, count };
+            if landing.outgoing {
+                out[landing.edge].0 = slot;
+            } else {
+                out[landing.edge].1 = slot;
+            }
+        }
+    }
+    out
 }
 
 /// Parent → child pairs, in a stable order.
@@ -321,17 +957,6 @@ pub fn edges(nodes: &[(StreamerId, Vec<StreamerId>)]) -> Vec<Edge> {
         .collect();
     edges.sort_by(|a, b| a.from.cmp(&b.from).then_with(|| a.to.cmp(&b.to)));
     edges
-}
-
-/// An SVG cubic bezier from a parent's bottom edge down to its child's top
-/// edge. The control points are pulled vertically so the curve leaves and
-/// enters straight down, which reads as a flow direction.
-#[must_use]
-pub fn edge_path(from: CardGeom, to: CardGeom) -> String {
-    let (x1, y1) = (from.x + from.width / 2.0, from.y + from.height);
-    let (x2, y2) = (to.x + to.width / 2.0, to.y);
-    let bend = ((y2 - y1).abs() * 0.5).clamp(30.0, 120.0);
-    format!("M {x1} {y1} C {x1} {}, {x2} {}, {x2} {y2}", y1 + bend, y2 - bend)
 }
 
 /// Where the camera has to sit for `target` to be centred in a viewport of
@@ -433,6 +1058,57 @@ mod tests {
         HashMap::new()
     }
 
+    /// The automatic layout, which is what these tests are about — hand-placed
+    /// nodes get their own tests below.
+    fn lay(
+        nodes: &[(StreamerId, Vec<StreamerId>)],
+        heights: &HashMap<StreamerId, f64>,
+    ) -> HashMap<StreamerId, CardGeom> {
+        layout(nodes, heights, &LayoutFile::default())
+    }
+
+    /// An automatically placed port: the `index`-th of `count` on a face.
+    /// Hand-placed ones go through `port_at` and get their own tests below.
+    fn port(geom: CardGeom, side: Side, index: usize, count: usize) -> (f64, f64) {
+        port_at(geom, side, auto_along(geom, side, index, count))
+    }
+
+    /// A route with the channel where the layout puts it, which is what most of
+    /// these tests are about — dragged channels get their own tests below.
+    fn auto_route(
+        from: (f64, f64),
+        from_side: Side,
+        to: (f64, f64),
+        to_side: Side,
+    ) -> Vec<(f64, f64)> {
+        route(from, from_side, to, to_side, 0.0).points
+    }
+
+    fn card(x: f64, y: f64, width: f64, height: f64) -> CardGeom {
+        CardGeom {
+            x,
+            y,
+            width,
+            height,
+        }
+    }
+
+    /// Every segment of a route has to be horizontal or vertical — that is the
+    /// entire claim the feature makes, and the one thing a diagonal would break.
+    fn assert_axis_aligned(points: &[(f64, f64)]) {
+        for pair in points.windows(2) {
+            let (a, b) = (pair[0], pair[1]);
+            assert!(
+                near(a.0, b.0) || near(a.1, b.1),
+                "diagonal segment {a:?} -> {b:?} in {points:?}"
+            );
+        }
+    }
+
+    fn on_grid(value: f64) -> bool {
+        near(value % GRID, 0.0) || near((value % GRID).abs(), GRID)
+    }
+
     fn geom(placed: &HashMap<StreamerId, CardGeom>, id: &str) -> CardGeom {
         match placed.get(id) {
             Some(g) => *g,
@@ -442,7 +1118,7 @@ mod tests {
 
     #[test]
     fn a_single_root_sits_at_the_origin() {
-        let placed = layout(&[node("a", None)], &no_heights());
+        let placed = lay(&[node("a", None)], &no_heights());
         assert_eq!(geom(&placed, "a").x, 0.0);
         assert_eq!(geom(&placed, "a").y, 0.0);
     }
@@ -450,7 +1126,7 @@ mod tests {
     /// The whole point of the hierarchy: a child is strictly below its parent.
     #[test]
     fn a_child_is_placed_below_its_parent() {
-        let placed = layout(&[node("a", None), node("b", Some("a"))], &no_heights());
+        let placed = lay(&[node("a", None), node("b", Some("a"))], &no_heights());
         assert!(
             geom(&placed, "b").y > geom(&placed, "a").y + geom(&placed, "a").height,
             "child overlaps or sits above its parent: {placed:?}"
@@ -460,7 +1136,7 @@ mod tests {
     /// Depth is transitive — a grandchild goes two rows down, not one.
     #[test]
     fn depth_accumulates_down_a_chain() {
-        let placed = layout(
+        let placed = lay(
             &[node("a", None), node("b", Some("a")), node("c", Some("b"))],
             &no_heights(),
         );
@@ -472,7 +1148,7 @@ mod tests {
     /// row, don't overlap, and the parent sits centred over them.
     #[test]
     fn siblings_share_a_row_and_are_centred_under_their_parent() {
-        let placed = layout(
+        let placed = lay(
             &[
                 node("source", None),
                 node("a", Some("source")),
@@ -513,8 +1189,8 @@ mod tests {
         reversed.reverse();
 
         assert_eq!(
-            layout(&forward, &no_heights()),
-            layout(&reversed, &no_heights())
+            lay(&forward, &no_heights()),
+            lay(&reversed, &no_heights())
         );
     }
 
@@ -525,8 +1201,8 @@ mod tests {
         let nodes = [node("a", None), node("b", Some("a"))];
         let tall = HashMap::from([("a".to_string(), 900.0)]);
 
-        let default_y = geom(&layout(&nodes, &no_heights()), "b").y;
-        let pushed_y = geom(&layout(&nodes, &tall), "b").y;
+        let default_y = geom(&lay(&nodes, &no_heights()), "b").y;
+        let pushed_y = geom(&lay(&nodes, &tall), "b").y;
         assert!(
             pushed_y > default_y,
             "a 900px card did not push the row below it down"
@@ -544,7 +1220,7 @@ mod tests {
         let nodes = nodes_from(&streamers);
         assert_eq!(nodes, vec![node("orphan", None)]);
 
-        let placed = layout(&nodes, &no_heights());
+        let placed = lay(&nodes, &no_heights());
         assert_eq!(geom(&placed, "orphan").y, 0.0);
     }
 
@@ -558,7 +1234,7 @@ mod tests {
             // fed by both the root and the row below it
             node_with("joined", &["root", "mid"]),
         ];
-        let placed = layout(&nodes, &no_heights());
+        let placed = lay(&nodes, &no_heights());
 
         let (root_y, mid_y, joined_y) = (
             geom(&placed, "root").y,
@@ -590,14 +1266,14 @@ mod tests {
                 },
             ]
         );
-        assert_eq!(edge_paths(&nodes, &layout(&nodes, &no_heights())).len(), 2);
+        assert_eq!(edge_paths(&nodes, &lay(&nodes, &no_heights()), &LayoutFile::default()).len(), 2);
     }
 
     /// The server shouldn't be able to produce a cycle, but the layout runs on
     /// whatever the API returned and must not hang if one shows up.
     #[test]
     fn a_cycle_does_not_hang_the_layout() {
-        let placed = layout(&[node("a", Some("b")), node("b", Some("a"))], &no_heights());
+        let placed = lay(&[node("a", Some("b")), node("b", Some("a"))], &no_heights());
         assert_eq!(placed.len(), 2, "both nodes should still be placed");
     }
 
@@ -605,7 +1281,7 @@ mod tests {
     /// clipped, and a zero size means nothing is drawn at all.
     #[test]
     fn bounds_cover_every_card() {
-        let placed = layout(
+        let placed = lay(
             &[
                 node("source", None),
                 node("a", Some("source")),
@@ -625,6 +1301,162 @@ mod tests {
     #[test]
     fn bounds_of_an_empty_graph_are_zero() {
         assert_eq!(bounds(&HashMap::new()), (0.0, 0.0));
+    }
+
+    fn arranged(entries: &[(&str, NodeLayout)]) -> LayoutFile {
+        let mut file = LayoutFile::default();
+        for (id, node) in entries {
+            file.nodes.insert((*id).to_string(), *node);
+        }
+        file
+    }
+
+    fn at(x: f64, y: f64) -> NodeLayout {
+        NodeLayout {
+            x,
+            y,
+            width: CARD_WIDTH,
+            height: None,
+        }
+    }
+
+    /// The point of the layout file: a card that was dragged stays where it was
+    /// put, however the automatic layout would have placed it.
+    #[test]
+    fn a_hand_placed_card_overrides_the_automatic_layout() {
+        let nodes = [node("a", None), node("b", Some("a"))];
+        let placed = layout(&nodes, &no_heights(), &arranged(&[("b", at(900.0, 40.0))]));
+
+        assert_eq!(geom(&placed, "b").x, 900.0);
+        assert_eq!(geom(&placed, "b").y, 40.0);
+        // ...and the card nobody touched is where it always was
+        assert_eq!(geom(&placed, "a"), geom(&lay(&nodes, &no_heights()), "a"));
+    }
+
+    /// Moving one card must not shuffle every other card on the canvas: the row
+    /// a pinned card came out of keeps its slot.
+    #[test]
+    fn pinning_one_card_leaves_its_siblings_alone() {
+        let nodes = [
+            node("root", None),
+            node("a", Some("root")),
+            node("b", Some("root")),
+        ];
+        let before = lay(&nodes, &no_heights());
+        let after = layout(&nodes, &no_heights(), &arranged(&[("a", at(2000.0, 2000.0))]));
+
+        assert_eq!(geom(&after, "b"), geom(&before, "b"));
+        assert_eq!(geom(&after, "root"), geom(&before, "root"));
+    }
+
+    /// A layout file is hand-editable and survives changes to the grid, so what
+    /// is in it may be off-grid. The canvas still puts the card on the grid —
+    /// otherwise one stale entry knocks every route through it off the lines.
+    #[test]
+    fn an_off_grid_entry_is_snapped_when_it_is_used() {
+        let placed = layout(
+            &[node("a", None)],
+            &no_heights(),
+            &arranged(&[("a", at(103.0, 217.0))]),
+        );
+        assert_eq!(geom(&placed, "a").x, 100.0);
+        assert_eq!(geom(&placed, "a").y, 220.0);
+    }
+
+    /// A pinned height wins over the measured one — that is what a resize
+    /// handle means — and a card with no pinned height still follows its
+    /// content.
+    #[test]
+    fn a_pinned_height_beats_the_measured_one() {
+        let nodes = [node("a", None)];
+        let measured = HashMap::from([("a".to_string(), 400.0)]);
+        assert_eq!(geom(&lay(&nodes, &measured), "a").height, 400.0);
+
+        let pinned = arranged(&[(
+            "a",
+            NodeLayout {
+                height: Some(160.0),
+                ..at(0.0, 0.0)
+            },
+        )]);
+        assert_eq!(geom(&layout(&nodes, &measured, &pinned), "a").height, 160.0);
+    }
+
+    /// Heights come from measuring content, so they arrive at arbitrary pixel
+    /// values; a card whose bottom edge is off-grid puts every port on its
+    /// sides off-grid too. Rounding *up* is what keeps the content fitting.
+    #[test]
+    fn a_measured_height_is_rounded_up_onto_the_grid() {
+        let nodes = [node("a", None)];
+        let height = geom(&lay(&nodes, &HashMap::from([("a".to_string(), 253.0)])), "a").height;
+        assert_eq!(height, 260.0);
+        assert!(height >= 253.0, "the card would be clipped");
+    }
+
+    /// The measure → lay out → render loop feeds the height it computes back
+    /// into itself, so rounding has to be idempotent or the card oscillates.
+    #[test]
+    fn rounding_a_height_that_is_already_on_the_grid_changes_nothing() {
+        let nodes = [node("a", None)];
+        let once = geom(&lay(&nodes, &HashMap::from([("a".to_string(), 253.0)])), "a").height;
+        let twice = geom(&lay(&nodes, &HashMap::from([("a".to_string(), once)])), "a").height;
+        assert_eq!(once, twice);
+    }
+
+    /// A drag lands on the grid whatever the pointer did, and — the reason the
+    /// result is snapped rather than the delta — a card that started off-grid
+    /// comes back onto it.
+    #[test]
+    fn dragging_snaps_the_card_to_the_grid() {
+        let geom = card(103.0, 217.0, CARD_WIDTH, 200.0);
+        let moved = dragged(geom, 4.0, -3.0, None);
+        assert_eq!((moved.x, moved.y), (100.0, 220.0));
+        assert_eq!(moved.height, None, "a drag must not pin the height");
+
+        // a drag big enough to matter moves by whole cells
+        let moved = dragged(card(100.0, 100.0, CARD_WIDTH, 200.0), 63.0, 0.0, None);
+        assert_eq!(moved.x, 160.0);
+    }
+
+    /// A drag on a card that was already resized keeps that height: moving
+    /// something is not resizing it.
+    #[test]
+    fn dragging_keeps_a_height_that_was_already_pinned() {
+        let moved = dragged(card(0.0, 0.0, CARD_WIDTH, 300.0), 20.0, 20.0, Some(300.0));
+        assert_eq!(moved.height, Some(300.0));
+    }
+
+    /// Resizing pins the height even when the card had been sized by its
+    /// content, or letting go would spring it back and read as a broken handle.
+    #[test]
+    fn resizing_snaps_and_pins_both_dimensions() {
+        let resized = resized(card(0.0, 0.0, CARD_WIDTH, 200.0), 33.0, -47.0);
+        assert_eq!(resized.width, CARD_WIDTH + 40.0);
+        assert_eq!(resized.height, Some(160.0));
+    }
+
+    /// A card can't be dragged out of existence: past the minimum it stops
+    /// rather than inverting.
+    #[test]
+    fn a_card_cannot_be_resized_below_its_minimum() {
+        let resized = resized(card(0.0, 0.0, CARD_WIDTH, 200.0), -5000.0, -5000.0);
+        assert_eq!(resized.width, MIN_CARD_WIDTH);
+        assert_eq!(resized.height, Some(MIN_CARD_HEIGHT));
+    }
+
+    /// A pinned width has to survive the round trip through the layout, or a
+    /// resized card would snap back to the default on the next re-layout.
+    #[test]
+    fn a_pinned_width_is_used_by_the_layout() {
+        let wide = arranged(&[(
+            "a",
+            NodeLayout {
+                width: 500.0,
+                ..at(0.0, 0.0)
+            },
+        )]);
+        let placed = layout(&[node("a", None)], &no_heights(), &wide);
+        assert_eq!(geom(&placed, "a").width, 500.0);
     }
 
     #[test]
@@ -652,22 +1484,535 @@ mod tests {
     /// An edge leaves the parent's bottom edge and arrives at the child's top
     /// edge — not at either card's origin.
     #[test]
-    fn an_edge_path_runs_from_the_parent_bottom_to_the_child_top() {
-        let from = CardGeom {
-            x: 0.0,
-            y: 0.0,
-            width: 100.0,
-            height: 50.0,
+    fn a_route_runs_from_the_parent_bottom_to_the_child_top() {
+        let from = card(0.0, 0.0, 100.0, 60.0);
+        let to = card(200.0, 300.0, 100.0, 60.0);
+        assert_eq!(sides_between(from, to), (Side::Bottom, Side::Top));
+
+        let points = auto_route(
+            port(from, Side::Bottom, 0, 1),
+            Side::Bottom,
+            port(to, Side::Top, 0, 1),
+            Side::Top,
+        );
+        assert_eq!(points.first().map(|p| p.1), Some(60.0), "{points:?}");
+        assert_eq!(points.last().map(|p| p.1), Some(300.0), "{points:?}");
+        assert_axis_aligned(&points);
+    }
+
+    /// The point of the whole exercise: no diagonals, whatever the two cards
+    /// are doing relative to each other.
+    #[test]
+    fn every_route_is_made_of_horizontal_and_vertical_segments() {
+        let from = card(200.0, 200.0, 360.0, 200.0);
+        for to in [
+            card(200.0, 600.0, 360.0, 200.0),   // directly below
+            card(900.0, 640.0, 360.0, 200.0),   // below and to the right
+            card(-500.0, 620.0, 360.0, 200.0),  // below and to the left
+            card(900.0, 200.0, 360.0, 200.0),   // directly to the right
+            card(-500.0, 240.0, 360.0, 200.0),  // to the left
+            card(200.0, -300.0, 360.0, 200.0),  // above: a backwards edge
+            card(220.0, 220.0, 360.0, 200.0),   // overlapping
+            card(560.0, 400.0, 360.0, 200.0),   // corner to corner, no clearance
+        ] {
+            let (from_side, to_side) = sides_between(from, to);
+            let points = auto_route(
+                port(from, from_side, 0, 1),
+                from_side,
+                port(to, to_side, 0, 1),
+                to_side,
+            );
+            assert!(points.len() >= 2, "no route to {to:?}");
+            assert_axis_aligned(&points);
+        }
+    }
+
+    /// A card dragged *level* with its parent is joined side to side. Coming
+    /// out of the bottom and looping round would be both longer and harder to
+    /// read.
+    #[test]
+    fn cards_side_by_side_are_joined_through_their_sides() {
+        let from = card(0.0, 0.0, 360.0, 200.0);
+        assert_eq!(
+            sides_between(from, card(600.0, 0.0, 360.0, 200.0)),
+            (Side::Right, Side::Left)
+        );
+        assert_eq!(
+            sides_between(from, card(-600.0, 40.0, 360.0, 200.0)),
+            (Side::Left, Side::Right)
+        );
+        // and a child dragged above its parent leaves by the top
+        assert_eq!(
+            sides_between(from, card(0.0, -600.0, 360.0, 200.0)),
+            (Side::Top, Side::Bottom)
+        );
+    }
+
+    /// The graph is a flow, so a child a row below its parent is joined
+    /// downwards whether it sits underneath or right across the canvas.
+    /// Choosing sideways here — because the horizontal distance happens to be
+    /// larger — makes a row of siblings into a row of lines arriving sideways,
+    /// which is what a fan-out should *not* look like.
+    #[test]
+    fn a_child_a_row_below_is_joined_downwards_however_far_to_the_side_it_is() {
+        let from = card(0.0, 0.0, 360.0, 200.0);
+        for to in [
+            card(0.0, 400.0, 360.0, 200.0),      // straight below
+            card(2000.0, 400.0, 360.0, 200.0),   // below, far to the right
+            card(-2000.0, 400.0, 360.0, 200.0),  // below, far to the left
+        ] {
+            assert_eq!(
+                sides_between(from, to),
+                (Side::Bottom, Side::Top),
+                "a child at {to:?} was not joined downwards"
+            );
+        }
+    }
+
+    /// A face is only used if a route can actually get through it. A child a
+    /// few pixels to the right is not "beside" its parent in any useful sense.
+    #[test]
+    fn a_face_with_no_room_in_front_of_it_is_not_used() {
+        let from = card(0.0, 0.0, 360.0, 200.0);
+        // overlapping vertically, and only a couple of pixels of horizontal gap
+        let cramped = card(362.0, 20.0, 360.0, 200.0);
+        assert_eq!(sides_between(from, cramped), (Side::Bottom, Side::Top));
+    }
+
+    /// Both ends of a route sit on a grid line, and so does the channel it runs
+    /// along in between. Everything else here follows from that.
+    #[test]
+    fn ports_and_channels_land_on_grid_lines() {
+        let from = card(0.0, 0.0, CARD_WIDTH, 200.0);
+        let to = card(CARD_WIDTH + 200.0, 500.0, CARD_WIDTH, 200.0);
+        let points = auto_route(
+            port(from, Side::Bottom, 1, 3),
+            Side::Bottom,
+            port(to, Side::Top, 0, 2),
+            Side::Top,
+        );
+        for (x, y) in &points {
+            assert!(on_grid(*x) && on_grid(*y), "{:?} is off the grid", (x, y));
+        }
+    }
+
+    /// A source feeding seven children is the shape `config.json` is built
+    /// around: if every route left the same point, the fan-out would be
+    /// invisible for the first hundred pixels.
+    #[test]
+    fn edges_sharing_a_face_leave_from_different_points() {
+        let geom = card(0.0, 0.0, CARD_WIDTH, 200.0);
+        let ports: HashSet<i64> = (0..7)
+            .map(|i| (port(geom, Side::Bottom, i, 7).0 * 100.0) as i64)
+            .collect();
+        assert_eq!(ports.len(), 7, "ports collided: {ports:?}");
+    }
+
+    /// ...and they stay on the card they belong to, however many there are.
+    #[test]
+    fn a_crowded_face_keeps_its_ports_on_the_card() {
+        let geom = card(0.0, 0.0, CARD_WIDTH, 200.0);
+        for i in 0..40 {
+            let (x, y) = port(geom, Side::Bottom, i, 40);
+            assert!(
+                (geom.x..=geom.x + geom.width).contains(&x),
+                "port {i} at x={x} is off the card"
+            );
+            assert_eq!(y, geom.y + geom.height);
+        }
+    }
+
+    /// Two cards that line up want one straight line, not a straight line
+    /// described as three segments with two corners rounded in the middle of it.
+    #[test]
+    fn an_aligned_pair_is_joined_by_a_single_segment() {
+        let from = card(0.0, 0.0, CARD_WIDTH, 200.0);
+        let to = card(0.0, 500.0, CARD_WIDTH, 200.0);
+        let points = auto_route(
+            port(from, Side::Bottom, 0, 1),
+            Side::Bottom,
+            port(to, Side::Top, 0, 1),
+            Side::Top,
+        );
+        assert_eq!(points, vec![(180.0, 200.0), (180.0, 500.0)]);
+        assert_eq!(rounded_path(&points, CORNER), "M 180 200 L 180 500");
+    }
+
+    /// A corner is rounded by cutting into the segments either side of it, so a
+    /// short segment has to shrink the radius rather than overshoot — two
+    /// corners that each ate past the other would draw a line that doubles back.
+    #[test]
+    fn a_corner_radius_never_exceeds_the_segments_it_joins() {
+        let tight = [(0.0, 0.0), (4.0, 0.0), (4.0, 4.0)];
+        let path = rounded_path(&tight, CORNER);
+        assert!(path.starts_with("M 0 0"), "{path}");
+        // the bend is at most half of the 4px segments, so nothing runs past x=4
+        for token in path.split_whitespace().filter_map(|t| t.parse::<f64>().ok()) {
+            assert!((0.0..=4.0).contains(&token), "{token} is outside the route: {path}");
+        }
+    }
+
+    #[test]
+    fn a_route_with_no_points_has_no_path() {
+        assert_eq!(rounded_path(&[], CORNER), "");
+    }
+
+    /// Two cards one above the other, offset sideways: the classic three-segment
+    /// route, and the middle segment is the one the user gets to grab.
+    fn stacked() -> (CardGeom, CardGeom) {
+        (
+            card(0.0, 0.0, CARD_WIDTH, 200.0),
+            card(600.0, 600.0, CARD_WIDTH, 200.0),
+        )
+    }
+
+    fn stacked_route(offset: f64) -> Route {
+        let (from, to) = stacked();
+        route(
+            port(from, Side::Bottom, 0, 1),
+            Side::Bottom,
+            port(to, Side::Top, 0, 1),
+            Side::Top,
+            offset,
+        )
+    }
+
+    /// The point of the whole feature: dragging the channel moves the middle
+    /// segment, and nothing else about the route changes — both ends stay on
+    /// the ports they belong to.
+    #[test]
+    fn an_offset_moves_the_channel_and_leaves_the_ends_alone() {
+        let (automatic, pulled) = (stacked_route(0.0), stacked_route(-120.0));
+
+        let channel = |r: &Route| r.channel.expect("a three-segment route has a channel").at.1;
+        assert_eq!(channel(&pulled), channel(&automatic) - 120.0);
+
+        assert_eq!(pulled.points.first(), automatic.points.first());
+        assert_eq!(pulled.points.last(), automatic.points.last());
+        assert_axis_aligned(&pulled.points);
+    }
+
+    /// Two routes between the same pair of rows are exactly the case this
+    /// exists for: give one of them an offset and they no longer lie along the
+    /// same line.
+    #[test]
+    fn two_routes_can_be_separated_by_offsetting_one_of_them() {
+        let together = (stacked_route(0.0), stacked_route(0.0));
+        assert_eq!(together.0.points, together.1.points, "same route, twice");
+
+        let apart = (stacked_route(0.0), stacked_route(60.0));
+        assert_ne!(apart.0.points, apart.1.points);
+    }
+
+    /// Dragged past either card the route would have to double back on itself,
+    /// so the channel stops at the gap it lives in. Nothing is lost by it —
+    /// there is nothing useful out there.
+    #[test]
+    fn a_channel_cannot_be_dragged_out_of_the_gap_between_the_cards() {
+        let (from, to) = stacked();
+        for offset in [-10_000.0, 10_000.0] {
+            let routed = stacked_route(offset);
+            let y = routed.channel.expect("a channel").at.1;
+            assert!(
+                (from.y + from.height..=to.y).contains(&y),
+                "an offset of {offset} put the channel at {y}, outside the gap"
+            );
+            assert_axis_aligned(&routed.points);
+        }
+    }
+
+    /// The channel is still on the grid after being dragged — an off-grid one
+    /// would undo the thing that makes the routes look deliberate.
+    #[test]
+    fn a_dragged_channel_stays_on_the_grid() {
+        for offset in [7.0, -13.0, 41.0] {
+            let y = stacked_route(offset).channel.expect("a channel").at.1;
+            assert!(on_grid(y), "a channel at {y} is off the grid");
+        }
+        // and the drag itself snaps, from wherever it started
+        assert_eq!(dragged_channel(0.0, 33.0), 40.0);
+        assert_eq!(dragged_channel(40.0, -7.0), 40.0);
+        assert_eq!(dragged_channel(13.0, 0.0), 20.0);
+    }
+
+    /// The handle spans the segment rather than sitting at one end of it: the
+    /// line is what the eye follows, so the line is what the hand should get.
+    #[test]
+    fn the_channel_handle_covers_the_middle_segment() {
+        let routed = stacked_route(0.0);
+        let channel = routed.channel.expect("a channel");
+        assert!(channel.vertical, "a bottom-to-top route runs vertically");
+
+        // the segment between the two turns, which is exactly what it spans
+        let turns: Vec<(f64, f64)> = routed
+            .points
+            .iter()
+            .filter(|p| near(p.1, channel.at.1))
+            .copied()
+            .collect();
+        assert_eq!(turns.len(), 2, "expected two corners on the channel");
+        assert_eq!(channel.length, (turns[1].0 - turns[0].0).abs());
+        assert_eq!(channel.at.0, (turns[0].0 + turns[1].0) / 2.0);
+    }
+
+    /// A route between two cards that line up is one straight segment; there is
+    /// no middle to move, and offering a handle that does nothing would be
+    /// worse than offering none.
+    #[test]
+    fn a_straight_route_has_no_channel_to_grab() {
+        let from = card(0.0, 0.0, CARD_WIDTH, 200.0);
+        let to = card(0.0, 600.0, CARD_WIDTH, 200.0);
+        let routed = route(
+            port(from, Side::Bottom, 0, 1),
+            Side::Bottom,
+            port(to, Side::Top, 0, 1),
+            Side::Top,
+            0.0,
+        );
+        assert_eq!(routed.channel, None);
+    }
+
+    /// Nor does an L-shaped one, where the faces are at right angles: it has
+    /// two segments and both are anchored to a port.
+    #[test]
+    fn a_right_angled_route_has_no_channel_to_grab() {
+        let from = card(0.0, 0.0, CARD_WIDTH, 200.0);
+        let to = card(900.0, 600.0, CARD_WIDTH, 200.0);
+        let routed = route(
+            port(from, Side::Bottom, 0, 1),
+            Side::Bottom,
+            port(to, Side::Left, 0, 1),
+            Side::Left,
+            0.0,
+        );
+        assert_eq!(routed.channel, None);
+    }
+
+    /// A horizontal route is the mirror image: its channel is a vertical bar
+    /// that slides left and right.
+    #[test]
+    fn a_side_to_side_route_has_a_channel_that_slides_sideways() {
+        let from = card(0.0, 0.0, CARD_WIDTH, 200.0);
+        // level with each other, so there is no room to route below
+        let to = card(900.0, 100.0, CARD_WIDTH, 200.0);
+        assert_eq!(sides_between(from, to), (Side::Right, Side::Left));
+
+        let at = |offset| {
+            route(
+                port(from, Side::Right, 0, 1),
+                Side::Right,
+                port(to, Side::Left, 0, 1),
+                Side::Left,
+                offset,
+            )
+            .channel
+            .expect("a channel")
         };
-        let to = CardGeom {
-            x: 200.0,
-            y: 300.0,
-            width: 100.0,
-            height: 50.0,
+        assert!(!at(0.0).vertical);
+        assert_eq!(at(-100.0).at.0, at(0.0).at.0 - 100.0);
+        // ...and it is the x that moves, not the y
+        assert_eq!(at(-100.0).at.1, at(0.0).at.1);
+    }
+
+    /// A fan-out: one source feeding three children, which is the shape where
+    /// pinning one port could plausibly disturb the others.
+    struct Fan {
+        nodes: Vec<(StreamerId, Vec<StreamerId>)>,
+        placed: HashMap<StreamerId, CardGeom>,
+    }
+
+    fn fan() -> Fan {
+        let nodes = vec![
+            node("root", None),
+            node("a", Some("root")),
+            node("b", Some("root")),
+            node("c", Some("root")),
+        ];
+        let placed = lay(&nodes, &no_heights());
+        Fan { nodes, placed }
+    }
+
+    fn drawn(paths: &[EdgePath], to: &str) -> EdgePath {
+        paths
+            .iter()
+            .find(|p| p.edge.to == to)
+            .cloned()
+            .expect("edge not drawn")
+    }
+
+    /// The point of the feature: an edge attaches where it was told to, and the
+    /// route starts from there.
+    #[test]
+    fn a_pinned_port_puts_the_edge_where_it_was_told() {
+        let Fan { nodes, placed } = fan();
+        let mut arrangement = LayoutFile::default();
+        arrangement.set_edge_port(
+            "root",
+            "a",
+            EdgeEnd::From,
+            Some(PortLayout {
+                side: Side::Bottom,
+                along: 40.0,
+            }),
+        );
+
+        let pinned = drawn(&edge_paths(&nodes, &placed, &arrangement), "a");
+        let root = placed["root"];
+        assert!(pinned.from_port.pinned);
+        assert_eq!(pinned.from_port.at, (root.x + 40.0, root.y + root.height));
+        assert!(
+            pinned.path.starts_with(&format!("M {} {}", root.x + 40.0, root.y + root.height)),
+            "the route does not start at the pinned port: {}",
+            pinned.path
+        );
+    }
+
+    /// Pinning one edge's port must not shuffle its siblings: the fan-out
+    /// spreads the *remaining* ends over the face as if the pinned one weren't
+    /// there, rather than counting it and squeezing up around a gap.
+    #[test]
+    fn pinning_one_port_does_not_move_the_others() {
+        let Fan { nodes, placed } = fan();
+        let automatic = edge_paths(&nodes, &placed, &LayoutFile::default());
+
+        let mut arrangement = LayoutFile::default();
+        arrangement.set_edge_port(
+            "root",
+            "b",
+            EdgeEnd::From,
+            Some(PortLayout {
+                side: Side::Bottom,
+                along: 20.0,
+            }),
+        );
+        let adjusted = edge_paths(&nodes, &placed, &arrangement);
+
+        // 'b' moved to where it was put...
+        assert_ne!(
+            drawn(&automatic, "b").from_port.at,
+            drawn(&adjusted, "b").from_port.at
+        );
+        // ...and the other two ends are exactly where they were
+        for sibling in ["a", "c"] {
+            assert_eq!(
+                drawn(&automatic, sibling).from_port.at,
+                drawn(&adjusted, sibling).from_port.at,
+                "'{sibling}' moved when 'b' was pinned"
+            );
+        }
+    }
+
+    /// A pinned position is measured along one face, and the router is free to
+    /// change its mind about which face to use. When it does, the old number
+    /// means nothing and the edge goes back to being placed automatically —
+    /// which is self-healing, and needs no cleanup pass over the file.
+    #[test]
+    fn a_pinned_port_on_a_face_the_route_no_longer_uses_is_ignored() {
+        let Fan { nodes, placed } = fan();
+        // pinned on the left face; the route actually leaves by the bottom
+        let mut stale = LayoutFile::default();
+        stale.set_edge_port(
+            "root",
+            "a",
+            EdgeEnd::From,
+            Some(PortLayout {
+                side: Side::Left,
+                along: 40.0,
+            }),
+        );
+
+        let automatic = drawn(&edge_paths(&nodes, &placed, &LayoutFile::default()), "a");
+        let with_stale = drawn(&edge_paths(&nodes, &placed, &stale), "a");
+        assert_eq!(with_stale.from_port.at, automatic.from_port.at);
+        assert!(!with_stale.from_port.pinned);
+    }
+
+    /// Both ends are adjustable, and independently: the arriving end of an edge
+    /// is as likely to be the confusing one as the leaving end.
+    #[test]
+    fn the_arriving_end_can_be_pinned_too() {
+        let Fan { nodes, placed } = fan();
+        let mut arrangement = LayoutFile::default();
+        arrangement.set_edge_port(
+            "root",
+            "a",
+            EdgeEnd::To,
+            Some(PortLayout {
+                side: Side::Top,
+                along: 300.0,
+            }),
+        );
+
+        let edge = drawn(&edge_paths(&nodes, &placed, &arrangement), "a");
+        let child = placed["a"];
+        assert_eq!(edge.to_port.at, (child.x + 300.0, child.y));
+        assert!(edge.to_port.pinned);
+        // the leaving end is untouched
+        assert!(!edge.from_port.pinned);
+    }
+
+    /// A port can't be dragged off its card, or past the corner where the line
+    /// would stop reading as attached to that face at all.
+    #[test]
+    fn a_port_stays_on_its_face() {
+        let geom = card(0.0, 0.0, CARD_WIDTH, 200.0);
+        for along in [-500.0, 0.0, 5_000.0] {
+            let (x, y) = port_at(geom, Side::Bottom, along);
+            assert!(
+                (geom.x + GRID..=geom.x + geom.width - GRID).contains(&x),
+                "an `along` of {along} put the port at x={x}"
+            );
+            assert_eq!(y, geom.y + geom.height);
+        }
+        // ...and a drag lands on the grid, wherever the pointer stopped
+        assert_eq!(dragged_port(60.0, 13.0, CARD_WIDTH), 80.0);
+        assert_eq!(dragged_port(60.0, -9_000.0, CARD_WIDTH), GRID);
+        assert_eq!(dragged_port(60.0, 9_000.0, CARD_WIDTH), CARD_WIDTH - GRID);
+    }
+
+    /// The handle has to report the face it is on and how long that face is, or
+    /// a drag has nothing to clamp against.
+    #[test]
+    fn a_port_handle_describes_the_face_it_is_on() {
+        let Fan { nodes, placed } = fan();
+        let edge = drawn(&edge_paths(&nodes, &placed, &LayoutFile::default()), "a");
+
+        assert_eq!(edge.from_port.side, Side::Bottom);
+        assert_eq!(edge.from_port.length, placed["root"].width);
+        assert_eq!(edge.to_port.side, Side::Top);
+        assert_eq!(edge.to_port.length, placed["a"].width);
+        // and `along` is where it says it is
+        assert_eq!(
+            edge.from_port.at,
+            port_at(placed["root"], Side::Bottom, edge.from_port.along)
+        );
+    }
+
+    /// The layout file reaches the routes: an adjusted edge is drawn adjusted,
+    /// and its neighbours are not.
+    #[test]
+    fn an_adjusted_edge_is_the_only_one_that_moves() {
+        let nodes = [
+            node("root", None),
+            node("a", Some("root")),
+            node("b", Some("root")),
+        ];
+        let placed = lay(&nodes, &no_heights());
+
+        let automatic = edge_paths(&nodes, &placed, &LayoutFile::default());
+        let mut arrangement = LayoutFile::default();
+        arrangement.set_edge_offset("root", "a", 60.0);
+        let adjusted = edge_paths(&nodes, &placed, &arrangement);
+
+        let path_to = |paths: &[EdgePath], to: &str| {
+            paths
+                .iter()
+                .find(|p| p.edge.to == to)
+                .map(|p| p.path.clone())
+                .expect("edge not drawn")
         };
-        let path = edge_path(from, to);
-        assert!(path.starts_with("M 50 50 "), "unexpected start: {path}");
-        assert!(path.ends_with("250 300"), "unexpected end: {path}");
+        assert_ne!(path_to(&automatic, "a"), path_to(&adjusted, "a"));
+        assert_eq!(path_to(&automatic, "b"), path_to(&adjusted, "b"));
     }
 
     /// The whole point of `edge_paths`: an edge is a function of where the
@@ -681,10 +2026,11 @@ mod tests {
             node("b", Some("a")),
         ];
 
-        let small = edge_paths(&nodes, &layout(&nodes, &no_heights()));
+        let small = edge_paths(&nodes, &lay(&nodes, &no_heights()), &LayoutFile::default());
         let grown = edge_paths(
             &nodes,
-            &layout(&nodes, &HashMap::from([("a".to_string(), 600.0)])),
+            &lay(&nodes, &HashMap::from([("a".to_string(), 600.0)])),
+            &LayoutFile::default(),
         );
 
         assert_eq!(small.len(), 2, "expected one path per parent/child pair");
@@ -699,7 +2045,7 @@ mod tests {
     #[test]
     fn an_edge_to_an_unplaced_card_is_skipped() {
         let nodes = [node("a", None), node("b", Some("a"))];
-        assert!(edge_paths(&nodes, &HashMap::new()).is_empty());
+        assert!(edge_paths(&nodes, &HashMap::new(), &LayoutFile::default()).is_empty());
     }
 
     fn batch_event(streamer_id: &str, stage: &str) -> UiEvent {

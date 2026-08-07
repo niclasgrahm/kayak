@@ -35,7 +35,7 @@ Lints are strict by design: clippy `pedantic` plus `unwrap_used`/`expect_used` a
 
 Three workspace crates:
 
-- **`streamer-core/`** — shared, dependency-light types. All config structs/enums (`config.rs`), plus `StreamerId`, `MessageBatch = Vec<Arc<serde_json::Value>>`, `UiEvent`, `StreamerDto`. Compiles for both native and `wasm32`, which is why it exists: the frontend needs the same config types as the server. It has no async/network deps and no real `main.rs`.
+- **`streamer-core/`** — shared, dependency-light types. All config structs/enums (`config.rs`), plus `StreamerId`, `MessageBatch = Vec<Arc<serde_json::Value>>`, `UiEvent`, `StreamerDto`, and the canvas layout types (`layout.rs`). Compiles for both native and `wasm32`, which is why it exists: the frontend needs the same config types as the server. It has no async/network deps and no real `main.rs`.
 - **`/` (root `streamer` crate)** — the Axum server and the whole stream-processing runtime. It is a **lib + bin**: everything lives in `src/lib.rs` and its modules so integration tests can import it; `src/main.rs` is only clap args, tracing setup and the Leptos router wiring. `api_router()` in `lib.rs` builds the JSON/SSE routes for both.
 - **`frontend/`** — Leptos 0.8 SSR + hydrate crate. `cdylib`+`rlib` with `ssr`/`hydrate` features; the root binary depends on it with `ssr` and mounts it via `leptos_axum`.
 
@@ -83,9 +83,38 @@ The file can be JSON or YAML (`streamer_core::ConfigFormat`), decided by the ext
 
 Three things to preserve. `persist::save_path` rejects anything but a bare file name and is a security boundary, not a nicety — the path comes from an HTTP request, so an unconstrained one is an arbitrary write; refuse, never normalise. `has_unsaved_changes` compares `render(current)` against the `saved` snapshot, which is exact *because* `render` is deterministic. And `revert` parses the file before tearing the runtime down, so a file broken by hand doesn't cost you the running graph.
 
+### The canvas layout file
+
+Card positions are **not configuration** and are deliberately kept out of the config file. They live in `<config-stem>.layout.json` beside it (`config.json` → `config.layout.json`, always JSON), whose path is *derived* in `layout::layout_path` rather than configured. `streamer_core::layout` holds the types (`LayoutFile`, `NodeLayout`), `src/layout.rs` the file IO — deterministic (`BTreeMap`) and atomic, same as `persist`, because the file is committed.
+
+The write rule is the **opposite** of the config file's, on purpose: `PUT /api/layout` writes to disk immediately, and arranging the canvas never counts as an unsaved change — moving a card changes nothing the server runs, so there is nothing worth reviewing before it lands. It is a full replacement rather than a patch, which is what makes "reset everything to automatic" a send of a smaller map. Only nodes someone has actually moved appear; `height` is absent unless the card was resized (a card is normally as tall as its content). `edges` holds adjusted lines (channel offset and either end's port), is omitted when empty, and `adjust_edge` drops an entry once *every* adjustment on it is back to default — an undone adjustment must not leave a no-op in a committed file, and dropping the entry when only one of the three is undone would silently lose the others. It's a `Vec` sorted by `(from, to)` rather than a map so no id character has to be escaped. `Side` lives in core rather than `graph.rs` because a stored port position is meaningless without the face it was measured on. Entries for pipelines that no longer exist are kept, not pruned. Without a `--config` there is nowhere to write and the arrangement is process-lifetime only.
+
+`tests/layout.rs` pins all of that, and each assertion there is a deliberate difference from `tests/persist.rs` — don't "fix" one to match the other.
+
+### Canvas geometry: the grid
+
+`graph::GRID` (20px) is the unit for everything on the canvas, not decoration: card width is 18 cells, `layout` snaps positions and sizes to it, ports sit on its lines, and edge channels run along them. The `.nodes` background-size is set inline from the same constant — if you change one, change both.
+
+Measured card heights are rounded **up** (`snap_up`): up so content still fits, and idempotent because the height feeds back through measure → lay out → render and would otherwise oscillate. A pinned height (from a resize) wins over the measured one, and the card's content scrolls — that's the `.card.pinned` CSS.
+
+Edges are orthogonal: `sides_between` picks the faces (only ones with `CLEARANCE` in front of them), `port` places an edge on a face — edges sharing one fan out along it — and `route` produces the corners, always axis-aligned, through a grid-snapped channel between the cards. `rounded_path` renders it.
+
+**Vertical wins whenever it's available** in `sides_between`, and that ordering is the point, not an accident: the graph is a flow, so a child a row below reads as fed-from-above however far to the side it sits. An earlier version tie-broke on centre distance and turned every wide fan-out into lines arriving sideways. Side faces are therefore what you get when the cards are *level* — no room to route between them — which is when a sideways line is right.
+
+**Three parts of a route are draggable**, all stored per edge in the layout file and all reset by double-click:
+
+- *The channel* (`Route::channel`, `Channel`, `dragged_channel`) — the answer to a dozen edges between the same two rows all picking the same half-way line. An *offset* from that line rather than a coordinate, so it survives either card moving; `route` clamps it to the gap, since past either end the route doubles back. A route with no middle segment — straight, or L-shaped between perpendicular faces — reports `channel: None` and gets no handle; one that did nothing would be worse than none.
+- *The two ends* (`PortHandle`, `port_at`, `auto_along`, `dragged_port`). The *face* stays automatic — that answer is nearly always right and has to keep up as cards move — but where along it the edge attaches is the user's. Stored as a distance from the face's start, not a fraction: "a card's width in from the corner" should stay put when the card is made taller.
+
+Two rules in there earn their keep. A stored port carries the `Side` it was measured on, and is **ignored when the router picks a different face** — the number means nothing on the new face, and dropping it is self-healing with no cleanup pass. And a pinned end **still occupies its slot in `slots_on_faces`** even though the slot's position is discarded for it: excluding it would re-spread the rest, so nudging one line would shift its siblings. `pinning_one_port_does_not_move_the_others` pins that; it failed on the first attempt, which is how the rule got found.
+
+One known gap: a channel can still pass through a third card. That's now a drag away from fixed rather than needing an obstacle-aware router.
+
+Pinned nodes **keep their slot in the automatic flow** (`layout` overwrites the auto answer rather than removing the node from it), so dragging one card doesn't rearrange the rest. Cards can then overlap, which is the user's business.
+
 ### HTTP surface
 
-`src/main.rs` builds two routers and merges them: an `api` router with `Arc<AppState>` state (`POST/GET /api/streams`, `DELETE /api/streams/{id}`, `GET /events` SSE, `GET /api/docs`), and the Leptos router with `LeptosOptions` state plus `file_and_error_handler` fallback.
+`src/main.rs` builds two routers and merges them: an `api` router with `Arc<AppState>` state (`POST/GET /api/streams`, `DELETE /api/streams/{id}`, `GET /events` SSE, `GET /api/docs`, `GET/PUT /api/layout`), and the Leptos router with `LeptosOptions` state plus `file_and_error_handler` fallback.
 
 `/events` is an SSE stream over the `UiEvent` broadcast; the frontend consumes it with `leptos_use::use_event_source` + `codee` JSON. Streamer run loops only send events when `receiver_count() > 0`. This is explicitly marked temporary in `src/streamer.rs`.
 
@@ -103,7 +132,11 @@ A `FieldDoc` carries `field_type` (`FieldType`) beside the human-readable `type_
 
 ### Editing the graph from the UI
 
-The canvas has a `Mode` (`frontend/src/app.rs`) that starts at `ReadOnly`; edit affordances are `<Show>`n, not disabled, so read-only really is read-only. It's a browser-tab property — the API accepts writes either way, which is fine for a dev tool but shouldn't be mistaken for enforcement. Edits apply to the runtime immediately, so `revert` (reload the file) is the only undo, and `unsaved changes` in the navbar is the only thing between a session's work and a restart.
+The canvas has a `Mode` (`frontend/src/app.rs`) that starts at `ReadOnly`; edit affordances are `<Show>`n, not disabled, so read-only really is read-only. That includes moving cards: the title bar is a drag handle and the corner a resize handle only in edit mode, and double-clicking the title bar puts a card back under the automatic layout. A `<Show>`'s children must be `Fn` *and* `Send + Sync`, which is why `Card`'s drag handler keeps its id in a `StoredValue` — that makes the closure `Copy` and usable in both places.
+
+The same applies to the edge handles: `ChannelGrip` and `PortGrip` are each two `<line>`s, a fat transparent one that catches the pointer (`.edges` sets `pointer-events: none`, so the hit line turns it back on for itself) and a visible grip. Note the label is an `aria-label` and not an SVG `<title>` child — `leptos_meta` claims `<title>` for the document's, and the browser tab ends up named after whichever edge rendered last. Their `.vertical` classes mean *opposite* things (a channel's is the route's direction, a port's is the face's), which is why the cursor rules are per-class rather than shared.
+
+Drags are tracked with window-level listeners rather than on the card (a fast pointer leaves the card behind, and a `mouseup` outside it would never arrive). The delta is divided by the zoom, applied to the geometry captured at press time rather than accumulated, and written into `arrangement` live so the edges follow; the `PUT` happens once, on release. It's a browser-tab property — the API accepts writes either way, which is fine for a dev tool but shouldn't be mistaken for enforcement. Edits apply to the runtime immediately, so `revert` (reload the file) is the only undo, and `unsaved changes` in the navbar is the only thing between a session's work and a restart.
 
 The `+` in the sidebar opens `AddNodeModal` (`frontend/src/app.rs`), whose pure half is `frontend/src/form.rs` — drafts in, `POST /api/streams` body or a list of `FormError`s out, unit tested like `graph.rs`/`inspector.rs`/`docs.rs`. One non-obvious constraint shapes the component: the field boxes are **uncontrolled** (`value=` once, `on:input` writes, never reads back), because the field list is rebuilt when the kind or variant changes and a rebuild on every keystroke would destroy the `<input>` being typed into. `DraftSignals` exists for the same reason — per-part signals so typing doesn't invalidate the list.
 

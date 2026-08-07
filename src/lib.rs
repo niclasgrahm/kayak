@@ -6,7 +6,7 @@
 
 use axum::{
     Router,
-    routing::{delete, get, post},
+    routing::{delete, get, post, put},
 };
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -15,6 +15,7 @@ use tokio::sync::broadcast;
 pub mod config;
 pub mod handlers;
 pub mod inputs;
+pub mod layout;
 pub mod outputs;
 pub mod persist;
 pub mod secrets;
@@ -26,6 +27,7 @@ pub mod transforms;
 use crate::handlers::{
     rest::{
         docs::get_docs,
+        layout::{get_layout, put_layout},
         settings::{get_settings, revert_config, save_config},
         streamer::{create_stream, delete_stream, get_streams},
     },
@@ -89,6 +91,10 @@ pub fn api_router(state: Arc<AppState>) -> Router {
         // the /docs *page* is a Leptos route; this is the same data as JSON
         .route("/api/docs", get(get_docs))
         .route("/api/settings", get(get_settings))
+        // where the cards sit, not what they run: written on the spot rather
+        // than waiting for a save — see `layout`
+        .route("/api/layout", get(get_layout))
+        .route("/api/layout", put(put_layout))
         // the config file is written only here, never as a side effect of an
         // edit — see `persist`
         .route("/api/config/save", post(save_config))

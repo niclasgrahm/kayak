@@ -1,6 +1,8 @@
 use gloo_net::http::Request;
 use serde_json::Value;
-use streamer_core::{ConfigFormat, SaveConfigRequest, SaveConfigResponse, SettingsDto, StreamerDto};
+use streamer_core::{
+    ConfigFormat, LayoutFile, SaveConfigRequest, SaveConfigResponse, SettingsDto, StreamerDto,
+};
 
 pub struct ApiClient {
     pub base: String,
@@ -20,6 +22,30 @@ impl ApiClient {
             .send()
             .await?;
         Ok(resp.json::<SettingsDto>().await?)
+    }
+
+    /// Where the cards have been arranged. An empty answer is the normal one:
+    /// nothing has been dragged, so everything is laid out automatically.
+    pub async fn layout(&self) -> Result<LayoutFile, ApiError> {
+        let resp = Request::get(&format!("{}/api/layout", self.base))
+            .send()
+            .await?;
+        Ok(resp.json::<LayoutFile>().await?)
+    }
+
+    /// Replace the arrangement. The whole map rather than one node, because
+    /// that is what makes "put it back to automatic" an ordinary save of a
+    /// smaller map instead of its own endpoint.
+    pub async fn save_layout(&self, layout: &LayoutFile) -> Result<(), ApiError> {
+        let resp = Request::put(&format!("{}/api/layout", self.base))
+            .json(layout)?
+            .send()
+            .await?;
+        if resp.ok() {
+            Ok(())
+        } else {
+            Err(rejection(resp).await)
+        }
     }
 
     /// Create a pipeline. `config` is the body the form built — a `Value`

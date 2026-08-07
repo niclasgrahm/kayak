@@ -161,7 +161,7 @@ pub fn write(path: &Path, configs: Vec<Config>, format: ConfigFormat) -> anyhow:
 /// A sibling of the target to stage the new contents in. The name is derived
 /// from the target's, so two servers writing two different config files in one
 /// directory don't collide.
-fn temporary_path(path: &Path) -> std::path::PathBuf {
+pub(crate) fn temporary_path(path: &Path) -> std::path::PathBuf {
     let name = path
         .file_name()
         .map_or_else(|| std::ffi::OsString::from("config"), ToOwned::to_owned);

@@ -10,7 +10,10 @@ use leptos_use::{
 };
 use std::collections::{HashMap, VecDeque};
 use streamer_core::docs::{Family, FieldType, all_components};
-use streamer_core::{ConfigFormat, StreamerDto, StreamerId, UiEvent, config::Config};
+use streamer_core::{
+    ConfigFormat, EdgeEnd, LayoutFile, PortLayout, Side, StreamerDto, StreamerId, UiEvent,
+    config::Config,
+};
 
 use crate::api_client::{ApiClient, ApiError};
 use crate::docs;
@@ -18,14 +21,19 @@ use crate::form;
 use crate::inspector;
 use crate::log;
 use crate::graph::{
-    CardGeom, Camera, Edge, FALLBACK_CARD_HEIGHT, PULSE_TICK_MS, PULSE_TICKS, approach, bounds,
-    edge_paths, focus_camera, layout, nodes_from, pulsed_edges, tick_pulses, wheel_delta_pixels,
-    zoom_at,
+    CardGeom, Camera, Channel, Edge, FALLBACK_CARD_HEIGHT, GRID, PULSE_TICK_MS, PULSE_TICKS,
+    PortHandle, approach, bounds, dragged, dragged_channel, dragged_port, edge_paths, focus_camera,
+    layout, nodes_from, pulsed_edges, resized, tick_pulses, wheel_delta_pixels, zoom_at,
 };
 
 /// How hard the wheel zooms. Small, because the factor is exponential in the
 /// scroll distance.
 const ZOOM_SENSITIVITY: f64 = 0.0015;
+
+/// How wide the handle on a port is, in surface pixels. A grid cell: wide
+/// enough to grab, narrow enough that two adjacent ports on a fanned-out face
+/// are still two things.
+const PORT_GRIP: f64 = GRID;
 
 pub fn shell(options: LeptosOptions) -> impl IntoView {
     view! {
@@ -100,13 +108,82 @@ impl AppState {
     }
 }
 
+/// A drag in progress: which card, what it is doing to it, and where the
+/// pointer was when it started.
+///
+/// One signal for both gestures because they are the same gesture with a
+/// different arithmetic at the end — press, move, release — and because only
+/// one of them can be happening at a time.
+#[derive(Clone, Copy, PartialEq)]
+pub enum Grab {
+    Move,
+    Resize,
+}
+
+#[derive(Clone, PartialEq)]
+pub struct Dragging {
+    pub id: StreamerId,
+    pub grab: Grab,
+    /// Pointer position when the press landed, in client (screen) pixels.
+    pub origin: (f64, f64),
+    /// The card's geometry when the press landed. The gesture is applied to
+    /// *this* rather than to the current geometry, so a drag can't accumulate
+    /// rounding: every mousemove computes the same answer from the same start.
+    pub start: CardGeom,
+    /// Whether the card had a pinned height before the drag, so a move can
+    /// leave it alone.
+    pub pinned_height: Option<f64>,
+}
+
+/// A channel drag in progress: which edge's middle segment is being moved, and
+/// where it started from.
+#[derive(Clone, PartialEq)]
+pub struct DraggingChannel {
+    pub edge: Edge,
+    /// The route runs vertically, so the pointer's *y* is what moves the
+    /// channel and its x is ignored — a handle that slid sideways as well
+    /// would just be a way to lose it.
+    pub vertical: bool,
+    pub origin: (f64, f64),
+    /// The offset before the drag, so every mousemove computes its answer from
+    /// the same starting point rather than accumulating one.
+    pub start_offset: f64,
+}
+
+/// A port drag in progress: which end of which edge is being slid along its
+/// card's face.
+#[derive(Clone, PartialEq)]
+pub struct DraggingPort {
+    pub edge: Edge,
+    pub end: EdgeEnd,
+    pub side: Side,
+    /// How long the face is, so the drag can stop at its ends.
+    pub length: f64,
+    pub origin: (f64, f64),
+    pub start_along: f64,
+}
+
 /// Everything the canvas needs to draw itself. All of it is derived state
 /// except `camera`, `measured` and `focus_request`, which are the three things
 /// the user can actually change.
 #[derive(Clone, Copy)]
 pub struct CanvasState {
-    /// Where each card sits — computed by `graph::layout`, never edited by hand.
+    /// Where each card sits — computed by `graph::layout` from the automatic
+    /// layout and `arrangement`, never written to directly.
     pub placements: RwSignal<HashMap<StreamerId, CardGeom>>,
+    /// The cards someone has dragged or resized, as loaded from — and saved
+    /// back to — the server's layout file. Absent ids are laid out
+    /// automatically, which is the normal state of most graphs.
+    pub arrangement: RwSignal<LayoutFile>,
+    /// The card drag currently in flight, if any.
+    pub dragging: RwSignal<Option<Dragging>>,
+    /// The edge-channel drag currently in flight, if any. Separate from
+    /// `dragging` rather than another `Grab`: the two move different things and
+    /// neither can start while the other is running, so nothing is shared but
+    /// the mouse.
+    pub dragging_channel: RwSignal<Option<DraggingChannel>>,
+    /// The port drag currently in flight, if any.
+    pub dragging_port: RwSignal<Option<DraggingPort>>,
     /// Card heights as actually rendered, fed back into the layout.
     pub measured: RwSignal<HashMap<StreamerId, f64>>,
     pub camera: RwSignal<Camera>,
@@ -122,6 +199,10 @@ impl CanvasState {
     fn new() -> Self {
         Self {
             placements: RwSignal::new(HashMap::new()),
+            arrangement: RwSignal::new(LayoutFile::default()),
+            dragging: RwSignal::new(None),
+            dragging_channel: RwSignal::new(None),
+            dragging_port: RwSignal::new(None),
             measured: RwSignal::new(HashMap::new()),
             camera: RwSignal::new(Camera::default()),
             viewport: RwSignal::new((0.0, 0.0)),
@@ -141,6 +222,102 @@ impl CanvasState {
             self.focus_target.set(None);
         }
     }
+
+    /// Move the drag on by the pointer's current position.
+    ///
+    /// Applied to the arrangement as it happens rather than only on release,
+    /// which is what makes the edges follow the card around instead of jumping
+    /// to it at the end. The pointer delta is in screen pixels and the layout
+    /// is in surface pixels, so it is divided by the zoom — at 50% a card has
+    /// to keep up with a pointer moving twice as far.
+    fn drag_to(&self, drag: &Dragging, client: (f64, f64)) {
+        let zoom = self.camera.get_untracked().zoom;
+        let dx = (client.0 - drag.origin.0) / zoom;
+        let dy = (client.1 - drag.origin.1) / zoom;
+        let node = match drag.grab {
+            Grab::Move => dragged(drag.start, dx, dy, drag.pinned_height),
+            Grab::Resize => resized(drag.start, dx, dy),
+        };
+        self.arrangement.update(|a| {
+            a.nodes.insert(drag.id.clone(), node);
+        });
+    }
+
+    /// Move an edge's channel on by the pointer's current position.
+    ///
+    /// Only the axis the channel actually slides along is read; the other is
+    /// the user moving the mouse, not the user moving the line.
+    fn drag_channel_to(&self, drag: &DraggingChannel, client: (f64, f64)) {
+        let zoom = self.camera.get_untracked().zoom;
+        let delta = if drag.vertical {
+            (client.1 - drag.origin.1) / zoom
+        } else {
+            (client.0 - drag.origin.0) / zoom
+        };
+        self.set_channel(&drag.edge, dragged_channel(drag.start_offset, delta));
+    }
+
+    fn set_channel(&self, edge: &Edge, offset: f64) {
+        self.arrangement
+            .update(|a| a.set_edge_offset(&edge.from, &edge.to, offset));
+    }
+
+    /// Slide a port along the face it is attached to.
+    ///
+    /// Only the axis of the face is read — a port on a card's bottom edge moves
+    /// left and right and nowhere else, which is the whole of what "where on
+    /// this side does the line attach" can mean.
+    fn drag_port_to(&self, drag: &DraggingPort, client: (f64, f64)) {
+        let zoom = self.camera.get_untracked().zoom;
+        let delta = if drag.side.is_vertical() {
+            (client.0 - drag.origin.0) / zoom
+        } else {
+            (client.1 - drag.origin.1) / zoom
+        };
+        let along = dragged_port(drag.start_along, delta, drag.length);
+        self.set_port(
+            &drag.edge,
+            drag.end,
+            Some(PortLayout {
+                side: drag.side,
+                along,
+            }),
+        );
+    }
+
+    fn set_port(&self, edge: &Edge, end: EdgeEnd, port: Option<PortLayout>) {
+        self.arrangement
+            .update(|a| a.set_edge_port(&edge.from, &edge.to, end, port));
+    }
+
+    /// Put a card back under the automatic layout.
+    fn unpin(&self, id: &StreamerId) {
+        let removed = self.arrangement.try_update(|a| a.nodes.remove(id).is_some());
+        if removed == Some(true) {
+            self.save_arrangement();
+        }
+    }
+
+    fn save_arrangement(&self) {
+        persist_arrangement(self.arrangement.get_untracked());
+    }
+}
+
+/// Send the arrangement to the server, which writes it to the layout file.
+///
+/// Fire and forget, and deliberately quiet about failing: this is the position
+/// of a box on a canvas, and interrupting someone mid-drag with a toast about
+/// it would cost more than the arrangement is worth. It is still logged, so a
+/// server refusing every save is findable rather than merely puzzling.
+fn persist_arrangement(arrangement: LayoutFile) {
+    leptos::task::spawn_local(async move {
+        let client = ApiClient {
+            base: String::new(),
+        };
+        if let Err(err) = client.save_layout(&arrangement).await {
+            leptos::logging::warn!("could not save the canvas layout: {err}");
+        }
+    });
 }
 
 /// The two pages, behind a router so `/docs` is a real url that can be linked
@@ -245,8 +422,61 @@ pub fn CanvasPage() -> impl IntoView {
             .iter()
             .map(|s| (s.id.clone(), s.config.clone()))
             .collect();
-        let placed = layout(&nodes_from(&pairs), &canvas_state.measured.get());
+        let placed = layout(
+            &nodes_from(&pairs),
+            &canvas_state.measured.get(),
+            &canvas_state.arrangement.get(),
+        );
         canvas_state.placements.set(placed);
+    });
+
+    // The arrangement is fetched once rather than on `reload`: the server only
+    // ever has what this tab last sent it, and re-reading it mid-drag would
+    // fight the drag.
+    let arrangement = LocalResource::new(|| async move {
+        ApiClient {
+            base: String::new(),
+        }
+        .layout()
+        .await
+    });
+    Effect::new(move |_| {
+        if let Some(res) = arrangement.get()
+            && let Ok(loaded) = res.as_ref()
+        {
+            canvas_state.arrangement.set(loaded.clone());
+        }
+    });
+
+    // A drag is tracked on the window, not on the card: a fast pointer leaves
+    // the card behind, and a mouseup outside it would otherwise never arrive
+    // and leave the card stuck to the cursor.
+    let _ = use_event_listener(use_window(), leptos::ev::mousemove, move |ev| {
+        let at = (f64::from(ev.client_x()), f64::from(ev.client_y()));
+        if let Some(drag) = canvas_state.dragging.get_untracked() {
+            ev.prevent_default();
+            canvas_state.drag_to(&drag, at);
+        } else if let Some(drag) = canvas_state.dragging_channel.get_untracked() {
+            ev.prevent_default();
+            canvas_state.drag_channel_to(&drag, at);
+        } else if let Some(drag) = canvas_state.dragging_port.get_untracked() {
+            ev.prevent_default();
+            canvas_state.drag_port_to(&drag, at);
+        }
+    });
+    let _ = use_event_listener(use_window(), leptos::ev::mouseup, move |_| {
+        let was_dragging = canvas_state.dragging.get_untracked().is_some()
+            || canvas_state.dragging_channel.get_untracked().is_some()
+            || canvas_state.dragging_port.get_untracked().is_some();
+        if was_dragging {
+            canvas_state.dragging.set(None);
+            canvas_state.dragging_channel.set(None);
+            canvas_state.dragging_port.set(None);
+            // Saved on release rather than on every frame of the drag: the
+            // layout file is a file on someone's disk, and a drag across the
+            // canvas would otherwise rewrite it a hundred times.
+            canvas_state.save_arrangement();
+        }
     });
 
     // The camera glide. It only runs while there is somewhere to go: the loop
@@ -350,7 +580,9 @@ pub fn CanvasPage() -> impl IntoView {
                     }
                     style:background-size=move || {
                         let c = canvas_state.camera.get();
-                        format!("{0}px {0}px", 24.0 * c.zoom)
+                        // the grid the cards snap to, so what is drawn is what
+                        // they land on rather than a decoration that resembles it
+                        format!("{0}px {0}px", GRID * c.zoom)
                     }
                     on:wheel=move |ev| {
                         ev.prevent_default();
@@ -479,9 +711,16 @@ pub fn Edges(streamers: Vec<StreamerDto>) -> impl IntoView {
             .collect::<Vec<(StreamerId, Config)>>(),
     );
 
+    let canvas = state.canvas_state;
     let paths = {
         let nodes = nodes.clone();
-        Memo::new(move |_| edge_paths(&nodes, &state.canvas_state.placements.get()))
+        Memo::new(move |_| {
+            edge_paths(
+                &nodes,
+                &canvas.placements.get(),
+                &canvas.arrangement.get(),
+            )
+        })
     };
     // a zero-sized svg is never painted, so it has to span the whole graph
     let size = Memo::new(move |_| bounds(&state.canvas_state.placements.get()));
@@ -535,17 +774,194 @@ pub fn Edges(streamers: Vec<StreamerDto>) -> impl IntoView {
                 paths
                     .get()
                     .into_iter()
-                    .map(|(edge, d)| {
+                    .map(|routed| {
+                        let edge = routed.edge;
                         view! {
                             <path
-                                d=d
+                                d=routed.path
                                 class:active=move || pulses.with(|p| p.contains_key(&edge))
                             />
                         }
                     })
                     .collect_view()
             }}
+            // The grips go in their own layer, above every path: a channel that
+            // has been dragged onto another edge would otherwise have its handle
+            // painted under that edge and be hard to grab back.
+            <Show when=move || state.editing()>
+                {move || {
+                    paths
+                        .get()
+                        .into_iter()
+                        .map(|routed| {
+                            let channel = routed
+                                .channel
+                                .map(|channel| {
+                                    view! { <ChannelGrip edge=routed.edge.clone() channel=channel /> }
+                                });
+                            view! {
+                                {channel}
+                                <PortGrip
+                                    edge=routed.edge.clone()
+                                    end=EdgeEnd::From
+                                    port=routed.from_port
+                                />
+                                <PortGrip edge=routed.edge end=EdgeEnd::To port=routed.to_port />
+                            }
+                        })
+                        .collect_view()
+                }}
+            </Show>
         </svg>
+    }
+}
+
+/// The handle on a route's middle segment.
+///
+/// Two lines on top of each other: a thick invisible one that catches the
+/// pointer, because a 2px stroke is not something anyone can reliably hit, and a
+/// visible grip that says the segment is draggable. Dragging it moves the
+/// channel across the gap between the two cards, which is how two routes that
+/// would otherwise lie along the same line get separated.
+#[component]
+fn ChannelGrip(edge: Edge, channel: Channel) -> impl IntoView {
+    let state = expect_context::<AppState>();
+    let canvas = state.canvas_state;
+
+    // Half the segment either side of its midpoint. The grip is the *whole*
+    // segment rather than a dot on it: the line is what the eye is following,
+    // so the line is what the hand should be able to take hold of.
+    let half = channel.length / 2.0;
+    let (x1, y1, x2, y2) = if channel.vertical {
+        (channel.at.0 - half, channel.at.1, channel.at.0 + half, channel.at.1)
+    } else {
+        (channel.at.0, channel.at.1 - half, channel.at.0, channel.at.1 + half)
+    };
+
+    let stored_edge = StoredValue::new(edge);
+    let start = move |ev: leptos::ev::MouseEvent| {
+        if ev.button() != 0 {
+            return;
+        }
+        ev.prevent_default();
+        ev.stop_propagation();
+        canvas.interrupt_focus();
+        let edge = stored_edge.get_value();
+        let offset = canvas
+            .arrangement
+            .with_untracked(|a| a.edge_offset(&edge.from, &edge.to));
+        canvas.dragging_channel.set(Some(DraggingChannel {
+            edge,
+            vertical: channel.vertical,
+            origin: (f64::from(ev.client_x()), f64::from(ev.client_y())),
+            start_offset: offset,
+        }));
+    };
+
+    let held = Memo::new(move |_| {
+        canvas
+            .dragging_channel
+            .with(|d| d.as_ref().is_some_and(|d| d.edge == stored_edge.get_value()))
+    });
+
+    view! {
+        <g class="channel-grip" class:held=move || held.get()>
+            <line
+                class="hit"
+                class:vertical=channel.vertical
+                x1=x1
+                y1=y1
+                x2=x2
+                y2=y2
+                on:mousedown=start
+                // the way back to the automatic route, same gesture as a card's
+                on:dblclick=move |_| {
+                    let edge = stored_edge.get_value();
+                    canvas.set_channel(&edge, 0.0);
+                    canvas.save_arrangement();
+                }
+                // an attribute, not an svg `<title>` child: leptos_meta claims
+                // `<title>` for the document's own, and the tab ends up named
+                // after whichever edge rendered last
+                aria-label="drag to move this line; double-click to reset it"
+            />
+            <line class="grip" x1=x1 y1=y1 x2=x2 y2=y2 />
+        </g>
+    }
+}
+
+/// The handle on the point where an edge meets a card.
+///
+/// Which *face* an edge uses is worked out from where the cards sit and stays
+/// automatic — that part is nearly always right, and it changes as things move.
+/// Where along that face it attaches is what this lets you say, by sliding it:
+/// the fan-out spreads ends evenly, which is a good default and a poor answer
+/// when two of the lines want to cross to get where they are going.
+///
+/// A short bar lying along the face rather than a dot, for the same reason the
+/// channel grip spans its segment: it has to be findable and hittable without
+/// being loud.
+#[component]
+fn PortGrip(edge: Edge, end: EdgeEnd, port: PortHandle) -> impl IntoView {
+    let state = expect_context::<AppState>();
+    let canvas = state.canvas_state;
+
+    let half = PORT_GRIP / 2.0;
+    let (x1, y1, x2, y2) = if port.side.is_vertical() {
+        (port.at.0 - half, port.at.1, port.at.0 + half, port.at.1)
+    } else {
+        (port.at.0, port.at.1 - half, port.at.0, port.at.1 + half)
+    };
+
+    let stored_edge = StoredValue::new(edge);
+    let start = move |ev: leptos::ev::MouseEvent| {
+        if ev.button() != 0 {
+            return;
+        }
+        ev.prevent_default();
+        ev.stop_propagation();
+        canvas.interrupt_focus();
+        canvas.dragging_port.set(Some(DraggingPort {
+            edge: stored_edge.get_value(),
+            end,
+            side: port.side,
+            length: port.length,
+            origin: (f64::from(ev.client_x()), f64::from(ev.client_y())),
+            start_along: port.along,
+        }));
+    };
+
+    let held = Memo::new(move |_| {
+        canvas.dragging_port.with(|d| {
+            d.as_ref()
+                .is_some_and(|d| d.edge == stored_edge.get_value() && d.end == end)
+        })
+    });
+
+    view! {
+        <g
+            class="port-grip"
+            class:held=move || held.get()
+            class:pinned=port.pinned
+        >
+            <line
+                class="hit"
+                class:vertical=port.side.is_vertical()
+                x1=x1
+                y1=y1
+                x2=x2
+                y2=y2
+                on:mousedown=start
+                // same gesture as everywhere else on the canvas: back to automatic
+                on:dblclick=move |_| {
+                    let edge = stored_edge.get_value();
+                    canvas.set_port(&edge, end, None);
+                    canvas.save_arrangement();
+                }
+                aria-label="drag along the card to move where this line connects; double-click to reset it"
+            />
+            <line class="grip" x1=x1 y1=y1 x2=x2 y2=y2 />
+        </g>
     }
 }
 
@@ -1850,20 +2266,109 @@ pub fn Card(
             })
     });
 
+    // Whether this card's height was chosen rather than measured. It decides
+    // between `height` and `min-height` below, which is the difference between
+    // a card that scrolls its content and one that grows to fit it.
+    let pinned_id = streamer_id.clone();
+    let pinned_height = Memo::new(move |_| {
+        canvas
+            .arrangement
+            .with(|a| a.get(&pinned_id).and_then(|n| n.height))
+    });
+
+    // Both gestures start the same way, and both have to keep the press away
+    // from the canvas — a card being dragged must not also pan the view behind
+    // it. The canvas' own handler ignores presses that land on a card, so this
+    // only has to stop the text selection that a drag would otherwise start.
+    // The id is stored rather than captured so that this closure stays `Copy`:
+    // the resize handle lives inside a `<Show>`, whose children are rebuilt
+    // whenever the mode changes and so can't consume what they capture.
+    let stored_id = StoredValue::new(streamer_id.clone());
+    let grab = move |ev: leptos::ev::MouseEvent, grab: Grab| {
+        if ev.button() != 0 {
+            return;
+        }
+        ev.prevent_default();
+        ev.stop_propagation();
+        canvas.interrupt_focus();
+        canvas.dragging.set(Some(Dragging {
+            id: stored_id.get_value(),
+            grab,
+            origin: (f64::from(ev.client_x()), f64::from(ev.client_y())),
+            start: position.get_untracked(),
+            pinned_height: pinned_height.get_untracked(),
+        }));
+    };
+
+    let dragging_id = streamer_id.clone();
+    let is_dragging = Memo::new(move |_| {
+        canvas
+            .dragging
+            .with(|d| d.as_ref().is_some_and(|d| d.id == dragging_id))
+    });
+
+    let reset_id = streamer_id.clone();
+
     view! {
         <div
             class="card"
+            class:dragging=move || is_dragging.get()
+            class:pinned=move || pinned_height.get().is_some()
             node_ref=card_ref
             style:left=move || format!("{}px", position.get().x)
             style:top=move || format!("{}px", position.get().y)
+            style:width=move || format!("{}px", position.get().width)
+            // A measured card is only ever pushed *up* to the next grid line, so
+            // it keeps growing with its content; a resized one is pinned to the
+            // height that was asked for and its log scrolls inside it.
+            style:height=move || {
+                pinned_height.get().map(|_| format!("{}px", position.get().height))
+            }
+            style:min-height=move || {
+                if pinned_height.get().is_some() {
+                    None
+                } else {
+                    Some(format!("{}px", position.get().height))
+                }
+            }
         >
-            <header>{streamer_id.clone()}</header>
+            <header
+                class:draggable=move || state.editing()
+                on:mousedown=move |ev| {
+                    if state.editing() {
+                        grab(ev, Grab::Move);
+                    }
+                }
+                // double-click puts the card back under the automatic layout,
+                // which is the only way back once it has been moved
+                on:dblclick=move |_| {
+                    if state.editing() {
+                        canvas.unpin(&reset_id);
+                    }
+                }
+                title=move || {
+                    if state.editing() {
+                        "drag to move, double-click to lay out automatically"
+                    } else {
+                        ""
+                    }
+                }
+            >
+                {streamer_id.clone()}
+            </header>
             <Inspector config=config />
             <div class="messages" node_ref=log_ref>
                 <For each=move || messages.get() key=|(i, _)| *i let:entry>
                     <div class:error=entry.1.error>{entry.1.text}</div>
                 </For>
             </div>
+            <Show when=move || state.editing()>
+                <div
+                    class="resize-handle"
+                    title="drag to resize"
+                    on:mousedown=move |ev| grab(ev, Grab::Resize)
+                />
+            </Show>
         </div>
     }
 }

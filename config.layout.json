@@ -1,0 +1,47 @@
+{
+  "version": 1,
+  "nodes": {
+    "everything": {
+      "x": -120.0,
+      "y": 900.0,
+      "width": 360.0
+    },
+    "heartbeat": {
+      "x": -720.0,
+      "y": -1340.0,
+      "width": 660.0,
+      "height": 520.0
+    },
+    "kafka_events": {
+      "x": 2060.0,
+      "y": -940.0,
+      "width": 360.0
+    },
+    "sensors": {
+      "x": 3220.0,
+      "y": -540.0,
+      "width": 360.0
+    }
+  },
+  "edges": [
+    {
+      "from": "heartbeat",
+      "to": "everything",
+      "offset": -760.0,
+      "from_port": {
+        "side": "bottom",
+        "along": 60.0
+      }
+    },
+    {
+      "from": "heartbeat",
+      "to": "heartbeat_pairs",
+      "offset": -660.0
+    },
+    {
+      "from": "sensors",
+      "to": "sensors_60s_sum",
+      "offset": -160.0
+    }
+  ]
+}
