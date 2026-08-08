@@ -27,14 +27,31 @@ dev-yaml: secrets
 # It is gitignored — nothing named secrets.json is committed, whatever is in it
 # — so a fresh checkout has the example and not the file. Copying it here is
 # what keeps `just dev` a single command anyway.
+#
+# Filling in *missing* keys rather than only creating the file is the part that
+# earns its keep: a checkout that ran `just dev` before a new secret was added to
+# the sample has a file that no longer starts the sample, and the failure names
+# the secret without saying that the fix is to go and diff two files by hand.
+# Values already in the file always win — someone may have put a real credential
+# there, and clobbering it back to "hunter2" would be a worse bug than the one
+# this fixes.
 
-# create example_config/secrets.json from the example, if it isn't there yet
+# create or top up example_config/secrets.json from the example
 secrets:
-  #!/usr/bin/env sh
-  if [ ! -f {{example}}/secrets.json ]; then
-    cp {{example}}/secrets.example.json {{example}}/secrets.json
-    echo "created {{example}}/secrets.json from the example"
-  fi
+  #!/usr/bin/env python3
+  import json, pathlib
+  example = pathlib.Path("{{example}}")
+  target, source = example / "secrets.json", example / "secrets.example.json"
+  wanted = json.loads(source.read_text())
+  if not target.exists():
+      target.write_text(json.dumps(wanted, indent=2) + "\n")
+      print(f"created {target} from the example")
+  else:
+      have = json.loads(target.read_text())
+      missing = {k: v for k, v in wanted.items() if k not in have}
+      if missing:
+          target.write_text(json.dumps({**have, **missing}, indent=2) + "\n")
+          print(f"added {', '.join(missing)} to {target} from the example")
 
 lint:
   cargo clippy --workspace --all-targets -- -D warnings

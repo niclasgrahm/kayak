@@ -39,7 +39,8 @@
         "connection": "local-kafka",
         "topic": "test.events",
         "group": "kayak-sample",
-        "start_at": "latest"
+        "start_at": "latest",
+        "max_batch": 500
       }
     ],
     "transforms": [],
@@ -55,7 +56,8 @@
       {
         "type": "nats",
         "connection": "local-nats",
-        "subject": "test.subject"
+        "subject": "test.subject",
+        "max_batch": 500
       }
     ],
     "transforms": [],
@@ -79,7 +81,8 @@
       {
         "type": "nats",
         "connection": "local-nats",
-        "subject": "test.aggregated.max"
+        "subject": "test.aggregated.max",
+        "max_batch": 500
       }
     ],
     "transforms": [],
@@ -132,6 +135,28 @@
         "type": "file",
         "connection": "local-files",
         "path": "heartbeat",
+        "format": "ndjson",
+        "rotate": {
+          "max_rows": 20,
+          "interval_secs": 60
+        }
+      }
+    ]
+  },
+  {
+    "id": "heartbeat_to_s3",
+    "inputs": [
+      {
+        "type": "pipeline",
+        "upstream": "heartbeat"
+      }
+    ],
+    "transforms": [],
+    "outputs": [
+      {
+        "type": "s3",
+        "connection": "local-s3",
+        "prefix": "heartbeat",
         "format": "ndjson",
         "rotate": {
           "max_rows": 20,

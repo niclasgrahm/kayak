@@ -555,6 +555,13 @@ body {
 
   .clear {
     margin-left: 3px;
+
+    // "paused" is a state, not an action taken — it stays lit for as long as it
+    // is true, the way an on chip does
+    &.active {
+      border-color: var(--accent);
+      color: var(--text);
+    }
   }
 }
 
@@ -566,6 +573,9 @@ body {
   // sixth line peeking out of the top
   max-height: calc(5 * 1.6em);
   overflow-y: auto;
+  // the wheel handler keeps the canvas from zooming; this keeps the browser
+  // from scrolling an ancestor once this pane is at its end
+  overscroll-behavior: contain;
 
   // A pass's header. Same three columns as a row so the two views line up when
   // one is toggled into the other, but it reads as a heading rather than as

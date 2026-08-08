@@ -2436,11 +2436,7 @@ mod tests {
     }
 
     fn batch_event(pipeline_id: &str, stage: Stage) -> UiEvent {
-        UiEvent::batch(
-            pipeline_id.to_string(),
-            stage,
-            std::sync::Arc::new(Vec::new()),
-        )
+        UiEvent::batch(pipeline_id.to_string(), stage, &Vec::new(), 0)
     }
 
     /// A batch arriving at a downstream pipeline is a batch that crossed the

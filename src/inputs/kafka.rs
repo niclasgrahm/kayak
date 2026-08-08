@@ -4,6 +4,7 @@ use crate::{
     secrets::Resolved,
 };
 use anyhow::{Context, Result};
+use futures_util::FutureExt;
 use kayak_core::config::{KafkaConfig, KafkaStartAt};
 use rdkafka::{
     ClientConfig, Message,
@@ -26,6 +27,10 @@ impl BuildInput for KafkaConfig {
             topic: self.topic,
             group: self.group,
             start_at: self.start_at.unwrap_or(KafkaStartAt::Latest),
+            // one message per batch unless the config asks for more: batching
+            // is an optimisation, never something imposed on a pipeline that
+            // wants its messages one at a time
+            max_batch: crate::inputs::batch_cap(self.max_batch),
             consumer: None,
         }))
     }
@@ -36,6 +41,10 @@ pub struct KafkaInput {
     topic: String,
     group: String,
     start_at: KafkaStartAt,
+    /// Most messages in one batch. One unless the config says otherwise — see
+    /// [`KafkaInput::next`] for what raising it does and, just as importantly,
+    /// what it doesn't.
+    max_batch: usize,
     /// Built on the first read, like the nats input: `build()` must not block
     /// on a broker that isn't up yet.
     consumer: Option<StreamConsumer>,
@@ -65,8 +74,44 @@ impl KafkaInput {
     }
 }
 
+impl KafkaInput {
+    /// The next record's JSON, waiting for one. `None` means the record was
+    /// skipped — no payload, or not JSON — and the caller should ask again.
+    fn decode(&self, msg: &rdkafka::message::BorrowedMessage<'_>) -> Option<serde_json::Value> {
+        let Some(payload) = msg.payload() else {
+            tracing::warn!(
+                "skipping kafka record with no payload on topic '{}'",
+                self.topic
+            );
+            return None;
+        };
+        // a single malformed payload shouldn't kill the pipeline; skip it and
+        // wait for the next record
+        match serde_json::from_slice(payload) {
+            Ok(value) => Some(value),
+            Err(e) => {
+                tracing::warn!(
+                    "skipping non-json record on kafka topic '{}': {}",
+                    self.topic,
+                    e
+                );
+                None
+            }
+        }
+    }
+}
+
 #[async_trait::async_trait]
 impl InputSource for KafkaInput {
+    /// Wait for one record, then take whatever else is *already* waiting, up to
+    /// `max_batch`.
+    ///
+    /// The second half is `now_or_never` rather than another `await` on purpose,
+    /// and it is what makes batching safe to leave on: this never waits for a
+    /// batch to fill. A topic producing one message a second yields batches of
+    /// one whatever `max_batch` says, so raising it costs an idle pipeline
+    /// nothing in latency. It only bites during a catch-up, which is the case it
+    /// exists for — and with the default of 1 the drain loop doesn't run at all.
     async fn next(&mut self) -> Result<Arc<MessageBatch>> {
         if self.consumer.is_none() {
             self.consumer = Some(self.connect()?);
@@ -76,30 +121,31 @@ impl InputSource for KafkaInput {
             .as_ref()
             .ok_or_else(|| anyhow::anyhow!("kafka consumer not initialized"))?;
 
-        loop {
+        let mut batch: MessageBatch = Vec::new();
+        while batch.is_empty() {
             // recv() is cancel-safe, which matters: the run loop drops this
             // future every time it checks for cancellation
             let msg = consumer
                 .recv()
                 .await
                 .with_context(|| format!("kafka consumer on '{}' failed", self.topic))?;
-            let Some(payload) = msg.payload() else {
-                tracing::warn!(
-                    "skipping kafka record with no payload on topic '{}'",
-                    self.topic
-                );
-                continue;
-            };
-            // a single malformed payload shouldn't kill the pipeline; skip it
-            // and wait for the next record
-            match serde_json::from_slice(payload) {
-                Ok(value) => return Ok(Arc::new(vec![Arc::new(value)])),
-                Err(e) => tracing::warn!(
-                    "skipping non-json record on kafka topic '{}': {}",
-                    self.topic,
-                    e
-                ),
+            if let Some(value) = self.decode(&msg) {
+                batch.push(Arc::new(value));
             }
         }
+
+        while batch.len() < self.max_batch {
+            // already-buffered records only; the moment the broker has nothing
+            // more for us this resolves to None and the batch goes as it is
+            let Some(ready) = consumer.recv().now_or_never() else {
+                break;
+            };
+            let msg = ready.with_context(|| format!("kafka consumer on '{}' failed", self.topic))?;
+            if let Some(value) = self.decode(&msg) {
+                batch.push(Arc::new(value));
+            }
+        }
+
+        Ok(Arc::new(batch))
     }
 }

@@ -35,6 +35,17 @@ impl Rotation {
         }
     }
 
+    /// Whether this policy ever closes a part.
+    ///
+    /// "No triggers" is a fine answer on a filesystem — one file for the run —
+    /// and not one on an object store, where a part that never closes is a part
+    /// that is never uploaded. The s3 output asks this at build time rather than
+    /// discovering it by growing.
+    #[must_use]
+    pub fn rotates(&self) -> bool {
+        self.max_rows.is_some() || self.interval.is_some()
+    }
+
     /// Whether a part holding `rows` messages, opened at `opened_at`, is
     /// finished as of `now`.
     ///

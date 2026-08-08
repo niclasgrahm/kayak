@@ -126,6 +126,20 @@ from `serde_json::Value` rather than by matching on the config enums, so a new
 component kind or a new field shows up without touching the frontend; the row
 names are the wire names.
 
+The bar above the log acts on the log and nothing else. The `in` / `out` / `err`
+chips filter it, `flat` / `grouped` swaps between an event per row and a batch's
+whole journey per row, and three buttons do what they say: **pause** stops
+keeping new events so a moving log can be read, **copy** puts the rows on the
+clipboard as tab-separated `time · stage · text`, and **clear** empties it.
+
+Two details there are deliberate. Pausing stops the *log*, not the pipeline, so
+the throughput readout and the error badge go on counting while it is paused —
+its tooltip says how many events went past — and resuming jumps back to the
+newest line rather than leaving the reader stranded mid-history. And a wheel
+over a log that has somewhere to scroll scrolls it instead of zooming the
+canvas; over one with nothing to scroll it falls through and zooms, since a
+pane that doesn't scroll shouldn't swallow the gesture.
+
 All the geometry — layout, edge paths, zoom anchoring, the camera glide — lives
 in `frontend/src/graph.rs` as pure functions with unit tests, and the same goes
 for the inspector rows. Keep it that way: the Leptos components should only feed
@@ -536,6 +550,11 @@ run out of the container image without the same flag — without it that pipelin
 refuses to build and takes the whole load down with it, which is the closed
 default working as intended.
 
+`heartbeat_to_s3` is its object-store twin, off the same `heartbeat` and with the
+same rotation, so the two can be watched side by side — one directory filling up,
+one bucket. Unlike its twin it does need `docker compose up`, for the rustfs it
+writes to.
+
 ## connections
 
 A kafka cluster or a nats server is usually shared. One pipeline per topic on
@@ -666,12 +685,70 @@ it rather than surfacing an hour into a run. `just dev` passes
 `--data-dir dev_data` so the component is usable without ceremony; the directory
 is gitignored, being output rather than a fixture.
 
-Two things it does not do yet. An `interval_secs` rotation is only noticed when
+One thing it does not do yet: an `interval_secs` rotation is only noticed when
 the next batch arrives, so an idle pipeline holds its part open past the
-interval — there is no timer task closing it. And a pipeline cancelled
-mid-part leaves a `json_array` file unclosed; every batch is flushed as it is
-written, so no data is lost, but the trailing `]` is missing. `ndjson` has
-neither problem, which is another reason it is the default.
+interval — there is no timer task closing it. A part left open when the pipeline
+*stops* is fine, though — the run loop calls `OutputDestination::finish` on its
+way out, which is what closes a `json_array`'s trailing `]`.
+
+## s3 output
+
+The same writer pointed at a bucket instead of a directory: same generated part
+names, same `format`, same `rotate`. Anything S3-compatible works — the sample
+is the rustfs in `docker-compose.yaml`, and leaving `endpoint` out addresses real
+AWS S3 in `region`.
+
+```jsonc
+// config.connections.json — the bucket and the credentials that reach it
+{ "local-s3": { "type": "s3", "bucket": "events",
+                "access_key_id": "${S3_ACCESS_KEY_ID}",
+                "secret_access_key": "${S3_SECRET_ACCESS_KEY}",
+                "endpoint": "http://localhost:9000", "allow_http": true } }
+
+// config.json — what this pipeline writes there
+{ "type": "s3", "connection": "local-s3", "prefix": "orders",
+  "format": "ndjson", "rotate": { "max_rows": 100000, "interval_secs": 3600 } }
+```
+
+`prefix` is to a bucket what `path` is to a root; objects land at
+`<prefix>/<generated part name>`. An empty prefix writes at the top of the
+bucket, which is legal here in a way an empty `path` is not — the connection *is*
+the bucket, so there is nothing to insist on. The bucket has to exist: this
+output creates objects and never buckets.
+
+**Why this is a separate component from `file`.** The two share everything in
+`src/outputs/rotate.rs` and differ in one thing that runs deep: **an object store
+has no append.** A file output opens a file and writes each batch into it, so a
+part is readable on disk while it is still filling. A bucket has no such state —
+an object exists or it does not, and `PUT` writes it whole. So a part is
+accumulated in memory and uploaded when it rotates, which makes `rotate`
+**required** on this output and optional on the file one. Without a trigger a
+pipeline would hold its entire run in RAM and upload it once at the end, so the
+output refuses to build rather than doing that quietly.
+
+That also makes rotation the thing that decides how soon data is visible.
+`max_rows: 20` on a one-a-second pipeline means an object every twenty seconds
+and never sooner. When the pipeline stops, the part in memory is uploaded by
+`OutputDestination::finish` — without that hook a cancelled pipeline would lose
+it outright, since there is no half-written object on the other side to recover.
+
+Multipart upload is the obvious alternative and is deliberately not used yet: S3
+requires every part but the last to be at least 5 MiB, so "one multipart part per
+batch" does not work at the batch sizes a pipeline produces.
+
+**There is no `--data-dir` here and there cannot be.** The local sandbox works
+because the server can ask the filesystem where a path really landed; nothing
+equivalent exists for a remote namespace. The boundary for this output is the
+credentials on its connection — a key that can write one bucket does the job
+`--data-dir` does locally, and that is where to spend the care. `allow_http` is
+the one guard rail on this side: plaintext credentials are refused unless the
+connection asks for them, which is what the local rustfs does and a real
+deployment should not.
+
+`docker compose up` brings up rustfs on `:9000` with the bucket `events` already
+made (a one-shot `mc` container does that). It writes to a tmpfs, so the bucket
+is empty again after a `docker compose down` — which is what you want from a
+fixture.
 
 ## secrets
 
@@ -759,7 +836,7 @@ docker run -p 6767:6767 \
 
 Without the secrets the server refuses to start rather than connecting without
 credentials, which is what an unresolved `${NAME}` is supposed to do. The nats,
-kafka and postgres pipelines then report connection errors on their cards
+kafka, postgres and s3 pipelines then report connection errors on their cards
 unless the container can reach those systems — `docker compose up` brings them
 up on the host, so join that network and name the services rather than
 `localhost`. `heartbeat` and its file output run regardless.
@@ -826,9 +903,16 @@ Timing-dependent tests use `#[tokio::test(start_paused = true)]` so a 10-second
 window costs no wall time.
 
 Not covered by `just test`, and deliberately so: the NATS and kafka
-input/outputs, the HTTP transform and the postgres output, which are thin
-wrappers over their clients — they need `docker compose up` and are exercised by
-`just start-baseline` / `just test-http`. What *is* tested offline for postgres is the part with a
+input/outputs, the HTTP transform, the postgres output and the upload half of the
+s3 output, which are thin wrappers over their clients — they need
+`docker compose up` and are exercised by
+`just start-baseline` / `just test-http`. For s3 that means the `PUT` itself is
+untested offline; what *is* tested is everything that decides *what* is uploaded
+— rotation, part naming and encoding in `outputs::rotate::tests`, shared verbatim
+with the file output and covered end-to-end there against a real directory — plus
+every build-time refusal in `outputs::s3::tests` (no rotation trigger, plaintext
+endpoint without `allow_http`, a connection of the wrong kind), which are the
+rules with a decision in them. What *is* tested offline for postgres is the part with a
 decision in it: `Table::parse` in `src/outputs/postgres.rs`, which validates the
 configured table name and builds the two statements. The table name cannot be a
 bind parameter, so it is interpolated into the SQL text, and that check is the
@@ -859,9 +943,13 @@ so running the server against the sample config needs a secret:
 just dev
 ```
 
-That is the whole of it: `just dev` copies `example_config/secrets.example.json`
-into place if there is no `example_config/secrets.json` yet, then runs
-`cargo leptos watch` against the sample. `just dev-yaml` is the same graph in its
+That is the whole of it: `just dev` creates `example_config/secrets.json` from
+`secrets.example.json` if it isn't there, and **tops up any keys it is missing**
+if it is, then runs `cargo leptos watch` against the sample. The top-up is what
+keeps a checkout working when a new component adds a secret to the sample —
+otherwise a file created months ago fails the next `just dev` with an unresolved
+`${NAME}`. Values already in your file are never overwritten, since one of them
+may be a real credential. `just dev-yaml` is the same graph in its
 other spelling.
 
 ## currently working on
@@ -927,11 +1015,12 @@ which is why they weren't just fixed.
       costs every build — and raises a question the JSON formats don't: messages
       are untyped, so a writer has to infer a schema and decide what to do with
       the batch that does not match it.
-- [ ] **object-store (s3) output.** The reason `src/outputs/rotate.rs` is split
-      out from `src/outputs/file.rs`: rotation, part naming and encoding are
-      already shared, and what is left is a destination. Its connection replaces
-      `root` with a bucket and credentials; `--data-dir` does not apply, since
-      the sandbox there is whatever the credentials can reach.
+- [x] **object-store (s3) output.** (done 2026-08-08: a separate `s3` output and
+      `s3` connection sharing `src/outputs/rotate.rs` whole, with rustfs in
+      `docker-compose.yaml` to write into. See "s3 output" above. Azure Blob and
+      GCS are the same shape again — a connection kind, a destination module and
+      a `FieldType::Connection` marker — and `object_store` already speaks both,
+      so they are feature flags and config rather than new machinery.)
 - [ ] **date partitioning.** `dt=2026-08-07/` in the path is what makes an
       object store queryable, and is a different thing from rotation. Needs the
       writer to hold several open parts keyed by partition rather than one.

@@ -185,6 +185,7 @@ impl Emitted {
 pub struct CollectingOutput {
     emitted: Emitted,
     init_calls: Arc<Mutex<usize>>,
+    finish_calls: Arc<Mutex<usize>>,
     /// When set, every `emit` fails — used to check that a broken output does
     /// not tear the pipeline down.
     fail_emit: bool,
@@ -196,6 +197,7 @@ impl CollectingOutput {
         Self {
             emitted: Emitted::default(),
             init_calls: Arc::new(Mutex::new(0)),
+            finish_calls: Arc::new(Mutex::new(0)),
             fail_emit: false,
         }
     }
@@ -218,6 +220,14 @@ impl CollectingOutput {
     pub fn init_calls(&self) -> Arc<Mutex<usize>> {
         Arc::clone(&self.init_calls)
     }
+
+    /// How many times the run loop has called `finish`. The outputs that hold a
+    /// part depend on being told the run is over, so "was it told" is worth
+    /// being able to ask without a filesystem or a bucket in the way.
+    #[must_use]
+    pub fn finish_calls(&self) -> Arc<Mutex<usize>> {
+        Arc::clone(&self.finish_calls)
+    }
 }
 
 impl Default for CollectingOutput {
@@ -238,6 +248,11 @@ impl OutputDestination for CollectingOutput {
 
     async fn init(&mut self) -> Result<()> {
         *lock(&self.init_calls) += 1;
+        Ok(())
+    }
+
+    async fn finish(&mut self) -> Result<()> {
+        *lock(&self.finish_calls) += 1;
         Ok(())
     }
 }

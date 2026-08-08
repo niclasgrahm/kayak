@@ -72,6 +72,14 @@ pub struct NatsConfig {
     pub connection: ConnectionId,
     /// the subject to subscribe to
     pub subject: String,
+    /// most messages to put in one batch. Defaults to 1 — one message per
+    /// batch, which is what this input has always done.
+    ///
+    /// Raising it only ever coalesces messages that had *already arrived*: the
+    /// input still returns as soon as it has one, so a quiet subject is no
+    /// slower than it was.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_batch: Option<usize>,
 }
 
 /// Consumes JSON messages from a kafka topic, each emitted as a batch of one.
@@ -98,6 +106,16 @@ pub struct KafkaConfig {
     /// replays the topic from the beginning, `latest` only sees new messages.
     /// Defaults to `latest`.
     pub start_at: Option<KafkaStartAt>,
+    /// most messages to put in one batch. Defaults to 1 — one message per
+    /// batch, which is what this input has always done.
+    ///
+    /// Raising it only ever coalesces records that had *already arrived*: the
+    /// input still returns as soon as it has one, so an idle topic is no slower
+    /// than it was. It is worth raising when a consumer is catching up on a
+    /// backlog, where one-message batches make the run loop, the transforms and
+    /// every downstream pipeline do their per-batch work a hundred times over.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_batch: Option<usize>,
 }
 
 /// Where a new consumer group starts reading.
@@ -245,6 +263,35 @@ pub struct FileOutputConfig {
     /// run.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub rotate: Option<RotationConfig>,
+}
+
+/// Writes each batch to objects under a prefix in an S3-compatible bucket.
+///
+/// The same writer as the `file` output — the same part naming, the same
+/// formats, the same rotation policy — pointed at a bucket instead of a
+/// directory. What differs is that an object store has no append: a part is
+/// buffered in memory and uploaded whole when it rotates, so `rotate` is
+/// **required** here and is what decides both how often objects appear and how
+/// much a running pipeline holds.
+#[derive(Clone, Debug, Deserialize, Serialize, JsonSchema)]
+#[schemars(title = "s3")]
+pub struct S3OutputConfig {
+    /// name of the s3 connection to write through — see "connections" in the
+    /// readme. The bucket and credentials live there; the prefix below is this
+    /// output's own.
+    #[schemars(extend("x-connection" = "s3"))]
+    pub connection: ConnectionId,
+    /// key prefix to write under, e.g. `orders` — objects land at
+    /// `<prefix>/<generated part name>`. Leave it empty to write at the root of
+    /// the bucket.
+    pub prefix: String,
+    /// how the messages are laid out. Defaults to `ndjson`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub format: Option<FileFormat>,
+    /// when to finish an object and start the next one. Required: an object
+    /// store cannot be appended to, so without a rotation trigger a pipeline
+    /// would hold its entire run in memory and upload it once, at the end.
+    pub rotate: RotationConfig,
 }
 
 /// Publishes every message in the batch to a nats subject, one message per
@@ -470,6 +517,7 @@ pub struct TransformConfig {
 pub enum OutputKind {
     Stdout(StdoutOutputConfig),
     File(FileOutputConfig),
+    S3(S3OutputConfig),
     Kafka(KafkaOutputConfig),
     Nats(NatsOutputConfig),
     Postgres(PostgresOutputConfig),
@@ -542,6 +590,7 @@ impl Config {
             OutputKind::Nats(c) => Some(&c.connection),
             OutputKind::Postgres(c) => Some(&c.connection),
             OutputKind::File(c) => Some(&c.connection),
+            OutputKind::S3(c) => Some(&c.connection),
             OutputKind::Stdout(_) => None,
         });
         inputs.chain(outputs).collect()

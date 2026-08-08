@@ -32,7 +32,7 @@ use kayak_core::config::Secret;
 use std::path::PathBuf;
 
 use kayak_core::connections::{
-    Connections, FileConnection, KafkaConnection, NatsConnection, PostgresConnection,
+    Connections, FileConnection, KafkaConnection, NatsConnection, PostgresConnection, S3Connection,
 };
 
 /// Threaded through every `build()` call. It carries the pipeline map — needed
@@ -151,5 +151,9 @@ impl<'a> BuildCtx<'a> {
 
     pub fn file_connection(&self, id: &str) -> anyhow::Result<&FileConnection> {
         Ok(self.connections.file(id)?)
+    }
+
+    pub fn s3_connection(&self, id: &str) -> anyhow::Result<&S3Connection> {
+        Ok(self.connections.s3(id)?)
     }
 }

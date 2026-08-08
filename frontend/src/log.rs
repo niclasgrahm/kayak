@@ -3,22 +3,12 @@
 //! Pure so it can be tested without a DOM — the component in `app.rs` pushes
 //! events in and renders what comes out, and holds no log state of its own.
 
-use kayak_core::{EventPayload, Stage, UiEvent};
+use kayak_core::{EventPayload, Stage, UiEvent, truncate};
 use std::collections::VecDeque;
 
 /// How many entries a card keeps. Older ones are dropped from the front, so the
 /// log reads like a tail.
 pub const LOG_CAPACITY: usize = 200;
-
-/// How many of a batch's messages are kept. A batch can be thousands of
-/// messages wide — a tumbling buffer over a busy subject is exactly that — and
-/// the rest are counted rather than stored: the card shows a handful at a time,
-/// and the count is what says how much it isn't showing.
-pub const MESSAGES_PER_BATCH: usize = 100;
-
-/// How much of one message is kept, in bytes. Enough to recognise a payload,
-/// far short of what a card can render.
-pub const MAX_MESSAGE_BYTES: usize = 2048;
 
 /// The window the throughput readout averages over.
 pub const RATE_WINDOW_SECS: u64 = 10;
@@ -265,6 +255,23 @@ impl Log {
         self.unseen_errors = 0;
     }
 
+    /// Take everything from an event *except* the row — what a paused log does
+    /// with what arrives while nobody is reading it.
+    ///
+    /// The two things it keeps are the two that would otherwise lie. The rate is
+    /// a fact about the pipeline, not about the log, and a paused card reading
+    /// `0/s` under a pipeline at full tilt says the wrong thing. And an error
+    /// while paused still has to reach the badge: a failure you were not looking
+    /// at is exactly the one worth being told about.
+    pub fn skip(&mut self, event: &UiEvent) {
+        match &event.payload {
+            EventPayload::Batch(preview) => self.rate.record(event.ts, preview.counted()),
+            EventPayload::Error(_) => {
+                self.unseen_errors = self.unseen_errors.saturating_add(1);
+            }
+        }
+    }
+
     /// Append an event.
     ///
     /// **Identical consecutive failures coalesce** into the entry already at the
@@ -274,15 +281,14 @@ impl Log {
     /// Batches never coalesce: the same payload arriving twice is news.
     pub fn push(&mut self, event: &UiEvent) {
         let kind = match &event.payload {
-            EventPayload::Batch(batch) => {
-                self.rate.record(event.ts, batch.len());
+            // The messages arrive already rendered and already cut — the server
+            // does that now, so this is a move rather than the per-message
+            // `to_string` it used to be. See `kayak_core::BatchPreview`.
+            EventPayload::Batch(preview) => {
+                self.rate.record(event.ts, preview.counted());
                 EntryKind::Batch {
-                    messages: batch
-                        .iter()
-                        .take(MESSAGES_PER_BATCH)
-                        .map(|msg| truncate(&msg.to_string()))
-                        .collect(),
-                    dropped: batch.len().saturating_sub(MESSAGES_PER_BATCH),
+                    messages: preview.messages.clone(),
+                    dropped: preview.dropped(),
                 }
             }
             EventPayload::Error(message) => {
@@ -551,17 +557,30 @@ pub fn summary(entry: &Entry, component: Option<&str>) -> String {
     }
 }
 
-/// Cut a string to [`MAX_MESSAGE_BYTES`], on a character boundary so what is
-/// kept is still a string, with an ellipsis to say it was cut.
-fn truncate(text: &str) -> String {
-    if text.len() <= MAX_MESSAGE_BYTES {
-        return text.to_string();
-    }
-    let mut end = MAX_MESSAGE_BYTES;
-    while end > 0 && !text.is_char_boundary(end) {
-        end -= 1;
-    }
-    format!("{}…", &text[..end])
+/// The log as text, for the clipboard: one line per row, in the order they are
+/// on screen.
+///
+/// The same three columns a row shows, tab-separated — a log pasted into an
+/// issue or a terminal wants to stay in columns, and a tab is the separator
+/// that survives both. It renders whatever entries it is handed, so what is
+/// copied is what passed the filter rather than everything the card holds.
+///
+/// Grouped or flat doesn't come into it: the two are arrangements of the same
+/// entries, and a copied log is the events, not the arrangement.
+#[must_use]
+pub fn as_text(entries: &[Entry], names: &ComponentNames, tz_offset_minutes: i32) -> String {
+    entries
+        .iter()
+        .map(|entry| {
+            format!(
+                "{}\t{}\t{}",
+                format_time(entry.ts, tz_offset_minutes),
+                stage_label(entry.stage),
+                summary(entry, names.name(entry.stage, entry.component))
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 /// A timestamp as `HH:MM:SS.mmm` in the viewer's own zone.
@@ -594,19 +613,22 @@ pub fn format_time(ts_millis: u64, tz_offset_minutes: i32) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{
-        Entry, EntryKind, Filter, LOG_CAPACITY, Log, MAX_MESSAGE_BYTES, MESSAGES_PER_BATCH, Rate,
-        format_time,
-    };
-    use kayak_core::{Stage, UiEvent};
+    use super::{Entry, EntryKind, Filter, LOG_CAPACITY, Log, Rate, format_time};
+    use kayak_core::{MAX_MESSAGE_BYTES, MESSAGES_PER_BATCH, Stage, UiEvent};
     use serde_json::json;
     use std::sync::Arc;
 
     fn batch_of(stage: Stage, messages: usize) -> UiEvent {
+        skipping(stage, messages, 0)
+    }
+
+    /// A batch event that also reports messages the feed didn't show — what the
+    /// throttle produces once it is sampling.
+    fn skipping(stage: Stage, messages: usize, skipped: u64) -> UiEvent {
         let batch = (0..messages)
             .map(|n| Arc::new(json!({ "n": n })))
             .collect::<Vec<_>>();
-        UiEvent::batch("witty-crab".to_string(), stage, Arc::new(batch)).at(1_000)
+        UiEvent::batch("witty-crab".to_string(), stage, &batch, skipped).at(1_000)
     }
 
     fn failure(stage: Stage, message: &str) -> UiEvent {
@@ -875,11 +897,39 @@ mod tests {
         log.push(&UiEvent::batch(
             "witty-crab".to_string(),
             Stage::Input,
-            Arc::new(vec![Arc::new(json!({"n": 1}))]),
+            &vec![Arc::new(json!({"n": 1}))],
+            0,
         ));
 
         assert_eq!(log.entries().len(), 1, "the entry is still kept");
         assert!((log.per_second(1_000) - 0.0).abs() < f64::EPSILON);
+    }
+
+    /// The feed is sampled under load, so an event stands for itself *and* for
+    /// the passes that were dropped to get to it. Counting only what arrives
+    /// would report a fraction of what the pipeline is really doing.
+    #[test]
+    fn the_rate_counts_what_the_feed_skipped_as_well_as_what_it_showed() {
+        let mut log = Log::default();
+        log.push(&skipping(Stage::Input, 10, 990));
+
+        // 1000 messages inside a ten-second window
+        assert!(
+            (log.per_second(1_000) - 100.0).abs() < f64::EPSILON,
+            "expected the skipped messages to be counted, got {}",
+            log.per_second(1_000)
+        );
+    }
+
+    /// A paused log stops keeping rows, but the pipeline's throughput is a fact
+    /// about the pipeline — so the skipped count has to reach the rate here too.
+    #[test]
+    fn a_paused_log_still_counts_what_the_feed_skipped() {
+        let mut log = Log::default();
+        log.skip(&skipping(Stage::Input, 10, 990));
+
+        assert!(log.entries().is_empty(), "a paused log keeps no rows");
+        assert!((log.per_second(1_000) - 100.0).abs() < f64::EPSILON);
     }
 
     #[test]
@@ -1121,6 +1171,63 @@ mod tests {
 
         assert_eq!(before.entries.len(), after.entries.len());
         assert_ne!(before.render_key(), after.render_key());
+    }
+
+    /// Pausing stops the log, not the pipeline. No new row, but the throughput
+    /// is still the pipeline's and a failure is still worth being told about —
+    /// so those two go on being counted while nobody is reading.
+    #[test]
+    fn a_skipped_event_leaves_no_row_but_still_counts() {
+        let mut log = Log::default();
+        log.push(&batch_of(Stage::Output, 1));
+
+        log.skip(&batch_of(Stage::Output, 9));
+        log.skip(&failure(Stage::Output, "connection refused"));
+
+        assert_eq!(log.entries().len(), 1, "a paused log holds what it held");
+        assert_eq!(log.unseen_errors(), 1, "a failure while paused is news");
+
+        // the readout is the same one an unpaused log would show, which is the
+        // point: it reports the pipeline, not what the log kept
+        let mut watched = Log::default();
+        watched.push(&batch_of(Stage::Output, 1));
+        watched.push(&batch_of(Stage::Output, 9));
+        watched.push(&failure(Stage::Output, "connection refused"));
+        assert!(
+            (log.per_second(1_000) - watched.per_second(1_000)).abs() < f64::EPSILON,
+            "paused: {}, watched: {}",
+            log.per_second(1_000),
+            watched.per_second(1_000)
+        );
+        assert!(log.per_second(1_000) > 0.0, "nothing was counted at all");
+    }
+
+    /// The clipboard gets the rows as they read on screen: same time, same
+    /// stage, same text, in the same order — and only the ones handed to it,
+    /// which is what the filter left.
+    #[test]
+    fn the_copied_text_is_one_line_per_row() {
+        let names = super::ComponentNames {
+            transforms: Vec::new(),
+            outputs: vec!["nats".to_string()],
+        };
+        let mut first = entry(Stage::Input, false);
+        first.ts = 1_786_104_221_000;
+        let mut failed = entry(Stage::Output, true);
+        failed.ts = 1_786_104_222_500;
+        failed.component = Some(0);
+
+        let text = super::as_text(&[first, failed], &names, 0);
+        let lines: Vec<&str> = text.lines().collect();
+        assert_eq!(lines.len(), 2);
+        assert!(
+            lines[0].starts_with("12:03:41.000\tin\t"),
+            "got: {}",
+            lines[0]
+        );
+        assert_eq!(lines[1], "12:03:42.500\tout\tnats: boom");
+        assert!(!text.ends_with('\n'), "no trailing blank line to paste");
+        assert_eq!(super::as_text(&[], &names, 0), "");
     }
 
     /// "output error" on a pipeline with two outputs is not something anyone

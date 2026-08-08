@@ -20,7 +20,7 @@ cargo run -- --config example_config/config.json --secrets example_config/secret
                                     # `just dev` is the one that works. --connections <path> is optional:
                                     # without it the file is derived from the config's name.
 
-docker compose up                   # NATS :4222 + publisher on test.subject, kafka :9092 + publisher on test.events, postgres :5432
+docker compose up                   # NATS :4222 + publisher on test.subject, kafka :9092 + publisher on test.events, postgres :5432, rustfs (s3) :9000 with the `events` bucket
 just test-http                      # hurl --test hurl/tests/*.hurl (needs the server running)
 just start-baseline                 # hurl hurl/create_baseline.hurl — creates a sample pipeline
 ```
@@ -54,7 +54,7 @@ Three object-safe traits define the plugin points, all in the root crate:
 
 - `inputs::InputSource` — `async fn next() -> Result<Arc<MessageBatch>>`. Several of them are merged by `inputs::merge` into an `inputs::Merged`, which runs a pump task per input rather than `select!`ing over them — selecting would cancel a losing `next()` and starve any input that waits on a timer. One input failing is reported and survived; the run loop only stops when the last one is gone.
 - `transforms::Transform` — `async fn apply(batch) -> Result<Vec<Arc<MessageBatch>>>` (one batch in, N batches out — that's how `splitter` works)
-- `outputs::OutputDestination` — `async fn init()` + `async fn emit(batch)`
+- `outputs::OutputDestination` — `async fn init()` + `async fn emit(batch)` + `async fn finish()`. `finish` defaults to a no-op and is called once by the run loop *after* the loop ends, however it ended (cancelled, or the input died). It exists for the two outputs that hold a *part*: `file` has a `json_array` to close, `s3` has a buffered object that has not been uploaded at all. Its errors are published like an `emit` error rather than returned — the pipeline has already stopped, and failing the run there would report the shutdown as the pipeline's failure. `tests/pipeline.rs` pins that it's called exactly once down *both* `select!` arms.
 
 ### Config → runtime wiring (the part that spans files)
 
@@ -128,8 +128,10 @@ out per kind on purpose, so a new component that talks to a configured system
 has to be added there and the compiler is what says so.
 
 **Adding a connection kind** touches: the struct + `ConnectionKind` variant in
-`kayak-core/src/connections.rs`, the typed accessor beside it, the `BuildCtx`
-helper in `src/lib.rs`, and a wire-format sample in `tests/config.rs`. The docs
+`kayak-core/src/connections.rs`, the typed accessor beside it, the `type_name`
+arm and the kind const, the `BuildCtx` helper in `src/lib.rs`, a wire-format
+sample in `tests/config.rs`, and the expected list in
+`kayak-core/src/docs.rs::connections_are_documented_as_their_own_family`. The docs
 page, the `/api/docs` output and the "add connection" form all come from the
 schema reflection and need nothing.
 
@@ -159,8 +161,8 @@ All of it happens at build time, and the build creates the directory.
 
 `src/outputs/rotate.rs` is split from `src/outputs/file.rs` on purpose and the
 line matters: rotate.rs decides *when* a part is finished, what it is called and
-how messages are laid out inside it, and touches no filesystem — the object
-store output will take it whole. file.rs is only the destination. Keep new
+how messages are laid out inside it, and touches no filesystem — `src/outputs/
+s3.rs` takes it whole. file.rs is only the destination. Keep new
 format or rotation work on the rotate.rs side of that line.
 
 Two properties there are load-bearing. Rotation is checked *after* a batch is
@@ -168,6 +170,37 @@ written, so a batch is never split across two parts (`max_rows` is a floor, not
 a ceiling). And `Rotation::is_full` returns false at zero rows — without that, an
 interval trigger on an idle pipeline closes and reopens a part every time it is
 asked, filling the directory with empty files.
+
+### The s3 output
+
+A **separate component** from `file`, not a mode of it, and the reason is one
+property that runs deep: **an object store has no append.** `file` opens a file
+and writes each batch into it, so a part is readable while it fills; a bucket has
+no such state, and `PUT` writes an object whole. So `src/outputs/s3.rs`
+accumulates a part in memory and uploads it on rotation — which makes `rotate`
+**required** here (a `RotationConfig`, not an `Option<RotationConfig>`, plus a
+`Rotation::rotates()` check at build time) and optional on `file`. Without a
+trigger the pipeline would hold its whole run in RAM; it refuses to build instead.
+Everything else is shared verbatim through `rotate.rs`, which is what that split
+was for.
+
+There is **no `--data-dir` analogue and there cannot be**: the local sandbox
+works because the server can ask the filesystem where a path really landed, and
+nothing equivalent exists for a remote namespace. The boundary is the
+credentials on the connection. The one guard rail on this side is `allow_http` —
+plaintext credentials are refused unless the connection asks, which is what the
+local rustfs does. Don't add a `Root`-shaped check here and don't reach for one;
+a `prefix` is not a path and cannot escape anything.
+
+`object_store` is the client, chosen over `aws-sdk-s3` for what comes next: Azure
+Blob and GCS are the same crate behind feature flags, so each is a connection
+kind, a destination module and a `FieldType::Connection` marker — not new
+machinery. Note the crate's `Path::child` is deprecated in 0.14 (use `join`), and
+`ObjectStoreExt` is the trait `put` lives on.
+
+Multipart upload is deliberately *not* used: S3's 5 MiB minimum per non-final
+part doesn't fit the batch sizes a pipeline produces, and doing it properly means
+this same accumulation with a flush threshold on top.
 
 The sample's file output is `heartbeat_to_disk`, and its upstream is deliberate:
 `heartbeat` is a dummy input, so it is the one pipeline in `example_config/` that
@@ -191,6 +224,19 @@ Note that `$defs` in the generated schema now holds non-component types (`Secret
 The config enums use `#[serde(tag = "type", rename_all = "snake_case")]` with `#[serde(flatten)]` wrappers, so JSON looks like `{"type": "nats", "urls": ..., "subject": ...}`. They also derive `schemars::JsonSchema` with `#[schemars(title = "...")]` — `/docs` generates component documentation by reflecting over `schema_for!(InputKind)` etc., so the title/doc-comments on config fields *are* the docs.
 
 Buffering is an input decorator, not a transform: `InputConfig.buffer` wraps any `InputSource` in `inputs::Buffered` (static N-message or tumbling time window). There is *also* a `buffer` transform — different thing, different place.
+
+**`max_batch` on the kafka and nats inputs is a third thing again, and its
+default is a promise.** `inputs::batch_cap` is where that promise lives: absent
+means 1, one message per batch, which is what those inputs have always done. A
+pipeline that must see its messages one at a time is a real case, and an input
+that quietly grouped them would be wrong in a way that is nearly invisible from
+the outside — so batching is opt-in and stays opt-in. Where it differs from
+`buffer` is that it never *waits*: it takes one message, then drains whatever has
+**already arrived** with `now_or_never`, so a quiet topic yields batches of one
+however high the cap is and only a catch-up ever fills one. That is what makes it
+safe to raise, and raising it is the cheapest fix there is for a consumer
+replaying a backlog — it divides the run loop's per-batch work, the transforms,
+the fan-out and the feed all at once.
 
 ### Runtime & state
 
@@ -250,6 +296,80 @@ A card can also be **maximized** to fill the canvas, from the button in its titl
 **The API router is not a list of `.route()` calls.** `src/endpoints.rs` folds it over `kayak_core::api_docs::endpoints()`, so that table isn't a description of the routes — it *is* the routes, and an endpoint missing from it is never registered. `handler_for` matches on the `Operation` enum, so a table entry with no handler doesn't compile; `route_of` takes the method from the table, so an entry documented `PUT` and wired to `post(...)` isn't expressible. Adding an endpoint therefore touches three places (an `Operation` variant, an `ApiDoc` entry, a handler arm) and the compiler names two of them.
 
 `/events` is an SSE stream over the `UiEvent` broadcast; the frontend consumes it with `leptos_use::use_event_source` + `codee` JSON. Pipeline run loops only send events when `receiver_count() > 0`. This is explicitly marked temporary in `src/pipeline.rs`.
+
+### The UI feed is a sample, not a record
+
+The single most important thing to know about `/events`: **a run loop does not
+report every pass, and it does not send whole batches.** Both were measured
+problems rather than theoretical ones, on a graph of nine pipelines:
+
+- publishing every pass cost **46% of the server's throughput** the moment one
+  browser attached — and bought nothing, because the broadcast channel then
+  dropped 8.8 million events a second to deliver 341;
+- the browser was blocked **63% of the time in freezes approaching a second**,
+  and the cost tracked the *event* rate, not the data: 50,000 messages a second
+  in 900 fat events was smooth, while 500 messages a second in 9,000 thin ones
+  was not.
+
+Three pieces, and they only work together:
+
+- **`pipeline::UiThrottle`** decides **once per pass** whether that pass is
+  reported — once per pass rather than per event, because an input event whose
+  matching output event was dropped draws a pass that never finished. Failures
+  get their own budget, keyed by *stage and component*: one output failing every
+  batch is a repeat worth suppressing, but the second of two outputs failing is a
+  different fact and one shared timer would swallow it. `report_pass` reads the
+  clock only every `CLOCK_CHECK_STRIDE` passes once a pipeline is fast enough for
+  that to matter — `Instant::now()` per pass was itself worth a tenth of the
+  throughput. All of it is gated on `receiver_count() > 0`, so a headless run
+  pays nothing and a browser attaching to a week-old pipeline doesn't get a
+  week's skipped messages on its first event.
+- **`kayak_core::BatchPreview`** is what a batch crosses the wire as: at most
+  `MESSAGES_PER_BATCH` messages, each cut to `MAX_MESSAGE_BYTES`, **rendered on
+  the server**. The truncation used to happen in the browser, i.e. after the
+  whole batch had been serialized, sent and parsed.
+- **`skipped_messages`** is what keeps the readout honest. The feed is sampled,
+  so counting only what arrives would report a fraction of the real rate; a
+  reported event carries the messages of the passes that were dropped to reach
+  it. The tail of the final unreported window is *not* carried — that is
+  deliberate, since the alternative is a synthetic batch event at every shutdown,
+  and the readout is a ten-second average that a bounded 100 ms tail can't move.
+
+Consequence worth knowing before you "fix" it: a pipeline faster than
+`UI_PASS_INTERVAL` (10 passes a second) **does** lose log lines. The `seq` gaps
+are what say so, and the frontend already draws them as passes not shown.
+`tests/pipeline.rs::throttling_the_ui_feed` pins both directions — a burst is
+sampled, a pipeline inside its budget is reported in full with no gaps. Tests
+that are about what the feed *says* rather than how often opt out with
+`PipelineRuntime::reporting_every_pass()`, which production never calls.
+
+### How the feed reaches the cards (`Feed`, `frontend/src/app.rs`)
+
+The browser half of the same problem, and the backstop for what the server can't
+bound (many pipelines, each inside its own budget). Two rules:
+
+- **The feed writes to the cards; cards do not watch the feed.** Every card used
+  to hold an `Effect` on one global `Signal<Option<UiEvent>>` and wake on every
+  event to compare one string, so an event cost O(cards). `Feed` is one
+  dispatcher with a map, and cards `register` for the life of the component.
+  Registrations carry a **token** and cleanup only removes a matching one — the
+  card list is rebuilt wholesale, so a card for an id can be created before the
+  old one is cleaned up, exactly as with the http inbox registry.
+- **Delivery is once per animation frame, not once per event.** A card's log is a
+  200-row keyed `<For>`, and appending one row re-runs the whole reconciliation;
+  all of a frame's events for one card land in a *single* signal write. The frame
+  loop pauses itself when the queue is empty, so an idle graph costs no frames.
+  `Edges` drives its blink off `Feed::frame` for the same reason.
+
+A **paused** log must not notify. `Log::skip` still records the rate and the
+error badge, but `update` marks a signal dirty whether or not the value moved, so
+notifying regardless made pausing a busy card cost *as much as leaving it
+running* — measured worse, in fact, because the work arrived in one 9.9-second
+task. So a paused card uses `update_untracked` unless a failure arrived, which is
+the only thing it shows that can change. Following the tail is deferred to the
+next frame for a related reason: reading `scroll_height` forces a synchronous
+layout of a 200-row pane, and doing that inline on every update was worth about a
+quarter of the blocked time.
 
 The frontend has two routes behind `leptos_router` (`frontend/src/app.rs`): `/` is the pannable/zoomable canvas of pipeline "cards" fed by `ApiClient::list_pipelines()` plus the live event signal, and `/docs` is the generated reference — two tabs, components and HTTP API. `Navbar` is shared and reads `AppState` through `use_context` rather than `expect_context`, because only the canvas provides it.
 

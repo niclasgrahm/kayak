@@ -303,6 +303,14 @@ impl OutputDestination for FileOutput {
         }
         Ok(())
     }
+
+    /// A part left open when the pipeline stops still has to be finished. It
+    /// only matters for `json_array` — ndjson is complete after every batch —
+    /// but that is exactly the case where not doing it leaves an unparseable
+    /// file behind, with no `]` and no rotation coming to add one.
+    async fn finish(&mut self) -> Result<()> {
+        self.close().await
+    }
 }
 
 #[cfg(test)]

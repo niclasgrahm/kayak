@@ -241,6 +241,38 @@ async fn a_json_array_part_is_closed_when_it_rotates() -> anyhow::Result<()> {
     Ok(())
 }
 
+/// The other half of the one above, and the case that used to be broken: a part
+/// that is still open when the pipeline *stops* has no rotation coming to close
+/// it. For `json_array` that left an unterminated file — no `]`, unparseable,
+/// and no later run would ever fix it. `OutputDestination::finish` is what the
+/// run loop calls on the way out, and this is what it is for.
+#[tokio::test]
+async fn a_json_array_part_left_open_at_shutdown_is_still_closed() -> anyhow::Result<()> {
+    let fixture = fixture()?;
+    let mut output = build(
+        &fixture,
+        ndjson(json!({
+            "path": "orders",
+            "format": "json_array",
+            "rotate": {"max_rows": 100}
+        })),
+        Some(&fixture.data_dir),
+    )?;
+    output.init().await?;
+    // well short of the row limit, so nothing rotates and the part is still
+    // open when the pipeline is asked to stop
+    output.emit(batch(vec![json!({"id": 1})])).await?;
+    output.finish().await?;
+
+    let written = parts(&fixture.data_dir.join("events").join("orders"))?;
+    assert_eq!(written.len(), 1);
+    let (name, contents) = &written[0];
+    let messages: Vec<Value> = serde_json::from_str(contents)
+        .map_err(|e| anyhow::anyhow!("{name} did not parse ({e}): {contents}"))?;
+    assert_eq!(messages, vec![json!({"id": 1})]);
+    Ok(())
+}
+
 /// The closed default, at the layer that matters: a config can be perfectly
 /// valid and still not build, because the *server* was never told it may write.
 #[tokio::test]

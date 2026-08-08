@@ -9,12 +9,14 @@ use leptos_meta::*;
 use leptos_router::components::{A, Route, Router, Routes};
 use leptos_router::path;
 use leptos_use::{
-    UseElementSizeOptions, UseElementSizeReturn, UseEventListenerOptions, UseEventSourceReturn,
-    UseIntervalFnOptions, UseRafFnCallbackArgs, UseRafFnOptions, use_element_size,
-    use_element_size_with_options, use_event_listener, use_event_listener_with_options,
-    use_event_source, use_interval_fn_with_options, use_raf_fn_with_options, use_window,
+    UseClipboardReturn, UseElementSizeOptions, UseElementSizeReturn, UseEventListenerOptions,
+    UseEventSourceReturn, UseIntervalFnOptions, UseRafFnCallbackArgs, UseRafFnOptions,
+    use_clipboard, use_element_size, use_element_size_with_options, use_event_listener,
+    use_event_listener_with_options, use_event_source, use_interval_fn_with_options,
+    use_raf_fn_with_options, use_window,
 };
 use std::collections::{HashMap, HashSet};
+use std::sync::Arc;
 
 use crate::api_client::{ApiClient, ApiError};
 use crate::api_docs;
@@ -92,6 +94,167 @@ pub enum SidebarTab {
     Connections,
 }
 
+/// One card's end of the feed, registered with [`Feed`] while it is mounted.
+///
+/// The `token` is the same trick the server's http inbox registry uses, and for
+/// the same reason: the card list is rebuilt wholesale, so a card for an id can
+/// be created *before* the old one for that id is cleaned up. An unconditional
+/// remove on cleanup would then unregister its own successor and leave a card
+/// that never updates again.
+#[derive(Clone, Copy)]
+pub struct Sink {
+    token: u64,
+    log: RwSignal<log::Log>,
+    paused: RwSignal<bool>,
+    skipped: RwSignal<usize>,
+}
+
+/// Where the `/events` feed is delivered.
+///
+/// Two things it is built to avoid, both measured on a nine-card canvas at nine
+/// thousand events a second, where the main thread was blocked 63% of the time
+/// in freezes approaching a second:
+///
+/// - **An effect per card.** Every card used to wake on every event to compare
+///   one string, so the cost of an event scaled with the size of the graph.
+///   Here one dispatcher looks the id up in a map.
+/// - **A render per event.** A card's log is a two-hundred row keyed list, and
+///   appending one row re-runs the whole reconciliation. Events are buffered and
+///   delivered **once per animation frame** instead, so a card renders at most
+///   sixty times a second however hard the feed is pushing — and all the events
+///   of one frame land in a single signal write.
+///
+/// The server samples the feed as well ([`kayak::pipeline::UiThrottle`]), so in
+/// practice this rarely has more than a handful of events to deliver. It is the
+/// backstop for the case the server can't bound: a great many pipelines, each
+/// well within its own budget.
+#[derive(Clone, Copy)]
+pub struct Feed {
+    /// The cards currently mounted, by the pipeline they show.
+    sinks: StoredValue<HashMap<PipelineId, Sink>>,
+    /// What has arrived since the last frame.
+    pending: StoredValue<Vec<UiEvent>>,
+    next_token: StoredValue<u64>,
+    /// One frame's events, published after they have been delivered to the
+    /// cards. `Edges` drives its blink off this rather than off the raw feed,
+    /// so the edge layer also re-renders per frame rather than per event.
+    frame: RwSignal<Arc<Vec<UiEvent>>>,
+}
+
+impl Feed {
+    fn new() -> Self {
+        Self {
+            sinks: StoredValue::new(HashMap::new()),
+            pending: StoredValue::new(Vec::new()),
+            next_token: StoredValue::new(0),
+            frame: RwSignal::new(Arc::new(Vec::new())),
+        }
+    }
+
+    /// Register a card's log for the life of the component.
+    fn register(
+        self,
+        id: PipelineId,
+        log: RwSignal<log::Log>,
+        paused: RwSignal<bool>,
+        skipped: RwSignal<usize>,
+    ) {
+        let token = self.next_token.try_update_value(|n| {
+            *n += 1;
+            *n
+        });
+        let Some(token) = token else {
+            return;
+        };
+        self.sinks.update_value(|sinks| {
+            sinks.insert(
+                id.clone(),
+                Sink {
+                    token,
+                    log,
+                    paused,
+                    skipped,
+                },
+            );
+        });
+        on_cleanup(move || {
+            self.sinks.update_value(|sinks| {
+                // ours only — see `Sink::token`
+                if sinks.get(&id).is_some_and(|s| s.token == token) {
+                    sinks.remove(&id);
+                }
+            });
+        });
+    }
+
+    /// Hold an event until the next frame.
+    fn queue(self, event: UiEvent) {
+        self.pending.update_value(|pending| pending.push(event));
+    }
+
+    /// Deliver everything queued. Returns false when there was nothing to do,
+    /// which is what lets the frame loop pause itself.
+    fn deliver(self) -> bool {
+        let events = self
+            .pending
+            .try_update_value(std::mem::take)
+            .unwrap_or_default();
+        if events.is_empty() {
+            return false;
+        }
+
+        // Grouped first so that a card is written to once for the whole frame:
+        // the point of the exercise is one render, not one render per event.
+        let mut by_pipeline: HashMap<&PipelineId, Vec<&UiEvent>> = HashMap::new();
+        for event in &events {
+            by_pipeline
+                .entry(&event.pipeline_id)
+                .or_default()
+                .push(event);
+        }
+
+        for (id, batch) in by_pipeline {
+            let Some(sink) = self.sinks.with_value(|sinks| sinks.get(id).copied()) else {
+                continue;
+            };
+            if sink.paused.get_untracked() {
+                let failures = batch.iter().filter(|e| e.is_error()).count();
+                sink.skipped.update(|n| *n = n.saturating_add(batch.len()));
+                // A paused log keeps no rows, so nothing it shows changes —
+                // *unless* a failure arrived, which the error badge has to
+                // report. Notifying regardless is what made pausing a busy card
+                // cost as much as leaving it running: `update` marks the signal
+                // dirty whether or not the value moved, so the whole two-hundred
+                // row list was reconciled again for a log that had not gained a
+                // line. The rate readout stays live either way — it is a memo
+                // over the once-a-second clock as well as over this.
+                if failures > 0 {
+                    sink.log.update(|log| {
+                        for event in batch {
+                            log.skip(event);
+                        }
+                    });
+                } else {
+                    sink.log.update_untracked(|log| {
+                        for event in batch {
+                            log.skip(event);
+                        }
+                    });
+                }
+            } else {
+                sink.log.update(|log| {
+                    for event in batch {
+                        log.push(event);
+                    }
+                });
+            }
+        }
+
+        self.frame.set(Arc::new(events));
+        true
+    }
+}
+
 #[derive(Clone, Copy)]
 pub struct AppState {
     pub pipelines: LocalResource<Result<Vec<PipelineDto>, ApiError>>,
@@ -99,6 +262,9 @@ pub struct AppState {
     /// as the pipelines: adding one changes what the next form can offer.
     pub connections: LocalResource<Result<Connections, ApiError>>,
     pub events: Signal<Option<UiEvent>>,
+    /// Where those events are delivered — see [`Feed`]. Cards register with it
+    /// rather than each watching `events` themselves.
+    pub feed: Feed,
     pub canvas_state: CanvasState,
     /// Bumped after a pipeline is created or deleted. `pipelines` and `settings`
     /// both read it, so bumping it re-fetches them — there is no `refetch()` on
@@ -507,11 +673,13 @@ pub fn CanvasPage() -> impl IntoView {
     let UseEventSourceReturn { data, .. } =
         use_event_source::<UiEvent, codee::string::JsonSerdeCodec>("/events");
 
+    let feed = Feed::new();
     let canvas_state = CanvasState::new();
     let state = AppState {
         pipelines,
         connections,
         events: data,
+        feed,
         canvas_state,
         reload,
         config_file,
@@ -527,6 +695,38 @@ pub fn CanvasPage() -> impl IntoView {
         tz_offset: RwSignal::new(0),
     };
     provide_context(state);
+
+    // The feed's two halves. Events are queued as they arrive and delivered on
+    // the next frame — see [`Feed`] for why that is the shape of it.
+    //
+    // The frame loop only runs while there is something to deliver: it pauses
+    // itself the first time it finds the queue empty, so an idle graph costs no
+    // frames at all. Same arrangement as the camera glide and the pulse decay.
+    let frames = use_raf_fn_with_options(
+        move |_| {
+            if !feed.deliver() {
+                // nothing left; the next event wakes us
+            }
+        },
+        UseRafFnOptions::default().immediate(false),
+    );
+    let (resume_frames, pause_frames) = (frames.resume.clone(), frames.pause.clone());
+    Effect::new(move |_| {
+        let Some(event) = data.get() else {
+            return;
+        };
+        feed.queue(event);
+        resume_frames();
+    });
+    // Stopping is decided off the queue rather than inside the callback so the
+    // loop keeps a frame's grace: `deliver` returning false means this frame
+    // found nothing, and the next event will resume it again.
+    Effect::new(move |_| {
+        feed.frame.track();
+        if feed.pending.with_value(Vec::is_empty) {
+            pause_frames();
+        }
+    });
 
     // Client only: an effect doesn't run during server-side rendering, which is
     // exactly the boundary — `js_sys::Date` is a browser API, and the server's
@@ -792,7 +992,6 @@ pub fn CanvasPage() -> impl IntoView {
                                             <For each=move || list.clone() key=|s| s.id.clone() let:s>
                                                 <Card
                                                     pipeline_id=s.id.clone()
-                                                    events=data
                                                     config=s.config.clone()
                                                 />
                                             </For>
@@ -885,12 +1084,16 @@ pub fn Edges(pipelines: Vec<PipelineDto>) -> impl IntoView {
 
     let pulses = RwSignal::new(HashMap::<Edge, u8>::new());
 
-    // a downstream receiving a batch is a batch having crossed the edge above it
+    // A downstream receiving a batch is a batch having crossed the edge above
+    // it. Driven off the delivered *frame* rather than off each event: this
+    // rebuilds the whole edge layer, and doing that once per event was the
+    // third of the per-event costs — see [`Feed`].
     Effect::new(move |_| {
-        let Some(event) = state.events.get() else {
-            return;
-        };
-        let lit = pulsed_edges(&event, &pipelines);
+        let frame = state.feed.frame.get();
+        let mut lit = Vec::new();
+        for event in frame.iter() {
+            lit.extend(pulsed_edges(event, &pipelines));
+        }
         if lit.is_empty() {
             return;
         }
@@ -3654,9 +3857,15 @@ fn MessageLog(
     messages: RwSignal<log::Log>,
     filter: RwSignal<log::Filter>,
     names: StoredValue<log::ComponentNames>,
+    /// Whether new events are being kept. Owned by the card, which is where the
+    /// stream arrives.
+    paused: RwSignal<bool>,
+    /// How many events have gone past since it was paused.
+    skipped: RwSignal<usize>,
 ) -> impl IntoView {
     let state = expect_context::<AppState>();
     let body_ref = NodeRef::<leptos::html::Div>::new();
+    let UseClipboardReturn { copy, copied, .. } = use_clipboard();
 
     // Flat by default: every event in the order it arrived, which is what a log
     // is expected to be. Grouping is the view you switch to when the question
@@ -3678,11 +3887,33 @@ fn MessageLog(
         }
     };
 
+    // Following the tail costs a **forced synchronous layout**: reading
+    // `scroll_height` makes the browser lay the pane out there and then, and a
+    // log holds a couple of hundred rows. Doing it inline on every update was
+    // worth about a quarter of the main thread's blocked time under load, so it
+    // is deferred to the next frame — by which point the rows this update added
+    // are in the DOM anyway, which is the moment the measurement is actually
+    // wanted.
+    //
+    // Coalesced on a flag rather than queued: several updates landing before
+    // the frame runs should scroll to the bottom once, not once each.
+    let scroll_queued = StoredValue::new(false);
+    let follow_the_tail = move || {
+        if scroll_queued.get_value() {
+            return;
+        }
+        scroll_queued.set_value(true);
+        request_animation_frame(move || {
+            scroll_queued.set_value(false);
+            scroll_to_end();
+        });
+    };
+
     Effect::new(move |_| {
         messages.track();
         filter.track();
         if following.get_untracked() {
-            scroll_to_end();
+            follow_the_tail();
         }
     });
 
@@ -3764,6 +3995,54 @@ fn MessageLog(
                 >
                     {move || if grouped.get() { "grouped" } else { "flat" }}
                 </button>
+                // Pausing stops the log, not the pipeline — which is why it
+                // says what went past rather than pretending nothing did.
+                <button
+                    class="clear"
+                    class:active=move || paused.get()
+                    title=move || {
+                        if paused.get() {
+                            format!(
+                                "resume — the pipeline kept running, {} events went past",
+                                skipped.get(),
+                            )
+                        } else {
+                            "stop keeping new events, so this log can be read".to_string()
+                        }
+                    }
+                    on:click=move |_| {
+                        paused.update(|p| *p = !*p);
+                        if paused.get_untracked() {
+                            skipped.set(0);
+                        } else {
+                            // catch up with what did arrive, which is where the
+                            // reader was before they paused
+                            following.set(true);
+                            scroll_to_end();
+                        }
+                    }
+                >
+                    {move || if paused.get() { "paused" } else { "pause" }}
+                </button>
+                // What the filter left, not everything the card holds: the copy
+                // of a log you are reading is the log you are reading.
+                <button
+                    class="clear"
+                    title="copy these lines to the clipboard"
+                    on:click=move |_| {
+                        let text = names
+                            .with_value(|names| {
+                                log::as_text(
+                                    &visible_entries.get_untracked(),
+                                    names,
+                                    state.tz_offset.get_untracked(),
+                                )
+                            });
+                        copy(&text);
+                    }
+                >
+                    {move || if copied.get() { "copied" } else { "copy" }}
+                </button>
                 <button
                     class="clear"
                     title="clear this log"
@@ -3781,6 +4060,23 @@ fn MessageLog(
                 on:scroll=move |_| {
                     if let Some(el) = body_ref.get_untracked() {
                         following.set(at_bottom(&el));
+                    }
+                }
+                // A wheel over a log that has somewhere to scroll is that log's,
+                // and the canvas never hears it. The canvas' handler is a
+                // `prevent_default` that zooms, so leaving the event to bubble
+                // is what stopped the browser scrolling this pane at all.
+                //
+                // Whether there is anything to scroll is the whole test, rather
+                // than which way the wheel went: chaining on to the zoom at the
+                // end of a log turns overscrolling one card into a lurch of the
+                // whole canvas. A log with nothing to scroll isn't a scrollable
+                // pane at all, so that one falls through and zooms.
+                on:wheel=move |ev| {
+                    if let Some(el) = body_ref.get_untracked()
+                        && el.scroll_height() > el.client_height()
+                    {
+                        ev.stop_propagation();
                     }
                 }
             >
@@ -3833,11 +4129,7 @@ fn MessageLog(
 }
 
 #[component]
-pub fn Card(
-    pipeline_id: PipelineId,
-    config: Config,
-    events: Signal<Option<UiEvent>>,
-) -> impl IntoView {
+pub fn Card(pipeline_id: PipelineId, config: Config) -> impl IntoView {
     let state = expect_context::<AppState>();
     let canvas = state.canvas_state;
     let messages = RwSignal::new(log::Log::default());
@@ -3863,13 +4155,18 @@ pub fn Card(
             .with(|m| m.as_ref() == Some(&maximized_id))
     });
 
-    Effect::new(move |_| {
-        if let Some(ev) = events.get()
-            && ev.pipeline_id == id
-        {
-            messages.update(|log| log.push(&ev));
-        }
-    });
+    // Paused here rather than in `MessageLog`, because this is where the stream
+    // reaches the log and pausing it anywhere further down would only be
+    // hiding rows that had already been kept.
+    let paused = RwSignal::new(false);
+    // How much went past while paused — the answer to "is it stuck, or am I
+    // just not watching". Counted here for the same reason.
+    let skipped = RwSignal::new(0_usize);
+
+    // The card doesn't watch the feed; the feed writes to the card. That is the
+    // difference between one map lookup per event and one effect per card per
+    // event — see [`Feed`]. The registration lasts as long as the component.
+    state.feed.register(id, messages, paused, skipped);
 
     // Report our rendered height back to the layout so the row below clears us.
     // Only on a real change: the layout writes positions, and a write here on
@@ -4045,7 +4342,7 @@ pub fn Card(
                 </button>
             </header>
             <Inspector config=config />
-            <MessageLog messages filter names />
+            <MessageLog messages filter names paused skipped />
             <Show when=move || state.editing() && !is_maximized.get()>
                 <div
                     class="resize-handle"

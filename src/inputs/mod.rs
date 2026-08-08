@@ -17,6 +17,24 @@ pub trait BuildInput {
     fn build(self, ctx: &mut BuildCtx) -> anyhow::Result<Box<dyn InputSource>>;
 }
 
+/// How many messages an input may put in one batch, from what the config said.
+///
+/// **The default is one, and that is a promise rather than a tuning choice.**
+/// Batching is worth a great deal when a consumer is catching up — it is the
+/// difference between a run loop doing its per-batch work once and doing it a
+/// hundred times — but a pipeline whose messages must not be grouped is a real
+/// thing, and an input that quietly coalesced them would be wrong in a way that
+/// is very hard to see from the outside. So it is opt-in: a config that says
+/// nothing gets exactly the one-message batches it always got.
+///
+/// Zero is read as one rather than refused. It can only mean "don't batch", and
+/// failing a pipeline to build over it would be a worse answer than the one the
+/// user obviously wanted.
+#[must_use]
+pub fn batch_cap(configured: Option<usize>) -> usize {
+    configured.unwrap_or(1).max(1)
+}
+
 // pub type MessageBatch = Vec<Arc<serde_json::Value>>;
 pub use kayak_core::MessageBatch;
 
@@ -226,5 +244,56 @@ impl InputSource for Buffered {
               //     }
               // }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::batch_cap;
+    use kayak_core::config::{KafkaConfig, NatsConfig};
+
+    /// The promise: an input that wasn't asked to batch doesn't. A pipeline
+    /// that needs its messages one at a time is a real case, so this is the
+    /// behaviour to break a build over rather than a default to tune.
+    #[test]
+    fn an_input_that_was_not_asked_to_batch_emits_one_message_per_batch() {
+        assert_eq!(batch_cap(None), 1);
+    }
+
+    /// Zero can only mean "don't batch", so it reads as one. Refusing to build
+    /// the pipeline would be a worse answer than the obvious one.
+    #[test]
+    fn a_cap_of_zero_reads_as_one_rather_than_failing() {
+        assert_eq!(batch_cap(Some(0)), 1);
+    }
+
+    #[test]
+    fn a_configured_cap_is_taken_as_it_is() {
+        assert_eq!(batch_cap(Some(500)), 500);
+    }
+
+    /// The wire default has to match: a config file with no `max_batch` must
+    /// deserialize to the un-batched behaviour, not to whatever serde would
+    /// otherwise pick.
+    #[test]
+    fn a_config_without_a_cap_leaves_it_unset() {
+        let Ok(kafka) = serde_json::from_value::<KafkaConfig>(serde_json::json!({
+            "connection": "local-kafka",
+            "topic": "test.events",
+            "group": "kayak",
+        })) else {
+            panic!("a kafka input without `max_batch` should parse");
+        };
+        assert_eq!(kafka.max_batch, None);
+        assert_eq!(batch_cap(kafka.max_batch), 1);
+
+        let Ok(nats) = serde_json::from_value::<NatsConfig>(serde_json::json!({
+            "connection": "local-nats",
+            "subject": "test.subject",
+        })) else {
+            panic!("a nats input without `max_batch` should parse");
+        };
+        assert_eq!(nats.max_batch, None);
+        assert_eq!(batch_cap(nats.max_batch), 1);
     }
 }

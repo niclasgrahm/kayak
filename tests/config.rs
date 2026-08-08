@@ -92,6 +92,16 @@ fn output_samples() -> Vec<(&'static str, Value)> {
             }),
         ),
         (
+            "s3",
+            json!({
+                "type": "s3",
+                "connection": "local-s3",
+                "prefix": "orders",
+                "format": "ndjson",
+                "rotate": {"max_rows": 100_000, "interval_secs": 3600}
+            }),
+        ),
+        (
             "nats",
             json!({"type": "nats", "connection": "local-nats", "subject": "out.subject"}),
         ),
@@ -135,6 +145,18 @@ fn connection_samples() -> Vec<(&'static str, Value)> {
             }),
         ),
         ("file", json!({"type": "file", "root": "./out/events"})),
+        (
+            "s3",
+            json!({
+                "type": "s3",
+                "bucket": "events",
+                "access_key_id": "${S3_ACCESS_KEY_ID}",
+                "secret_access_key": "${S3_SECRET_ACCESS_KEY}",
+                "endpoint": "http://localhost:9000",
+                "region": "us-east-1",
+                "allow_http": true
+            }),
+        ),
     ]
 }
 

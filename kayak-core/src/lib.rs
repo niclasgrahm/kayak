@@ -142,12 +142,97 @@ impl std::fmt::Display for Stage {
     }
 }
 
+/// How many of a batch's messages the feed carries. A batch can be thousands
+/// of messages wide — a tumbling buffer over a busy subject is exactly that —
+/// and the rest are counted rather than sent: a card shows a handful at a time,
+/// and the count is what says how much it isn't showing.
+pub const MESSAGES_PER_BATCH: usize = 100;
+
+/// How much of one message the feed carries, in bytes. Enough to recognise a
+/// payload, far short of what a card can render.
+pub const MAX_MESSAGE_BYTES: usize = 2048;
+
+/// A batch as the UI feed carries it: a few of its messages, already rendered
+/// and cut to size, plus the counts that say what was left out.
+///
+/// **The truncation happens on the server**, which is the whole point of the
+/// type. An earlier version sent `Arc<MessageBatch>` — the entire batch — and
+/// left the browser to throw all but a hundred of them away, so a wide batch
+/// was serialized whole, pushed across the wire whole and parsed whole before
+/// anything decided it wasn't wanted. At a kafka-shaped 50k messages a second
+/// that measured 22 MB/s of JSON nobody ever read.
+#[derive(Clone, Serialize, Deserialize, PartialEq, Eq, Debug, JsonSchema)]
+pub struct BatchPreview {
+    /// Compact JSON, at most [`MESSAGES_PER_BATCH`] of them, each cut to
+    /// [`MAX_MESSAGE_BYTES`]. Compact rather than pretty because this is what a
+    /// collapsed row shows; expanding one re-parses it.
+    pub messages: Vec<String>,
+    /// How many messages the batch actually held. Larger than `messages` is
+    /// long whenever the batch was wider than the cap.
+    pub total: usize,
+    /// Messages that passed this stage in passes the feed **did not report**,
+    /// counted since the last one it did — see `kayak::pipeline::UiThrottle`.
+    ///
+    /// It exists so the throughput readout stays honest. The feed is sampled
+    /// under load, so counting only the batches that arrive would report a
+    /// fraction of what the pipeline is really doing, and a card reading `40/s`
+    /// under a pipeline running at 40,000 says the wrong thing more loudly than
+    /// no number at all would.
+    #[serde(default)]
+    pub skipped_messages: u64,
+}
+
+impl BatchPreview {
+    /// Render a batch down to what the feed carries.
+    #[must_use]
+    pub fn of(batch: &MessageBatch, skipped_messages: u64) -> Self {
+        Self {
+            messages: batch
+                .iter()
+                .take(MESSAGES_PER_BATCH)
+                .map(|message| truncate(&message.to_string()))
+                .collect(),
+            total: batch.len(),
+            skipped_messages,
+        }
+    }
+
+    /// How many messages the batch held that this preview doesn't carry.
+    #[must_use]
+    pub fn dropped(&self) -> usize {
+        self.total.saturating_sub(self.messages.len())
+    }
+
+    /// What this event is worth to a throughput readout: its own messages plus
+    /// everything the feed skipped to get here. Counting `total` alone would
+    /// report a sampled fraction of what the pipeline is really doing.
+    #[must_use]
+    pub fn counted(&self) -> usize {
+        let skipped = usize::try_from(self.skipped_messages).unwrap_or(usize::MAX);
+        self.total.saturating_add(skipped)
+    }
+}
+
+/// Cut `text` to [`MAX_MESSAGE_BYTES`], on a character boundary, marking that
+/// it was cut. Strings that fit are returned unchanged.
+#[must_use]
+pub fn truncate(text: &str) -> String {
+    if text.len() <= MAX_MESSAGE_BYTES {
+        return text.to_string();
+    }
+    let mut end = MAX_MESSAGE_BYTES;
+    while end > 0 && !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    format!("{}…", &text[..end])
+}
+
 /// What a run loop is reporting: a batch that passed through, or something that
 /// went wrong while handling one.
 #[derive(Clone, Serialize, Deserialize, PartialEq, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum EventPayload {
-    Batch(Arc<MessageBatch>),
+    Batch(BatchPreview),
     /// A failure at this stage. The batch that caused it is not carried: a
     /// transform that failed has no output to show, and the input that did
     /// arrive was already reported by its own event.
@@ -192,14 +277,22 @@ pub struct UiEvent {
 }
 
 impl UiEvent {
-    pub fn batch(pipeline_id: PipelineId, stage: Stage, batch: Arc<MessageBatch>) -> Self {
+    /// Report a batch, cut down to what the feed carries. `skipped_messages` is
+    /// what passed this stage since the last reported event — zero unless the
+    /// throttle has been dropping passes.
+    pub fn batch(
+        pipeline_id: PipelineId,
+        stage: Stage,
+        batch: &MessageBatch,
+        skipped_messages: u64,
+    ) -> Self {
         Self {
             pipeline_id,
             stage,
             ts: 0,
             seq: None,
             component: None,
-            payload: EventPayload::Batch(batch),
+            payload: EventPayload::Batch(BatchPreview::of(batch, skipped_messages)),
         }
     }
 
@@ -214,6 +307,12 @@ impl UiEvent {
             component: None,
             payload: EventPayload::Error(format!("{error:#}")),
         }
+    }
+
+    /// Whether this is a failure rather than a batch that went through.
+    #[must_use]
+    pub fn is_error(&self) -> bool {
+        matches!(self.payload, EventPayload::Error(_))
     }
 
     /// Stamp the event with a wall-clock time. Called by the publisher, which
@@ -242,7 +341,9 @@ impl UiEvent {
 
 #[cfg(test)]
 mod tests {
-    use super::{EventPayload, Stage, UiEvent};
+    use super::{
+        BatchPreview, EventPayload, MAX_MESSAGE_BYTES, MESSAGES_PER_BATCH, Stage, UiEvent, truncate,
+    };
     use serde_json::json;
     use std::sync::Arc;
 
@@ -270,11 +371,94 @@ mod tests {
         let event = UiEvent::batch(
             "witty-crab".to_string(),
             Stage::Output,
-            Arc::new(vec![Arc::new(json!({"n": 1}))]),
+            &vec![Arc::new(json!({"n": 1}))],
+            0,
         );
 
         assert_eq!(event.ts, 0, "unstamped until published");
         assert_eq!(event.at(1_754_573_021_220).ts, 1_754_573_021_220);
+    }
+
+    /// The cap is the reason the type exists: a batch wider than it must cross
+    /// the wire as a preview plus a count, never whole.
+    #[test]
+    fn a_wide_batch_is_cut_down_to_the_cap_and_counted() {
+        let batch: Vec<_> = (0..MESSAGES_PER_BATCH * 3)
+            .map(|n| Arc::new(json!({ "n": n })))
+            .collect();
+
+        let preview = BatchPreview::of(&batch, 0);
+
+        assert_eq!(preview.messages.len(), MESSAGES_PER_BATCH);
+        assert_eq!(preview.total, MESSAGES_PER_BATCH * 3);
+        assert_eq!(preview.dropped(), MESSAGES_PER_BATCH * 2);
+    }
+
+    #[test]
+    fn a_batch_that_fits_drops_nothing() {
+        let batch = vec![Arc::new(json!({"n": 1})), Arc::new(json!({"n": 2}))];
+
+        let preview = BatchPreview::of(&batch, 0);
+
+        assert_eq!(preview.total, 2);
+        assert_eq!(preview.dropped(), 0);
+        assert_eq!(preview.messages.len(), 2);
+    }
+
+    /// A long message is cut on a character boundary — slicing a multi-byte
+    /// character in half would panic rather than produce a shorter string.
+    #[test]
+    fn a_long_message_is_cut_without_splitting_a_character() {
+        let text = "é".repeat(MAX_MESSAGE_BYTES);
+
+        let cut = truncate(&text);
+
+        assert!(cut.len() <= MAX_MESSAGE_BYTES + "…".len());
+        assert!(cut.ends_with('…'), "expected a marked cut, got {cut}");
+    }
+
+    #[test]
+    fn a_short_message_is_left_alone() {
+        assert_eq!(truncate("{\"n\":1}"), "{\"n\":1}");
+    }
+
+    /// The skip count is what keeps the throughput readout honest once the feed
+    /// is being sampled, so it has to survive the round trip.
+    #[test]
+    fn a_preview_carries_what_the_feed_skipped() {
+        let event = UiEvent::batch(
+            "witty-crab".to_string(),
+            Stage::Input,
+            &vec![Arc::new(json!({"n": 1}))],
+            4_096,
+        );
+
+        let Ok(json) = serde_json::to_string(&event) else {
+            panic!("an event should serialize");
+        };
+        let Ok(round_tripped) = serde_json::from_str::<UiEvent>(&json) else {
+            panic!("an event should round trip");
+        };
+        let EventPayload::Batch(preview) = round_tripped.payload else {
+            panic!("expected a batch payload");
+        };
+
+        assert_eq!(preview.skipped_messages, 4_096);
+        assert_eq!(preview.total, 1);
+    }
+
+    /// An older server sends no `skipped_messages`; that has to read as "nothing
+    /// was skipped" rather than fail the whole event.
+    #[test]
+    fn a_preview_without_a_skip_count_still_parses() {
+        let Ok(preview) = serde_json::from_value::<BatchPreview>(json!({
+            "messages": ["{\"n\":1}"],
+            "total": 1,
+        })) else {
+            panic!("a preview without `skipped_messages` should still parse");
+        };
+
+        assert_eq!(preview.skipped_messages, 0);
     }
 
     /// A frontend built against a newer core must still read a server that

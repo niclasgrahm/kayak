@@ -102,6 +102,48 @@ pub struct FileConnection {
     pub root: String,
 }
 
+/// A bucket on an S3-compatible object store, and the credentials that reach
+/// it.
+///
+/// The `bucket` is where [`FileConnection`]'s `root` is: the thing the *system*
+/// gives you, against which an output names a prefix of its own. What is not
+/// here is any equivalent of `--data-dir`. There cannot be one — the server has
+/// no view of a remote namespace to confine writes within, so the boundary is
+/// the credentials, and giving a deployment a key that can only write one bucket
+/// is the thing that does what the sandbox does locally.
+///
+/// `endpoint` is what makes this work against rustfs, minio or any other
+/// S3-compatible server; left out, it is real AWS S3 in `region`.
+#[derive(Clone, Debug, Deserialize, Serialize, JsonSchema, PartialEq, Eq)]
+#[schemars(title = "s3")]
+pub struct S3Connection {
+    /// the bucket to write into. It has to exist already — an output creates
+    /// objects, never buckets.
+    pub bucket: String,
+    /// access key id. May reference secrets as `${NAME}` — see "secrets" in the
+    /// readme, and prefer a reference to a literal here.
+    pub access_key_id: Secret,
+    /// secret access key. May reference secrets as `${NAME}` — see "secrets" in
+    /// the readme, and prefer a reference to a literal here.
+    pub secret_access_key: Secret,
+    /// url of an S3-compatible server, e.g. `http://localhost:9000` for the
+    /// rustfs in `docker-compose.yaml`. Leave it out for real AWS S3, which is
+    /// then addressed through `region`.
+    // omitted rather than written as `null` when absent, so a connection saved
+    // back out is the file someone hand-wrote — same rule as a postgres port
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub endpoint: Option<String>,
+    /// the bucket's region. Defaults to `us-east-1`, which is also what an
+    /// S3-compatible server that does not care about regions will accept.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub region: Option<String>,
+    /// allow a plaintext `http://` endpoint. Defaults to false: credentials
+    /// over http is a mistake worth having to write down, and the local rustfs
+    /// is the case that legitimately wants it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub allow_http: Option<bool>,
+}
+
 /// Every kind of system a connection can describe.
 ///
 /// Tagged the same way the component enums are, so a connection reads like the
@@ -115,6 +157,7 @@ pub enum ConnectionKind {
     Nats(NatsConnection),
     Postgres(PostgresConnection),
     File(FileConnection),
+    S3(S3Connection),
 }
 
 impl ConnectionKind {
@@ -127,6 +170,7 @@ impl ConnectionKind {
             Self::Nats(_) => NATS,
             Self::Postgres(_) => POSTGRES,
             Self::File(_) => FILE,
+            Self::S3(_) => S3,
         }
     }
 }
@@ -135,6 +179,7 @@ pub const KAFKA: &str = "kafka";
 pub const NATS: &str = "nats";
 pub const POSTGRES: &str = "postgres";
 pub const FILE: &str = "file";
+pub const S3: &str = "s3";
 
 /// What `POST /api/connections` takes: a name, and the connection itself
 /// flattened alongside it.
@@ -235,6 +280,13 @@ impl Connections {
         match self.lookup(id, FILE)? {
             ConnectionKind::File(c) => Ok(c),
             other => Err(ConnectionError::wrong_kind(id, FILE, other)),
+        }
+    }
+
+    pub fn s3(&self, id: &str) -> Result<&S3Connection, ConnectionError> {
+        match self.lookup(id, S3)? {
+            ConnectionKind::S3(c) => Ok(c),
+            other => Err(ConnectionError::wrong_kind(id, S3, other)),
         }
     }
 

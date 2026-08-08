@@ -172,7 +172,11 @@ async fn the_repository_config_file_starts_a_working_graph() -> anyhow::Result<(
         std::path::Path::new("example_config/config.json"),
         std::sync::Arc::new(MapSecretStore::new(
             "the config.json test store",
-            &[("POSTGRES_PASSWORD", "hunter2")],
+            &[
+                ("POSTGRES_PASSWORD", "hunter2"),
+                ("S3_ACCESS_KEY_ID", "rustfsadmin"),
+                ("S3_SECRET_ACCESS_KEY", "rustfsadmin"),
+            ],
         )),
         None,
         Some(std::path::PathBuf::from("dev_data")),

@@ -65,6 +65,54 @@ services:
       timeout: 3s
       retries: 10
 
+  # an S3-compatible object store for the `s3` output to write into, so the
+  # object-store path can be exercised without an AWS account. Single drive and
+  # no console — this is a target for writes, not a deployment.
+  #
+  # 9000 is the S3 API. The credentials are what ${S3_ACCESS_KEY_ID} and
+  # ${S3_SECRET_ACCESS_KEY} have to resolve to — see
+  # example_config/secrets.example.json. They are the well-known defaults on
+  # purpose: this listens on localhost and holds test data.
+  rustfs:
+    image: rustfs/rustfs:latest
+    ports:
+      - "9000:9000"
+    environment:
+      RUSTFS_VOLUMES: /data/rustfs0
+      RUSTFS_ADDRESS: 0.0.0.0:9000
+      RUSTFS_CONSOLE_ENABLE: "false"
+      RUSTFS_ACCESS_KEY: rustfsadmin
+      RUSTFS_SECRET_KEY: rustfsadmin
+      RUSTFS_OBS_LOGGER_LEVEL: warn
+    # tmpfs rather than a named volume, and not only for throwaway-ness: rustfs
+    # runs as uid 10001 and docker creates a named volume's directory owned by
+    # root, so the upstream compose needs a helper container to chown it first.
+    # A tmpfs comes up world-writable and needs no such thing. The cost is that
+    # the bucket is empty again after a `docker compose down`, which is what you
+    # want from a fixture anyway.
+    tmpfs:
+      - /data/rustfs0:size=512m
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://127.0.0.1:9000/health"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  # the bucket the `events_to_s3` pipeline writes into. An output creates
+  # objects and never buckets, so something has to make it once; this exits as
+  # soon as it has, and `mb --ignore-existing` makes a second `up` a no-op.
+  rustfs-bucket:
+    image: minio/mc:latest
+    depends_on:
+      rustfs:
+        condition: service_healthy
+    entrypoint: ["sh", "-c"]
+    command:
+      - |
+        mc alias set local http://rustfs:9000 rustfsadmin rustfsadmin &&
+        mc mb --ignore-existing local/events &&
+        echo "bucket 'events' ready"
+
   publisher:
     image: natsio/nats-box:latest
     depends_on:

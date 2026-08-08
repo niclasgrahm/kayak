@@ -4,6 +4,7 @@ use crate::{
     secrets::Resolved,
 };
 use anyhow::{Context, Result};
+use futures_util::FutureExt;
 use tokio_stream::StreamExt;
 
 use std::sync::Arc;
@@ -23,6 +24,9 @@ impl BuildInput for NatsConfig {
                 )
             })?,
             subject: self.subject,
+            // one message per batch unless the config asks for more — see
+            // `NatsInput::next`
+            max_batch: crate::inputs::batch_cap(self.max_batch),
             sub: None,
         }))
     }
@@ -31,6 +35,8 @@ impl BuildInput for NatsConfig {
 pub struct NatsInput {
     pub urls: Resolved,
     pub subject: String,
+    /// Most messages in one batch. One unless the config says otherwise.
+    pub max_batch: usize,
     pub sub: Option<async_nats::Subscriber>,
 }
 
@@ -54,21 +60,45 @@ impl InputSource for NatsInput {
             .as_mut()
             .ok_or_else(|| anyhow::anyhow!("nats subscriber not initialized"))?;
 
-        loop {
+        // a single malformed payload shouldn't kill the pipeline; skip it and
+        // wait for the next message
+        let decode = |payload: &[u8]| match serde_json::from_slice::<serde_json::Value>(payload) {
+            Ok(value) => Some(value),
+            Err(e) => {
+                tracing::warn!(
+                    "skipping non-json message on nats subject '{}': {}",
+                    self.subject,
+                    e
+                );
+                None
+            }
+        };
+
+        let mut batch: MessageBatch = Vec::new();
+        while batch.is_empty() {
             let msg = subscriber
                 .next()
                 .await
                 .ok_or_else(|| anyhow::anyhow!("nats subscription on '{}' ended", self.subject))?;
-            // a single malformed payload shouldn't kill the pipeline; skip it
-            // and wait for the next message
-            match serde_json::from_slice(&msg.payload) {
-                Ok(value) => return Ok(Arc::new(vec![Arc::new(value)])),
-                Err(e) => tracing::warn!(
-                    "skipping non-json message on nats subject '{}': {}",
-                    self.subject,
-                    e
-                ),
+            if let Some(value) = decode(&msg.payload) {
+                batch.push(Arc::new(value));
             }
         }
+
+        // Whatever else has *already* arrived, up to the cap — never a wait for
+        // one to fill, so a quiet subject still yields batches of one however
+        // high `max_batch` is. With the default of 1 this loop never runs.
+        while batch.len() < self.max_batch {
+            let Some(ready) = subscriber.next().now_or_never() else {
+                break;
+            };
+            let msg = ready
+                .ok_or_else(|| anyhow::anyhow!("nats subscription on '{}' ended", self.subject))?;
+            if let Some(value) = decode(&msg.payload) {
+                batch.push(Arc::new(value));
+            }
+        }
+
+        Ok(Arc::new(batch))
     }
 }

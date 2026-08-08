@@ -74,6 +74,7 @@ impl BuildOutputConfig for OutputConfig {
         match self.kind {
             OutputKind::Stdout(c) => c.build(ctx),
             OutputKind::File(c) => c.build(ctx),
+            OutputKind::S3(c) => c.build(ctx),
             OutputKind::Kafka(c) => c.build(ctx),
             OutputKind::Nats(c) => c.build(ctx),
             OutputKind::Postgres(c) => c.build(ctx),

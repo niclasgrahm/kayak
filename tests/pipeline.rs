@@ -35,7 +35,12 @@ fn runtime(
     events: broadcast::Sender<UiEvent>,
 ) -> PipelineRuntime {
     match PipelineRuntime::from_parts(inputs, transforms, outputs, shared, events) {
-        Ok(r) => r,
+        // Every test in this file is about what the feed *says* — that one
+        // pass's events share a sequence number, that a failure names its
+        // component — and none of them about how often it says it. The feed is
+        // sampled in production; `throttling_the_ui_feed` below is what covers
+        // that, and it builds its runtime without this.
+        Ok(r) => r.reporting_every_pass(),
         Err(e) => panic!("building the runtime: {e:#}"),
     }
 }
@@ -236,6 +241,46 @@ async fn cancelling_the_token_stops_a_running_pipeline() {
     shared.cancellation_token.cancel();
     let stopped = tokio::time::timeout(Duration::from_secs(5), handle).await;
     assert!(stopped.is_ok(), "run loop did not exit after cancellation");
+}
+
+/// An output holding an unfinished part is told the run is over, whichever way
+/// it ended.
+///
+/// Both cases matter and they arrive down different arms of the run loop's
+/// `select!`: a cancelled pipeline breaks out of the top, an input that dies
+/// breaks out of the error arm. The s3 output loses a whole object if either one
+/// skips this, and the file output leaves an unterminated `json_array` behind.
+#[tokio::test]
+async fn an_output_is_finished_when_the_run_loop_ends() {
+    for when_exhausted in [WhenExhausted::Pend, WhenExhausted::Fail] {
+        let shared = pipeline("finish-me");
+        let (events, _events_rx) = broadcast::channel(16);
+        let output = CollectingOutput::new();
+        let finish_calls = output.finish_calls();
+        let runtime = runtime(
+            vec![Box::new(ScriptedInput::new(
+                vec![batch(vec![json!({"n": 1})])],
+                when_exhausted,
+            ))],
+            vec![],
+            vec![Box::new(output)],
+            Arc::clone(&shared),
+            events,
+        );
+        let handle = tokio::spawn(runtime.run());
+        if when_exhausted == WhenExhausted::Pend {
+            shared.cancellation_token.cancel();
+        }
+        let stopped = tokio::time::timeout(Duration::from_secs(5), handle).await;
+        assert!(stopped.is_ok(), "{when_exhausted:?}: run loop did not exit");
+
+        let calls = *finish_calls
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        // exactly once: an output that has already flushed its part must not be
+        // asked to do it again and upload an empty one
+        assert_eq!(calls, 1, "{when_exhausted:?}: finish was called {calls} times");
+    }
 }
 
 /// The SSE feed sees one `input` event and one `output` event per batch.
@@ -828,4 +873,155 @@ async fn one_input_failing_does_not_stop_the_others() {
         "the event should carry the cause: {}",
         errors[0].1
     );
+}
+
+/// The feed is a **sample**, not a record.
+///
+/// Publishing every pass halved the server's throughput with one browser
+/// attached, and bought nothing with it — the broadcast channel dropped
+/// millions of events a second to deliver a few hundred. These pin the two
+/// halves of the deal: the feed stays quiet under load, and nothing it drops is
+/// lost from the number the card reports.
+mod throttling_the_ui_feed {
+    use super::{Arc, Duration, Ticking, pipeline, ScriptedInput, WhenExhausted, batch};
+    use kayak::inputs::InputSource;
+    use kayak::pipeline::PipelineRuntime;
+    use kayak::state::UiEvent;
+    use kayak_core::{EventPayload, Stage};
+    use serde_json::json;
+    use tokio::sync::broadcast;
+
+    /// A hundred passes arriving back to back inside one throttle window must
+    /// not become a hundred events.
+    #[tokio::test]
+    async fn a_burst_of_passes_is_reported_as_only_a_few() {
+        let (events, mut rx) = broadcast::channel::<UiEvent>(1024);
+        let script: Vec<_> = (0..100).map(|n| batch(vec![json!({ "n": n })])).collect();
+        let inputs: Vec<Box<dyn InputSource>> =
+            vec![Box::new(ScriptedInput::new(script, WhenExhausted::Fail))];
+
+        let Ok(runtime) = PipelineRuntime::from_parts(
+            inputs,
+            vec![],
+            vec![],
+            pipeline("throttled"),
+            events.clone(),
+        ) else {
+            panic!("building the runtime");
+        };
+        let _ = runtime.run().await;
+
+        let batches = std::iter::from_fn(|| rx.try_recv().ok())
+            .filter(|ev| matches!(ev.payload, EventPayload::Batch(_)))
+            .count();
+
+        assert!(
+            batches < 100,
+            "the feed reported every pass ({batches}) instead of sampling them"
+        );
+    }
+
+    /// The other half of the deal, and the one that would be easy to lose: a
+    /// pipeline that isn't flooding must still be reported in full.
+    ///
+    /// Almost every real pipeline is this one — a message every second or two —
+    /// and a throttle that sampled *those* would have turned a live log into a
+    /// lossy one to fix a problem they never had.
+    #[tokio::test]
+    async fn a_pipeline_slower_than_the_budget_has_every_pass_reported() {
+        let (events, mut rx) = broadcast::channel::<UiEvent>(1024);
+        let inputs: Vec<Box<dyn InputSource>> = vec![Box::new(Ticking::new(
+            // comfortably slower than UI_PASS_INTERVAL, so every pass is due
+            // when it arrives. A pipeline *faster* than the budget does lose
+            // lines, on purpose — see the burst test above, and note the
+            // frontend draws the resulting `seq` gaps as "not shown" rather
+            // than running the survivors together.
+            Duration::from_millis(150),
+            json!({"n": 1}),
+        ))];
+
+        let shared = pipeline("slow");
+        let Ok(runtime) =
+            PipelineRuntime::from_parts(inputs, vec![], vec![], Arc::clone(&shared), events.clone())
+        else {
+            panic!("building the runtime");
+        };
+        let handle = tokio::spawn(runtime.run());
+        tokio::time::sleep(Duration::from_millis(800)).await;
+        shared.cancellation_token.cancel();
+        let _ = handle.await;
+
+        let mut seqs = Vec::new();
+        while let Ok(ev) = rx.try_recv() {
+            if ev.stage == Stage::Input && matches!(ev.payload, EventPayload::Batch(_)) {
+                seqs.push(ev.seq);
+            }
+        }
+
+        assert!(seqs.len() >= 4, "expected several passes, got {seqs:?}");
+        let expected: Vec<_> = (1..=seqs.len() as u64).map(Some).collect();
+        assert_eq!(
+            seqs, expected,
+            "a pipeline inside its budget must have every pass reported, with no gaps"
+        );
+    }
+
+    /// What the throttle drops still has to be *counted*, or the card's
+    /// throughput readout reports a fraction of what the pipeline is doing.
+    ///
+    /// The accounting is "carried on the next reported event", which means the
+    /// messages of the final unreported window are never carried out — a
+    /// pipeline that stops mid-window takes up to one window's count with it.
+    /// That is deliberate rather than a gap: the alternative is publishing a
+    /// synthetic batch event at shutdown, which would put a row holding no
+    /// messages into every card's log every time a pipeline ends. The readout is
+    /// a ten-second rolling average, so a bounded 100 ms tail is invisible in
+    /// it — what must not happen is the *steady state* under-reporting, which is
+    /// what this pins.
+    #[tokio::test]
+    async fn the_messages_of_skipped_passes_are_carried_on_the_next_event() {
+        let (events, mut rx) = broadcast::channel::<UiEvent>(1024);
+        // long enough to span several throttle windows, so there is a "next
+        // reported event" for the skipped counts to ride out on
+        let script: Vec<_> = (0..100).map(|n| batch(vec![json!({ "n": n })])).collect();
+        let inputs: Vec<Box<dyn InputSource>> = vec![Box::new(Ticking::new(
+            Duration::from_millis(5),
+            json!({"n": 1}),
+        ))];
+        drop(script);
+
+        let shared = pipeline("counted");
+        let Ok(runtime) =
+            PipelineRuntime::from_parts(inputs, vec![], vec![], Arc::clone(&shared), events.clone())
+        else {
+            panic!("building the runtime");
+        };
+        let handle = tokio::spawn(runtime.run());
+        // ~5 windows of a 5 ms ticker: ~100 passes, ~5 of them reported
+        tokio::time::sleep(Duration::from_millis(500)).await;
+        shared.cancellation_token.cancel();
+        let _ = handle.await;
+
+        let mut reported_events = 0u64;
+        let mut counted = 0u64;
+        while let Ok(ev) = rx.try_recv() {
+            if ev.stage != Stage::Input {
+                continue;
+            }
+            if let EventPayload::Batch(preview) = &ev.payload {
+                reported_events += 1;
+                counted += preview.counted() as u64;
+            }
+        }
+
+        assert!(
+            reported_events > 0,
+            "the feed reported nothing at all over half a second"
+        );
+        assert!(
+            counted > reported_events,
+            "the skipped passes were not counted: {reported_events} events accounted for only \
+             {counted} messages, so the readout would report a fraction of the real rate"
+        );
+    }
 }

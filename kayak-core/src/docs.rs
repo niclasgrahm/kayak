@@ -660,7 +660,7 @@ mod tests {
     fn required_fields_come_first_in_declaration_order() {
         assert_eq!(
             field_names(&component("nats")),
-            ["connection", "subject", "buffer"]
+            ["connection", "subject", "max_batch", "buffer"]
         );
     }
 
@@ -796,7 +796,7 @@ mod tests {
             .into_iter()
             .map(|c| c.kind)
             .collect();
-        assert_eq!(kinds, ["kafka", "nats", "postgres", "file"]);
+        assert_eq!(kinds, ["kafka", "nats", "postgres", "file", "s3"]);
 
         // a file connection is the odd one out — a directory rather than a
         // server — and documents itself through the same machinery regardless
