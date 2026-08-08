@@ -140,6 +140,35 @@ pub fn draft_of(doc: &ComponentDoc) -> ComponentDraft {
     }
 }
 
+/// A draft of the input that reads from an existing pipeline, already pointed
+/// at `upstream` — what the "add a pipeline fed by this one" affordance on a
+/// card opens the modal with.
+///
+/// Found by looking for an input with a [`FieldType::PipelineId`] field rather
+/// than by naming the `pipeline` input, for the reason `docs.rs` looks for the
+/// marker and not the field name: any input that grows a reference to another
+/// pipeline should be usable here without this function learning about it.
+/// Only top-level fields are considered — a nested reference would be a field
+/// of some other value, not the thing this input is fed by.
+///
+/// `None` if no input has such a field, which the current schema always does;
+/// the caller falls back to a blank form.
+#[must_use]
+pub fn draft_fed_by(docs: &[ComponentDoc], upstream: &str) -> Option<ComponentDraft> {
+    let (doc, field) = kinds_in(docs, Family::Input).into_iter().find_map(|doc| {
+        let field = doc
+            .fields
+            .iter()
+            .find(|f| f.field_type == FieldType::PipelineId)?;
+        Some((doc, field))
+    })?;
+    let mut draft = draft_of(doc);
+    draft
+        .values
+        .insert(field.name.clone(), upstream.to_string());
+    Some(draft)
+}
+
 /// The fields to render for a draft: a component's own, or — when it is
 /// enum-shaped, like `filter` — the ones belonging to the selected variant.
 #[must_use]
@@ -541,6 +570,44 @@ mod tests {
         let output = component(Family::Output, "nats");
         assert!(input.fields.iter().any(|f| f.name == "buffer"));
         assert!(!output.fields.iter().any(|f| f.name == "buffer"));
+    }
+
+    /// The card's "add a pipeline fed by this one" opens the modal on this
+    /// draft, so it has to be a complete, buildable input — not just the right
+    /// kind with the id dropped somewhere.
+    #[test]
+    fn a_seeded_input_reads_from_the_pipeline_it_was_seeded_with() -> anyhow::Result<()> {
+        let docs = docs();
+        let draft = match draft_fed_by(&docs, "ingest") {
+            Some(draft) => draft,
+            None => panic!("no input takes a pipeline id"),
+        };
+        assert_eq!(draft.family, Family::Input);
+        let doc = component(Family::Input, &draft.kind);
+        let json = component_json(&doc, &draft).map_err(|e| anyhow::anyhow!("{e:?}"))?;
+        assert_eq!(json, json!({"type": "pipeline", "upstream": "ingest"}));
+        Ok(())
+    }
+
+    /// The seed is looked up by the field's *type*, so the dropdown the modal
+    /// renders for it is the same control that would be there if it had been
+    /// picked by hand — and the marked field is the one that got the id.
+    #[test]
+    fn the_seeded_field_is_the_one_marked_as_a_pipeline_id() {
+        let docs = docs();
+        let draft = match draft_fed_by(&docs, "ingest") {
+            Some(draft) => draft,
+            None => panic!("no input takes a pipeline id"),
+        };
+        let doc = component(Family::Input, &draft.kind);
+        let marked: Vec<&str> = doc
+            .fields
+            .iter()
+            .filter(|f| f.field_type == FieldType::PipelineId)
+            .map(|f| f.name.as_str())
+            .collect();
+        assert_eq!(marked.len(), 1, "one field should carry the id");
+        assert_eq!(draft.values.get(marked[0]).map(String::as_str), Some("ingest"));
     }
 
     #[test]

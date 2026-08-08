@@ -361,6 +361,46 @@ body {
   }
 }
 
+// "Add a pipeline fed by this one", on the bottom edge — the direction the new
+// card will be laid out in. It *is* its own hover zone: the affordance is
+// meant to appear when the cursor comes near the edge, and a separate
+// transparent strip to detect that would have to swallow clicks meant for the
+// log underneath. So it is always there and always this small, and only its
+// visibility changes — a ghost once the pointer is anywhere on the card, solid
+// once it is on the button itself.
+.card-spawn {
+  position: absolute;
+  left: 0;
+  bottom: 0;
+  width: 18px;
+  height: 14px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+  background: var(--bg-hover);
+  border: none;
+  border-top-right-radius: var(--radius);
+  color: var(--text-dim);
+  cursor: pointer;
+  font: inherit;
+  font-size: 13px;
+  line-height: 1;
+  opacity: 0;
+  transition: opacity 80ms linear;
+
+  .card:hover & {
+    opacity: 0.45;
+  }
+
+  &:hover,
+  &:focus-visible {
+    opacity: 1;
+    color: var(--text);
+    background: var(--accent);
+  }
+}
+
 // Bottom-right corner, in the usual place. Deliberately understated until it is
 // wanted: it only exists in edit mode at all, and shouldn't compete with the
 // card's content for attention once it's there.

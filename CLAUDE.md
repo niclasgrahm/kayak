@@ -420,6 +420,21 @@ Four things to preserve:
 
 The canvas has a `Mode` (`frontend/src/app.rs`) that starts at `ReadOnly`; edit affordances are `<Show>`n, not disabled, so read-only really is read-only. That includes moving cards: the title bar is a drag handle and the corner a resize handle only in edit mode, and double-clicking the title bar puts a card back under the automatic layout. A `<Show>`'s children must be `Fn` *and* `Send + Sync`, which is why `Card`'s drag handler keeps its id in a `StoredValue` — that makes the closure `Copy` and usable in both places.
 
+A card also carries a `.card-spawn` handle — "add a pipeline fed by this one",
+which opens `AddPipelineModal` with its one input already pointed here. It sits
+on the **bottom** edge because that is the face the new card's edge will be
+routed out of, and to the **left** because the log's "jump to latest" already
+owns the middle of that edge. It *is* its own hover zone: a transparent strip to
+detect the pointer nearing the edge would have to swallow clicks meant for the
+log underneath, so the button is always present, always that small, and only its
+opacity changes. The seed rides on `AppState.add_upstream`, written only through
+`open_add` — the modal is mounted under a `<Show>`, so it reads the seed once at
+construction, and routing every open through one method is what stops a stale id
+reaching the sidebar's plain `+`. `form::draft_fed_by` builds the draft by
+looking for an input with a `FieldType::PipelineId` field rather than by naming
+the `pipeline` input, the same rule `docs.rs` follows: any input that grows a
+reference to another pipeline becomes the one this seeds, with no edit here.
+
 The same applies to the edge handles: `ChannelGrip` and `PortGrip` are each two `<line>`s, a fat transparent one that catches the pointer (`.edges` sets `pointer-events: none`, so the hit line turns it back on for itself) and a visible grip. Note the label is an `aria-label` and not an SVG `<title>` child — `leptos_meta` claims `<title>` for the document's, and the browser tab ends up named after whichever edge rendered last. Their `.vertical` classes mean *opposite* things (a channel's is the route's direction, a port's is the face's), which is why the cursor rules are per-class rather than shared.
 
 Drags are tracked with window-level listeners rather than on the card (a fast pointer leaves the card behind, and a `mouseup` outside it would never arrive). The delta is divided by the zoom, applied to the geometry captured at press time rather than accumulated, and written into `arrangement` live so the edges follow; the `PUT` happens once, on release. It's a browser-tab property — the API accepts writes either way, which is fine for a dev tool but shouldn't be mistaken for enforcement. Edits apply to the runtime immediately, so `revert` (reload the file) is the only undo, and `unsaved changes` in the navbar is the only thing between a session's work and a restart.

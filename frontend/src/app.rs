@@ -285,6 +285,15 @@ pub struct AppState {
     pub mode: RwSignal<Mode>,
     /// Whether the "add pipeline" modal is open.
     pub adding: RwSignal<bool>,
+    /// The pipeline the modal should open already fed by, when it was opened
+    /// from a card's downstream handle rather than from the sidebar's `+`.
+    ///
+    /// A separate signal rather than a payload on `adding` because the modal
+    /// reads it once, at construction: it is mounted under a `<Show>`, so every
+    /// open is a fresh component and a seed can only ever be the current one.
+    /// Always written through [`AppState::open_add`], which is what stops a
+    /// stale id surviving into the next plain `+`.
+    pub add_upstream: RwSignal<Option<PipelineId>>,
     /// Whether the "add connection" modal is open.
     pub adding_connection: RwSignal<bool>,
     /// Whether the "save as" modal is open.
@@ -335,6 +344,15 @@ impl AppState {
             .iter()
             .map(|(id, kind)| (id.clone(), kind.type_name().to_string()))
             .collect()
+    }
+
+    /// Open the "add pipeline" modal, optionally with its first input already
+    /// reading from `upstream`.
+    ///
+    /// The one way in, so that the seed is set — or cleared — on every open.
+    pub fn open_add(&self, upstream: Option<PipelineId>) {
+        self.add_upstream.set(upstream);
+        self.adding.set(true);
     }
 
     fn editing(&self) -> bool {
@@ -687,6 +705,7 @@ pub fn CanvasPage() -> impl IntoView {
         unsaved,
         mode: RwSignal::new(Mode::ReadOnly),
         adding: RwSignal::new(false),
+        add_upstream: RwSignal::new(None),
         adding_connection: RwSignal::new(false),
         saving: RwSignal::new(false),
         tab: RwSignal::new(SidebarTab::Pipelines),
@@ -1513,7 +1532,7 @@ fn PipelineList() -> impl IntoView {
                     <button
                         class="icon-button"
                         title="add pipeline"
-                        on:click=move |_| state.adding.set(true)
+                        on:click=move |_| state.open_add(None)
                     >
                         "+"
                     </button>
@@ -2020,7 +2039,12 @@ struct DraftSignals {
 
 impl DraftSignals {
     fn new(doc: &kayak_core::docs::ComponentDoc) -> Self {
-        let draft = form::draft_of(doc);
+        Self::from_draft(form::draft_of(doc))
+    }
+
+    /// The same, from a draft that already has something in it — what a modal
+    /// opened from a card's downstream handle starts with.
+    fn from_draft(draft: form::ComponentDraft) -> Self {
         Self {
             family: draft.family,
             kind: RwSignal::new(draft.kind),
@@ -2096,9 +2120,19 @@ fn AddPipelineModal() -> impl IntoView {
             }
         });
     };
-    // a pipeline needs an input, so start it with one rather than with an
-    // empty form and an error waiting to happen
-    add(Family::Input);
+    // A pipeline needs an input, so start it with one rather than with an
+    // empty form and an error waiting to happen. Opened from a card's
+    // downstream handle, that one input is already reading from that card;
+    // read untracked, because a seed is a starting point and not something the
+    // form should be dragged back to.
+    let seeded = state
+        .add_upstream
+        .get_untracked()
+        .and_then(|upstream| docs.with_value(|docs| form::draft_fed_by(docs, &upstream)));
+    match seeded {
+        Some(draft) => drafts.update(|d| d.push(DraftSignals::from_draft(draft))),
+        None => add(Family::Input),
+    }
 
     let submit = move || {
         if submitting.get_untracked() {
@@ -4343,6 +4377,25 @@ pub fn Card(pipeline_id: PipelineId, config: Config) -> impl IntoView {
             </header>
             <Inspector config=config />
             <MessageLog messages filter names paused skipped />
+            // Downstream is *down*, so the handle for it sits on the bottom
+            // edge — the face `sides_between` will route the new card's edge
+            // out of. Left rather than centre because the log's "jump to
+            // latest" already lives in the middle of that edge.
+            <Show when=move || state.editing() && !is_maximized.get()>
+                <button
+                    class="card-spawn"
+                    title="add a pipeline fed by this one"
+                    aria-label="add a pipeline fed by this one"
+                    // the press must not reach the canvas behind the card
+                    on:mousedown=move |ev| ev.stop_propagation()
+                    on:click=move |ev| {
+                        ev.stop_propagation();
+                        state.open_add(Some(stored_id.get_value()));
+                    }
+                >
+                    "+"
+                </button>
+            </Show>
             <Show when=move || state.editing() && !is_maximized.get()>
                 <div
                     class="resize-handle"
