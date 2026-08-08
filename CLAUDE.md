@@ -62,6 +62,35 @@ Config types live in `kayak-core::config` and are pure data. The *building* of r
 
 `BuildCtx` (defined in `src/lib.rs`) is threaded through every `build()` call. It carries `&mut HashMap<PipelineId, PipelineHandle>` — needed so a `pipeline` input can look up its upstream and register an mpsc sender on it — the `broadcast::Sender<UiEvent>`, the `Arc<dyn SecretStore>` that `${NAME}` references resolve against, and the `Arc<Connections>` a component's `connection` field is looked up in.
 
+### The http input
+
+Every other input reaches out; this one is reached. `src/inputs/http.rs` holds
+both halves: the `InputSource` and the `Inboxes` registry the handler finds it
+through. Building the input claims the pipeline's id in the registry and
+dropping it gives the claim up, so the endpoint's lifetime *is* the run loop's
+and nothing has to remember to unregister. The registry rides on `BuildCtx`
+exactly as the connections do (`AppState` owns it), which is what keeps the axum
+layer from ever holding an `InputSource`.
+
+The path is derived from the pipeline id (`POST /api/pipelines/{id}/messages`)
+rather than configured — one pipeline is one endpoint, so a second `http` input
+on a pipeline fails to build. Three things are load-bearing. Registrations carry
+a **token** and `Drop` only removes a matching one: a revert can build the new
+pipeline before the old one's task has finished dying, and an unconditional
+remove would tear down the successor's endpoint. `delete_pipeline` **evicts by
+name** under the pipelines lock (and `revert` clears the map) so an endpoint goes
+down with the request that removed it rather than whenever the task gets round to
+it — by-name eviction is safe *because* of that lock. And posting is a
+`try_send`: a full queue is a 503, never an awaited send, because holding an HTTP
+request open until a pipeline catches up just moves the timeout somewhere less
+visible. Lock order is the existing one — pipelines before inboxes; `ingest`
+classifies its 404 after the inbox lock is already released.
+
+`PipelineError` grew `NotAccepting` (a running pipeline with no `http` input) and
+`Backpressure` (503). `NotAccepting` is a 404 like `NotFound` and is deliberately
+a separate variant: one is fixed by creating the pipeline, the other by giving it
+the input.
+
 ### Connections
 
 The systems pipelines talk to are declared once under a name, in a third file
@@ -143,11 +172,13 @@ asked, filling the directory with empty files.
 The sample's file output is `heartbeat_to_disk`, and its upstream is deliberate:
 `heartbeat` is a dummy input, so it is the one pipeline in `example_config/` that
 writes real output without `docker compose up`. Its cost is that the sample no
-longer loads on a server with no `--data-dir` — so `just dev`, `tests/graph.rs`
-and the `Dockerfile` all pass `--data-dir dev_data`, and the connection's root
-(`dev_data/events`) is relative, resolving against the working directory in all
-three. Change one and change all three. `dev_data` is gitignored; the build
-creates it.
+longer loads on a server with no `--data-dir` — so `just dev` and
+`tests/graph.rs` both pass `--data-dir dev_data`, and the connection's root
+(`dev_data/events`) is relative, resolving against the working directory in
+both. Change one and change the other. The container image doesn't pass it
+(nothing is baked in there), so running the sample out of the image takes the
+flag on the command line — that's the readme's deployment section. `dev_data` is
+gitignored; the build creates it.
 
 ### Secrets
 
@@ -271,5 +302,5 @@ The pipelines tab has two arrangements and a search box, and which rows that com
 
 - `readme.md` holds the current TODO list — check it for what's in flight before proposing work.
 - Leptos config lives in the root `Cargo.toml` under `[[workspace.metadata.leptos]]`; `site-addr` there (6767) is what the binary actually binds, not the `--port` arg.
-- `Dockerfile` is a two-stage cargo-leptos build; the runtime image bakes in `example_config/config.json` (and the connections file beside it, which has to keep the same stem or it stops being found) and the `LEPTOS_SITE_*` env vars.
+- `Dockerfile` is a two-stage cargo-leptos build, documented in the readme's "deployment" section. The runtime image is the *runtime and nothing else*: binary, site directory, `LEPTOS_SITE_*` env vars, uid 10001, `ENTRYPOINT` = the binary so container args are server flags. **No config is baked in** — bare it serves an empty graph, and a deployment mounts one into `/kayak` (the WORKDIR, owned by the run user because saving writes there). The sample is carried at `/usr/share/kayak/example` for a tour, connections and layout file beside it under the same stem or they stop being found. The builder installs `cmake` for `rdkafka-sys`; nothing else, since TLS is rustls and zlib is vendored.
 - **`example_config/` is the sample everything is tried against**, and it is one directory because the set travels together: the connections and layout files are *derived* from the config's path, so they only find each other side by side. `tests/config.rs` and `tests/graph.rs` read the files from there by relative path, so moving or renaming them breaks those tests — which is the point, the sample is not allowed to rot. `secrets.json` is gitignored anywhere in the tree; `just dev` creates the sample's from `secrets.example.json`.

@@ -28,6 +28,7 @@ fn only_input(config: &Config) -> &InputConfig {
 fn input_samples() -> Vec<(&'static str, Value)> {
     vec![
         ("dummy", json!({"type": "dummy", "duration": 5})),
+        ("http", json!({"type": "http", "capacity": 256})),
         (
             "nats",
             json!({"type": "nats", "connection": "local-nats", "subject": "test.subject"}),
@@ -353,6 +354,18 @@ fn an_input_without_a_buffer_is_valid() -> anyhow::Result<()> {
         "outputs": [{"type": "stdout"}]
     }))?;
     assert!(only_input(&config).buffer.is_none());
+    Ok(())
+}
+
+/// The http input's only field is optional, so `{"type": "http"}` on its own is
+/// a whole input — and it has to come back out that way, without a `"capacity":
+/// null` a hand-written config never had.
+#[test]
+fn an_http_input_without_a_capacity_round_trips_bare() -> anyhow::Result<()> {
+    let bare = json!({"type": "http"});
+    let kind: InputKind = serde_json::from_value(bare.clone())?;
+    assert!(matches!(kind, InputKind::Http(ref c) if c.capacity.is_none()));
+    assert_eq!(serde_json::to_value(&kind)?, bare);
     Ok(())
 }
 

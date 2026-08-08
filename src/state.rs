@@ -3,6 +3,7 @@ use serde::Serialize;
 use tokio::sync::broadcast;
 
 use crate::BuildCtx;
+use crate::inputs::http::{IngestError, Inboxes};
 use crate::pipeline::Pipeline;
 use crate::secrets::{EnvStore, SecretStore};
 use kayak_core::config::Config;
@@ -25,6 +26,14 @@ pub struct PipelineHandle {
 pub enum PipelineError {
     NotFound(PipelineId),
     DuplicateId(PipelineId),
+    /// The pipeline is running, but nothing can be posted to it: it has no
+    /// `http` input. A 404 like [`PipelineError::NotFound`], and deliberately
+    /// distinct from it — one is fixed by creating the pipeline, the other by
+    /// giving it the input that would serve the endpoint.
+    NotAccepting(PipelineId),
+    /// A pipeline's `http` input queue is full — it is not reading as fast as
+    /// something is posting. A 503: try again, nothing was lost but this batch.
+    Backpressure(PipelineId),
     /// A connection someone asked to delete is still named by running
     /// pipelines. Deleting it would leave them running on settings nothing
     /// records, and the next revert would refuse to rebuild them.
@@ -40,6 +49,14 @@ impl std::fmt::Display for PipelineError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::NotFound(id) => write!(f, "pipeline with id '{id}' not found"),
+            Self::NotAccepting(id) => write!(
+                f,
+                "pipeline '{id}' has no http input, so nothing can be posted to it"
+            ),
+            Self::Backpressure(id) => write!(
+                f,
+                "pipeline '{id}' is not keeping up; its http input queue is full"
+            ),
             Self::DuplicateId(id) => write!(f, "pipeline with id '{id}' already exists"),
             Self::ConnectionInUse(id, used_by) => write!(
                 f,
@@ -135,6 +152,15 @@ pub struct AppState {
     /// data firehose at the directory holding the config someone is editing is
     /// not a default anyone would choose. See [`crate::outputs::file::Root`].
     data_dir: Option<Arc<PathBuf>>,
+    /// Where the running pipelines' `http` inputs are reached, by id.
+    ///
+    /// Beside the graph rather than inside it because the two ends of it are on
+    /// either side of the runtime: a pipeline registers here when it is built,
+    /// and the HTTP handler that serves `POST /api/pipelines/{id}/messages`
+    /// looks it up here without ever touching an `InputSource`. Entries come
+    /// and go with the pipelines themselves — the registration is owned by the
+    /// input, so a deleted pipeline's endpoint disappears with its run loop.
+    inboxes: Arc<Inboxes>,
     /// The rendered form of the graph as last loaded or saved, which is what
     /// "unsaved changes" is measured against.
     ///
@@ -200,6 +226,7 @@ impl AppState {
             saved_connections: Mutex::new(None),
             save_dir,
             data_dir: None,
+            inboxes: Arc::new(Inboxes::new()),
             saved: Mutex::new(None),
             layout: Mutex::new(LayoutFile::default()),
         }
@@ -578,6 +605,11 @@ impl AppState {
                 TEARDOWN_GRACE.as_secs()
             );
         }
+        // The graph is gone, so no endpoint belongs to anything any more. A
+        // straggler still holding one would fail the rebuild of the pipeline
+        // that takes its id — and its own `Drop`, arriving later, is a no-op
+        // once the entry it knows about has been replaced.
+        self.inboxes.clear();
 
         // back to what is on disk means both files, and the connections have to
         // land first: the pipelines about to be rebuilt name them
@@ -882,7 +914,8 @@ impl AppState {
             Arc::clone(&self.secrets),
         )
         .with_connections(connections)
-        .with_data_dir(self.data_dir.clone());
+        .with_data_dir(self.data_dir.clone())
+        .with_inboxes(Arc::clone(&self.inboxes));
         // building the runtime only fails on things the config got wrong
         // (unknown upstream, unbuildable component)
         let join_handle = pipeline.start(ctx).map_err(|e| {
@@ -906,7 +939,50 @@ impl AppState {
         };
         // signal cancellation here; the run loop drops out on its own
         handle.shared.cancellation_token.cancel();
+        // ...but the endpoint goes now rather than whenever that task gets
+        // round to dropping the input, so a post that arrives after the delete
+        // returns 404 instead of disappearing into a pipeline on its way out.
+        // Done under the pipelines lock, which is what makes eviction by name
+        // safe — nothing can have re-registered this id yet.
+        self.inboxes.evict(id);
         tracing::debug!("pipeline deleted: {}", id);
         Ok(())
+    }
+
+    /// Hand posted messages to a pipeline's `http` input, as one batch.
+    ///
+    /// Returns how many messages were queued for the run loop — *accepted*, not
+    /// processed: nothing here waits for the pipeline to work through them.
+    ///
+    /// An empty post is a no-op that still has to say whether anyone was
+    /// listening, so it asks without sending. A pipeline that isn't accepting
+    /// posts is not the same thing as one that doesn't exist, and the two are
+    /// told apart here rather than at the HTTP layer — both are a 404, but only
+    /// one of them is fixed by creating the pipeline.
+    pub fn ingest(
+        &self,
+        id: &str,
+        messages: Vec<serde_json::Value>,
+    ) -> Result<usize, PipelineError> {
+        let accepted = messages.len();
+        // the inbox lock is taken and released inside these, so classifying the
+        // failure below can take the pipelines lock without holding it
+        let sent = if accepted == 0 {
+            self.inboxes.check(id)
+        } else {
+            let batch = Arc::new(messages.into_iter().map(Arc::new).collect());
+            self.inboxes.send(id, batch)
+        };
+        match sent {
+            Ok(()) => Ok(accepted),
+            Err(IngestError::Full(_)) => Err(PipelineError::Backpressure(id.to_string())),
+            Err(IngestError::NoInbox(_)) => {
+                if self.lock_pipelines().contains_key(id) {
+                    Err(PipelineError::NotAccepting(id.to_string()))
+                } else {
+                    Err(PipelineError::NotFound(id.to_string()))
+                }
+            }
+        }
     }
 }

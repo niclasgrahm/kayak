@@ -1,3 +1,13 @@
-target 
+target
 .git
+.github
+dev_data
 frontend/dist
+**/secrets.json
+*.md
+!readme.md
+hurl
+docker-compose.yaml
+Dockerfile
+.dockerignore
+.claude

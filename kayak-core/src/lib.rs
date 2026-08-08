@@ -26,6 +26,44 @@ pub struct PipelineDto {
     pub config: Config,
 }
 
+/// What `POST /api/pipelines/{id}/messages` takes: one message, or an array of
+/// them.
+///
+/// Untagged, and the array arm comes first on purpose — a JSON array would
+/// otherwise deserialize as [`IngestRequest::One`] holding an array, and posting
+/// ten messages would put one message into the pipeline. There is no envelope
+/// around the messages because there is nothing to put in one: the pipeline is
+/// named by the path, and kayak has no schema to declare.
+#[derive(Serialize, Deserialize, Clone, Debug, JsonSchema)]
+#[serde(untagged)]
+pub enum IngestRequest {
+    /// Several messages, delivered as one batch.
+    Many(Vec<serde_json::Value>),
+    /// A single message, delivered as a batch of one.
+    One(serde_json::Value),
+}
+
+impl IngestRequest {
+    /// The messages, however they were spelled.
+    #[must_use]
+    pub fn into_messages(self) -> Vec<serde_json::Value> {
+        match self {
+            Self::Many(messages) => messages,
+            Self::One(message) => vec![message],
+        }
+    }
+}
+
+/// What came back from a post: how many messages were handed to the pipeline.
+///
+/// It says *accepted*, not *processed* — the batch is queued for the run loop
+/// and the response doesn't wait for it, so a 202 means the pipeline has the
+/// messages, not that the outputs have written them.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq, JsonSchema)]
+pub struct IngestResponse {
+    pub accepted: usize,
+}
+
 /// How the server was started, and whether what it is running still matches
 /// the file it started from.
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq, JsonSchema)]

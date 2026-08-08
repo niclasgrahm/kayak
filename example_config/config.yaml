@@ -172,3 +172,9 @@
     rotate:
       max_rows: 20
       interval_secs: 60
+- id: ingest
+  inputs:
+  - type: http
+  transforms: []
+  outputs:
+  - type: stdout

@@ -37,7 +37,14 @@ where
         // downcast_ref walks the whole cause chain, so added context doesn't
         // hide the classification
         let status = match err.downcast_ref::<PipelineError>() {
-            Some(PipelineError::NotFound(_)) => StatusCode::NOT_FOUND,
+            // both are "there is nothing here to post to": one has no
+            // pipeline, one has no http input on the pipeline it does have
+            Some(PipelineError::NotFound(_) | PipelineError::NotAccepting(_)) => {
+                StatusCode::NOT_FOUND
+            }
+            // the pipeline is there and behind, which is a "come back" rather
+            // than a "you asked for the wrong thing"
+            Some(PipelineError::Backpressure(_)) => StatusCode::SERVICE_UNAVAILABLE,
             // both are "the server's state disagrees with what you asked for",
             // and both are fixed by doing something else first
             Some(PipelineError::DuplicateId(_) | PipelineError::ConnectionInUse(..)) => {

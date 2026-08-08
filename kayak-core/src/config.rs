@@ -117,6 +117,27 @@ pub struct DummyConfig {
     pub duration: u64,
 }
 
+/// Accepts messages posted to this pipeline's own endpoint,
+/// `POST /api/pipelines/{id}/messages` — the pipeline is the receiving end of
+/// an http API rather than something that reaches out to a broker.
+///
+/// The endpoint is derived from the pipeline's id and appears as soon as the
+/// pipeline is running; nothing is configured about it here. The body is one
+/// JSON message or an array of them, and an array arrives as one batch. A
+/// pipeline can only have one of these — two would share an endpoint, and which
+/// of them a request went to would be a coin toss — so a second one fails to
+/// build.
+#[derive(Clone, Debug, Deserialize, Serialize, JsonSchema)]
+#[schemars(title = "http")]
+pub struct HttpInputConfig {
+    /// how many posted batches may queue up ahead of the pipeline before it
+    /// starts refusing them with a `503`. Defaults to 1024. The queue is what
+    /// lets a burst through; refusing past it is deliberate, since the
+    /// alternative is holding a request open until the pipeline catches up.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub capacity: Option<usize>,
+}
+
 /// Takes another pipeline's output as its input. This is what makes the
 /// pipelines a graph: several pipelines can read from the same upstream, and it
 /// fans out to all of them. The upstream must already exist when this pipeline
@@ -346,6 +367,7 @@ pub struct SplitterTransformConfig {
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum InputKind {
     Dummy(DummyConfig),
+    Http(HttpInputConfig),
     Kafka(KafkaConfig),
     Nats(NatsConfig),
     Pipeline(PipelineConfig),
@@ -434,7 +456,10 @@ impl Config {
             // only thing that will say so
             .filter_map(|input| match &input.kind {
                 InputKind::Pipeline(c) => Some(&c.upstream),
-                InputKind::Dummy(_) | InputKind::Kafka(_) | InputKind::Nats(_) => None,
+                InputKind::Dummy(_)
+                | InputKind::Http(_)
+                | InputKind::Kafka(_)
+                | InputKind::Nats(_) => None,
             })
             .collect()
     }
@@ -454,7 +479,7 @@ impl Config {
         let inputs = self.inputs.iter().filter_map(|input| match &input.kind {
             InputKind::Kafka(c) => Some(&c.connection),
             InputKind::Nats(c) => Some(&c.connection),
-            InputKind::Dummy(_) | InputKind::Pipeline(_) => None,
+            InputKind::Dummy(_) | InputKind::Http(_) | InputKind::Pipeline(_) => None,
         });
         let outputs = self.outputs.iter().filter_map(|output| match &output.kind {
             OutputKind::Kafka(c) => Some(&c.connection),

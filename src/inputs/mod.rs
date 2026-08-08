@@ -8,6 +8,7 @@ use crate::state::{PipelineId, UiEvent};
 use kayak_core::Stage;
 
 pub mod dummy;
+pub mod http;
 pub mod kafka;
 pub mod nats;
 pub mod pipeline;

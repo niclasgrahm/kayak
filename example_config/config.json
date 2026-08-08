@@ -15,6 +15,20 @@
     ]
   },
   {
+    "id": "ingest",
+    "inputs": [
+      {
+        "type": "http"
+      }
+    ],
+    "transforms": [],
+    "outputs": [
+      {
+        "type": "stdout"
+      }
+    ]
+  },
+  {
     "id": "kafka_events",
     "inputs": [
       {

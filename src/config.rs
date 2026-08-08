@@ -25,6 +25,7 @@ impl BuildInputConfig for InputKind {
     fn build(self, ctx: &mut BuildCtx) -> Result<Box<dyn InputSource>> {
         match self {
             InputKind::Dummy(c) => c.build(ctx),
+            InputKind::Http(c) => c.build(ctx),
             InputKind::Kafka(c) => c.build(ctx),
             InputKind::Nats(c) => c.build(ctx),
             InputKind::Pipeline(c) => c.build(ctx),

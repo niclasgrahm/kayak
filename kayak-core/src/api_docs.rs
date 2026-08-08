@@ -30,7 +30,10 @@ use crate::config::Config;
 use crate::connections::{Connections, CreateConnectionRequest};
 use crate::docs::ComponentDoc;
 use crate::layout::LayoutFile;
-use crate::{PipelineDto, SaveConfigRequest, SaveConfigResponse, SettingsDto, UiEvent};
+use crate::{
+    IngestRequest, IngestResponse, PipelineDto, SaveConfigRequest, SaveConfigResponse, SettingsDto,
+    UiEvent,
+};
 
 /// The error body every failing request comes back with.
 ///
@@ -94,6 +97,7 @@ pub enum Operation {
     ListPipelines,
     CreatePipeline,
     DeletePipeline,
+    IngestMessages,
     ListConnections,
     CreateConnection,
     DeleteConnection,
@@ -116,6 +120,7 @@ impl Operation {
             Self::ListPipelines => "listPipelines",
             Self::CreatePipeline => "createPipeline",
             Self::DeletePipeline => "deletePipeline",
+            Self::IngestMessages => "ingestMessages",
             Self::ListConnections => "listConnections",
             Self::CreateConnection => "createConnection",
             Self::DeleteConnection => "deleteConnection",
@@ -475,6 +480,51 @@ pub fn endpoints() -> Vec<ApiDoc> {
             ],
         },
         ApiDoc {
+            path: "/api/pipelines/{pipeline_id}/messages",
+            method: Method::Post,
+            operation: Operation::IngestMessages,
+            summary: "Post messages into a pipeline",
+            description: "The endpoint a pipeline's `http` input serves. Every pipeline \
+                          with one has this path, derived from its id, and it exists for \
+                          as long as the pipeline is running — this is how a system \
+                          pushes data into kayak without a broker in between.\n\n\
+                          The body is one JSON message or an array of them; an array \
+                          arrives as a single batch, so posting ten messages is one pass \
+                          through the transforms rather than ten. There is no envelope \
+                          and no schema: whatever is posted is what the transforms see.\n\n\
+                          Accepted means queued, not processed. The batch is handed to \
+                          the pipeline's run loop and the response is sent without \
+                          waiting for the outputs, so a 202 says nothing about whether \
+                          the data has landed anywhere.",
+            tag: Tag::Pipelines,
+            params: vec![ParamDoc {
+                name: "pipeline_id",
+                description: "The id of the pipeline to post to.",
+            }],
+            request: Some(RequestDoc {
+                body: Body::Json("IngestRequest"),
+                description: "One message, or an array of messages to deliver as one batch.",
+            }),
+            responses: vec![
+                ResponseDoc {
+                    status: 202,
+                    description: "Queued for the pipeline, with the number of messages taken.",
+                    body: Body::Json("IngestResponse"),
+                },
+                not_found(
+                    "No pipeline is running under that id, or the one that is has no \
+                     `http` input to post to.",
+                ),
+                ResponseDoc {
+                    status: 503,
+                    description: "The pipeline's queue is full — it is not reading as fast \
+                                  as this is being posted. Nothing was taken; send it again.",
+                    body: Body::Json("ApiError"),
+                },
+                server_error(),
+            ],
+        },
+        ApiDoc {
             path: "/api/connections",
             method: Method::Get,
             operation: Operation::ListConnections,
@@ -799,6 +849,8 @@ pub fn schemas() -> BTreeMap<&'static str, Value> {
     let mut schemas = BTreeMap::new();
     schemas.insert("Config", of(schema_for!(Config)));
     schemas.insert("PipelineDto", of(schema_for!(PipelineDto)));
+    schemas.insert("IngestRequest", of(schema_for!(IngestRequest)));
+    schemas.insert("IngestResponse", of(schema_for!(IngestResponse)));
     schemas.insert("Connections", of(schema_for!(Connections)));
     schemas.insert(
         "CreateConnectionRequest",

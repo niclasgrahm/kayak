@@ -381,3 +381,127 @@ async fn an_error_body_matches_the_documented_shape() -> anyhow::Result<()> {
     );
     Ok(())
 }
+
+/// A pipeline whose only input is its own endpoint, and whose output goes
+/// nowhere external.
+fn posted_config(id: &str) -> Value {
+    json!({
+        "id": id,
+        "inputs": [{ "type": "http" }],
+        "transforms": [],
+        "outputs": [{ "type": "stdout" }]
+    })
+}
+
+async fn post_messages(app: &Router, id: &str, body: &Value) -> anyhow::Result<(StatusCode, Value)> {
+    let req = Request::builder()
+        .method("POST")
+        .uri(format!("/api/pipelines/{id}/messages"))
+        .header(header::CONTENT_TYPE, "application/json")
+        .body(Body::from(serde_json::to_vec(body)?))?;
+    send(app, req).await
+}
+
+#[tokio::test]
+async fn a_single_posted_message_is_accepted() -> anyhow::Result<()> {
+    let app = app();
+    post_stream(&app, &posted_config("ingest")).await?;
+
+    let (status, body) = post_messages(&app, "ingest", &json!({"n": 1})).await?;
+    assert_eq!(status, StatusCode::ACCEPTED);
+    assert_eq!(body, json!({"accepted": 1}));
+    Ok(())
+}
+
+/// An array is *one batch*, not a message that happens to be an array — which
+/// is what the untagged `IngestRequest` arm order is there to guarantee.
+#[tokio::test]
+async fn an_array_is_accepted_as_that_many_messages() -> anyhow::Result<()> {
+    let app = app();
+    post_stream(&app, &posted_config("ingest")).await?;
+
+    let (status, body) = post_messages(&app, "ingest", &json!([{"n": 1}, {"n": 2}, {"n": 3}])).await?;
+    assert_eq!(status, StatusCode::ACCEPTED);
+    assert_eq!(body, json!({"accepted": 3}));
+    Ok(())
+}
+
+#[tokio::test]
+async fn posting_to_an_unknown_pipeline_is_a_404() -> anyhow::Result<()> {
+    let (status, body) = post_messages(&app(), "nobody", &json!({"n": 1})).await?;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    assert!(
+        body["error"].as_str().is_some_and(|e| e.contains("nobody")),
+        "the error should name the id: {body}"
+    );
+    Ok(())
+}
+
+/// A running pipeline with no `http` input has no endpoint either, and says so
+/// rather than pretending the pipeline isn't there.
+#[tokio::test]
+async fn posting_to_a_pipeline_without_an_http_input_is_a_404() -> anyhow::Result<()> {
+    let app = app();
+    post_stream(&app, &idle_config("p1")).await?;
+
+    let (status, body) = post_messages(&app, "p1", &json!({"n": 1})).await?;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    assert!(
+        body["error"]
+            .as_str()
+            .is_some_and(|e| e.contains("no http input")),
+        "the error should say what is missing: {body}"
+    );
+    Ok(())
+}
+
+/// Deleting the pipeline takes its endpoint with it, and immediately — the run
+/// loop's task may not have finished dying yet.
+#[tokio::test]
+async fn a_deleted_pipeline_stops_accepting_posts() -> anyhow::Result<()> {
+    let app = app();
+    post_stream(&app, &posted_config("ingest")).await?;
+    delete_pipeline(&app, "ingest").await?;
+
+    let (status, _) = post_messages(&app, "ingest", &json!({"n": 1})).await?;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    Ok(())
+}
+
+/// Two http inputs would share one endpoint, so the pipeline doesn't build.
+#[tokio::test]
+async fn a_pipeline_with_two_http_inputs_is_rejected() -> anyhow::Result<()> {
+    let app = app();
+    let mut config = posted_config("ingest");
+    config["inputs"] = json!([{ "type": "http" }, { "type": "http" }]);
+
+    let (status, body) = post_stream(&app, &config).await?;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+    assert!(
+        body["error"]
+            .as_str()
+            .is_some_and(|e| e.contains("already has an http input")),
+        "the error should say why: {body}"
+    );
+    // and the failed build left nothing claiming the endpoint: the same id
+    // builds cleanly with one input
+    let (status, _) = post_stream(&app, &posted_config("ingest")).await?;
+    assert_eq!(status, StatusCode::CREATED);
+    Ok(())
+}
+
+/// A pipeline that is behind is a 503 rather than a 404 or a silent drop: the
+/// data is still wanted, just not now. The queue level is unit-tested in
+/// `inputs::http`; what's pinned here is the status the mapping gives it.
+#[test]
+fn a_backlogged_pipeline_maps_onto_a_503() {
+    use axum::response::IntoResponse;
+    use kayak::handlers::error::AppError;
+    use kayak::state::PipelineError;
+
+    let err: AppError = anyhow::Error::from(PipelineError::Backpressure("ingest".to_string())).into();
+    assert_eq!(
+        err.into_response().status(),
+        StatusCode::SERVICE_UNAVAILABLE
+    );
+}

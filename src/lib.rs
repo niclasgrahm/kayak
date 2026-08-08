@@ -25,6 +25,7 @@ pub mod testing;
 pub mod transforms;
 
 pub use crate::endpoints::api_router;
+use crate::inputs::http::Inboxes;
 use crate::secrets::{EnvStore, Resolved, SecretStore};
 use crate::state::{PipelineHandle, PipelineId, UiEvent};
 use kayak_core::config::Secret;
@@ -64,6 +65,11 @@ pub struct BuildCtx<'a> {
     /// — that one bounds where *configs* are written, and the two should not be
     /// conflated just because they are both directories.
     pub data_dir: Option<Arc<PathBuf>>,
+    /// Where an `http` input registers the endpoint it is posted to, shared
+    /// with the handler that serves it. Held by [`crate::state::AppState`] and
+    /// passed in here for the same reason the connections are: the component
+    /// needs it at build time and knows nothing about the server.
+    pub inboxes: Arc<Inboxes>,
 }
 
 impl<'a> BuildCtx<'a> {
@@ -92,6 +98,7 @@ impl<'a> BuildCtx<'a> {
             secrets,
             connections: Arc::new(Connections::new()),
             data_dir: None,
+            inboxes: Arc::new(Inboxes::new()),
         }
     }
 
@@ -107,6 +114,16 @@ impl<'a> BuildCtx<'a> {
     #[must_use]
     pub fn with_data_dir(mut self, data_dir: Option<Arc<PathBuf>>) -> Self {
         self.data_dir = data_dir;
+        self
+    }
+
+    /// The same, with the server's http-input registry rather than a private
+    /// one. Without it an `http` input still builds and still works — it is
+    /// just that nothing outside this build can reach it, which is what a test
+    /// driving the input directly wants.
+    #[must_use]
+    pub fn with_inboxes(mut self, inboxes: Arc<Inboxes>) -> Self {
+        self.inboxes = inboxes;
         self
     }
 

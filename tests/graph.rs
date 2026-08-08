@@ -222,3 +222,74 @@ async fn a_config_file_that_declares_a_downstream_first_is_rejected() -> anyhow:
     );
     Ok(())
 }
+
+/// The http input end to end: what is posted to a running pipeline comes out of
+/// its run loop. The subscription is the same fan-out mechanism a downstream
+/// pipeline uses, so receiving here means a real pass through the pipeline
+/// rather than a channel echoing back.
+#[tokio::test]
+async fn posted_messages_flow_through_the_pipeline() -> anyhow::Result<()> {
+    let state = AppState::new();
+    let pipeline = state.create_pipeline(serde_json::from_value(json!({
+        "id": "ingest",
+        "inputs": [{ "type": "http" }],
+        "transforms": [],
+        "outputs": [{ "type": "stdout" }]
+    }))?)?;
+
+    let (tx, mut rx) = tokio::sync::mpsc::channel(8);
+    pipeline.subscribe(tx);
+
+    let accepted = state.ingest("ingest", vec![json!({"n": 1}), json!({"n": 2})])?;
+    assert_eq!(accepted, 2);
+
+    let got = tokio::time::timeout(Duration::from_secs(5), rx.recv())
+        .await?
+        .ok_or_else(|| anyhow::anyhow!("the pipeline emitted nothing"))?;
+    // one post of two messages is one batch, not two passes
+    assert_eq!(got.len(), 2);
+    assert_eq!(got[0]["n"], json!(1));
+    assert_eq!(got[1]["n"], json!(2));
+    Ok(())
+}
+
+/// A post to a pipeline that exists but has no endpoint is told apart from one
+/// to a pipeline that doesn't exist — both 404 at the HTTP layer, but only one
+/// of them is fixed by creating the pipeline.
+#[tokio::test]
+async fn posting_is_refused_differently_by_a_missing_pipeline_and_a_missing_input()
+-> anyhow::Result<()> {
+    let state = AppState::new();
+    state.create_pipeline(idle("p1")?)?;
+
+    assert!(matches!(
+        state.ingest("p1", vec![json!({"n": 1})]),
+        Err(PipelineError::NotAccepting(ref id)) if id == "p1"
+    ));
+    assert!(matches!(
+        state.ingest("nobody", vec![json!({"n": 1})]),
+        Err(PipelineError::NotFound(ref id)) if id == "nobody"
+    ));
+    Ok(())
+}
+
+/// An empty post delivers nothing, but still has to answer the question the
+/// endpoint is asked — a pipeline that isn't listening is a 404 whether the
+/// body had messages in it or not.
+#[tokio::test]
+async fn an_empty_post_is_a_no_op_that_still_checks_the_endpoint() -> anyhow::Result<()> {
+    let state = AppState::new();
+    state.create_pipeline(serde_json::from_value(json!({
+        "id": "ingest",
+        "inputs": [{ "type": "http" }],
+        "transforms": [],
+        "outputs": [{ "type": "stdout" }]
+    }))?)?;
+
+    assert_eq!(state.ingest("ingest", vec![])?, 0);
+    assert!(matches!(
+        state.ingest("nobody", vec![]),
+        Err(PipelineError::NotFound(_))
+    ));
+    Ok(())
+}
