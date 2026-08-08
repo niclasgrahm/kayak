@@ -223,6 +223,38 @@ Note that `$defs` in the generated schema now holds non-component types (`Secret
 
 The config enums use `#[serde(tag = "type", rename_all = "snake_case")]` with `#[serde(flatten)]` wrappers, so JSON looks like `{"type": "nats", "urls": ..., "subject": ...}`. They also derive `schemars::JsonSchema` with `#[schemars(title = "...")]` — `/docs` generates component documentation by reflecting over `schema_for!(InputKind)` etc., so the title/doc-comments on config fields *are* the docs.
 
+### The reducer
+
+One `reducer` is a **list of aggregations over a list of grouping fields**, not
+one function over one field — `{"function": "sum", "field": "value", "as":
+"total"}` × N, plus `group_by`, plus `on_missing`. Three properties are
+load-bearing and none of them can be had by chaining reducers:
+
+- **Several answers in one message.** A chain can't do it, because each reducer
+  throws away the fields the next one needs. That's also why the output message
+  is *assembled* (group fields, then each `as`) rather than being one fixed
+  shape — the old `{original_field, reduced_value}` was the shape that made a
+  second reducer downstream useless.
+- **`group_by` changes the cardinality**: one message per distinct key, emitted
+  in **first-seen** order. First-seen rather than sorted because a reducer sits
+  in a stream, and arrival order is the only order it has a claim to. Groups are
+  found by a linear scan of the keys — a batch holds a handful of distinct
+  values, and hashing would mean giving `serde_json::Value` a `Hash` it doesn't
+  have.
+- **`on_missing` defaults to `error`**, which is the behaviour that was there
+  before. A sum over "whichever messages happened to carry the field" is wrong
+  in a way nothing downstream can see, so `skip` has to be asked for. A field
+  present but `null` counts as missing — the same fact said two ways.
+
+Everything that would otherwise be a strange message once per batch forever is
+refused at `build()` instead: no aggregations, a function other than `count`
+with no `field`, a blank or duplicated `as`, an `as` that would overwrite a
+`group_by` field. `count` is the one function with no field, and both readings
+of it are useful — messages in the group, or messages that carried the field.
+`min`/`max` compare numbers as numbers and strings alphabetically, which is what
+makes `max` over an ISO timestamp the latest one; mixed types are an error
+rather than a guess.
+
 Buffering is an input decorator, not a transform: `InputConfig.buffer` wraps any `InputSource` in `inputs::Buffered` (static N-message or tumbling time window). There is *also* a `buffer` transform — different thing, different place.
 
 **`max_batch` on the kafka and nats inputs is a third thing again, and its
@@ -394,6 +426,26 @@ A `FieldDoc` carries `field_type` (`FieldType`) beside the human-readable `type_
 The walk is bounded (`MAX_NESTING`) because it follows `$ref`s and a config type that referred to itself would otherwise recurse until the stack ran out.
 
 On the form side that nesting is flat: draft values and error keys are **dotted paths** (`buffer.type`, `buffer.size`, `rotate.max_rows`), which is what lets one `HashMap<String, String>`, one error list and one `FieldEditor` serve any depth. `FieldEditor` renders itself for those, so it returns `AnyView` — a component containing itself can't have a return type defined in terms of its own. The union's tag dropdown is the **one control in the modal that reads its value back**, for the same reason the others don't: rebuilding the fields is exactly what it is for. Its signal holds only the tag, so a keystroke in a nested box can't reach it.
+
+`FieldType::List` is the one field with **no fixed number of boxes** — a
+reducer's `aggregations`. It carries the element as a whole `FieldDoc` (name
+empty, always required), so nothing renders rows without knowing what they are
+rows *of*, and a list whose element the reflection can't render degrades to
+`Json` whole rather than to rows of JSON boxes. On the form side a row's
+**position is its name**: `aggregations.0.function`, in the same flat map as
+everything else. The list's *own* path holds the row **count** (`aggregations` =
+`"3"`) rather than a value, which is what lets an empty row exist — counting the
+keys that happen to be filled in would make a freshly added row vanish until
+something was typed into it. Removing a row therefore has to shift the ones
+after it down (`form::remove_list_element`) and drop that list's messages, since
+they are about boxes that have moved. Like the union's tag, the row count is a
+control that reads its value back, and for the same reason.
+
+Known gap: `/docs` renders one flat table per component, so a list element's or
+a nested object's own fields aren't shown there — `aggregations` reads as "list
+of aggregation" and the reducer's doc comment carries the shape. `rotate` has
+always had the same gap. Fixing it means recursing `FieldTable`, not changing
+the reflection, which already carries the whole tree.
 
 `FieldType::Connection(kind)` works the same way and for the same reason, one step further: a `connection` field carries `#[schemars(extend("x-connection" = "kafka"))]`, and the marker holds the *kind* — "any connection" is the wrong set to offer, since a kafka input can only use a kafka connection. `Family::Connection` is a fourth family, so a connection kind documents itself on `/docs` and generates its own form through the same machinery a component does.
 

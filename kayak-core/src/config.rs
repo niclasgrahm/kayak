@@ -434,25 +434,104 @@ impl std::fmt::Display for HttpVerb {
         })
     }
 }
-#[derive(Clone, Debug, Deserialize, Serialize, JsonSchema)]
+/// How the values of one field are combined into a single answer.
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, JsonSchema, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum ReduceFnKind {
+    /// The total. Numbers only.
     Sum,
+    /// The arithmetic mean. Numbers only.
     Avg,
+    /// The smallest value. Numbers compare as numbers and strings
+    /// alphabetically, which is what makes `min` over an ISO timestamp the
+    /// earliest one.
     Min,
+    /// The largest value, comparing as `min` does.
     Max,
+    /// How many messages there were. The one function that needs no `field` —
+    /// given one, it counts the messages that carry it instead.
+    Count,
+    /// How many *different* values there were, compared by their JSON form.
+    CountDistinct,
+    /// The value from the first message of the group, whatever type it is.
+    First,
+    /// The value from the last message of the group.
+    Last,
+    /// Every value, as an array, in the order they arrived.
+    Collect,
+    /// The middle value, or the mean of the middle two. Numbers only.
+    Median,
+    /// The population standard deviation. Numbers only.
+    Stddev,
 }
 
-/// Reduces a whole batch to a single message by aggregating one numeric field
-/// across it. Pair it with a buffer, or it will only ever see one message at a
+/// What to do about a message that doesn't carry a field being aggregated or
+/// grouped by. A field present but `null` counts as missing — it is the same
+/// fact said two ways.
+#[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, JsonSchema, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum MissingFieldPolicy {
+    /// Fail the pipeline. The default, because a sum over "whichever messages
+    /// happened to have the field" is wrong in a way nothing downstream can see.
+    #[default]
+    Error,
+    /// Leave that message out of that one aggregation. An aggregation left with
+    /// no values at all reports `null` (or `0`, for the counts).
+    Skip,
+}
+
+impl MissingFieldPolicy {
+    /// Whether this is the value serde would supply anyway — so the field can
+    /// be left out of the JSON a config round-trips to.
+    #[must_use]
+    pub fn is_default(&self) -> bool {
+        matches!(self, Self::Error)
+    }
+}
+
+/// One thing to compute over a group, and what to call it in the result.
+#[derive(Clone, Debug, Deserialize, Serialize, JsonSchema)]
+#[schemars(title = "aggregation")]
+pub struct Aggregation {
+    /// how to combine the values
+    pub function: ReduceFnKind,
+    /// the field the emitted message carries this answer under. Two
+    /// aggregations may not share one, and none may collide with a `group_by`
+    /// field.
+    #[serde(rename = "as")]
+    pub output: String,
+    /// the field to aggregate. Required by every function except `count`, which
+    /// counts messages when it is left out.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub field: Option<String>,
+}
+
+/// Reduces a batch to one message per group, carrying whatever was asked for
+/// about it. Pair it with a buffer, or it will only ever see one message at a
 /// time.
+///
+/// With no `group_by` the whole batch is one group and one message comes out;
+/// with one, a message comes out per distinct combination of those fields, in
+/// the order the groups were first seen. The emitted message carries the
+/// grouping fields under their own names alongside the aggregations.
+///
+/// Each aggregation is a `function`, the `field` to apply it to and the `as`
+/// name the answer is written under — `{"function": "avg", "field": "value",
+/// "as": "mean"}`. `count` is the one function that needs no `field`: without
+/// one it counts the messages in the group, with one it counts the messages
+/// that carried it.
 #[derive(Clone, Debug, Deserialize, Serialize, JsonSchema)]
 #[schemars(title = "reducer")]
 pub struct ReduceTransformConfig {
-    /// how to aggregate
-    pub function: ReduceFnKind,
-    /// the field to aggregate; messages without it are ignored
-    pub field: String,
+    /// what to compute. At least one, and each needs a distinct `as`.
+    pub aggregations: Vec<Aggregation>,
+    /// the fields whose combination defines a group. Omit it to reduce the
+    /// whole batch at once.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub group_by: Vec<String>,
+    /// what to do about a message missing one of the fields above
+    #[serde(default, skip_serializing_if = "MissingFieldPolicy::is_default")]
+    pub on_missing: MissingFieldPolicy,
 }
 
 /// Cuts one batch into several smaller ones — the opposite of `buffer`.

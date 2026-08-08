@@ -1477,6 +1477,33 @@ body {
   }
 }
 
+// A field with no fixed number of boxes: a reducer's aggregations. Rows sit in
+// the control column of the row that owns them, each with its own remove, and
+// the "+ add" underneath is the only thing that changes how many there are.
+.form-list {
+  .form-list-row {
+    display: flex;
+    align-items: flex-start;
+    gap: 4px;
+
+    .form-list-body {
+      flex: 1;
+      min-width: 0;
+    }
+
+    // the label of a row is its number, which needs none of the width a field
+    // name does
+    .form-row {
+      grid-template-columns: 18px 1fr;
+    }
+  }
+
+  > .button {
+    margin-top: 4px;
+    width: 100%;
+  }
+}
+
 .form-error {
   color: var(--error);
   font-size: 11px;

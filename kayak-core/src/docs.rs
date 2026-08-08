@@ -85,9 +85,20 @@ pub enum FieldType {
     /// output's `rotate`. Not a choice, just a level of nesting, so the form
     /// renders its fields inline.
     Object(Vec<FieldDoc>),
-    /// Something with a shape of its own that is none of the above — a list,
-    /// say, or a union tagged in a spelling this module doesn't read. There is
-    /// no general widget for those, so the form takes them as literal JSON.
+    /// A value that is a list of some other type — a reducer's `aggregations`.
+    /// Unlike every other field type this one has no fixed number of boxes, so
+    /// the form renders rows that can be added and taken away, each of them
+    /// whatever the element type asks for.
+    ///
+    /// The element is carried as a whole [`FieldDoc`] because that is what a
+    /// control is chosen from, and its [`FieldDoc::name`] is empty: a list
+    /// element has no name of its own, it has a position, which only the form
+    /// rendering it knows. It is always required — a row that is there is a
+    /// value that will be sent.
+    List(Box<FieldDoc>),
+    /// Something with a shape of its own that is none of the above — a union
+    /// tagged in a spelling this module doesn't read, say. There is no general
+    /// widget for those, so the form takes them as literal JSON.
     Json,
 }
 
@@ -386,7 +397,22 @@ fn type_name_of(root: &Value, schema: &Value) -> String {
         return resolve_ref(root, schema)
             .map_or_else(|| "object".to_string(), |def| type_name_of(root, def));
     }
+    if scalar_type_of(schema) == Some("array") {
+        return format!("list of {}", element_name_of(root, &schema["items"]));
+    }
     scalar_type_of(schema).unwrap_or("object").to_string()
+}
+
+/// What to call the elements of a list.
+///
+/// A config struct's `#[schemars(title = ...)]` is preferred over the type name
+/// it would otherwise get, because "list of object" says nothing and "list of
+/// aggregation" says the whole thing. Falls back to the ordinary name for
+/// elements that have no title — a list of plain strings.
+fn element_name_of(root: &Value, items: &Value) -> String {
+    resolve_ref(root, items)
+        .and_then(|def| def["title"].as_str())
+        .map_or_else(|| type_name_of(root, items), ToString::to_string)
 }
 
 /// The `type` keyword, as one name.
@@ -516,8 +542,34 @@ fn field_type_at(root: &Value, schema: &Value, depth: usize) -> FieldType {
             fields if fields.is_empty() => FieldType::Json,
             fields => FieldType::Object(fields),
         },
+        Some("array") => element_at(root, &schema["items"], depth + 1)
+            .map_or(FieldType::Json, |element| FieldType::List(Box::new(element))),
         _ => FieldType::Json,
     }
+}
+
+/// One element of a list, as the field a control is chosen from.
+///
+/// It has no name — a position is all a list element has — and it is always
+/// required, because a row that exists is a value that will be sent. A list
+/// whose elements this module can't render is not a list a form can offer, so
+/// it degrades to [`FieldType::Json`] whole rather than to rows of JSON boxes.
+fn element_at(root: &Value, items: &Value, depth: usize) -> Option<FieldDoc> {
+    if items.is_null() {
+        return None;
+    }
+    let field_type = field_type_at(root, items, depth);
+    if field_type == FieldType::Json {
+        return None;
+    }
+    Some(FieldDoc {
+        name: String::new(),
+        type_name: element_name_of(root, items),
+        field_type,
+        description: description_of(items)
+            .or_else(|| resolve_ref(root, items).and_then(description_of)),
+        required: true,
+    })
 }
 
 /// A field whose value is a tagged union, if it is one: every branch of a
@@ -684,8 +736,8 @@ mod tests {
     #[test]
     fn a_field_with_a_closed_set_of_values_lists_them() {
         assert_eq!(
-            field(&component("reducer"), "function").type_name,
-            "sum | avg | min | max"
+            field(&component("dummy"), "payload").type_name,
+            "number | text"
         );
     }
 
@@ -838,13 +890,8 @@ mod tests {
     #[test]
     fn a_field_with_a_closed_set_of_values_carries_them() {
         assert_eq!(
-            field(&component("reducer"), "function").field_type,
-            FieldType::Enum(vec![
-                "sum".to_string(),
-                "avg".to_string(),
-                "min".to_string(),
-                "max".to_string()
-            ])
+            field(&component("dummy"), "payload").field_type,
+            FieldType::Enum(vec!["number".to_string(), "text".to_string()])
         );
         // ...through an Option, too
         assert_eq!(
@@ -970,48 +1017,97 @@ mod tests {
         );
     }
 
+    /// A list is the one field with no fixed number of boxes, so the form is
+    /// told what *one* of them looks like and renders as many as it is given.
+    #[test]
+    fn a_list_field_carries_the_shape_of_one_element() {
+        let reducer = in_family("reducer", Family::Transform);
+
+        let group_by = field(&reducer, "group_by");
+        let FieldType::List(element) = &group_by.field_type else {
+            panic!("group_by is a list, not a {:?}", group_by.field_type);
+        };
+        assert_eq!(element.field_type, FieldType::Text);
+        assert_eq!(group_by.type_name, "list of string");
+        assert!(!group_by.required, "reducing the whole batch is the default");
+
+        let aggregations = field(&reducer, "aggregations");
+        let FieldType::List(element) = &aggregations.field_type else {
+            panic!(
+                "aggregations is a list, not a {:?}",
+                aggregations.field_type
+            );
+        };
+        // named for the struct's title rather than "object", which says nothing
+        assert_eq!(aggregations.type_name, "list of aggregation");
+        assert!(aggregations.required);
+        // an element has a position, not a name — the form supplies that
+        assert!(element.name.is_empty());
+        assert!(element.required, "a row that is there will be sent");
+
+        let FieldType::Object(fields) = &element.field_type else {
+            panic!("an aggregation has fields, not a {:?}", element.field_type);
+        };
+        let names: Vec<&str> = fields.iter().map(|f| f.name.as_str()).collect();
+        assert_eq!(names, ["function", "as", "field"]);
+        assert!(
+            matches!(fields[0].field_type, FieldType::Enum(_)),
+            "the function is a closed set, so it is a dropdown"
+        );
+        assert!(
+            !fields[2].required,
+            "`count` needs no field, so the element's does not"
+        );
+    }
+
     /// Every field of every component has to be something a form can render.
     /// A `Json` box is the honest fallback, but it is also the one a user has
     /// to hand-write, so nothing is allowed to fall back to it unnoticed.
     #[test]
     fn no_component_field_needs_raw_json() {
         let mut json_fields = Vec::new();
-        let mut check = |kind: &str, fields: &[FieldDoc], prefix: &str| {
-            for f in fields {
-                if f.field_type == FieldType::Json {
-                    json_fields.push(format!("{kind}.{prefix}{}", f.name));
-                }
-            }
-        };
         for component in all_components() {
-            check(&component.kind, &component.fields, "");
+            collect_json_fields(&component.fields, &component.kind, &mut json_fields);
             for variant in &component.variants {
-                check(&component.kind, &variant.fields, &format!("{}.", variant.name));
-            }
-            // one level down is where `buffer` and `rotate` live; deeper than
-            // that nothing nests yet
-            for field in &component.fields {
-                match &field.field_type {
-                    FieldType::Object(fields) => {
-                        check(&component.kind, fields, &format!("{}.", field.name));
-                    }
-                    FieldType::Union(union) => {
-                        for variant in &union.variants {
-                            check(
-                                &component.kind,
-                                &variant.fields,
-                                &format!("{}.{}.", field.name, variant.name),
-                            );
-                        }
-                    }
-                    _ => {}
-                }
+                let prefix = format!("{}.{}", component.kind, variant.name);
+                collect_json_fields(&variant.fields, &prefix, &mut json_fields);
             }
         }
         assert!(
             json_fields.is_empty(),
             "these fields can only be filled in as raw JSON: {json_fields:?}"
         );
+    }
+
+    /// The whole way down, rather than the one level the config used to nest:
+    /// a list of objects is two, and the point of the check is that *nothing*
+    /// falls back to a JSON box unnoticed — least of all something buried.
+    fn collect_json_fields(fields: &[FieldDoc], prefix: &str, found: &mut Vec<String>) {
+        for field in fields {
+            // a list element has no name; it is described by where it sits
+            let at = if field.name.is_empty() {
+                format!("{prefix}[]")
+            } else {
+                format!("{prefix}.{}", field.name)
+            };
+            match &field.field_type {
+                FieldType::Json => found.push(at),
+                FieldType::Object(fields) => collect_json_fields(fields, &at, found),
+                FieldType::List(element) => {
+                    collect_json_fields(std::slice::from_ref(element), &at, found);
+                }
+                FieldType::Union(union) => {
+                    for variant in &union.variants {
+                        collect_json_fields(
+                            &variant.fields,
+                            &format!("{at}.{}", variant.name),
+                            found,
+                        );
+                    }
+                }
+                _ => {}
+            }
+        }
     }
 
     /// `Option<u16>` is an integer that may be omitted, not a nullable oddity.

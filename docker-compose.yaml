@@ -120,7 +120,11 @@ services:
     entrypoint: ["sh", "-c"]
     command:
       - |
+        # the sensor id is what the sample's grouping reducer groups by, so
+        # there has to be more than one of them
+        sensors="north south east west"
         while true; do
-          nats --server nats://nats:4222 pub test.subject "{\"ts\":\"$(date -Iseconds)\",\"value\":$((RANDOM % 101))}"
+          sensor=$(echo $sensors | tr ' ' '\n' | shuf -n 1)
+          nats --server nats://nats:4222 pub test.subject "{\"ts\":\"$(date -Iseconds)\",\"sensor\":\"$sensor\",\"value\":$((RANDOM % 101))}"
           sleep 1
         done

@@ -206,8 +206,22 @@
     "transforms": [
       {
         "type": "reducer",
-        "function": "max",
-        "field": "value"
+        "aggregations": [
+          {
+            "function": "max",
+            "field": "value",
+            "as": "value"
+          },
+          {
+            "function": "count",
+            "as": "readings"
+          },
+          {
+            "function": "max",
+            "field": "ts",
+            "as": "last_seen"
+          }
+        ]
       }
     ],
     "outputs": [
@@ -233,8 +247,31 @@
     "transforms": [
       {
         "type": "reducer",
-        "function": "avg",
-        "field": "value"
+        "group_by": [
+          "sensor"
+        ],
+        "on_missing": "skip",
+        "aggregations": [
+          {
+            "function": "avg",
+            "field": "value",
+            "as": "mean"
+          },
+          {
+            "function": "min",
+            "field": "value",
+            "as": "lowest"
+          },
+          {
+            "function": "max",
+            "field": "value",
+            "as": "highest"
+          },
+          {
+            "function": "count",
+            "as": "readings"
+          }
+        ]
       }
     ],
     "outputs": [
@@ -258,8 +295,23 @@
     "transforms": [
       {
         "type": "reducer",
-        "function": "sum",
-        "field": "value"
+        "aggregations": [
+          {
+            "function": "sum",
+            "field": "value",
+            "as": "total"
+          },
+          {
+            "function": "median",
+            "field": "value",
+            "as": "median"
+          },
+          {
+            "function": "count_distinct",
+            "field": "sensor",
+            "as": "sensors"
+          }
+        ]
       }
     ],
     "outputs": [

@@ -170,9 +170,10 @@ fn render(value: &Value) -> String {
 mod tests {
     use super::*;
     use kayak_core::config::{
-        BufferConfig, BufferTransformConfig, DummyConfig, InputConfig, InputKind, NatsOutputConfig,
-        OutputConfig, OutputKind, ReduceFnKind, ReduceTransformConfig, Secret,
-        SplitterTransformConfig, StdoutOutputConfig, TransformConfig, TransformKind,
+        Aggregation, BufferConfig, BufferTransformConfig, DummyConfig, InputConfig, InputKind,
+        MissingFieldPolicy, NatsOutputConfig, OutputConfig, OutputKind, ReduceFnKind,
+        ReduceTransformConfig, Secret, SplitterTransformConfig, StdoutOutputConfig, TransformConfig,
+        TransformKind,
     };
     use kayak_core::connections::{KafkaConnection, PostgresConnection};
 
@@ -345,8 +346,13 @@ mod tests {
                 TransformKind::Buffer(BufferTransformConfig { size: 100 }),
                 TransformKind::Splitter(SplitterTransformConfig { out_size: 3 }),
                 TransformKind::Reducer(ReduceTransformConfig {
-                    function: ReduceFnKind::Avg,
-                    field: "temperature".to_string(),
+                    aggregations: vec![Aggregation {
+                        function: ReduceFnKind::Avg,
+                        output: "mean_temperature".to_string(),
+                        field: Some("temperature".to_string()),
+                    }],
+                    group_by: vec!["sensor".to_string()],
+                    on_missing: MissingFieldPolicy::Error,
                 }),
             ],
             OutputKind::Stdout(StdoutOutputConfig {}),
@@ -354,7 +360,11 @@ mod tests {
 
         let kinds: Vec<&str> = sections.iter().map(|s| s.kind.as_str()).collect();
         assert_eq!(kinds, ["buffer", "splitter", "reducer"]);
-        assert_eq!(value_of(&sections[2], "field"), "temperature");
+        // a list is one row per element, as it already was for the outputs of a
+        // pipeline — a reducer is just the first component to carry one
+        assert_eq!(value_of(&sections[2], "aggregations[0].field"), "temperature");
+        assert_eq!(value_of(&sections[2], "aggregations[0].as"), "mean_temperature");
+        assert_eq!(value_of(&sections[2], "group_by[0]"), "sensor");
     }
 
     /// Several components have no settings at all; they still need a kind, or

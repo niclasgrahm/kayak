@@ -2649,6 +2649,82 @@ fn FieldEditor(
             pipelines,
             connections,
         ),
+        // The one field with no fixed number of boxes. Rows are added and taken
+        // away, and each of them is whatever the element type asks for — an
+        // aggregation's three boxes, or one box for a field name — so nothing
+        // here knows what it is rendering rows *of*.
+        //
+        // Like the union below, this control reads its own value back: the row
+        // count is exactly what has to rebuild the list, and it is held in a
+        // local signal so a keystroke inside a row can't reach it.
+        FieldType::List(element) => {
+            let element = (**element).clone();
+            let at = at.clone();
+            let rows = RwSignal::new(values.with_untracked(|v| form::list_len(v, &at)));
+            let add = {
+                let at = at.clone();
+                move |_| {
+                    let len = values
+                        .try_update(|v| form::push_list_element(v, &at))
+                        .unwrap_or_default();
+                    rows.set(len);
+                }
+            };
+            let list_at = at.clone();
+            view! {
+                <div class="form-list">
+                    {move || {
+                        let count = rows.get();
+                        (0..count)
+                            .map(|row| {
+                                let mut field = element.clone();
+                                field.name = row.to_string();
+                                let at = list_at.clone();
+                                // taking a row out shifts the ones below it
+                                // down, so their messages are about boxes that
+                                // have moved and go with them
+                                let remove = move |_| {
+                                    let left = values
+                                        .try_update(|v| form::remove_list_element(v, &at, row))
+                                        .unwrap_or_default();
+                                    errors
+                                        .update(|errors| {
+                                            form::clear_list_errors(errors, index, &at)
+                                        });
+                                    rows.set(left);
+                                };
+                                view! {
+                                    <div class="form-list-row">
+                                        <div class="form-list-body">
+                                            <FieldEditor
+                                                field=field
+                                                prefix=list_at.clone()
+                                                index=index
+                                                values=values
+                                                errors=errors
+                                                pipelines=pipelines
+                                                connections=connections
+                                            />
+                                        </div>
+                                        <button
+                                            class="icon-button danger"
+                                            title="remove"
+                                            on:click=remove
+                                        >
+                                            "×"
+                                        </button>
+                                    </div>
+                                }
+                            })
+                            .collect_view()
+                    }}
+                    <button class="button" on:click=add>
+                        "+ add"
+                    </button>
+                </div>
+            }
+            .into_any()
+        }
         // The conditional one. Which boxes belong here is not known until the
         // tag is picked, so the tag is a dropdown and the rest of the form is
         // derived from it — the same shape the component's own `variants`

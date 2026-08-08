@@ -66,7 +66,15 @@ fn transform_samples() -> Vec<(&'static str, Value)> {
         ("splitter", json!({"type": "splitter", "out_size": 2})),
         (
             "reducer",
-            json!({"type": "reducer", "function": "sum", "field": "value"}),
+            json!({
+                "type": "reducer",
+                "aggregations": [
+                    {"function": "sum", "as": "total", "field": "value"},
+                    {"function": "count", "as": "readings"}
+                ],
+                "group_by": ["sensor"],
+                "on_missing": "skip"
+            }),
         ),
         (
             "filter",

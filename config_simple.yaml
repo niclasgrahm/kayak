@@ -1,0 +1,31 @@
+- id: foo
+  inputs:
+  - type: dummy
+    duration: 1
+  transforms: []
+  outputs: []
+- id: eloquently-passionate-boatbill
+  inputs:
+  - type: pipeline
+    upstream: foo
+    buffer:
+      type: tumbling
+      window_seconds: 10
+  transforms:
+  - type: reducer
+    aggregations:
+    - function: sum
+      as: new_field
+      field: value
+  outputs: []
+- id: two
+  inputs:
+  - type: pipeline
+    upstream: foo
+  transforms:
+  - type: reducer
+    aggregations:
+    - function: avg
+      as: new_field
+      field: value
+  outputs: []

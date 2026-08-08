@@ -198,6 +198,98 @@ pub fn path(prefix: &str, name: &str) -> String {
     }
 }
 
+/// How many rows a list field may hold.
+///
+/// The count is read out of the same string map everything else lives in, so it
+/// is a number someone could in principle have put anything in. A ceiling keeps
+/// a stray value from asking the renderer for a million rows; it is far above
+/// any real aggregation list.
+pub const MAX_LIST_ROWS: usize = 64;
+
+/// How many rows a list field currently has.
+///
+/// A list's own path holds its length rather than a value — `aggregations` is
+/// `"3"`, and the rows themselves live at `aggregations.0`, `aggregations.1`
+/// and so on. Storing the count is what lets a row exist while it is still
+/// empty: counting the keys that happen to be filled in would make a freshly
+/// added row disappear until something was typed into it.
+#[must_use]
+pub fn list_len(values: &HashMap<String, String>, at: &str) -> usize {
+    values
+        .get(at)
+        .and_then(|raw| raw.parse::<usize>().ok())
+        .unwrap_or(0)
+        .min(MAX_LIST_ROWS)
+}
+
+/// Add a row to the end of a list, and say how many there are now.
+pub fn push_list_element(values: &mut HashMap<String, String>, at: &str) -> usize {
+    let len = (list_len(values, at) + 1).min(MAX_LIST_ROWS);
+    values.insert(at.to_string(), len.to_string());
+    len
+}
+
+/// Take one row out of a list, and say how many are left.
+///
+/// The rows after it shift down, because a row's *position* is its identity
+/// here: everything about row 2 is stored under keys beginning `at.2`, so
+/// removing row 1 without moving row 2 down would leave a gap the renderer
+/// reads as an empty row and a set of orphaned keys under it.
+pub fn remove_list_element(values: &mut HashMap<String, String>, at: &str, index: usize) -> usize {
+    let len = list_len(values, at);
+    if index >= len {
+        return len;
+    }
+    for row in index..len - 1 {
+        move_keys_under(values, &path(at, &(row + 1).to_string()), &path(at, &row.to_string()));
+    }
+    drop_keys_under(values, &path(at, &(len - 1).to_string()));
+    values.insert(at.to_string(), (len - 1).to_string());
+    len - 1
+}
+
+/// Every key belonging to one row, moved to another row's path.
+fn move_keys_under(values: &mut HashMap<String, String>, from: &str, to: &str) {
+    for (key, value) in take_keys_under(values, from) {
+        let suffix = key.split_at(from.len()).1;
+        values.insert(format!("{to}{suffix}"), value);
+    }
+}
+
+fn drop_keys_under(values: &mut HashMap<String, String>, at: &str) {
+    take_keys_under(values, at);
+}
+
+/// A row's own value and everything nested inside it — `aggregations.1` and
+/// `aggregations.1.function` alike, and nothing from `aggregations.10`.
+fn take_keys_under(values: &mut HashMap<String, String>, at: &str) -> Vec<(String, String)> {
+    let taken: Vec<String> = values
+        .keys()
+        .filter(|key| key.as_str() == at || key.starts_with(&format!("{at}.")))
+        .cloned()
+        .collect();
+    taken
+        .into_iter()
+        .filter_map(|key| values.remove(&key).map(|value| (key, value)))
+        .collect()
+}
+
+/// Drop every message belonging to a list, because its rows have just moved.
+///
+/// The alternative would be shifting the messages along with the values, which
+/// is more work to say something less true: the rows below the removed one are
+/// different rows now, and the next submit re-derives every message anyway.
+pub fn clear_list_errors(errors: &mut Vec<FormError>, component: usize, at: &str) {
+    let under = format!("{at}.");
+    errors.retain(|e| {
+        !matches!(
+            e,
+            FormError::Field { component: which, field, .. }
+                if *which == component && (field == at || field.starts_with(&under))
+        )
+    });
+}
+
 /// Turn one field's raw text into the JSON value it stands for.
 ///
 /// `Ok(None)` means "leave it out" — an empty optional field, which is not the
@@ -247,7 +339,7 @@ pub fn parse_field(field: &FieldDoc, raw: &str) -> Result<Option<Value>, String>
                 return Err(format!("must be one of: {}", values.join(", ")));
             }
         }
-        FieldType::Json | FieldType::Union(_) | FieldType::Object(_) => {
+        FieldType::Json | FieldType::Union(_) | FieldType::Object(_) | FieldType::List(_) => {
             serde_json::from_str(trimmed).map_err(|e| format!("not valid JSON: {e}"))?
         }
     };
@@ -281,6 +373,31 @@ fn value_at(
                 return None;
             }
             Some(Value::Object(body))
+        }
+        // As many values as there are rows, each of them read exactly as the
+        // element type would be read anywhere else — which is what keeps a list
+        // of objects from needing anything of its own. The element's name is
+        // its position: a list element has none until the form gives it one.
+        FieldType::List(element) => {
+            let rows = list_len(&draft.values, &at);
+            let mut items = Vec::with_capacity(rows);
+            for row in 0..rows {
+                let mut element = (**element).clone();
+                element.name = row.to_string();
+                if let Some(value) = value_at(&element, &at, draft, errors) {
+                    items.push(value);
+                }
+            }
+            // no rows at all is an absent field, not `[]` — the same bargain
+            // the object above makes, and what keeps `group_by` out of a config
+            // that isn't grouping
+            if items.is_empty() {
+                if field.required {
+                    errors.push((at, "required".to_string()));
+                }
+                return None;
+            }
+            Some(Value::Array(items))
         }
         FieldType::Union(union) => {
             let tag = path(&at, &union.tag);
@@ -776,17 +893,177 @@ mod tests {
     }
 
     /// The `type` tag would happily accept a typo'd `sum`; the schema says
-    /// which values exist, so the form can too.
+    /// which values exist, so the form can too — inside a list row like
+    /// anywhere else.
     #[test]
     fn a_closed_set_field_rejects_a_value_outside_it() {
         let draft = filled(
             Family::Transform,
             "reducer",
-            &[("function", "average"), ("field", "value")],
+            &[
+                ("aggregations", "1"),
+                ("aggregations.0.function", "average"),
+                ("aggregations.0.field", "value"),
+                ("aggregations.0.as", "total"),
+            ],
         );
         let errors = component_json(&component(Family::Transform, "reducer"), &draft)
             .expect_err("'average' is not one of sum/avg/min/max");
+        assert_eq!(errors[0].0, "aggregations.0.function");
         assert!(errors[0].1.contains("avg"), "got: {}", errors[0].1);
+    }
+
+    /// A list is as many values as there are rows, and each row is read exactly
+    /// as the same shape would be read anywhere else.
+    #[test]
+    fn a_list_field_is_built_from_the_rows_under_it() -> anyhow::Result<()> {
+        let reducer = component(Family::Transform, "reducer");
+        let draft = filled(
+            Family::Transform,
+            "reducer",
+            &[
+                ("aggregations", "2"),
+                ("aggregations.0.function", "sum"),
+                ("aggregations.0.field", "value"),
+                ("aggregations.0.as", "total"),
+                ("aggregations.1.function", "count"),
+                ("aggregations.1.as", "n"),
+                ("group_by", "1"),
+                ("group_by.0", "sensor"),
+                ("on_missing", "skip"),
+            ],
+        );
+        let json = component_json(&reducer, &draft).map_err(|e| anyhow::anyhow!("{e:?}"))?;
+        assert_eq!(
+            json,
+            json!({
+                "type": "reducer",
+                "aggregations": [
+                    {"function": "sum", "field": "value", "as": "total"},
+                    {"function": "count", "as": "n"}
+                ],
+                "group_by": ["sensor"],
+                "on_missing": "skip"
+            })
+        );
+
+        // ...and it is the config the server takes, not just the shape of one
+        let config: Config = serde_json::from_value(
+            build_config("p", &[dummy_input(), draft], &docs())
+                .map_err(|e| anyhow::anyhow!("{e:?}"))?,
+        )?;
+        assert_eq!(config.transforms.len(), 1);
+        Ok(())
+    }
+
+    /// A list with no rows is an absent field rather than `[]` — the same
+    /// bargain the nested object makes — unless it is required, which is a
+    /// message about the list itself.
+    #[test]
+    fn an_empty_list_is_omitted_or_reported_against_the_list() -> anyhow::Result<()> {
+        let reducer = component(Family::Transform, "reducer");
+        let draft = filled(
+            Family::Transform,
+            "reducer",
+            &[
+                ("aggregations", "1"),
+                ("aggregations.0.function", "count"),
+                ("aggregations.0.as", "n"),
+            ],
+        );
+        let json = component_json(&reducer, &draft).map_err(|e| anyhow::anyhow!("{e:?}"))?;
+        assert!(json.get("group_by").is_none(), "sent a group_by: {json}");
+
+        let bare = filled(Family::Transform, "reducer", &[]);
+        let errors =
+            component_json(&reducer, &bare).expect_err("a reducer with nothing to compute");
+        assert_eq!(errors, [("aggregations".to_string(), "required".to_string())]);
+        Ok(())
+    }
+
+    /// A row's position is its identity, so taking one out has to move the ones
+    /// after it down — otherwise row 2's boxes are orphaned under a path
+    /// nothing renders and the gap reads as an empty row.
+    #[test]
+    fn removing_a_row_shifts_the_ones_after_it_down() {
+        let mut values = HashMap::new();
+        for (key, value) in [
+            ("aggregations", "3"),
+            ("aggregations.0.as", "a"),
+            ("aggregations.1.as", "b"),
+            ("aggregations.1.function", "sum"),
+            ("aggregations.2.as", "c"),
+            // a field whose name merely starts the same way must not move
+            ("aggregations_note", "untouched"),
+        ] {
+            values.insert(key.to_string(), value.to_string());
+        }
+
+        assert_eq!(remove_list_element(&mut values, "aggregations", 0), 2);
+        assert_eq!(list_len(&values, "aggregations"), 2);
+        assert_eq!(values.get("aggregations.0.as").map(String::as_str), Some("b"));
+        assert_eq!(
+            values.get("aggregations.0.function").map(String::as_str),
+            Some("sum"),
+            "everything nested in the row moves with it"
+        );
+        assert_eq!(values.get("aggregations.1.as").map(String::as_str), Some("c"));
+        assert_eq!(values.get("aggregations.2.as"), None, "no orphaned row");
+        assert_eq!(
+            values.get("aggregations_note").map(String::as_str),
+            Some("untouched")
+        );
+    }
+
+    /// Ten rows and one row share a prefix; only one of them is row 1.
+    #[test]
+    fn removing_a_row_leaves_the_double_digit_ones_alone() {
+        let mut values = HashMap::new();
+        values.insert("xs".to_string(), "12".to_string());
+        values.insert("xs.1".to_string(), "one".to_string());
+        values.insert("xs.10".to_string(), "ten".to_string());
+        remove_list_element(&mut values, "xs", 0);
+        assert_eq!(values.get("xs.0").map(String::as_str), Some("one"));
+        assert_eq!(values.get("xs.9").map(String::as_str), Some("ten"));
+    }
+
+    #[test]
+    fn adding_a_row_stops_at_the_ceiling() {
+        let mut values = HashMap::new();
+        values.insert("xs".to_string(), MAX_LIST_ROWS.to_string());
+        assert_eq!(push_list_element(&mut values, "xs"), MAX_LIST_ROWS);
+    }
+
+    /// The rows below a removed one are different rows now, so their messages
+    /// are about boxes that have moved. Dropping them is what stops a "required"
+    /// pointing at the wrong row.
+    #[test]
+    fn removing_a_row_drops_the_lists_messages() {
+        let mut errors = vec![
+            FormError::Field {
+                component: 0,
+                field: "aggregations.1.as".to_string(),
+                message: "required".to_string(),
+            },
+            FormError::Field {
+                component: 0,
+                field: "group_by.0".to_string(),
+                message: "required".to_string(),
+            },
+            FormError::Field {
+                component: 1,
+                field: "aggregations.0.as".to_string(),
+                message: "required".to_string(),
+            },
+        ];
+        clear_list_errors(&mut errors, 0, "aggregations");
+        assert_eq!(field_error(&errors, 0, "aggregations.1.as"), None);
+        assert_eq!(field_error(&errors, 0, "group_by.0"), Some("required"));
+        assert_eq!(
+            field_error(&errors, 1, "aggregations.0.as"),
+            Some("required"),
+            "another component's list is not this one"
+        );
     }
 
     /// A closed set whose variants are doc-commented is spelled differently in
@@ -1179,6 +1456,15 @@ mod tests {
                         values.insert(path(&at, &union.tag), variant.name.clone());
                         fill_required(values, &variant.fields, &at);
                     }
+                    continue;
+                }
+                // one row, filled in as the form would fill it: a required list
+                // with none is a list nobody has added anything to yet
+                FieldType::List(element) => {
+                    let mut row = (**element).clone();
+                    row.name = "0".to_string();
+                    values.insert(at.clone(), "1".to_string());
+                    fill_required(values, std::slice::from_ref(&row), &at);
                     continue;
                 }
             };

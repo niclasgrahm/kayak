@@ -20,7 +20,8 @@ use kayak::testing::{
 use kayak::transforms::Transform;
 use kayak_core::{EventPayload, Stage};
 use kayak_core::config::{
-    ReduceFnKind, ReduceTransformConfig, SplitterTransformConfig, TransformConfig, TransformKind,
+    Aggregation, MissingFieldPolicy, ReduceFnKind, ReduceTransformConfig, SplitterTransformConfig,
+    TransformConfig, TransformKind,
 };
 use serde_json::json;
 use tokio::sync::{broadcast, mpsc};
@@ -106,8 +107,13 @@ async fn transforms_are_chained_in_order_and_fan_out_within_the_chain() -> anyho
         out_size: 2,
     }))?;
     let reduce = transform_from_config(TransformKind::Reducer(ReduceTransformConfig {
-        function: ReduceFnKind::Sum,
-        field: "n".to_string(),
+        aggregations: vec![Aggregation {
+            function: ReduceFnKind::Sum,
+            output: "total".to_string(),
+            field: Some("n".to_string()),
+        }],
+        group_by: Vec::new(),
+        on_missing: MissingFieldPolicy::Error,
     }))?;
 
     let emitted = run_to_completion(
@@ -126,8 +132,8 @@ async fn transforms_are_chained_in_order_and_fan_out_within_the_chain() -> anyho
     assert_eq!(
         emitted.values(),
         vec![
-            vec![json!({"original_field": "n", "reduced_value": 3.0})],
-            vec![json!({"original_field": "n", "reduced_value": 7.0})],
+            vec![json!({"total": 3.0})],
+            vec![json!({"total": 7.0})],
         ]
     );
     Ok(())
