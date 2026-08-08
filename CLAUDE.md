@@ -261,7 +261,19 @@ Generated, never hand-written. `kayak-core/src/docs.rs` reflects over `schema_fo
 
 Nothing in there knows the name of any component — keep it that way. Notes for anyone touching it: walk `oneOf` (which pairs a `type` tag with a config struct), never `$defs` (which also holds shared field types like `Secret`); field order is `required` order then alphabetical; `Option<T>` arrives as `anyOf: [T, null]` when the inner type is a `$ref` and as `"type": ["integer", "null"]` when it isn't — `scalar_type_of` handles the second spelling.
 
-A `FieldDoc` carries `field_type` (`FieldType`) beside the human-readable `type_name`. That's the same reflection serving a second consumer: the "add pipeline" modal generates its form from it, so a new component gets working controls and validation for free. `FieldType::Json` is the honest fallback for anything with a shape of its own (a tagged union like `buffer`) — it renders as a JSON box rather than a control that can't work.
+A closed set of values has two spellings too, and both have to be read
+(`string_values_of`): a plain unit-variant enum is `enum: ["a", "b"]`, but one
+variant with a doc comment on it switches schemars to `oneOf: [{const: "a",
+description}, ...]`. They mean the same thing, and recognising only the first is
+what once made *documenting* a variant silently downgrade its dropdown to a JSON
+box. The `oneOf` walk is the same one the tagged unions use, so the rule is
+every branch is a bare string `const` or it is not a closed set.
+
+A `FieldDoc` carries `field_type` (`FieldType`) beside the human-readable `type_name`. That's the same reflection serving a second consumer: the "add pipeline" modal generates its form from it, so a new component gets working controls and validation for free. A field with a shape of its own is described rather than surrendered to a JSON box: `FieldType::Object` carries its fields, `FieldType::Union` carries a tag and the variants it selects between. The union is the **conditional** case — a `buffer` is `{"type": "static", "size": 10}` or `{"type": "tumbling", "window_seconds": 30}`, so which boxes exist depends on an answer given in another box — and it is the field-level twin of `ComponentDoc::variants`, which does the same thing for a component's own shape (`filter`). Only the internally tagged spelling is read; the externally tagged one is a component's shape and is `variants_of`'s job. `FieldType::Json` remains as the fallback for anything neither walk understands, and `no_component_field_needs_raw_json` fails if a component ever lands on it — the point being that a JSON box is a field the user has to hand-write.
+
+The walk is bounded (`MAX_NESTING`) because it follows `$ref`s and a config type that referred to itself would otherwise recurse until the stack ran out.
+
+On the form side that nesting is flat: draft values and error keys are **dotted paths** (`buffer.type`, `buffer.size`, `rotate.max_rows`), which is what lets one `HashMap<String, String>`, one error list and one `FieldEditor` serve any depth. `FieldEditor` renders itself for those, so it returns `AnyView` — a component containing itself can't have a return type defined in terms of its own. The union's tag dropdown is the **one control in the modal that reads its value back**, for the same reason the others don't: rebuilding the fields is exactly what it is for. Its signal holds only the tag, so a keystroke in a nested box can't reach it.
 
 `FieldType::Connection(kind)` works the same way and for the same reason, one step further: a `connection` field carries `#[schemars(extend("x-connection" = "kafka"))]`, and the marker holds the *kind* — "any connection" is the wrong set to offer, since a kafka input can only use a kafka connection. `Family::Connection` is a fourth family, so a connection kind documents itself on `/docs` and generates its own form through the same machinery a component does.
 

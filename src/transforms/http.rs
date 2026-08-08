@@ -1,4 +1,4 @@
-use kayak_core::config::HttpTransformConfig;
+use kayak_core::config::{HttpTransformConfig, HttpVerb};
 use std::sync::Arc;
 
 use crate::{
@@ -21,7 +21,7 @@ pub struct HttpTransform {
     // request is a POST. Wiring it up changes behaviour for existing configs,
     // so it needs a decision first (see readme "known issues").
     #[allow(dead_code)]
-    verb: String,
+    verb: HttpVerb,
     client: reqwest::Client,
 }
 #[async_trait::async_trait]

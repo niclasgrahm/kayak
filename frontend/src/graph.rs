@@ -2794,7 +2794,7 @@ mod tests {
     fn dummy_input() -> kayak_core::config::InputConfig {
         use kayak_core::config::DummyConfig;
         kayak_core::config::InputConfig {
-            kind: InputKind::Dummy(DummyConfig { duration: 1 }),
+            kind: InputKind::Dummy(DummyConfig { duration: 1, payload: None, amplitude: None, period: None }),
             buffer: None,
         }
     }

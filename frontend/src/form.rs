@@ -29,6 +29,11 @@ use serde_json::{Map, Value};
 /// until the form is submitted. Parsing as you type would fight the user: a
 /// half-typed `1.` is not a number yet, and neither is an empty box someone is
 /// about to fill in.
+///
+/// A field with a shape of its own is stored flat, under a dotted [`path`]:
+/// `buffer.type`, `buffer.size`. Flat rather than nested because that is what
+/// makes the nesting free — one map of boxes to their contents, one error keyed
+/// the same way, and no widget has to know how deep it sits.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ComponentDraft {
     pub family: Family,
@@ -150,11 +155,30 @@ pub fn fields_of(doc: &ComponentDoc, variant: Option<&str>) -> Vec<FieldDoc> {
         .unwrap_or_default()
 }
 
+/// Where one field's text lives in a draft: its name, prefixed by the path of
+/// whatever it is nested inside.
+///
+/// The top level has no prefix, so an ordinary field is stored under its own
+/// name and nothing about the flat case changes.
+#[must_use]
+pub fn path(prefix: &str, name: &str) -> String {
+    if prefix.is_empty() {
+        name.to_string()
+    } else {
+        format!("{prefix}.{name}")
+    }
+}
+
 /// Turn one field's raw text into the JSON value it stands for.
 ///
 /// `Ok(None)` means "leave it out" — an empty optional field, which is not the
 /// same as an empty string: writing `"subject": ""` where the field was meant
 /// to be absent is a different config.
+///
+/// This answers for one box. A field with a shape of its own is spread over
+/// several of them, so it is [`value_at`] that builds those — what arrives here
+/// for one of those is the literal JSON a caller has, which is the same
+/// fallback the form used to offer for all of them.
 pub fn parse_field(field: &FieldDoc, raw: &str) -> Result<Option<Value>, String> {
     let trimmed = raw.trim();
     if trimmed.is_empty() {
@@ -194,11 +218,83 @@ pub fn parse_field(field: &FieldDoc, raw: &str) -> Result<Option<Value>, String>
                 return Err(format!("must be one of: {}", values.join(", ")));
             }
         }
-        FieldType::Json => {
+        FieldType::Json | FieldType::Union(_) | FieldType::Object(_) => {
             serde_json::from_str(trimmed).map_err(|e| format!("not valid JSON: {e}"))?
         }
     };
     Ok(Some(value))
+}
+
+/// One field's value, from however many boxes it is spread over.
+///
+/// The recursive half of the form, and the whole of what "conditional
+/// rendering" comes to once the shape is known: an object is its fields, and a
+/// union is *the fields of the variant that was picked* — so what is read here
+/// depends on an answer given elsewhere in the same draft, exactly as what is
+/// rendered does.
+///
+/// Errors are pushed as they're found rather than returned, and keyed by full
+/// path, so a message lands under the box it belongs to however deep that is.
+fn value_at(
+    field: &FieldDoc,
+    prefix: &str,
+    draft: &ComponentDraft,
+    errors: &mut Vec<(String, String)>,
+) -> Option<Value> {
+    let at = path(prefix, &field.name);
+    match &field.field_type {
+        FieldType::Object(fields) => {
+            let body = object_at(fields, &at, draft, errors);
+            // an object nobody touched is an absent field, not an empty one:
+            // `"rotate": {}` says "rotate on nothing", which is a different
+            // thing to say than saying nothing
+            if body.is_empty() && !field.required {
+                return None;
+            }
+            Some(Value::Object(body))
+        }
+        FieldType::Union(union) => {
+            let tag = path(&at, &union.tag);
+            let chosen = draft.value(&tag).trim().to_string();
+            if chosen.is_empty() {
+                if field.required {
+                    errors.push((tag, "required".to_string()));
+                }
+                return None;
+            }
+            let Some(variant) = union.variants.iter().find(|v| v.name == chosen) else {
+                let names: Vec<&str> = union.variants.iter().map(|v| v.name.as_str()).collect();
+                errors.push((tag, format!("must be one of: {}", names.join(", "))));
+                return None;
+            };
+            let mut body = object_at(&variant.fields, &at, draft, errors);
+            body.insert(union.tag.clone(), Value::String(chosen));
+            Some(Value::Object(body))
+        }
+        _ => match parse_field(field, draft.value(&at)) {
+            Ok(value) => value,
+            Err(message) => {
+                errors.push((at, message));
+                None
+            }
+        },
+    }
+}
+
+/// A set of fields under one path, as the object they make up.
+fn object_at(
+    fields: &[FieldDoc],
+    prefix: &str,
+    draft: &ComponentDraft,
+    errors: &mut Vec<(String, String)>,
+) -> Map<String, Value> {
+    let mut body = Map::new();
+    for field in fields {
+        if let Some(value) = value_at(field, prefix, draft, errors) {
+            body.insert(field.name.clone(), value);
+        }
+    }
+    body
 }
 
 /// One component as it goes on the wire: `{"type": "nats", ...}`, or
@@ -210,17 +306,13 @@ pub fn component_json(
     doc: &ComponentDoc,
     draft: &ComponentDraft,
 ) -> Result<Value, Vec<(String, String)>> {
-    let mut body = Map::new();
     let mut errors = Vec::new();
-    for field in fields_of(doc, draft.variant.as_deref()) {
-        match parse_field(&field, draft.value(&field.name)) {
-            Ok(Some(value)) => {
-                body.insert(field.name.clone(), value);
-            }
-            Ok(None) => {}
-            Err(message) => errors.push((field.name.clone(), message)),
-        }
-    }
+    let mut body = object_at(
+        &fields_of(doc, draft.variant.as_deref()),
+        "",
+        draft,
+        &mut errors,
+    );
     if !errors.is_empty() {
         return Err(errors);
     }
@@ -630,30 +722,176 @@ mod tests {
         assert!(errors[0].1.contains("avg"), "got: {}", errors[0].1);
     }
 
-    /// `buffer` has a shape of its own, so the form takes it as literal JSON —
-    /// and has to say so when it isn't.
+    /// A closed set whose variants are doc-commented is spelled differently in
+    /// the schema, and used to arrive as [`FieldType::Json`] — which meant a
+    /// box wanting `"number"`, quotes and all, where a dropdown belonged.
     #[test]
-    fn a_json_field_is_parsed_rather_than_sent_as_a_string() -> anyhow::Result<()> {
+    fn a_documented_closed_set_is_a_dropdown_rather_than_a_json_box() -> anyhow::Result<()> {
+        let dummy = component(Family::Input, "dummy");
+        let payload = fields_of(&dummy, None)
+            .into_iter()
+            .find(|f| f.name == "payload")
+            .ok_or_else(|| anyhow::anyhow!("the dummy input has no 'payload' field"))?;
+        assert_eq!(
+            payload.field_type,
+            FieldType::Enum(vec!["number".to_string(), "text".to_string()])
+        );
+
+        let draft = filled(
+            Family::Input,
+            "dummy",
+            &[("duration", "5"), ("payload", "text")],
+        );
+        let json = component_json(&dummy, &draft).map_err(|e| anyhow::anyhow!("{e:?}"))?;
+        assert_eq!(json["payload"], json!("text"), "sent as the bare value");
+        // and the config the server takes agrees that it is one
+        let config: Config = serde_json::from_value(
+            build_config("p", &[draft], &docs()).map_err(|e| anyhow::anyhow!("{e:?}"))?,
+        )?;
+        assert_eq!(config.inputs.len(), 1);
+
+        let typo = filled(
+            Family::Input,
+            "dummy",
+            &[("duration", "5"), ("payload", "sine")],
+        );
+        let errors = component_json(&dummy, &typo).expect_err("'sine' is not a payload kind");
+        assert!(errors[0].1.contains("number"), "got: {}", errors[0].1);
+        Ok(())
+    }
+
+    /// The conditional case: what a `buffer` is asked for depends on which kind
+    /// of buffer was picked, and the answer is assembled from the boxes under
+    /// its path rather than typed as JSON into one.
+    #[test]
+    fn a_union_field_is_built_from_the_variant_that_was_chosen() -> anyhow::Result<()> {
+        let dummy = component(Family::Input, "dummy");
         let draft = filled(
             Family::Input,
             "dummy",
             &[
                 ("duration", "5"),
-                ("buffer", r#"{"type": "static", "size": 10}"#),
+                ("buffer.type", "tumbling"),
+                ("buffer.window_seconds", "30"),
+            ],
+        );
+        let json = component_json(&dummy, &draft).map_err(|e| anyhow::anyhow!("{e:?}"))?;
+        assert_eq!(
+            json["buffer"],
+            json!({"type": "tumbling", "window_seconds": 30})
+        );
+
+        // ...and it is the config the server takes, not just the shape of one
+        let config: Config = serde_json::from_value(
+            build_config("p", &[draft], &docs()).map_err(|e| anyhow::anyhow!("{e:?}"))?,
+        )?;
+        assert!(matches!(
+            config.inputs.first().and_then(|i| i.buffer.as_ref()),
+            Some(kayak_core::config::BufferConfig::Tumbling { window_seconds: 30 })
+        ));
+        Ok(())
+    }
+
+    /// Switching the choice must switch the answer. A `size` left behind from
+    /// a look at the static buffer is not part of a tumbling one, and sending
+    /// it would be rejected by the very serde the form is standing in for.
+    #[test]
+    fn the_other_variants_fields_are_left_out() -> anyhow::Result<()> {
+        let draft = filled(
+            Family::Input,
+            "dummy",
+            &[
+                ("duration", "5"),
+                ("buffer.type", "static"),
+                ("buffer.size", "10"),
+                ("buffer.window_seconds", "30"),
             ],
         );
         let json = component_json(&component(Family::Input, "dummy"), &draft)
             .map_err(|e| anyhow::anyhow!("{e:?}"))?;
         assert_eq!(json["buffer"], json!({"type": "static", "size": 10}));
+        Ok(())
+    }
 
-        let broken = filled(
+    /// Nothing chosen is an absent optional field, not an empty object: every
+    /// input has a `buffer` and almost none of them wants one.
+    #[test]
+    fn an_unchosen_union_field_is_omitted() -> anyhow::Result<()> {
+        let draft = filled(Family::Input, "dummy", &[("duration", "5")]);
+        let json = component_json(&component(Family::Input, "dummy"), &draft)
+            .map_err(|e| anyhow::anyhow!("{e:?}"))?;
+        assert!(json.get("buffer").is_none(), "sent a buffer: {json}");
+        Ok(())
+    }
+
+    /// A message about a nested box has to land under that box, which means it
+    /// is keyed by the same path the box is.
+    #[test]
+    fn a_message_about_a_nested_field_is_keyed_by_its_path() {
+        let drafts = vec![filled(
             Family::Input,
             "dummy",
-            &[("duration", "5"), ("buffer", "{")],
+            &[
+                ("duration", "5"),
+                ("buffer.type", "static"),
+                ("buffer.size", "lots"),
+            ],
+        )];
+        let errors = build_config("p", &drafts, &docs()).expect_err("'lots' is not a size");
+        assert!(
+            field_error(&errors, 0, "buffer.size").is_some_and(|m| m.contains("whole number")),
+            "got: {errors:?}"
         );
-        let errors = component_json(&component(Family::Input, "dummy"), &broken)
-            .expect_err("'{' is not JSON");
-        assert!(errors[0].1.contains("JSON"), "got: {}", errors[0].1);
+        // and not against the field it is nested in, which has no box of its own
+        assert_eq!(field_error(&errors, 0, "buffer"), None);
+    }
+
+    /// A variant is picked from a list, so the only way to be outside it is a
+    /// draft that was built by something other than the form.
+    #[test]
+    fn a_union_tagged_with_something_that_is_not_a_variant_is_rejected() {
+        let draft = filled(
+            Family::Input,
+            "dummy",
+            &[("duration", "5"), ("buffer.type", "sliding")],
+        );
+        let errors =
+            component_json(&component(Family::Input, "dummy"), &draft).expect_err("no such buffer");
+        assert_eq!(errors[0].0, "buffer.type");
+        assert!(errors[0].1.contains("tumbling"), "got: {}", errors[0].1);
+    }
+
+    /// Nesting without a choice: a file output's rotation is two triggers, and
+    /// either one alone is a rotation.
+    #[test]
+    fn a_nested_object_is_built_from_the_fields_under_it() -> anyhow::Result<()> {
+        let file = component(Family::Output, "file");
+        let draft = filled(
+            Family::Output,
+            "file",
+            &[
+                ("connection", "local-files"),
+                ("path", "orders"),
+                ("rotate.max_rows", "1000"),
+            ],
+        );
+        let json = component_json(&file, &draft).map_err(|e| anyhow::anyhow!("{e:?}"))?;
+        assert_eq!(json["rotate"], json!({"max_rows": 1000}));
+        let config: Config = serde_json::from_value(
+            build_config("p", &[dummy_input(), draft], &docs())
+                .map_err(|e| anyhow::anyhow!("{e:?}"))?,
+        )?;
+        assert_eq!(config.outputs.len(), 1);
+
+        // an untouched one is left out rather than sent as `{}`, which would
+        // mean "rotate on nothing" — a different thing to say than nothing
+        let bare = filled(
+            Family::Output,
+            "file",
+            &[("connection", "local-files"), ("path", "orders")],
+        );
+        let json = component_json(&file, &bare).map_err(|e| anyhow::anyhow!("{e:?}"))?;
+        assert!(json.get("rotate").is_none(), "sent a rotation: {json}");
         Ok(())
     }
 
@@ -837,27 +1075,47 @@ mod tests {
     fn every_documented_component_can_be_drafted_and_built() {
         for doc in docs() {
             let mut draft = draft_of(&doc);
-            for field in fields_of(&doc, draft.variant.as_deref()) {
-                if !field.required {
-                    continue;
-                }
-                let sample = match field.field_type {
-                    FieldType::Text | FieldType::PipelineId | FieldType::Connection(_) => {
-                        "x".to_string()
-                    }
-                    FieldType::Integer => "1".to_string(),
-                    FieldType::Number => "1.5".to_string(),
-                    FieldType::Boolean => "true".to_string(),
-                    FieldType::Enum(ref values) => values.first().cloned().unwrap_or_default(),
-                    FieldType::Json => "{}".to_string(),
-                };
-                draft.values.insert(field.name.clone(), sample);
-            }
+            let fields = fields_of(&doc, draft.variant.as_deref());
+            fill_required(&mut draft.values, &fields, "");
             assert!(
                 component_json(&doc, &draft).is_ok(),
                 "'{}' could not be built from a filled-in form",
                 doc.kind
             );
+        }
+    }
+
+    /// A plausible answer in every required box, nested ones included — the
+    /// same walk the form renders, which is what makes it a check that every
+    /// component can be filled in at all.
+    fn fill_required(values: &mut HashMap<String, String>, fields: &[FieldDoc], prefix: &str) {
+        for field in fields {
+            if !field.required {
+                continue;
+            }
+            let at = path(prefix, &field.name);
+            let sample = match &field.field_type {
+                FieldType::Text | FieldType::PipelineId | FieldType::Connection(_) => {
+                    "x".to_string()
+                }
+                FieldType::Integer => "1".to_string(),
+                FieldType::Number => "1.5".to_string(),
+                FieldType::Boolean => "true".to_string(),
+                FieldType::Enum(values) => values.first().cloned().unwrap_or_default(),
+                FieldType::Json => "{}".to_string(),
+                FieldType::Object(fields) => {
+                    fill_required(values, fields, &at);
+                    continue;
+                }
+                FieldType::Union(union) => {
+                    if let Some(variant) = union.variants.first() {
+                        values.insert(path(&at, &union.tag), variant.name.clone());
+                        fill_required(values, &variant.fields, &at);
+                    }
+                    continue;
+                }
+            };
+            values.insert(at, sample);
         }
     }
 }

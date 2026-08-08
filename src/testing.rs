@@ -276,7 +276,7 @@ pub fn stub_config(id: &str) -> Config {
     Config {
         id: Some(id.to_string()),
         inputs: vec![InputConfig {
-            kind: InputKind::Dummy(DummyConfig { duration: 3600 }),
+            kind: InputKind::Dummy(DummyConfig { duration: 3600, payload: None, amplitude: None, period: None }),
             buffer: None,
         }],
         transforms: Vec::<TransformConfig>::new(),

@@ -72,10 +72,37 @@ pub enum FieldType {
     /// the connections of *that kind*, since a nats connection is no use to a
     /// kafka input.
     Connection(String),
-    /// Something with a shape of its own (an object, a list, a tagged union
-    /// like an input's `buffer`). There is no general widget for those, so the
-    /// form takes them as literal JSON.
+    /// A value that is one of several shapes, tagged by one of its own
+    /// properties — an input's `buffer`, which is `{"type": "static", "size":
+    /// 10}` or `{"type": "tumbling", "window_seconds": 30}`.
+    ///
+    /// This is the field-level twin of [`ComponentDoc::variants`], and it is
+    /// what makes a form conditional: which fields a value has depends on which
+    /// variant was picked, so the tag is chosen first and the rest of the form
+    /// follows from it.
+    Union(UnionDoc),
+    /// A value that is an object with a fixed set of fields of its own — a file
+    /// output's `rotate`. Not a choice, just a level of nesting, so the form
+    /// renders its fields inline.
+    Object(Vec<FieldDoc>),
+    /// Something with a shape of its own that is none of the above — a list,
+    /// say, or a union tagged in a spelling this module doesn't read. There is
+    /// no general widget for those, so the form takes them as literal JSON.
     Json,
+}
+
+/// A tagged union as a form can render it: pick the tag, then fill in whatever
+/// that variant asks for.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct UnionDoc {
+    /// The property that says which variant this is — `type`, for every union
+    /// in the config today. Carried rather than assumed, because it is what
+    /// goes on the wire beside the variant's own fields.
+    pub tag: String,
+    /// The variants, named by their tag *value* (`static`, `tumbling`) rather
+    /// than by a Rust variant name. The tag itself is not among any variant's
+    /// fields — it is the choice, not a thing to fill in.
+    pub variants: Vec<VariantDoc>,
 }
 
 /// One configurable field of a component.
@@ -256,6 +283,20 @@ fn description_of(schema: &Value) -> Option<String> {
 /// declaration order, which is a better default for the fields that must be
 /// there. Optional fields fall back to alphabetical, which is at least stable.
 fn fields_of(root: &Value, def: &Value) -> Vec<FieldDoc> {
+    fields_at(root, def, 0)
+}
+
+/// How far into a field's own shape the reflection will go before giving up and
+/// calling it [`FieldType::Json`].
+///
+/// Nothing in the config nests anywhere near this deep. The bound is here
+/// because a schema *may* refer to itself — a config type that contains its own
+/// kind — and this walk follows `$ref`s, so without a floor such a type would
+/// recurse until the stack ran out. Degrading to a JSON box is the same answer
+/// this module already gives for a shape it can't render.
+const MAX_NESTING: usize = 4;
+
+fn fields_at(root: &Value, def: &Value, depth: usize) -> Vec<FieldDoc> {
     let Some(properties) = def["properties"].as_object() else {
         return Vec::new();
     };
@@ -267,7 +308,7 @@ fn fields_of(root: &Value, def: &Value) -> Vec<FieldDoc> {
     let field = |name: &str, schema: &Value| FieldDoc {
         name: name.to_string(),
         type_name: type_name_of(root, schema),
-        field_type: field_type_of(root, schema),
+        field_type: field_type_at(root, schema, depth),
         // a doc comment on the field wins over the one on its type: `urls` is
         // better described as "the nats url" than as all of `Secret`'s docs
         description: description_of(schema)
@@ -328,8 +369,8 @@ fn type_name_of(root: &Value, schema: &Value) -> String {
             return type_name_of(root, only);
         }
     }
-    if let Some(values) = schema["enum"].as_array() {
-        return join_values(values.iter().filter_map(Value::as_str));
+    if let Some(values) = string_values_of(schema) {
+        return join_values(values.iter().map(String::as_str));
     }
     if let Some(variants) = schema["oneOf"].as_array() {
         let tags = variants
@@ -395,6 +436,35 @@ fn connection_kind(schema: &Value) -> Option<&str> {
     schema[CONNECTION_MARKER].as_str()
 }
 
+/// The values of a closed set of strings, in either of the two spellings
+/// schemars uses for one.
+///
+/// A plain unit-variant enum comes out as `"enum": ["a", "b"]` — but the moment
+/// a single variant carries a doc comment there is a description to hang
+/// somewhere, and schemars switches to `"oneOf": [{"const": "a", "description":
+/// ...}, ...]` instead. The two say exactly the same thing about what the field
+/// accepts, and recognising only the first is what quietly turned documenting a
+/// variant into downgrading its dropdown to a JSON box.
+///
+/// Every branch has to be a string constant, which is what keeps this off the
+/// tagged unions (a buffer's `static | tumbling`): those have a whole config
+/// struct behind each tag, so there is no one value to pick.
+fn string_values_of(schema: &Value) -> Option<Vec<String>> {
+    // every branch or nothing: a set with one value that isn't a plain string
+    // is not a set of plain strings, and half a dropdown is worse than none
+    let all_of = |values: &[Value], read: fn(&Value) -> Option<&str>| {
+        let found: Vec<String> = values
+            .iter()
+            .filter_map(|v| read(v).map(ToString::to_string))
+            .collect();
+        (!found.is_empty() && found.len() == values.len()).then_some(found)
+    };
+    if let Some(values) = schema["enum"].as_array() {
+        return all_of(values, Value::as_str);
+    }
+    all_of(schema["oneOf"].as_array()?, |v| v["const"].as_str())
+}
+
 fn join_values<'a>(values: impl Iterator<Item = &'a str>) -> String {
     values.collect::<Vec<_>>().join(" | ")
 }
@@ -405,7 +475,7 @@ fn join_values<'a>(values: impl Iterator<Item = &'a str>) -> String {
 /// The two deliberately disagree in one place: a tagged union like a buffer's
 /// `static | tumbling` reads well as a type name, but there is no single
 /// control that edits it, so it comes back as [`FieldType::Json`].
-fn field_type_of(root: &Value, schema: &Value) -> FieldType {
+fn field_type_at(root: &Value, schema: &Value, depth: usize) -> FieldType {
     if is_pipeline_id(schema) {
         return FieldType::PipelineId;
     }
@@ -417,30 +487,82 @@ fn field_type_of(root: &Value, schema: &Value) -> FieldType {
     if let Some(branches) = schema["anyOf"].as_array() {
         let mut real = branches.iter().filter(|b| b["type"] != "null");
         if let (Some(only), None) = (real.next(), real.next()) {
-            return field_type_of(root, only);
+            return field_type_at(root, only, depth);
         }
     }
-    if let Some(values) = schema["enum"].as_array() {
-        let values: Vec<String> = values
-            .iter()
-            .filter_map(Value::as_str)
-            .map(ToString::to_string)
-            .collect();
-        // an `enum` of anything but plain strings isn't a dropdown
-        if !values.is_empty() {
-            return FieldType::Enum(values);
-        }
+    if let Some(values) = string_values_of(schema) {
+        return FieldType::Enum(values);
     }
     if schema["$ref"].is_string() {
-        return resolve_ref(root, schema).map_or(FieldType::Json, |def| field_type_of(root, def));
+        return resolve_ref(root, schema)
+            .map_or(FieldType::Json, |def| field_type_at(root, def, depth));
+    }
+    // past here a field has a shape of its own, and describing it means
+    // describing its fields — which is the walk that has to be bounded
+    if depth >= MAX_NESTING {
+        return FieldType::Json;
+    }
+    if let Some(union) = union_at(root, schema, depth + 1) {
+        return FieldType::Union(union);
     }
     match scalar_type_of(schema) {
         Some("string") => FieldType::Text,
         Some("integer") => FieldType::Integer,
         Some("number") => FieldType::Number,
         Some("boolean") => FieldType::Boolean,
+        // an object with fields of its own is those fields, laid out in place.
+        // One with none is something this module has no better word for.
+        Some("object") => match fields_at(root, schema, depth + 1) {
+            fields if fields.is_empty() => FieldType::Json,
+            fields => FieldType::Object(fields),
+        },
         _ => FieldType::Json,
     }
+}
+
+/// A field whose value is a tagged union, if it is one: every branch of a
+/// `oneOf` carrying the same tag property with a different constant value.
+///
+/// This is the *internally* tagged spelling (`{"type": "static", "size": 10}`),
+/// which is what `#[serde(tag = "type")]` produces and what every union in the
+/// config uses. The externally tagged one (`{"Numeric": {...}}`) is a component
+/// config's own shape and is read by [`variants_of`] instead; a field spelled
+/// that way falls back to JSON, which is the honest answer until one exists.
+fn union_at(root: &Value, def: &Value, depth: usize) -> Option<UnionDoc> {
+    let branches = def["oneOf"].as_array()?;
+    let tag = tag_of(branches)?;
+    let variants = branches
+        .iter()
+        .map(|branch| {
+            Some(VariantDoc {
+                name: branch["properties"][&tag]["const"].as_str()?.to_string(),
+                // the tag is the choice itself, not one of the things the
+                // chosen variant asks for
+                fields: fields_at(root, branch, depth)
+                    .into_iter()
+                    .filter(|f| f.name != tag)
+                    .collect(),
+            })
+        })
+        .collect::<Option<Vec<_>>>()?;
+    Some(UnionDoc { tag, variants })
+}
+
+/// The property that tags a `oneOf`: the one that is a string constant in every
+/// branch. Found rather than assumed to be `type`, so a union tagged by any
+/// other name reads the same way.
+fn tag_of(branches: &[Value]) -> Option<String> {
+    let is_tag = |name: &str| {
+        branches
+            .iter()
+            .all(|branch| branch["properties"][name]["const"].is_string())
+    };
+    branches
+        .first()?["properties"]
+        .as_object()?
+        .keys()
+        .find(|name| is_tag(name))
+        .cloned()
 }
 
 #[cfg(test)]
@@ -731,15 +853,165 @@ mod tests {
         );
     }
 
-    /// `buffer` is a tagged union of two different shapes. It renders as
-    /// `static | tumbling`, but no single control edits it, so the form takes
-    /// it as JSON rather than offering a dropdown that can't work.
+    /// A doc comment on a variant makes schemars spell the same closed set as
+    /// `oneOf` of `const`s rather than as an `enum` array. Both are dropdowns:
+    /// documenting a variant must not be what takes the dropdown away.
     #[test]
-    fn a_structured_field_is_typed_as_json_even_when_it_names_its_variants() {
+    fn a_closed_set_is_recognised_in_either_spelling_schemars_uses() {
+        // `KafkaStartAt`'s variants carry no doc comments — the `enum` array
+        assert_eq_documented(
+            field(&component("kafka"), "start_at"),
+            "earliest | latest",
+            &["earliest", "latest"],
+        );
+        // `DummyPayload`'s do — `oneOf` of consts, through an `Option` as well
+        assert_eq_documented(
+            field(&component("dummy"), "payload"),
+            "number | text",
+            &["number", "text"],
+        );
+        // and an output's, to pin that it isn't an input-only accident
+        assert_eq_documented(
+            field(&in_family("file", Family::Output), "format"),
+            "ndjson | json_array",
+            &["ndjson", "json_array"],
+        );
+    }
+
+    fn assert_eq_documented(field: &FieldDoc, type_name: &str, values: &[&str]) {
+        assert_eq!(field.type_name, type_name, "field '{}'", field.name);
+        assert_eq!(
+            field.field_type,
+            FieldType::Enum(values.iter().map(ToString::to_string).collect()),
+            "field '{}' would not render as a dropdown",
+            field.name
+        );
+    }
+
+    /// The http transform's method is a closed set too, and was a `String` for
+    /// long enough to be worth pinning as one.
+    #[test]
+    fn the_http_verb_is_a_closed_set_rather_than_free_text() {
+        let http = in_family("http", Family::Transform);
+        let verb = field(&http, "verb");
+        assert_eq!(
+            verb.field_type,
+            FieldType::Enum(
+                ["GET", "POST", "PUT", "PATCH", "DELETE"]
+                    .iter()
+                    .map(ToString::to_string)
+                    .collect()
+            )
+        );
+    }
+
+    /// `buffer` is a tagged union: which fields it has depends on which kind of
+    /// buffer it is. That's the whole of what a form needs to render it as a
+    /// choice followed by the fields that choice implies.
+    #[test]
+    fn a_tagged_union_field_carries_its_tag_and_its_variants() {
         let dummy = component("dummy");
         let buffer = field(&dummy, "buffer");
         assert_eq!(buffer.type_name, "static | tumbling");
-        assert_eq!(buffer.field_type, FieldType::Json);
+        let FieldType::Union(union) = &buffer.field_type else {
+            panic!("buffer is a choice of shapes, not a {:?}", buffer.field_type);
+        };
+        assert_eq!(union.tag, "type");
+        let names: Vec<&str> = union.variants.iter().map(|v| v.name.as_str()).collect();
+        assert_eq!(names, ["static", "tumbling"]);
+
+        // the fields differ per variant — which is why the choice has to come
+        // first — and the tag is not among them, since it *is* the choice
+        let fields_of = |name: &str| {
+            union
+                .variants
+                .iter()
+                .find(|v| v.name == name)
+                .map(|v| {
+                    v.fields
+                        .iter()
+                        .map(|f| (f.name.clone(), f.field_type.clone(), f.required))
+                        .collect::<Vec<_>>()
+                })
+                .unwrap_or_default()
+        };
+        assert_eq!(
+            fields_of("static"),
+            [("size".to_string(), FieldType::Integer, true)]
+        );
+        assert_eq!(
+            fields_of("tumbling"),
+            [("window_seconds".to_string(), FieldType::Integer, true)]
+        );
+    }
+
+    /// `rotate` is nesting without a choice: an object with fields of its own,
+    /// which the form can lay out in place rather than take as literal JSON.
+    #[test]
+    fn a_nested_object_field_carries_its_own_fields() {
+        let file = in_family("file", Family::Output);
+        let rotate = field(&file, "rotate");
+        let FieldType::Object(fields) = &rotate.field_type else {
+            panic!("rotate has fields of its own, not a {:?}", rotate.field_type);
+        };
+        let names: Vec<&str> = fields.iter().map(|f| f.name.as_str()).collect();
+        assert_eq!(names, ["interval_secs", "max_rows"]);
+        assert!(
+            fields.iter().all(|f| f.field_type == FieldType::Integer),
+            "both triggers are counts"
+        );
+        assert!(
+            fields.iter().all(|f| !f.required),
+            "either trigger alone is a rotation"
+        );
+        assert!(
+            fields[0].description.is_some(),
+            "a nested field is documented like any other"
+        );
+    }
+
+    /// Every field of every component has to be something a form can render.
+    /// A `Json` box is the honest fallback, but it is also the one a user has
+    /// to hand-write, so nothing is allowed to fall back to it unnoticed.
+    #[test]
+    fn no_component_field_needs_raw_json() {
+        let mut json_fields = Vec::new();
+        let mut check = |kind: &str, fields: &[FieldDoc], prefix: &str| {
+            for f in fields {
+                if f.field_type == FieldType::Json {
+                    json_fields.push(format!("{kind}.{prefix}{}", f.name));
+                }
+            }
+        };
+        for component in all_components() {
+            check(&component.kind, &component.fields, "");
+            for variant in &component.variants {
+                check(&component.kind, &variant.fields, &format!("{}.", variant.name));
+            }
+            // one level down is where `buffer` and `rotate` live; deeper than
+            // that nothing nests yet
+            for field in &component.fields {
+                match &field.field_type {
+                    FieldType::Object(fields) => {
+                        check(&component.kind, fields, &format!("{}.", field.name));
+                    }
+                    FieldType::Union(union) => {
+                        for variant in &union.variants {
+                            check(
+                                &component.kind,
+                                &variant.fields,
+                                &format!("{}.{}.", field.name, variant.name),
+                            );
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+        assert!(
+            json_fields.is_empty(),
+            "these fields can only be filled in as raw JSON: {json_fields:?}"
+        );
     }
 
     /// `Option<u16>` is an integer that may be omitted, not a nullable oddity.

@@ -2213,6 +2213,7 @@ fn ComponentEditor(
                                 view! {
                                     <FieldEditor
                                         field=field
+                                        prefix=String::new()
                                         index=index
                                         values=draft.values
                                         errors=errors
@@ -2233,16 +2234,23 @@ fn ComponentEditor(
 
 /// One field: a control chosen by the field's type, and whatever the validator
 /// had to say about it.
+///
+/// It renders itself for a field with a shape of its own, which is why it
+/// returns an [`AnyView`] rather than an opaque `impl IntoView` — a component
+/// that contains itself can't have a return type defined in terms of its own.
+/// `prefix` is where in the draft this field sits: empty at the top, and the
+/// path of the object or variant it belongs to further down.
 #[component]
 fn FieldEditor(
     field: kayak_core::docs::FieldDoc,
+    prefix: String,
     index: usize,
     values: RwSignal<HashMap<String, String>>,
     errors: RwSignal<Vec<form::FormError>>,
     pipelines: Signal<Vec<String>>,
     connections: Signal<Vec<(String, String)>>,
-) -> impl IntoView {
-    let name = field.name.clone();
+) -> AnyView {
+    let name = form::path(&prefix, &field.name);
     // read once, on purpose: the control is uncontrolled from here on, so that
     // typing into it doesn't rebuild it
     let initial = values.with_untracked(|v| v.get(&name).cloned().unwrap_or_default());
@@ -2251,6 +2259,9 @@ fn FieldEditor(
         errors.with(|errors| form::field_error(errors, index, &error_name).map(ToString::to_string))
     });
 
+    // the path this field sits at, kept back from the closures below because
+    // the nested controls need it: it is the prefix of everything inside it
+    let at = name.clone();
     let cleared_name = name.clone();
     let write = move |ev: leptos::ev::Event| {
         let value = event_target_value(&ev);
@@ -2305,7 +2316,7 @@ fn FieldEditor(
         // after the modal opened, so the chosen id is re-marked on each
         // rebuild rather than lost.
         FieldType::PipelineId => {
-            let chosen = field.name.clone();
+            let chosen = at.clone();
             let picked =
                 move || values.with_untracked(|v| v.get(&chosen).cloned().unwrap_or_default());
             view! {
@@ -2347,7 +2358,7 @@ fn FieldEditor(
         // would only be a way to build a pipeline that fails.
         FieldType::Connection(kind) => {
             let kind = kind.clone();
-            let chosen = field.name.clone();
+            let chosen = at.clone();
             let picked =
                 move || values.with_untracked(|v| v.get(&chosen).cloned().unwrap_or_default());
             view! {
@@ -2389,6 +2400,131 @@ fn FieldEditor(
             }
             .into_any()
         }
+        // A value with fields of its own: the fields, laid out in place under
+        // this one's name. Nothing conditional about it — every one of them is
+        // always there — so it is the union arm below without the choice.
+        FieldType::Object(fields) => nested(
+            fields.clone(),
+            at.clone(),
+            index,
+            values,
+            errors,
+            pipelines,
+            connections,
+        ),
+        // The conditional one. Which boxes belong here is not known until the
+        // tag is picked, so the tag is a dropdown and the rest of the form is
+        // derived from it — the same shape the component's own `variants`
+        // selector has, one level down.
+        //
+        // This is the one control whose choice is *read back*: everything else
+        // here is uncontrolled because rebuilding a box destroys what is being
+        // typed into it, but rebuilding is the entire point of this one. The
+        // signal is local and holds only the tag, so a keystroke in a nested
+        // box doesn't reach it.
+        FieldType::Union(union) => {
+            let tag_at = form::path(&at, &union.tag);
+            let chosen = RwSignal::new(
+                values.with_untracked(|v| v.get(&tag_at).cloned().unwrap_or_default()),
+            );
+            let unset = chosen.get_untracked().is_empty();
+            // same bargain as the enum control: a blank entry so that nothing
+            // chosen doesn't look like the first variant chosen
+            let blank = !field.required || unset;
+            let variants = union.variants.clone();
+            let options = variants.clone();
+            let tag_error = {
+                let tag_at = tag_at.clone();
+                Memo::new(move |_| {
+                    errors.with(|errors| {
+                        form::field_error(errors, index, &tag_at).map(ToString::to_string)
+                    })
+                })
+            };
+            let pick = move |ev: leptos::ev::Event| {
+                let value = event_target_value(&ev);
+                values.update(|v| {
+                    v.insert(tag_at.clone(), value.clone());
+                });
+                errors.update(|errors| form::clear_field_error(errors, index, &tag_at));
+                chosen.set(value);
+            };
+            let prefix = at.clone();
+            view! {
+                <select class="select" class:invalid=move || tag_error.get().is_some() on:change=pick>
+                    <Show when=move || blank>
+                        <option value="" selected=unset></option>
+                    </Show>
+                    {
+                        let selected = chosen.get_untracked();
+                        options
+                            .into_iter()
+                            .map(|variant| {
+                                let name = variant.name.clone();
+                                let label = name.clone();
+                                view! {
+                                    <option value=name.clone() selected=name == selected>
+                                        {label}
+                                    </option>
+                                }
+                            })
+                            .collect_view()
+                    }
+                </select>
+                {move || tag_error.get().map(|message| view! { <div class="form-error">{message}</div> })}
+                {
+                    let variants = variants.clone();
+                    let prefix = prefix.clone();
+                    move || {
+                        let picked = chosen.get();
+                        variants
+                            .iter()
+                            .find(|variant| variant.name == picked)
+                            .map(|variant| {
+                                nested(
+                                    variant.fields.clone(),
+                                    prefix.clone(),
+                                    index,
+                                    values,
+                                    errors,
+                                    pipelines,
+                                    connections,
+                                )
+                            })
+                    }
+                }
+            }
+            .into_any()
+        }
+        // Two values is a closed set like any other, and the parser takes the
+        // words `true` and `false` — so it is the enum control with the two
+        // values written out, rather than a checkbox. A checkbox has nowhere to
+        // put "not set", which is what an omitted optional boolean is.
+        FieldType::Boolean => {
+            let unset = initial.is_empty();
+            let blank = !field.required || unset;
+            view! {
+                <select class="select" on:change=write>
+                    <Show when=move || blank>
+                        <option value="" selected=unset></option>
+                    </Show>
+                    {
+                        let selected = initial.clone();
+                        ["true", "false"]
+                            .into_iter()
+                            .map(|value| {
+                                view! {
+                                    <option value=value selected=value == selected>
+                                        {value}
+                                    </option>
+                                }
+                            })
+                            .collect_view()
+                    }
+                </select>
+            }
+            .into_any()
+        }
         _ => view! {
             <input
                 class="text-input"
@@ -2417,6 +2553,47 @@ fn FieldEditor(
             </div>
         </div>
     }
+    .into_any()
+}
+
+/// The fields inside a field, rendered under its path.
+///
+/// One indented block of the same rows, which is what keeps a nested field
+/// looking like — and behaving as — the fields around it: its own errors, its
+/// own required markers, and a control chosen by its own type, however deep.
+fn nested(
+    fields: Vec<kayak_core::docs::FieldDoc>,
+    prefix: String,
+    index: usize,
+    values: RwSignal<HashMap<String, String>>,
+    errors: RwSignal<Vec<form::FormError>>,
+    pipelines: Signal<Vec<String>>,
+    connections: Signal<Vec<(String, String)>>,
+) -> AnyView {
+    if fields.is_empty() {
+        return ().into_any();
+    }
+    view! {
+        <div class="form-nested">
+            {fields
+                .into_iter()
+                .map(|field| {
+                    view! {
+                        <FieldEditor
+                            field=field
+                            prefix=prefix.clone()
+                            index=index
+                            values=values
+                            errors=errors
+                            pipelines=pipelines
+                            connections=connections
+                        />
+                    }
+                })
+                .collect_view()}
+        </div>
+    }
+    .into_any()
 }
 
 /// Shared by both pages. The zoom readout is canvas-only, so it's driven by an

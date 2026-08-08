@@ -243,7 +243,7 @@ mod tests {
             .collect();
         if inputs.is_empty() {
             inputs.push(InputConfig {
-                kind: InputKind::Dummy(DummyConfig { duration: 1 }),
+                kind: InputKind::Dummy(DummyConfig { duration: 1, payload: None, amplitude: None, period: None }),
                 buffer: None,
             });
         }

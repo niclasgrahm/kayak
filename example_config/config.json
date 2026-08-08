@@ -4,7 +4,10 @@
     "inputs": [
       {
         "type": "dummy",
-        "duration": 1
+        "duration": 1,
+        "payload": "number",
+        "amplitude": 10.0,
+        "period": 60.0
       }
     ],
     "transforms": [],

@@ -163,15 +163,23 @@ appears in the dropdown with the right fields, the right required markers, the
 right dropdowns for closed-value fields, and the right validation — without
 anyone touching the frontend. Field doc comments become the labels' tooltips.
 
-Three things the field types decide:
+Four things the field types decide:
 
 - a field with a closed set of values (`sum | avg | min | max`) is a dropdown,
   and starts blank rather than showing the first value it hasn't recorded;
-- a structured field — an input's `buffer`, which is `static | tumbling` with
-  different fields either way — is taken as literal JSON, because there is no
-  single control that edits it;
+- a field with fields of its own — a file output's `rotate` — is those fields,
+  indented under it;
+- a field that is a *choice* of shapes — an input's `buffer`, which is `static`
+  with a `size` or `tumbling` with a `window_seconds` — is the choice first and
+  then whichever fields it implies. Pick `tumbling` and the `size` box is
+  replaced by a `window_seconds` box; nothing you filled in for the other one is
+  sent;
 - an enum-shaped component (the `filter` transform) gets a `form` picker for its
-  `Numeric` / `String` variants, and its fields follow the choice.
+  `Numeric` / `String` variants, and its fields follow the choice — the same
+  idea one level up.
+
+Between them that is the whole config surface: there is no field anywhere that
+has to be filled in as raw JSON, and a test fails if a new one ever is.
 
 Validation is `frontend/src/form.rs`: pure, unit tested, and the same rules
 serde applies, so what it accepts the server accepts. It reports every problem
@@ -519,7 +527,10 @@ pipeline" above).
 rather than off the nats source on purpose: the dummy input needs nothing
 running, so it is the one pipeline in here that writes real output on a bare
 `just dev` with no `docker compose up`. Twenty messages a part at one a second,
-so you see it rotate while you watch. It is also why `just dev` and
+so you see it rotate while you watch. `heartbeat` emits its numeric payload — a
+sine wave, ±10 over a minute — so what lands on disk has a shape rather than
+being the same message a thousand times; `payload: text` swaps it for random
+sentences. It is also why `just dev` and
 `tests/graph.rs` both pass `--data-dir dev_data`, and why the sample can't be
 run out of the container image without the same flag — without it that pipeline
 refuses to build and takes the whole load down with it, which is the closed

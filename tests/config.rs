@@ -11,7 +11,7 @@
 
 use std::collections::BTreeSet;
 
-use kayak_core::config::{Config, InputConfig, InputKind, OutputKind, TransformKind};
+use kayak_core::config::{Config, DummyPayload, InputConfig, InputKind, OutputKind, TransformKind};
 use kayak_core::connections::{ConnectionKind, Connections};
 use schemars::schema_for;
 use serde_json::{Value, json};
@@ -27,7 +27,16 @@ fn only_input(config: &Config) -> &InputConfig {
 
 fn input_samples() -> Vec<(&'static str, Value)> {
     vec![
-        ("dummy", json!({"type": "dummy", "duration": 5})),
+        (
+            "dummy",
+            json!({
+                "type": "dummy",
+                "duration": 5,
+                "payload": "number",
+                "amplitude": 10.0,
+                "period": 30.0
+            }),
+        ),
         ("http", json!({"type": "http", "capacity": 256})),
         (
             "nats",
@@ -366,6 +375,39 @@ fn an_http_input_without_a_capacity_round_trips_bare() -> anyhow::Result<()> {
     let kind: InputKind = serde_json::from_value(bare.clone())?;
     assert!(matches!(kind, InputKind::Http(ref c) if c.capacity.is_none()));
     assert_eq!(serde_json::to_value(&kind)?, bare);
+    Ok(())
+}
+
+/// Every dummy field but `duration` is optional, and the configs written before
+/// they existed only have that one — so the bare form has to keep parsing, and
+/// keep coming back out bare rather than gaining three nulls.
+#[test]
+fn a_dummy_input_without_a_payload_round_trips_bare() -> anyhow::Result<()> {
+    let bare = json!({"type": "dummy", "duration": 1});
+    let kind: InputKind = serde_json::from_value(bare.clone())?;
+    assert!(
+        matches!(kind, InputKind::Dummy(ref c)
+            if c.payload.is_none() && c.amplitude.is_none() && c.period.is_none())
+    );
+    assert_eq!(serde_json::to_value(&kind)?, bare);
+    Ok(())
+}
+
+/// The two payload spellings are the wire format the UI's dropdown posts.
+#[test]
+fn dummy_payloads_are_snake_case() -> anyhow::Result<()> {
+    for (spelling, expected) in [("number", DummyPayload::Number), ("text", DummyPayload::Text)] {
+        let kind: InputKind =
+            serde_json::from_value(json!({"type": "dummy", "duration": 1, "payload": spelling}))?;
+        assert!(matches!(kind, InputKind::Dummy(ref c) if c.payload == Some(expected)));
+    }
+    assert!(
+        serde_json::from_value::<InputKind>(
+            json!({"type": "dummy", "duration": 1, "payload": "Number"})
+        )
+        .is_err(),
+        "payload spellings are snake_case only"
+    );
     Ok(())
 }
 

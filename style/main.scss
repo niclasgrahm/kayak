@@ -1407,6 +1407,24 @@ body {
     outline: none;
     border-color: var(--accent);
   }
+  // a nested control carries its own message, so it turns red itself rather
+  // than through the row it sits in
+  &.invalid {
+    border-color: var(--error);
+  }
+}
+
+// The fields *of* a field: a rotation's triggers, or whichever fields the
+// buffer kind that was just picked asks for. They sit in the control column of
+// the row that owns them, and the rule down the left is what says so.
+.form-nested {
+  border-left: 1px solid var(--border);
+  margin-top: 4px;
+  padding-left: 8px;
+
+  .form-row {
+    grid-template-columns: 45% 1fr;
+  }
 }
 
 .form-error {

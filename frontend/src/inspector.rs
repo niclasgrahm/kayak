@@ -207,7 +207,7 @@ mod tests {
 
     fn dummy_input() -> InputConfig {
         InputConfig {
-            kind: InputKind::Dummy(DummyConfig { duration: 5 }),
+            kind: InputKind::Dummy(DummyConfig { duration: 5, payload: None, amplitude: None, period: None }),
             buffer: None,
         }
     }
@@ -233,7 +233,7 @@ mod tests {
             inputs: vec![
                 dummy_input(),
                 InputConfig {
-                    kind: InputKind::Dummy(DummyConfig { duration: 9 }),
+                    kind: InputKind::Dummy(DummyConfig { duration: 9, payload: None, amplitude: None, period: None }),
                     buffer: None,
                 },
             ],

@@ -110,11 +110,40 @@ pub enum KafkaStartAt {
 
 /// Emits one generated message on a fixed interval — a heartbeat for testing a
 /// pipeline without a real source attached.
+///
+/// Every message carries a `value` and the `current_time` it was emitted at.
+/// What the `value` holds is the `payload` field's business: a number sampled
+/// from a sine wave, so a chart of it has a shape, or a random sentence, so a
+/// text transform has something to chew on.
 #[derive(Clone, Debug, Deserialize, Serialize, JsonSchema)]
 #[schemars(title = "dummy")]
 pub struct DummyConfig {
     /// seconds between messages
     pub duration: u64,
+    /// what each message's `value` holds: a `number` sampled from a sine wave,
+    /// or a random sentence as `text`. Defaults to `number`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub payload: Option<DummyPayload>,
+    /// peak of the sine wave — it swings between `-amplitude` and `+amplitude`.
+    /// Numeric payloads only; defaults to 1.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub amplitude: Option<f64>,
+    /// seconds for one full turn of the sine wave. Numeric payloads only;
+    /// defaults to 60. Sampling is by wall clock rather than by message count,
+    /// so the wave keeps its period whatever `duration` is.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub period: Option<f64>,
+}
+
+/// What a dummy input puts in each message's `value`.
+#[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, JsonSchema, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum DummyPayload {
+    /// a number sampled from a sine wave
+    #[default]
+    Number,
+    /// a random sentence
+    Text,
 }
 
 /// Accepts messages posted to this pipeline's own endpoint,
@@ -329,7 +358,34 @@ pub struct HttpTransformConfig {
     /// endpoint to send the batch to
     pub url: String,
     /// http method. Accepted but not honoured yet: every request is a POST.
-    pub verb: String,
+    pub verb: HttpVerb,
+}
+
+/// The http method an http transform sends with.
+///
+/// A closed set rather than a `String` because it is one: a request is made
+/// with one of these or it is not made at all, and typing the name of a method
+/// into a box is a way of finding that out one round trip later than necessary.
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, JsonSchema, PartialEq, Eq)]
+#[serde(rename_all = "UPPERCASE")]
+pub enum HttpVerb {
+    Get,
+    Post,
+    Put,
+    Patch,
+    Delete,
+}
+
+impl std::fmt::Display for HttpVerb {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Self::Get => "GET",
+            Self::Post => "POST",
+            Self::Put => "PUT",
+            Self::Patch => "PATCH",
+            Self::Delete => "DELETE",
+        })
+    }
 }
 #[derive(Clone, Debug, Deserialize, Serialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
