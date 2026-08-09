@@ -32,6 +32,7 @@ use crate::inspector;
 use crate::log;
 use crate::sidebar;
 use crate::sidebar::{Row, SidebarMode};
+use crate::stats;
 
 /// How hard the wheel zooms. Small, because the factor is exponential in the
 /// scroll distance.
@@ -106,9 +107,34 @@ pub enum SidebarTab {
 #[derive(Clone, Copy)]
 pub struct Sink {
     token: u64,
-    log: RwSignal<log::Log>,
-    paused: RwSignal<bool>,
-    skipped: RwSignal<usize>,
+    card: CardSink,
+}
+
+/// What a card offers the feed: where the events go, and whether it is looking.
+///
+/// A collapsed section is not fed. That is the point of the collapse — the card
+/// is a window on a stream, and a window nobody is at should cost what a closed
+/// one costs. What each section does when it is shut differs, though, and the
+/// difference is what it would otherwise get *wrong*:
+///
+/// - The **log** still takes everything except the row (`Log::skip`, the same
+///   call a paused log makes) and takes it *untracked*, so nothing renders. It
+///   is the rate window that this is for: a log opened onto a busy pipeline
+///   should read what the pipeline is doing rather than climb from zero over
+///   ten seconds.
+/// - The **chart** takes nothing at all, because a bar is a fact about a moment
+///   and there is no honest way to draw the ones that were not watched. It
+///   starts empty when it is opened, and fills from there.
+#[derive(Clone, Copy)]
+pub struct CardSink {
+    pub log: RwSignal<log::Log>,
+    /// Whether the log section is open. See [`CardSink`].
+    pub log_open: RwSignal<bool>,
+    pub paused: RwSignal<bool>,
+    pub skipped: RwSignal<usize>,
+    pub stats: RwSignal<stats::Stats>,
+    /// Whether the chart section is open. See [`CardSink`].
+    pub stats_open: RwSignal<bool>,
 }
 
 /// Where the `/events` feed is delivered.
@@ -153,14 +179,8 @@ impl Feed {
         }
     }
 
-    /// Register a card's log for the life of the component.
-    fn register(
-        self,
-        id: PipelineId,
-        log: RwSignal<log::Log>,
-        paused: RwSignal<bool>,
-        skipped: RwSignal<usize>,
-    ) {
+    /// Register a card's log and chart for the life of the component.
+    fn register(self, id: PipelineId, card: CardSink) {
         let token = self.next_token.try_update_value(|n| {
             *n += 1;
             *n
@@ -169,15 +189,7 @@ impl Feed {
             return;
         };
         self.sinks.update_value(|sinks| {
-            sinks.insert(
-                id.clone(),
-                Sink {
-                    token,
-                    log,
-                    paused,
-                    skipped,
-                },
-            );
+            sinks.insert(id.clone(), Sink { token, card });
         });
         on_cleanup(move || {
             self.sinks.update_value(|sinks| {
@@ -219,7 +231,29 @@ impl Feed {
             let Some(sink) = self.sinks.with_value(|sinks| sinks.get(id).copied()) else {
                 continue;
             };
-            if sink.paused.get_untracked() {
+            let sink = sink.card;
+
+            // The chart counts before the log does and independently of it: the
+            // two sections are collapsed separately, and a card showing only its
+            // throughput is a reasonable way to watch a pipeline.
+            if sink.stats_open.get_untracked() {
+                sink.stats.update(|stats| {
+                    for event in &batch {
+                        stats.record(event);
+                    }
+                });
+            }
+
+            if !sink.log_open.get_untracked() {
+                // Collapsed: the counters, none of the rows, and no
+                // notification — nothing this log shows is on screen. See
+                // [`CardSink`].
+                sink.log.update_untracked(|log| {
+                    for event in batch {
+                        log.skip(event);
+                    }
+                });
+            } else if sink.paused.get_untracked() {
                 let failures = batch.iter().filter(|e| e.is_error()).count();
                 sink.skipped.update(|n| *n = n.saturating_add(batch.len()));
                 // A paused log keeps no rows, so nothing it shows changes —
@@ -4551,6 +4585,127 @@ fn MessageLog(
     }
 }
 
+/// One of a card's three collapsible parts: a heading that toggles it, and the
+/// part itself when it is open.
+///
+/// The body is genuinely unmounted rather than hidden, which is what makes the
+/// collapse worth having: a shut log is not a two-hundred row list with
+/// `display: none` on it, and a shut chart runs no memo over the clock. What the
+/// feed does about it is the other half — see [`CardSink`].
+///
+/// `children` is a `ChildrenFn` because `<Show>` rebuilds them every time it
+/// opens; a section body therefore has to be buildable more than once, which is
+/// why the card stores its config rather than moving it in.
+#[component]
+fn CardSection(
+    /// What the heading says, and what the toggle announces.
+    name: &'static str,
+    /// Distinguishes the three in CSS — a resized card gives its spare height to
+    /// the log and to nothing else.
+    class: &'static str,
+    open: RwSignal<bool>,
+    children: ChildrenFn,
+) -> impl IntoView {
+    view! {
+        <div class=format!("card-section {class}") class:open=move || open.get()>
+            <button
+                class="section-head"
+                // the heading is inside the card, so a press on it must not
+                // reach the canvas' pan handler behind it
+                on:mousedown=move |ev| ev.stop_propagation()
+                on:click=move |_| open.update(|o| *o = !*o)
+                title=move || {
+                    if open.get() {
+                        format!("hide {name}")
+                    } else {
+                        format!("show {name}")
+                    }
+                }
+            >
+                <span class="chevron">{move || if open.get() { "▾" } else { "▸" }}</span>
+                <span class="section-name">{name}</span>
+            </button>
+            <Show when=move || open.get()>{children()}</Show>
+        </div>
+    }
+}
+
+/// A card's throughput: one bar pair per time unit, rolling right to left.
+///
+/// The whole chart is **two `<path>` elements**, one per series, and that is
+/// what makes it cheap enough to redraw on every card once a second: a frame is
+/// two attribute writes rather than a hundred and twenty elements reconciled.
+/// The `viewBox` is a fixed 100×100 at `preserveAspectRatio: none`, so a
+/// maximized card gets a wider chart rather than a scaled-up one.
+#[component]
+fn ThroughputChart(stats: RwSignal<stats::Stats>) -> impl IntoView {
+    let state = expect_context::<AppState>();
+
+    // Redrawn on the clock as well as on the events, which is what makes it
+    // *roll*: a pipeline that has stopped sends nothing, and a chart that only
+    // moved when something arrived would freeze with the last burst pinned to
+    // the right-hand edge. One memo, read three times below.
+    let bars = Memo::new(move |_| {
+        #[allow(clippy::cast_sign_loss, clippy::cast_possible_truncation)]
+        let now = state.now.get().max(0.0) as u64;
+        stats.with(|stats| stats.bars(now))
+    });
+    let peak = Memo::new(move |_| stats::Stats::peak(&bars.read()));
+    let paths = Memo::new(move |_| stats::bar_paths(&bars.read(), peak.get()));
+
+    view! {
+        <div class="chart">
+            <div class="chart-bar">
+                <span class="series in">"in"</span>
+                <span class="series out">"out"</span>
+                // The one number on the chart, and its whole scale — the bars
+                // are drawn against it. In the bar rather than in the plot
+                // because the bars fill from the right, so a corner label sits
+                // on top of the newest of them exactly when it is tallest.
+                <span class="peak" title="the tallest bar in the window">
+                    {move || {
+                        let peak = peak.get();
+                        (peak > 0).then(|| stats::compact(peak))
+                    }}
+                </span>
+                <span class="units">
+                    {stats::Unit::ALL
+                        .into_iter()
+                        .map(|unit| {
+                            view! {
+                                <button
+                                    class="chip"
+                                    class:active=move || stats.with(|s| s.unit() == unit)
+                                    title=unit.window_label()
+                                    on:click=move |_| stats.update(|s| s.set_unit(unit))
+                                >
+                                    {unit.label()}
+                                </button>
+                            }
+                        })
+                        .collect_view()}
+                </span>
+            </div>
+            <div class="chart-plot">
+                <svg
+                    class="chart-svg"
+                    viewBox="0 0 100 100"
+                    preserveAspectRatio="none"
+                    // Labelled rather than titled: `leptos_meta` claims `<title>`
+                    // for the document's, so an SVG one renames the browser tab.
+                    aria-label="messages in and out per time unit"
+                >
+                    <path class="in" d=move || paths.get().0 />
+                    <path class="out" d=move || paths.get().1 />
+                </svg>
+                <Show when=move || peak.get() == 0>
+                    <div class="empty">"waiting for messages…"</div>
+                </Show>
+            </div>
+        </div>
+    }
+}
+
 #[component]
 pub fn Card(pipeline_id: PipelineId, config: Config) -> impl IntoView {
     let state = expect_context::<AppState>();
@@ -4569,6 +4724,10 @@ pub fn Card(pipeline_id: PipelineId, config: Config) -> impl IntoView {
             .map(|section| section.kind)
             .collect(),
     });
+    // Stored rather than moved, because the config section is behind a `<Show>`
+    // and its children are rebuilt every time it is opened — the config of a
+    // running pipeline never changes, so this is the same one every time.
+    let config = StoredValue::new(config);
     let id = pipeline_id.clone();
 
     let maximized_id = pipeline_id.clone();
@@ -4585,11 +4744,45 @@ pub fn Card(pipeline_id: PipelineId, config: Config) -> impl IntoView {
     // How much went past while paused — the answer to "is it stuck, or am I
     // just not watching". Counted here for the same reason.
     let skipped = RwSignal::new(0_usize);
+    let stats = RwSignal::new(stats::Stats::default());
+
+    // Which of the three sections are open. In memory and only here: which part
+    // of a card someone is reading is a property of this browser tab, like
+    // `maximized` and unlike the arrangement — writing it to the layout file
+    // would commit one reader's habits to the repository.
+    //
+    // The log starts shut because it is the expensive one and the one you go
+    // looking for; the config and the chart are what a card is *for* at a
+    // glance.
+    let config_open = RwSignal::new(true);
+    let stats_open = RwSignal::new(true);
+    let log_open = RwSignal::new(false);
+
+    // A collapsed chart is not fed, so what it holds is a picture of a window
+    // with a hole in it — and a hole in a bar chart reads as an idle pipeline,
+    // which is the one thing it must never say by accident. Emptying it on the
+    // way down is what makes "this is what has happened since you opened it"
+    // true, and it gives the memory back for as long as nobody is looking.
+    Effect::new(move |_| {
+        if !stats_open.get() {
+            stats.update(stats::Stats::clear);
+        }
+    });
 
     // The card doesn't watch the feed; the feed writes to the card. That is the
     // difference between one map lookup per event and one effect per card per
     // event — see [`Feed`]. The registration lasts as long as the component.
-    state.feed.register(id, messages, paused, skipped);
+    state.feed.register(
+        id,
+        CardSink {
+            log: messages,
+            log_open,
+            paused,
+            skipped,
+            stats,
+            stats_open,
+        },
+    );
 
     // Report our rendered height back to the layout so the row below clears us.
     // Only on a real change: the layout writes positions, and a write here on
@@ -4764,8 +4957,15 @@ pub fn Card(pipeline_id: PipelineId, config: Config) -> impl IntoView {
                     {move || if is_maximized.get() { "⤡" } else { "⤢" }}
                 </button>
             </header>
-            <Inspector config=config />
-            <MessageLog messages filter names paused skipped />
+            <CardSection name="config" class="section-config" open=config_open>
+                <Inspector config=config.get_value() />
+            </CardSection>
+            <CardSection name="stats" class="section-stats" open=stats_open>
+                <ThroughputChart stats />
+            </CardSection>
+            <CardSection name="logs" class="section-logs" open=log_open>
+                <MessageLog messages filter names paused skipped />
+            </CardSection>
             // Downstream is *down*, so the handle for it sits on the bottom
             // edge — the face `sides_between` will route the new card's edge
             // out of. Left rather than centre because the log's "jump to

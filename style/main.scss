@@ -15,6 +15,12 @@
   --border: #14171c; // darker than fills — key Godot trait
   --accent: #699ce8; // Godot's selection blue
   --error: #e06c75; // failures in a card's log
+  // The two series on a card's throughput chart. Blue and amber rather than
+  // blue and green: they are read side by side at three pixels wide, where a
+  // hue difference is all there is to go on, and this pair survives the common
+  // colour-blindnesses that blue/green does not.
+  --stat-in: #699ce8;
+  --stat-out: #d8a657;
   --error-bg: #3a2226; // just enough tint to find one in a scrolling log
   --text: #cdced2;
   --text-dim: #85878c;
@@ -329,16 +335,23 @@ body {
   // whatever is left over, so making a card taller buys more log rather than
   // empty space under one.
   &.pinned {
-    > .inspector {
+    > .section-config {
       min-height: 0;
       overflow: hidden;
     }
 
     // the bar keeps its height and the tail takes the rest, so a taller card
-    // buys log rather than empty space under one
-    > .log {
+    // buys log rather than empty space under one. Only while the log is open:
+    // a collapsed section is a heading and nothing else, and stretching it
+    // would put the two below it at the bottom of an empty card.
+    > .section-logs.open {
       flex: 1;
       min-height: 0;
+
+      > .log {
+        flex: 1;
+        min-height: 0;
+      }
 
       .log-body {
         flex: 1;
@@ -530,6 +543,171 @@ body {
   font-style: italic;
   padding: 2px;
 }
+// ---------------------------------------------------------------------------
+// A card is three collapsible parts: config, stats, logs. The heading is the
+// control and also the rule between one part and the next, which is what keeps
+// a collapsed section down to a single line.
+// ---------------------------------------------------------------------------
+
+.card-section {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+
+  // On the heading rather than between the sections: the card's own title bar
+  // already draws a line under itself, and a second one under it would read as
+  // a border around nothing.
+  + .card-section > .section-head {
+    border-top: 1px solid var(--border);
+  }
+}
+
+.section-head {
+  appearance: none;
+  background: transparent;
+  border: none;
+  width: 100%;
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  padding: 3px 8px;
+  cursor: pointer;
+  color: var(--text-dim);
+  font: inherit;
+  font-size: 10px;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+  text-align: left;
+  user-select: none;
+
+  &:hover {
+    background: var(--bg-hover);
+    color: var(--text);
+  }
+
+  // fixed width so the label doesn't shift when the chevron turns
+  .chevron {
+    flex: none;
+    width: 9px;
+    font-size: 10px;
+    line-height: 1;
+  }
+}
+
+// ---------------------------------------------------------------------------
+// The throughput chart: one bar pair per time unit, rolling right to left.
+//
+// The whole plot is two `<path>`s in a 100×100 viewBox drawn at
+// `preserveAspectRatio: none`, so it stretches to the card rather than being
+// scaled — see the `ThroughputChart` component.
+// ---------------------------------------------------------------------------
+
+.chart {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  padding: 5px 8px 7px;
+}
+
+.chart-bar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 10px;
+  color: var(--text-dim);
+
+  // The legend is the only thing that says which bar is which, so it carries
+  // the colour itself rather than a key drawn somewhere else.
+  .series {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+
+    &::before {
+      content: "";
+      width: 6px;
+      height: 6px;
+      border-radius: 1px;
+    }
+    &.in::before {
+      background: var(--stat-in);
+    }
+    &.out::before {
+      background: var(--stat-out);
+    }
+  }
+
+  // The scale of the whole chart, so it reads as a readout rather than as a
+  // control: monospaced and dim, next to the chips but not one of them.
+  .peak {
+    margin-left: auto;
+    font-family: var(--font-mono);
+    font-variant-numeric: tabular-nums;
+  }
+
+  .units {
+    display: flex;
+    gap: 2px;
+
+    .chip {
+      appearance: none;
+      background: transparent;
+      border: 1px solid transparent;
+      border-radius: var(--radius);
+      color: var(--text-dim);
+      cursor: pointer;
+      font: inherit;
+      font-size: 10px;
+      padding: 0 4px;
+
+      &:hover {
+        background: var(--bg-hover);
+        color: var(--text);
+      }
+      &.active {
+        border-color: var(--accent);
+        color: var(--text);
+      }
+    }
+  }
+}
+
+.chart-plot {
+  position: relative;
+  height: 54px;
+  // the baseline the bars stand on. The only rule on the plot: a grid behind
+  // sixty bar pairs three pixels wide is noise, and the scale is one number in
+  // the corner instead.
+  border-bottom: 1px solid var(--border);
+
+  .chart-svg {
+    display: block;
+    width: 100%;
+    height: 100%;
+
+    path {
+      // no stroke: `preserveAspectRatio: none` scales one anyway, and the bars
+      // are thinner than a line would be
+      stroke: none;
+
+      &.in {
+        fill: var(--stat-in);
+      }
+      &.out {
+        fill: var(--stat-out);
+      }
+    }
+  }
+
+  .empty {
+    position: absolute;
+    inset: 0;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+  }
+}
+
 // The log at the foot of a card: a bar of controls over a scrolling tail.
 //
 // `position: relative` for the jump button, which is pinned to the bottom of
@@ -537,9 +715,7 @@ body {
 // from, and covering the config above it would be answering a question nobody
 // asked.
 .log {
-  // the log is a different thing from the config above it, and reads as one
-  // without a rule between them
-  border-top: 1px solid var(--border);
+  // no rule of its own: the section heading above it is the separator now
   position: relative;
   display: flex;
   flex-direction: column;

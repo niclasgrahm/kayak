@@ -526,6 +526,40 @@ next frame for a related reason: reading `scroll_height` forces a synchronous
 layout of a 200-row pane, and doing that inline on every update was worth about a
 quarter of the blocked time.
 
+### A card's three sections, and the throughput chart
+
+A card is `config` / `stats` / `logs`, each a `CardSection` whose body is behind
+a `<Show>` — genuinely unmounted, not hidden, which is the only version of
+collapsing worth the code. Open state is three `RwSignal<bool>` on the card and
+goes nowhere else: like `maximized` and unlike `arrangement`, it is a way of
+looking at a card, so the layout file never hears about it. Logs start shut.
+
+**A shut section is not fed, and the two shut differently** — `CardSink` carries
+the flags and `Feed::deliver` reads them. The log still takes `Log::skip`
+*untracked*, so the rate window is right the moment it is opened and nothing
+renders. The chart takes nothing **and is emptied on the way down**, because an
+unfed chart draws the gap as an idle pipeline; "since you opened it" is the only
+honest reading, and it is a promise the clearing effect in `Card` keeps. Don't
+"optimise" that into keeping the old bars.
+
+`frontend/src/stats.rs` is the pure half, tested like `log.rs`. Three things
+there are load-bearing. A bar counts `BatchPreview::counted()`, not `total` —
+the same reason the log's rate does, and a chart of the sampling rate would be
+worse than none. `bars(now)` is given the clock rather than reading the newest
+bucket, which is what makes the window *roll* when a pipeline stops; it ends at
+whichever of the two clocks is further on, since the timestamps are the server's
+and `now` is the browser's. And `outbound` sums every output component, so
+fan-out shows as more leaving than arriving — deliberate, and the thing that
+makes one output dying legible.
+
+`BARS` is 30 because a card is 18 grid cells wide; 60 turned each pair into a
+fan of hairlines, which loses the one comparison the chart is for. The plot is
+**two `<path>` elements** in a fixed 100×100 viewBox at `preserveAspectRatio:
+none` — a frame is two attribute writes rather than sixty elements reconciled,
+which is what lets every card redraw once a second. Keep it that way; a rect per
+bar is the version that doesn't scale. The `aria-label` on the `<svg>` is not a
+`<title>` child for the reason the edge grips give: `leptos_meta` owns `<title>`.
+
 The frontend has two routes behind `leptos_router` (`frontend/src/app.rs`): `/` is the pannable/zoomable canvas of pipeline "cards" fed by `ApiClient::list_pipelines()` plus the live event signal, and `/docs` is the generated reference — two tabs, components and HTTP API. `Navbar` is shared and reads `AppState` through `use_context` rather than `expect_context`, because only the canvas provides it.
 
 Of the older Askama templates, only `templates/index.html` and the dead `/ui` `index_handler` are left; both are slated for removal, and Askama goes with them.

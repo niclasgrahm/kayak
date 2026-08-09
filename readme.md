@@ -85,6 +85,8 @@ which input carried it.
 | click a name in the sidebar | glide the camera to centre that pipeline |
 | `flat` / `tree` in the sidebar header | switch between the pipelines in id order and the same set nested under the upstreams that feed them |
 | type in the sidebar's search box | narrow the list; in tree mode a match keeps the chain above it |
+| click a card's `config` / `stats` / `logs` heading | fold that part away, or bring it back — a shut part stops being fed |
+| `5s` / `1m` / `5m` on a card's chart | change the bar width, and so how far back the chart reaches |
 | `edit` in the navbar | switch out of read-only, revealing the controls below |
 | `+` in the sidebar header | open the "add pipeline" modal |
 | `×` on a sidebar row | delete that pipeline (click twice — the first click arms it) |
@@ -113,9 +115,50 @@ not — searching for a root would otherwise show the whole graph. Both modes an
 the filter are `frontend/src/sidebar.rs`, unit-tested away from the browser like
 `graph.rs`.
 
-Each card shows its config as a tabbed property list — inputs / transforms /
-outputs — over a live message log. The log carries failures as well as messages:
-a `UiEvent` is either a `batch` or an `error`, and an error is logged in red as
+A card is **three collapsible parts**: config, stats and logs, each with a
+heading that toggles it. Config and stats start open and the log starts shut —
+it is the expensive one and the one you go looking for. Which parts are open is
+a property of the browser tab, like maximizing a card and unlike arranging one:
+it isn't written to the layout file and doesn't survive a reload, because it is
+a way of looking at a card rather than a change to the graph.
+
+**A shut section is not fed.** The body is unmounted rather than hidden, so a
+shut log is not a two-hundred row list with `display: none` on it, and the feed
+stops writing to it — which is the point, since a canvas of nine cards is nine
+of everything. What each part does about it differs by what it would otherwise
+get wrong. A shut log still takes the counters and none of the rows, so opening
+one onto a busy pipeline reads what that pipeline is doing rather than climbing
+from zero over ten seconds. A shut chart takes nothing at all and is emptied on
+the way down: a bar is a fact about a moment, a gap in a bar chart reads as an
+idle pipeline, and there is no honest way to draw the moments nobody was
+watching. So the chart always says "since you opened this".
+
+The **stats** part is a rolling bar chart of the pipeline's throughput: one pair
+of bars per time unit, messages in against messages out, newest on the right and
+sliding left as time passes. The unit is `5s`, `1m` or `5m` and the window is
+thirty of them — two and a half minutes, half an hour, two and a half hours.
+Changing it starts the chart again, because minutes can't be cut back out of
+seconds. The one number on it is the tallest bar in the window, which is also
+the scale the bars are drawn against; there is no axis, since a grid behind
+thirty bar pairs on a 360px card is noise.
+
+Two things it counts deliberately. **Out is summed over every output** — each
+output gets every batch, so a pipeline with two of them shows twice as much
+leaving as arriving, and one of them dying is visible as the gap it is. And a
+bar counts what the *feed skipped* as well as what it carried: `/events` is
+sampled under load and every batch says how many passes were dropped to reach
+it, so counting only what arrives would draw the sampling rate rather than the
+pipeline. The counting is the browser's, though — it is fed by the same event
+stream the log is, so nothing is recorded while the tab is closed and none of it
+survives a reload. `frontend/src/stats.rs` is the bucketing and the bar
+geometry, pure and unit tested like `log.rs`; the chart itself is two `<path>`
+elements in a fixed viewBox, which is what makes it cheap enough to redraw on
+every card once a second.
+
+The **config** part is a tabbed property list — inputs / transforms / outputs —
+and the **logs** part is the live message log. The log carries failures as well
+as messages: a `UiEvent` is either a `batch` or an `error`, and an error is
+logged in red as
 `<stage> error: <cause>` on the card of the pipeline it happened in. That covers
 the three places the run loop tolerates a failure — a transform that threw, an
 output that couldn't emit, an input that died — and it's the same text the
