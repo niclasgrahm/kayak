@@ -13,6 +13,7 @@
 
 use crate::config::{InputConfig, InputKind, OutputKind, TransformKind};
 use crate::connections::ConnectionKind;
+use crate::metadata::MetaFieldDoc;
 use schemars::{JsonSchema, schema_for};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -152,6 +153,12 @@ pub struct ComponentDoc {
     /// Empty for all but the enum-shaped components; when it isn't, the fields
     /// live on the variants instead.
     pub variants: Vec<VariantDoc>,
+    /// What this input attaches to a message when its `envelope` is set —
+    /// empty for every family but [`Family::Input`], and declared in
+    /// [`crate::metadata`] rather than reflected, since a schema cannot know
+    /// what a nats subscription knows.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub metadata: Vec<MetaFieldDoc>,
 }
 
 impl ComponentDoc {
@@ -176,6 +183,10 @@ impl ComponentDoc {
                 .as_ref()
                 .is_some_and(|d| d.to_lowercase().contains(&query))
             || in_fields(&self.fields)
+            || self
+                .metadata
+                .iter()
+                .any(|m| m.name.to_lowercase().contains(&query))
             || self
                 .variants
                 .iter()
@@ -265,6 +276,11 @@ pub fn components_of(schema: &Value, family: Family) -> Vec<ComponentDoc> {
                 description: description_of(def),
                 fields: fields_of(schema, def),
                 variants: variants_of(schema, def),
+                metadata: if family == Family::Input {
+                    crate::metadata::for_input(kind).unwrap_or_default()
+                } else {
+                    Vec::new()
+                },
             })
         })
         .collect()
@@ -712,7 +728,9 @@ mod tests {
     fn required_fields_come_first_in_declaration_order() {
         assert_eq!(
             field_names(&component("nats")),
-            ["connection", "subject", "max_batch", "buffer"]
+            // `buffer` and `envelope` are `InputConfig`'s rather than the nats
+            // input's, and are appended after the kind's own fields
+            ["connection", "subject", "max_batch", "buffer", "envelope"]
         );
     }
 
@@ -767,6 +785,85 @@ mod tests {
                 input.kind
             );
         }
+    }
+
+    /// Metadata is *declared* in `crate::metadata` rather than reflected out of
+    /// the schema — a schema cannot know that a nats subscription knows the
+    /// subject. This is what makes the declaration compulsory: an input added
+    /// without an arm in `metadata::for_input` fails here rather than shipping
+    /// with an empty "metadata" section on `/docs`.
+    #[test]
+    fn every_input_declares_its_metadata() {
+        let inputs: Vec<ComponentDoc> = all_components()
+            .into_iter()
+            .filter(|c| c.family == Family::Input)
+            .collect();
+        assert!(inputs.len() > 1, "expected several input kinds");
+        for input in inputs {
+            assert!(
+                crate::metadata::for_input(&input.kind).is_some(),
+                "input '{}' hasn't declared what metadata it attaches — add an \
+                 arm to metadata::for_input, even if it is an empty one",
+                input.kind
+            );
+            // even an input with nothing of its own to say carries the common
+            // fields, so an empty list here means the arm above is a lie
+            for name in ["pipeline", "input", "received_at"] {
+                assert!(
+                    input.metadata.iter().any(|m| m.name == name),
+                    "input '{}' doesn't document the common '{name}' metadata field",
+                    input.kind
+                );
+            }
+        }
+    }
+
+    /// Only inputs have any: a transform or an output is not where a message
+    /// comes from.
+    #[test]
+    fn nothing_but_an_input_declares_metadata() {
+        for component in all_components() {
+            if component.family != Family::Input {
+                assert!(
+                    component.metadata.is_empty(),
+                    "{} '{}' declares metadata",
+                    component.family.label(),
+                    component.kind
+                );
+            }
+        }
+    }
+
+    /// `envelope` lives beside `buffer` on `InputConfig`, so the same rule
+    /// applies: every input accepts it and so every input documents it.
+    #[test]
+    fn every_input_documents_the_shared_envelope_option() {
+        for input in all_components()
+            .into_iter()
+            .filter(|c| c.family == Family::Input)
+        {
+            assert!(
+                input.fields.iter().any(|f| f.name == "envelope"),
+                "input '{}' doesn't document the envelope option",
+                input.kind
+            );
+        }
+    }
+
+
+    /// The envelope is a *choice of shapes*, so the modal has to offer the
+    /// choice and then the fields it implies — not a JSON box. Same walk the
+    /// `buffer` option gets, one family up.
+    #[test]
+    fn the_envelope_option_is_a_union_of_its_two_shapes() {
+        let nats = component("nats");
+        let envelope = field(&nats, "envelope");
+        let FieldType::Union(union) = &envelope.field_type else {
+            panic!("envelope is {:?}, not a union", envelope.field_type);
+        };
+        assert_eq!(union.tag, "type");
+        let names: Vec<&str> = union.variants.iter().map(|v| v.name.as_str()).collect();
+        assert_eq!(names, ["merge", "wrap"]);
     }
 
     /// The `filter` transform's fields depend on which filter it is, so they're

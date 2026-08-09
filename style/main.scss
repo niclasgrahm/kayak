@@ -1036,6 +1036,40 @@ body {
   }
 }
 
+// What an input attaches to a message, under the same furniture as the settings
+// table but with two columns rather than four: a metadata field has no type to
+// declare and is never optional — it is there whenever the envelope is.
+.doc-metadata {
+  margin: 0 10px 8px;
+  border-left: 1px solid var(--border);
+  padding-left: 10px;
+
+  .section-kind {
+    display: inline-block;
+    font-family: var(--font-mono);
+    text-transform: none;
+    letter-spacing: 0;
+  }
+
+  .doc-metadata-note {
+    margin: 2px 0 0;
+    font-size: 11px;
+    color: var(--text-dim);
+
+    code {
+      font-family: var(--font-mono);
+    }
+  }
+
+  .field-table {
+    padding: 4px 0 0;
+
+    .field {
+      grid-template-columns: 22% 1fr;
+    }
+  }
+}
+
 // ---------------------------------------------------------------------------
 // The HTTP reference — the second tab of /docs. It reuses the component
 // reference's furniture (.doc-card, .field-table) on purpose: the two answer
@@ -1311,6 +1345,83 @@ body {
   .property {
     grid-template-columns: 34% 1fr;
   }
+}
+
+// What one state bucket is holding. The connection card's furniture, because
+// the two are the same gesture — click a name in the sidebar, get its detail
+// beside it — but with a list of keys instead of one set of settings, so it is
+// wider and scrolls sooner.
+.state-card {
+  position: fixed;
+  left: 226px;
+  z-index: 10;
+  width: 320px;
+  background: var(--bg-panel);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  box-shadow: 0 4px 14px rgba(0, 0, 0, 0.45);
+  padding: 6px;
+  max-height: 70vh;
+  overflow-y: auto;
+
+  .state-card-name {
+    font-family: var(--font-mono);
+    font-size: 12px;
+    padding: 0 2px 5px;
+    margin-bottom: 5px;
+    border-bottom: 1px solid var(--border);
+  }
+
+  // one block per key, separated rather than boxed: a bucket is usually a
+  // handful of short entries and borders everywhere would be louder than the
+  // values
+  .state-entry + .state-entry {
+    margin-top: 6px;
+    padding-top: 6px;
+    border-top: 1px solid var(--border);
+  }
+
+  .state-key {
+    font-family: var(--font-mono);
+    font-size: 12px;
+    color: var(--accent);
+    padding: 0 2px 2px;
+
+    // a bucket-wide value has no key; the placeholder standing in for one is
+    // prose rather than a name, and shouldn't look like one
+    &.unkeyed {
+      font-family: inherit;
+      font-style: italic;
+      color: var(--text-dim);
+    }
+  }
+
+  .state-updated {
+    font-size: 10px;
+    color: var(--text-dim);
+    padding: 2px 2px 0;
+  }
+
+  .state-truncated {
+    margin-top: 6px;
+    padding-top: 6px;
+    border-top: 1px solid var(--border);
+    font-size: 10px;
+    color: var(--text-dim);
+    text-align: center;
+  }
+
+  .property {
+    grid-template-columns: 40% 1fr;
+  }
+}
+
+// How full a bucket is, at the end of its row — the one number that says
+// whether anything is happening in it at all.
+.bucket-keys {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  color: var(--text-dim);
 }
 
 .modal-backdrop {

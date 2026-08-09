@@ -54,6 +54,24 @@ async fn post_stream(app: &Router, config: &Value) -> anyhow::Result<(StatusCode
     send(app, req).await
 }
 
+fn get(uri: &str) -> Request<Body> {
+    // a builder that can't fail on a static uri; unwrapping is not allowed here
+    // and there is nothing to recover from either way
+    Request::builder()
+        .uri(uri)
+        .body(Body::empty())
+        .unwrap_or_else(|_| Request::new(Body::empty()))
+}
+
+fn post(uri: &str, body: &Value) -> Request<Body> {
+    Request::builder()
+        .method("POST")
+        .uri(uri)
+        .header(header::CONTENT_TYPE, "application/json")
+        .body(Body::from(serde_json::to_vec(body).unwrap_or_default()))
+        .unwrap_or_else(|_| Request::new(Body::empty()))
+}
+
 async fn get_pipelines(app: &Router) -> anyhow::Result<(StatusCode, Value)> {
     let req = Request::builder()
         .uri("/api/pipelines")
@@ -504,4 +522,96 @@ fn a_backlogged_pipeline_maps_onto_a_503() {
         err.into_response().status(),
         StatusCode::SERVICE_UNAVAILABLE
     );
+}
+
+/// A server with no buckets declared — which is every config that hasn't asked
+/// for them — reports none rather than failing.
+#[tokio::test]
+async fn a_server_with_no_state_buckets_lists_none() -> anyhow::Result<()> {
+    let app = app();
+    let (status, body) = send(&app, get("/api/state")).await?;
+
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body, json!([]));
+    Ok(())
+}
+
+/// Asking for a bucket nobody declared is a 404, and a JSON one — the router's
+/// own 404 has an empty body, and telling them apart is what the route-coverage
+/// test leans on.
+#[tokio::test]
+async fn an_undeclared_state_bucket_is_a_json_404() -> anyhow::Result<()> {
+    let app = app();
+    let (status, body) = send(&app, get("/api/state/nope")).await?;
+
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    assert!(
+        body.get("error").is_some(),
+        "expected an ApiError body, got {body}"
+    );
+    Ok(())
+}
+
+/// The buckets a config declares are reported with the bounds they were
+/// declared with, and fill up as pipelines remember things.
+#[tokio::test]
+async fn a_declared_bucket_is_listed_and_fills_as_it_is_written_to() -> anyhow::Result<()> {
+    let dir = tempfile::tempdir()?;
+    let path = dir.path().join("config.json");
+    std::fs::write(
+        &path,
+        serde_json::to_string(&json!({
+            "state": { "machines": { "max_keys": 50, "idle_timeout_secs": 900 } },
+            "pipelines": [{
+                "id": "feeder",
+                "state": { "bucket": "machines", "key": "machine_id" },
+                "inputs": [{ "type": "http" }],
+                "transforms": [{
+                    "type": "remember",
+                    "remember": [{ "field": "unit", "as": "unit_id" }]
+                }],
+                "outputs": []
+            }]
+        }))?,
+    )?;
+    let app = api_router(Arc::new(AppState::from_config(&path)?));
+
+    let (status, body) = send(&app, get("/api/state")).await?;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body[0]["name"], json!("machines"));
+    assert_eq!(body[0]["keys"], json!(0), "nothing has been remembered yet");
+    assert_eq!(body[0]["max_keys"], json!(50));
+    assert_eq!(body[0]["idle_timeout_secs"], json!(900));
+
+    // post something for the pipeline to remember
+    let (status, _) = send(
+        &app,
+        post(
+            "/api/pipelines/feeder/messages",
+            &json!([{ "machine_id": "m1", "unit": "u-7" }]),
+        ),
+    )
+    .await?;
+    assert_eq!(status, StatusCode::ACCEPTED);
+
+    // the post is accepted before the run loop has processed it, so wait for
+    // the bucket rather than assuming
+    let mut contents = Value::Null;
+    for _ in 0..50 {
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        let (status, body) = send(&app, get("/api/state/machines")).await?;
+        assert_eq!(status, StatusCode::OK);
+        if body["entries"].as_array().is_some_and(|e| !e.is_empty()) {
+            contents = body;
+            break;
+        }
+    }
+
+    assert_eq!(contents["name"], json!("machines"));
+    assert_eq!(contents["keys"], json!(1));
+    assert_eq!(contents["truncated"], json!(false));
+    assert_eq!(contents["entries"][0]["key"], json!("m1"));
+    assert_eq!(contents["entries"][0]["values"]["unit_id"], json!("u-7"));
+    assert!(contents["entries"][0]["updated_at"].is_string());
+    Ok(())
 }

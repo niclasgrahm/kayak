@@ -105,6 +105,11 @@ async fn delete_pipeline(app: &Router, id: &str) -> anyhow::Result<StatusCode> {
     Ok(send(app, req).await?.0)
 }
 
+async fn get(app: &Router, uri: &str) -> anyhow::Result<(StatusCode, Value)> {
+    let req = Request::builder().uri(uri).body(Body::empty())?;
+    send(app, req).await
+}
+
 async fn settings(app: &Router) -> anyhow::Result<Value> {
     let req = Request::builder()
         .uri("/api/settings")
@@ -134,6 +139,7 @@ async fn listed_ids(app: &Router) -> anyhow::Result<Vec<String>> {
 /// a restart would read it, so a `.yaml` file is checked as YAML.
 fn ids_in(path: &Path) -> anyhow::Result<Vec<String>> {
     Ok(kayak::persist::read(path)?
+        .pipelines
         .into_iter()
         .map(|c| c.id.unwrap_or_default())
         .collect())
@@ -873,5 +879,153 @@ async fn reverting_picks_up_changes_made_to_the_file() -> anyhow::Result<()> {
     revert(&app).await?;
 
     assert_eq!(listed_ids(&app).await?, ["hand-added", "original"]);
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// state buckets
+// ---------------------------------------------------------------------------
+
+/// The buckets are part of the config file, so a save writes them and a reload
+/// gets them back. This is also what pins the *document* spelling round-tripping
+/// through the two formats.
+#[tokio::test]
+async fn declared_buckets_survive_a_save_and_a_reload() -> anyhow::Result<()> {
+    let dir = tempfile::tempdir()?;
+    let path = dir.path().join("config.json");
+    std::fs::write(
+        &path,
+        serde_json::to_string(&json!({
+            "state": { "machines": { "max_keys": 7 } },
+            "pipelines": [idle_config("p1")]
+        }))?,
+    )?;
+    let app = app_from(&path)?;
+
+    let (status, buckets) = get(&app, "/api/state").await?;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(buckets[0]["name"], json!("machines"));
+    assert_eq!(buckets[0]["max_keys"], json!(7));
+
+    // save under a new name and load *that* — the buckets have to make the
+    // round trip through the writer, not just the reader
+    let (status, _) = save_as(&app, "again.json").await?;
+    assert_eq!(status, StatusCode::OK);
+
+    let reloaded = kayak::persist::read(&dir.path().join("again.json"))?;
+    assert_eq!(reloaded.state.get("machines").map(kayak_core::StateBucketConfig::max_keys), Some(7));
+    Ok(())
+}
+
+/// A config with no buckets is written as a bare array, exactly as it always
+/// was — adding this feature must not rewrite every existing file into a new
+/// shape the moment it is saved.
+#[tokio::test]
+async fn a_config_with_no_buckets_is_still_written_as_a_bare_array() -> anyhow::Result<()> {
+    let dir = tempfile::tempdir()?;
+    let path = seeded(&dir, &[idle_config("p1")])?;
+    let app = app_from(&path)?;
+
+    save_as(&app, "out.json").await?;
+    let written = std::fs::read_to_string(dir.path().join("out.json"))?;
+
+    assert!(
+        written.trim_start().starts_with('['),
+        "a config with no buckets grew a document wrapper:\n{written}"
+    );
+    Ok(())
+}
+
+/// **The rule that makes global state usable.** A revert rebuilds every
+/// pipeline in the graph, and emptying the buckets while doing it would mean an
+/// edit to an unrelated pipeline costs an hour of accumulated state.
+#[tokio::test]
+async fn a_revert_keeps_what_an_unchanged_bucket_held() -> anyhow::Result<()> {
+    let dir = tempfile::tempdir()?;
+    let path = dir.path().join("config.json");
+    let config = json!({
+        "state": { "machines": { "max_keys": 50 } },
+        "pipelines": [{
+            "id": "feeder",
+            "state": { "bucket": "machines", "key": "machine_id" },
+            "inputs": [{ "type": "http" }],
+            "transforms": [{
+                "type": "remember",
+                "remember": [{ "field": "unit", "as": "unit_id" }]
+            }],
+            "outputs": []
+        }]
+    });
+    std::fs::write(&path, serde_json::to_string(&config)?)?;
+    let app = app_from(&path)?;
+
+    post(
+        &app,
+        "/api/pipelines/feeder/messages",
+        &json!([{ "machine_id": "m1", "unit": "u-7" }]),
+    )
+    .await?;
+    for _ in 0..50 {
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        if get(&app, "/api/state/machines").await?.1["keys"] == json!(1) {
+            break;
+        }
+    }
+    assert_eq!(get(&app, "/api/state/machines").await?.1["keys"], json!(1));
+
+    assert_eq!(revert(&app).await?, StatusCode::NO_CONTENT);
+
+    let (_, contents) = get(&app, "/api/state/machines").await?;
+    assert_eq!(
+        contents["entries"][0]["values"]["unit_id"],
+        json!("u-7"),
+        "a revert emptied a bucket whose declaration had not changed"
+    );
+    Ok(())
+}
+
+/// ...but a bucket whose *bounds* moved is a different bucket: what it holds
+/// may not satisfy the new limits, so it starts again.
+#[tokio::test]
+async fn a_revert_empties_a_bucket_whose_declaration_changed() -> anyhow::Result<()> {
+    let dir = tempfile::tempdir()?;
+    let path = dir.path().join("config.json");
+    let config = |max_keys: u32| {
+        json!({
+            "state": { "machines": { "max_keys": max_keys } },
+            "pipelines": [{
+                "id": "feeder",
+                "state": { "bucket": "machines", "key": "machine_id" },
+                "inputs": [{ "type": "http" }],
+                "transforms": [{
+                    "type": "remember",
+                    "remember": [{ "field": "unit", "as": "unit_id" }]
+                }],
+                "outputs": []
+            }]
+        })
+    };
+    std::fs::write(&path, serde_json::to_string(&config(50))?)?;
+    let app = app_from(&path)?;
+
+    post(
+        &app,
+        "/api/pipelines/feeder/messages",
+        &json!([{ "machine_id": "m1", "unit": "u-7" }]),
+    )
+    .await?;
+    for _ in 0..50 {
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        if get(&app, "/api/state/machines").await?.1["keys"] == json!(1) {
+            break;
+        }
+    }
+
+    // the file changes under the server, which is what a revert is for
+    std::fs::write(&path, serde_json::to_string(&config(10))?)?;
+    assert_eq!(revert(&app).await?, StatusCode::NO_CONTENT);
+
+    let (_, contents) = get(&app, "/api/state/machines").await?;
+    assert_eq!(contents["keys"], json!(0));
     Ok(())
 }

@@ -469,6 +469,197 @@ over them. Selecting drops the losing futures on every iteration, and an input
 that waits on a timer would have its timer restarted every time a chattier
 sibling produced — starving it forever. There's a test for exactly that.
 
+## message metadata
+
+An input knows things about a message that the message doesn't say: the nats
+subject it arrived on, the topic, partition and offset of a kafka record, the
+method it was posted with. `envelope` on any input is what attaches that to the
+message, and the exact fields each input attaches are listed under it on
+`/docs` — declared in `kayak-core/src/metadata.rs`, so an input added without
+saying what it attaches fails a test rather than shipping an empty section.
+
+```json
+{ "type": "nats", "connection": "opc", "subject": "*.temperature",
+  "envelope": { "type": "wrap", "payload": "value", "meta": "_meta" } }
+```
+
+**Metadata is attached in band** — as ordinary fields on the JSON, not as a
+sidecar travelling beside it. That is the whole design decision, and it is
+deliberately not what Benthos does. The reason is the transforms that change
+cardinality: a reducer collapses five hundred messages into one, a splitter
+divides one into several, the http transform replaces the batch with a service's
+reply. Out of band, every one of them has to answer "whose metadata comes out?"
+and there is no good general answer — Benthos picks the first message's, which
+is arbitrary. In band the question doesn't exist. Metadata is data, so
+
+```json
+{ "type": "reducer", "group_by": ["_meta.subject"],
+  "aggregations": [{ "function": "avg", "field": "value", "as": "mean" }] }
+```
+
+is a `group_by` like any other, and nothing in the reducer knows that metadata
+is a thing. That is also what the machine-data case needs: subscribe to
+`*.temperature` and the machine's name exists *only* in the subject.
+
+Two shapes, because a payload is not always an object:
+
+- **`merge`** adds the metadata as one more field. The payload's own fields stay
+  exactly where they were, so nothing downstream of an input that grows an
+  envelope has to change. A payload that isn't a JSON object is skipped with a
+  warning — there is nowhere to put the field — the same way a non-JSON payload
+  already is.
+- **`wrap`** puts the whole payload under a field of its own beside the
+  metadata: `{"value": 1, "_meta": {…}}`. Works whatever the payload is, which
+  is what a source of bare readings needs. The cost is that field references
+  downstream now go through the payload field — `value.temperature` rather than
+  `temperature` — and that is exactly why both shapes exist rather than one.
+
+**Leaving `envelope` out is the default and means what it always meant**: the
+message is passed on as it arrived, byte for byte. Attaching metadata changes
+the shape of every message from that input, which is not something to do to a
+running config without being asked — the same promise `max_batch` makes about
+batching.
+
+What it costs, said plainly: metadata reaches your outputs (a nats publish or an
+ndjson file carries `_meta` unless something removes it) and the key can collide
+with one the payload already uses. Both are yours to decide, which is what the
+`meta` and `payload` field names are for.
+
+A `pipeline` input usually wants no envelope at all: being in band, whatever the
+upstream attached is already on the message and arrives with it. Setting one
+there says something about *that hop* rather than replacing it, and a `wrap`
+would nest the upstream's message inside a new one.
+
+The `http` input's headers are the one place this is restricted. Only
+`content-type`, `user-agent`, `x-request-id`, `x-correlation-id` and
+`traceparent` are passed on; everything else is dropped. It is an allow-list
+rather than a deny-list or an `x-` prefix rule on purpose — the prefix rule is
+exactly the one that passes `x-api-key` through, and a credential written into a
+file or an object store is a leak that outlives the request by years.
+
+### field paths
+
+Everything that addresses a field by name — `filter`, `reduce`'s `group_by` and
+its aggregations — takes a dotted path, which is what makes `_meta.subject`
+reachable and, incidentally, nested payloads reachable at all.
+
+**An exact key wins over a path.** `a.b` is the value under the literal key
+`"a.b"` if the message has one, and only otherwise the `b` inside the `a`. That
+ordering is what makes paths a compatible addition: a source whose field names
+contain dots keeps working exactly as it did, and no config has to learn an
+escaping rule to say what it already said.
+
+A reducer grouping by a path writes the group out under the path's **last
+segment**: `group_by: ["_meta.machine_id"]` emits `machine_id`, because that is
+the field the next pipeline wants and it shouldn't have to spell the previous
+one's input shape. Two paths that would land on the same leaf are refused when
+the pipeline is built, like every other collision there.
+
+## state
+
+A transform sees one batch. `state` is what lets a pipeline carry something
+from one batch to the next — the unit currently being produced, the recipe in
+force, the last reading from each machine — so a fast stream can be attributed
+to a slow-moving fact that arrived on a different message.
+
+Buckets are **global and named**, declared once at the top of the config and
+referred to by the pipelines that use them:
+
+```yaml
+state:
+  machine_state:
+    max_keys: 5000
+    idle_timeout_secs: 900
+
+pipelines:
+  - id: machine_cycles
+    state:
+      bucket: machine_state
+      key: _meta.machine_id
+    inputs: [...]
+    transforms:
+      - type: remember
+        when:
+          - type: string
+            field: _meta.signal
+            operator: EqualTo
+            value: unit_id
+        remember:
+          - { field: value, as: unit_id }
+      - type: recall
+        recall: [unit_id]
+        on_missing: skip
+    outputs: [...]
+```
+
+Global rather than per-pipeline because of the shape one step past the example
+above: a `recipes` pipeline consumes the recipe stream and remembers the current
+recipe per machine, and six unrelated pipelines want to stamp it onto their
+output. Per-pipeline state has no answer to that but six copies of one fact and
+six edges that exist only to carry it. Named-and-global is also the shape
+connections already have, down to the "declared in a file, referred to by name"
+part.
+
+**The one rule that isn't enforced, and matters.** Two pipelines sharing a
+bucket are two run loops with no ordering between them: a reader can see the
+value from before or after a given write depending on nothing it can observe. So
+*ordering-sensitive correlation belongs in one pipeline; sharing is for state
+whose value doesn't change on the timescale of a message*. A recipe that updates
+hourly is safe to share. A unit id that changes every cycle is not — put the
+`remember` and the `recall` in the same transform chain, where there is one
+stream and one order.
+
+`remember` and `recall` are two transforms rather than one because **where they
+sit in the chain is the semantics**: recall after remember means a message
+carrying a new unit id comes out carrying it, and before means it comes out
+carrying the previous one.
+
+- `remember` writes matching messages into the bucket and **passes the batch on
+  unchanged** — it is a tap, not a filter. `when` is a list of conditions, all
+  of which must match; leave it out to remember from everything.
+- `recall` writes the named values onto every message as top-level fields, so a
+  reducer downstream can `group_by` them without knowing where they came from.
+  `on_missing` defaults to `skip`: every stateful pipeline has a warm-up in
+  which nothing has been remembered yet, and passing those messages on
+  unattributed makes a reducer lump them into one bogus group. `null` passes
+  them with the gap showing; `error` fails the batch.
+
+The `key` is a field path on the *pipeline*, not on the bucket, because it is a
+property of that stream — the same machine id arrives as `_meta.machine_id` from
+a nats subscription and as `machine_id` after a reducer has flattened it. The
+cost is that two pipelines sharing a bucket can key it differently with nothing
+to catch them. Leave `key` out for one bucket-wide value.
+
+**Every bucket is bounded and there is no way to ask for an unbounded one.**
+`max_keys` defaults to 10000 and evicts the least recently written key past it;
+`idle_timeout_secs` forgets a key that long after its last write. A keyed store
+with no limit is a leak with a week-long fuse, so the only question is what the
+limits are.
+
+**It is in memory, and it does not survive a restart.** That is a decision
+rather than a stage: the store is touched on every message, which rules out a
+network round trip; and durability without checkpointed *input positions* would
+be worse than none. A core nats subscription has no replay at all, so restoring
+a half-finished piece of work whose remaining messages were never delivered
+produces an answer that is wrong in a way nothing downstream can see. Dropping
+it is the honest answer. A durable backend is a later swap behind the same
+shape, and it starts at the input rather than at the store.
+
+It **does** survive a revert, which is the case that actually bites: reloading
+the config rebuilds every pipeline, and an edit to an unrelated pipeline
+shouldn't cost an hour of accumulated state. A bucket whose *declaration*
+changed is a different bucket and starts empty.
+
+The `state` tab in the sidebar lists the buckets and how full each one is;
+clicking one opens a card beside it with the keys, their values and when each
+was last written. It polls once a second while that tab is open and costs
+nothing when it isn't — through a plain signal rather than a resource, because
+the page has one suspense boundary around the whole canvas and a polled resource
+under it rebuilds the canvas on every tick. It is read-only, and that is the whole family: buckets
+are part of the graph's logic, so they live in the config file and there is
+nothing here to write. `GET /api/state` and `GET /api/state/{bucket}` are the
+same thing over HTTP.
+
 ## posting into a pipeline
 
 Every other input reaches out to something — a broker, a timer, another
@@ -521,7 +712,7 @@ the run loop's.
 
 | | |
 | --- | --- |
-| `config.json` | the worked example: every component kind |
+| `config.json` | the worked example: every component kind, and the state buckets |
 | `config.yaml` | the same graph, spelled as YAML |
 | `config.connections.{json,yaml}` | the systems those pipelines name |
 | `config.layout.json` | where the cards sit on the canvas |
@@ -536,6 +727,34 @@ fails `just test` rather than rotting quietly.
 `ingest` is the http input's sample and needs nothing running either — it is a
 root pipeline with no source, waiting to be posted to (see "posting into a
 pipeline" above).
+
+**Three of the roots attach metadata, and the choice of shape is the point.**
+`sensors` and `kafka_events` use `merge`, so their downstream pipelines — which
+filter and group on `value`, `sensor`, `ts` and `latency_ms` — carry on reading
+exactly the fields they always did and gain a `_meta` beside them. `ingest` uses
+`wrap`, because it is the one input whose payload isn't ours to assume: anything
+can be posted to an endpoint, including a bare number, and `merge` has nowhere
+to attach a field on one. Its payload lands under `body`.
+
+`heartbeat` deliberately has **no** envelope — the default is worth seeing in
+the sample too, and it is the pipeline whose output is written to disk and to a
+bucket, where the un-enveloped shape is the easier one to read.
+
+`sensors_10s_avg` then groups by `["sensor", "_meta.subject"]`, which is the
+whole in-band argument in one line: the reducer needs nothing new to reach the
+subject, and the grouped path comes out as `subject`. It is paired with the
+`sensors` envelope — a test fails if that envelope is ever dropped, since
+`on_missing: skip` would leave that reducer silently emitting nothing.
+
+`heartbeat_peaks` is the state sample, and it hangs off `heartbeat` for the
+reason `heartbeat_to_disk` does — it fills a bucket on a bare `just dev` with
+nothing else running. It remembers the last heartbeat above 8 and stamps every
+message with it, which is `when`, `remember` and `recall` in one four-line
+chain; `on_missing: null` is what makes the messages before the first peak
+readable rather than dropped. Its bucket is `max_keys: 1` because the pipeline
+declares no `key` — one bucket-wide value, shown in the card as "the whole
+bucket". `sensor_state` beside it is the keyed shape, one entry per sensor, and
+needs `docker compose up`.
 
 `heartbeat_to_disk` is the file output's sample, and it hangs off `heartbeat`
 rather than off the nats source on purpose: the dummy input needs nothing
@@ -975,7 +1194,10 @@ other spelling.
       only used by the dead `/ui` index handler, which is all that's left)
 - [ ] add time based buffer for the transform buffer
 - [ ] make outputs optional (for example, when a parent pipeline is only used to push data to children)
-- [ ] think about necessary metadata to add to each message
+- [x] think about necessary metadata to add to each message
+      (done 2026-08-08: `envelope` on any input, attached in band. See "message
+      metadata" above — and note the field paths that came with it, which make
+      nested payloads reachable for the first time.)
 - [x] deal with all unwraps -- this will bite us in the ass soon otherwise
       (done 2026-08-03: no unwrap/expect left in src/; see "known issues" below
       for the things that pass turned up but didn't change)
@@ -987,6 +1209,78 @@ other spelling.
       and `output` keys are gone. See "pipelines" below.)
 - [ ] new transform (i guess?): wait_for_condition (should it be called buffer_until_condition? or perhaps both are needed?)
       for example, we need to wait for x: a and z: b. for this, we also need the multiple input thing
+      (2026-08-09: the state half of this landed — named buckets plus `remember`
+      and `recall`, see "state" above. What is left is the *session window*, now
+      tracked with the rest of the machine-cycle work under "the machine-cycle
+      scenario" below.)
+
+## the machine-cycle scenario
+
+The worked case this is being built towards, kept here so the remaining pieces
+are a list rather than a conversation to re-derive. An injection-moulding
+machine publishes to nats — `<machine>.cycle_status` (1 opens a cycle, 0 closes
+it), `<machine>.unit_id`, `<machine>.recipe`, `<machine>.temperature` and
+`<machine>.pressure` at 2 Hz. Per cycle we want the average pressure per unit on
+one subject, and every temperature reading of that cycle posted as one array to
+an ML service with the answer published on another.
+
+The target graph is four pipelines: one reads `*.*` and attributes the readings,
+one cuts them into cycles, and two reduce each cycle. **One wildcard
+subscription rather than five inputs is load-bearing** — merged inputs have no
+ordering between them, so a `cycle_status: 0` could overtake the last reading of
+its own cycle, while a single subscription is delivered in publish order.
+
+Already in: the envelope (the subject is where `machine_id` lives), field paths,
+and state buckets with `remember`/`recall` (attributing readings to the current
+unit and recipe).
+
+Left to build, roughly in dependency order:
+
+- [ ] **the session window transform** — the heart of it. Keyed by the
+      pipeline's `state.key`, opened and closed by `Condition` lists (the same
+      type `remember` already takes), emitting one batch per completed cycle so
+      that a downstream `reducer` over the whole batch *is* a per-cycle
+      aggregation. Needs `max_messages` so a cycle that never closes is capped
+      rather than fatal, and a `linger` on close — a small grace period before
+      emitting — which is the cheap answer to the boundary race. Decide whether
+      the boundary messages are included (I'd say yes: they're data).
+- [ ] **a tick for transforms** — the window's idle-timeout needs one, and so
+      does the "idle file output holds its part open" issue below. Transforms
+      are currently only ever driven by an arriving batch, which is also why
+      bucket eviction is lazy. One mechanism, three users.
+- [ ] **`subject_fields` on the nats input** — name the subject's tokens so
+      `machine_7.temperature` arrives as `_meta.machine_id` and `_meta.signal`.
+      Without it a wildcard subscription is unusable, since nothing can address
+      part of a subject. Small, and unblocks keying by machine.
+- [ ] **request shaping and response merging on the http transform** — it
+      currently posts the batch verbatim and *replaces* it with the reply, so
+      the ML call can neither send `{machine_id, unit_id, temperatures: [...]}`
+      nor keep the identifiers it needs to publish the answer under. Wants
+      headers/auth, a timeout and a retry too, and while in there: `verb` is
+      accepted and ignored (see known issues).
+- [ ] **templated output subjects and topics** — `kayak.{machine_id}.avg_pressure`.
+      Without it every machine's results land on one subject with the id only in
+      the body, which throws away the routing nats is for.
+- [ ] **compound conditions on `filter`** — `remember` already takes a list of
+      `Condition` meaning "all of these", while `filter` still takes a single
+      externally-tagged `FilterKind`. Moving `filter` onto the same type would
+      make one spelling of "a test on a message" and let a filter match on two
+      fields, which the cycle pipelines want. A wire-format change to `filter`.
+- [ ] **rename `RecallMissingPolicy::Null`** — probably to `keep`, reading
+      against `skip`. Bare `on_missing: null` in YAML parses as a null and fails
+      with `invalid type: unit value`, which points nowhere near the problem;
+      the value has to be quoted. Kayak's own writer quotes it, so this only
+      bites hand-written config — but it shouldn't bite at all.
+- [ ] **a `map` transform** (set / rename / copy / drop a field) — no way to
+      reshape a message today. Mostly wanted for things the items above cover
+      specifically, so it is last; worth doing if a third case turns up.
+
+Not planned, and worth knowing why: **event-time windows with watermarks.** The
+linger above is a fudge over arrival order. Doing it properly means reading the
+OPC timestamps and holding windows open against a watermark, which is a much
+larger concept — and the durability argument under "state" says the same thing:
+correctness across restarts starts at the input, with checkpointed positions,
+not at the pieces downstream of it.
 
 ## known issues
 

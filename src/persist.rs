@@ -31,6 +31,7 @@ use std::path::Path;
 
 use anyhow::Context;
 use kayak_core::config::Config;
+use kayak_core::state::ConfigFile;
 use kayak_core::{ConfigFormat, PipelineId};
 
 /// The pipelines in an order the config file can be replayed in: every pipeline
@@ -92,27 +93,30 @@ pub fn ordered(configs: Vec<Config>) -> Vec<Config> {
 /// read and diffed by a human rather than only by `serde`. Both formats are
 /// deterministic in the same way, which is what [`crate::state`] leans on to
 /// answer "are there unsaved changes" by comparing rendered bytes.
-pub fn render(configs: Vec<Config>, format: ConfigFormat) -> anyhow::Result<String> {
-    let ordered = ordered(configs);
+pub fn render(file: ConfigFile, format: ConfigFormat) -> anyhow::Result<String> {
+    // the pipelines are ordered; the buckets order themselves, being a BTreeMap
+    let file = ConfigFile::new(file.state, ordered(file.pipelines));
     match format {
         ConfigFormat::Json => {
-            let mut json = serde_json::to_string_pretty(&ordered)
-                .context("failed to serialize the pipelines")?;
+            let mut json =
+                serde_json::to_string_pretty(&file).context("failed to serialize the config")?;
             json.push('\n');
             Ok(json)
         }
         // serde_norway already ends its output in a newline
         ConfigFormat::Yaml => {
-            serde_norway::to_string(&ordered).context("failed to serialize the pipelines")
+            serde_norway::to_string(&file).context("failed to serialize the config")
         }
     }
 }
 
-/// The pipelines in a config file's contents.
+/// A config file's contents — the buckets and the pipelines.
 ///
 /// The counterpart of [`render`], and the only place either format is parsed —
-/// everything past here has a `Vec<Config>` and no idea how it was spelled.
-pub fn parse(contents: &str, format: ConfigFormat) -> anyhow::Result<Vec<Config>> {
+/// everything past here has a [`ConfigFile`] and no idea how it was spelled.
+/// It is also the only place the two *spellings* of a config file are told
+/// apart; see [`ConfigFile`].
+pub fn parse(contents: &str, format: ConfigFormat) -> anyhow::Result<ConfigFile> {
     match format {
         ConfigFormat::Json => serde_json::from_str(contents).map_err(Into::into),
         ConfigFormat::Yaml => serde_norway::from_str(contents).map_err(Into::into),
@@ -120,7 +124,7 @@ pub fn parse(contents: &str, format: ConfigFormat) -> anyhow::Result<Vec<Config>
 }
 
 /// Read and parse the config file at `path`, in the format its name implies.
-pub fn read(path: &Path) -> anyhow::Result<Vec<Config>> {
+pub fn read(path: &Path) -> anyhow::Result<ConfigFile> {
     let contents = std::fs::read_to_string(path)
         .with_context(|| format!("failed to open config file {}", path.display()))?;
     let format = format_of(path);
@@ -144,8 +148,8 @@ pub fn format_of(path: &Path) -> ConfigFormat {
 /// the previous file untouched rather than a half-written one. The temporary
 /// sits next to the target because a rename across filesystems isn't atomic
 /// (and on some platforms isn't allowed at all).
-pub fn write(path: &Path, configs: Vec<Config>, format: ConfigFormat) -> anyhow::Result<()> {
-    let contents = render(configs, format)?;
+pub fn write(path: &Path, file: ConfigFile, format: ConfigFormat) -> anyhow::Result<()> {
+    let contents = render(file, format)?;
     let temporary = temporary_path(path);
     std::fs::write(&temporary, contents)
         .with_context(|| format!("failed to write {}", temporary.display()))?;
@@ -231,6 +235,18 @@ mod tests {
         DummyConfig, InputConfig, InputKind, PipelineConfig, TransformConfig,
     };
 
+    /// Most of these tests are about the *pipelines* — the order they come out
+    /// in, the bytes they render to — and predate buckets entirely. Wrapping
+    /// here rather than at every call site keeps them saying what they are
+    /// about; the bucket half of a config file has its own tests below.
+    fn render(configs: Vec<Config>, format: ConfigFormat) -> anyhow::Result<String> {
+        super::render(ConfigFile::of_pipelines(configs), format)
+    }
+
+    fn write(path: &Path, configs: Vec<Config>, format: ConfigFormat) -> anyhow::Result<()> {
+        super::write(path, ConfigFile::of_pipelines(configs), format)
+    }
+
     fn pipeline(id: &str, upstreams: &[&str]) -> Config {
         let mut inputs: Vec<InputConfig> = upstreams
             .iter()
@@ -239,12 +255,14 @@ mod tests {
                     upstream: (*up).to_string(),
                 }),
                 buffer: None,
+                envelope: None,
             })
             .collect();
         if inputs.is_empty() {
             inputs.push(InputConfig {
                 kind: InputKind::Dummy(DummyConfig { duration: 1, payload: None, amplitude: None, period: None }),
                 buffer: None,
+                envelope: None,
             });
         }
         Config {
@@ -252,6 +270,7 @@ mod tests {
             inputs,
             transforms: Vec::<TransformConfig>::new(),
             outputs: Vec::new(),
+            state: None,
         }
     }
 
@@ -383,7 +402,7 @@ mod tests {
         assert!(rendered.ends_with('\n'), "got: {rendered}");
 
         let parsed = parse(&rendered, ConfigFormat::Yaml)?;
-        assert_eq!(ids(&parsed), ["root", "child"]);
+        assert_eq!(ids(&parsed.pipelines), ["root", "child"]);
         Ok(())
     }
 
@@ -412,7 +431,7 @@ mod tests {
             let path = dir.path().join(name);
             assert_eq!(format_of(&path), format, "{name}");
             std::fs::write(&path, render(vec![pipeline("a", &[])], format)?)?;
-            assert_eq!(ids(&read(&path)?), ["a"], "{name}");
+            assert_eq!(ids(&read(&path)?.pipelines), ["a"], "{name}");
         }
 
         let broken = dir.path().join("broken.yaml");

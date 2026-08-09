@@ -29,6 +29,7 @@ use serde_json::Value;
 use crate::config::Config;
 use crate::connections::{Connections, CreateConnectionRequest};
 use crate::docs::ComponentDoc;
+use crate::state::{BucketContents, BucketSummary};
 use crate::layout::LayoutFile;
 use crate::{
     IngestRequest, IngestResponse, PipelineDto, SaveConfigRequest, SaveConfigResponse, SettingsDto,
@@ -99,6 +100,8 @@ pub enum Operation {
     DeletePipeline,
     IngestMessages,
     ListConnections,
+    ListStateBuckets,
+    GetStateBucket,
     CreateConnection,
     DeleteConnection,
     GetSettings,
@@ -122,6 +125,8 @@ impl Operation {
             Self::DeletePipeline => "deletePipeline",
             Self::IngestMessages => "ingestMessages",
             Self::ListConnections => "listConnections",
+            Self::ListStateBuckets => "listStateBuckets",
+            Self::GetStateBucket => "getStateBucket",
             Self::CreateConnection => "createConnection",
             Self::DeleteConnection => "deleteConnection",
             Self::GetSettings => "getSettings",
@@ -147,6 +152,7 @@ impl Operation {
 pub enum Tag {
     Pipelines,
     Connections,
+    State,
     Config,
     Layout,
     Events,
@@ -154,9 +160,10 @@ pub enum Tag {
 }
 
 /// Every tag, in the order pages list them.
-pub const TAGS: [Tag; 6] = [
+pub const TAGS: [Tag; 7] = [
     Tag::Pipelines,
     Tag::Connections,
+    Tag::State,
     Tag::Config,
     Tag::Layout,
     Tag::Events,
@@ -169,6 +176,7 @@ impl Tag {
         match self {
             Self::Pipelines => "pipelines",
             Self::Connections => "connections",
+            Self::State => "state",
             Self::Config => "config",
             Self::Layout => "layout",
             Self::Events => "events",
@@ -187,6 +195,11 @@ impl Tag {
             Self::Connections => {
                 "The systems pipelines talk to, named once and referred to by the \
                  components that use them."
+            }
+            Self::State => {
+                "What the pipelines remember between batches. Read-only: buckets are \
+                 declared in the config and filled by `remember` transforms, so there \
+                 is nothing here to write."
             }
             Self::Config => {
                 "The config file: how the server was started, writing the running \
@@ -544,6 +557,59 @@ pub fn endpoints() -> Vec<ApiDoc> {
             }],
         },
         ApiDoc {
+            path: "/api/state",
+            method: Method::Get,
+            operation: Operation::ListStateBuckets,
+            summary: "The state buckets and how full they are",
+            description: "One entry per bucket declared under `state` in the config, in \
+                          name order, with the number of keys it is currently holding \
+                          and the bounds it is held to.\n\n\
+                          Buckets are not created or deleted through the API — they are \
+                          part of the graph's logic and live in the config file, so \
+                          this family is read-only.",
+            tag: Tag::State,
+            params: vec![],
+            request: None,
+            responses: vec![ResponseDoc {
+                status: 200,
+                description: "Every declared bucket, in name order.",
+                body: Body::Json("BucketSummary"),
+            }],
+        },
+        ApiDoc {
+            path: "/api/state/{bucket}",
+            method: Method::Get,
+            operation: Operation::GetStateBucket,
+            summary: "What one bucket is holding",
+            description: "The keys and the values remembered under each, most recently \
+                          written first — which is the order that makes a live bucket \
+                          readable, since the key that just changed is the one worth \
+                          seeing.\n\n\
+                          Capped: a bucket may hold thousands of keys and this returns \
+                          a page of them, with `truncated` saying so and `keys` giving \
+                          the real total. It is a snapshot taken under the bucket's \
+                          lock, so it is consistent with itself and stale the moment it \
+                          is sent.",
+            tag: Tag::State,
+            params: vec![ParamDoc {
+                name: "bucket",
+                description: "Name of the bucket, as declared in the config.",
+            }],
+            request: None,
+            responses: vec![
+                ResponseDoc {
+                    status: 200,
+                    description: "The bucket's contents.",
+                    body: Body::Json("BucketContents"),
+                },
+                ResponseDoc {
+                    status: 404,
+                    description: "No bucket of that name is declared.",
+                    body: Body::Json("ApiError"),
+                },
+            ],
+        },
+        ApiDoc {
             path: "/api/connections",
             method: Method::Post,
             operation: Operation::CreateConnection,
@@ -852,6 +918,8 @@ pub fn schemas() -> BTreeMap<&'static str, Value> {
     schemas.insert("IngestRequest", of(schema_for!(IngestRequest)));
     schemas.insert("IngestResponse", of(schema_for!(IngestResponse)));
     schemas.insert("Connections", of(schema_for!(Connections)));
+    schemas.insert("BucketSummary", of(schema_for!(Vec<BucketSummary>)));
+    schemas.insert("BucketContents", of(schema_for!(BucketContents)));
     schemas.insert(
         "CreateConnectionRequest",
         of(schema_for!(CreateConnectionRequest)),

@@ -34,7 +34,7 @@ impl FilterTransform {
                 operator,
                 value,
             } => {
-                let Some(field_value) = message.get(field).and_then(serde_json::Value::as_f64)
+                let Some(field_value) = crate::fields::get(message, field).and_then(serde_json::Value::as_f64)
                 else {
                     tracing::warn!(
                         "filter: field '{field}' missing or not a number; dropping message"
@@ -54,7 +54,7 @@ impl FilterTransform {
                 operator,
                 value,
             } => {
-                let Some(field_value) = message.get(field).and_then(serde_json::Value::as_str)
+                let Some(field_value) = crate::fields::get(message, field).and_then(serde_json::Value::as_str)
                 else {
                     tracing::warn!(
                         "filter: field '{field}' missing or not a string; dropping message"
@@ -195,5 +195,42 @@ mod tests {
         let mut t = transform(numeric(NumericFilterOperatorKind::GreaterThan, 100.0));
         let out = kept(&mut t, vec![json!({"value": 1})]).await;
         assert!(out.is_empty(), "expected no batches, got {out:?}");
+    }
+
+    /// The same field addressing every transform uses: a dotted path reaches
+    /// into a nested object, which is what lets a filter select on metadata
+    /// without knowing that metadata is a thing.
+    #[tokio::test]
+    async fn a_nested_field_can_be_filtered_on() {
+        let mut t = transform(FilterKind::String {
+            field: "_meta.subject".to_string(),
+            operator: StringFilterOperatorKind::Contains,
+            value: "temperature".to_string(),
+        });
+
+        let kept = kept(
+            &mut t,
+            vec![
+                json!({ "n": 1, "_meta": { "subject": "m1.temperature" } }),
+                json!({ "n": 2, "_meta": { "subject": "m1.pressure" } }),
+            ],
+        )
+        .await;
+
+        assert_eq!(kept, vec![vec![json!({ "n": 1, "_meta": { "subject": "m1.temperature" } })]]);
+    }
+
+    /// A source whose field names really do contain dots keeps working: the
+    /// literal key is tried first, so nothing had to learn an escaping rule.
+    #[tokio::test]
+    async fn a_field_name_containing_a_dot_still_matches_itself() {
+        let mut t = transform(FilterKind::Numeric {
+            field: "a.b".to_string(),
+            operator: NumericFilterOperatorKind::GreaterThan,
+            value: 1.0,
+        });
+
+        let kept = kept(&mut t, vec![json!({ "a.b": 5 })]).await;
+        assert_eq!(kept, vec![vec![json!({ "a.b": 5 })]]);
     }
 }

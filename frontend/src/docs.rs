@@ -156,10 +156,15 @@ mod tests {
         assert_eq!(families, FAMILIES.to_vec());
     }
 
+    /// Note the query: a search matches *descriptions* as well as names, so a
+    /// term has to be one no other component's prose uses to narrow to one
+    /// component. "reducer" used to be such a term and stopped being one when
+    /// `recall` was documented as feeding a reducer downstream — which is the
+    /// search working, not failing.
     #[test]
     fn a_query_narrows_the_list_to_matching_components() {
-        let groups = groups(&all_components(), "reducer");
-        assert_eq!(kinds(&groups), ["reducer"]);
+        let groups = groups(&all_components(), "out_size");
+        assert_eq!(kinds(&groups), ["splitter"]);
     }
 
     /// A query that matches nothing must not leave three empty headings behind.

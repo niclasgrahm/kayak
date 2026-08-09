@@ -1,4 +1,5 @@
 use gloo_net::http::Request;
+use kayak_core::state::{BucketContents, BucketSummary};
 use kayak_core::{
     ConfigFormat, Connections, LayoutFile, PipelineDto, SaveConfigRequest, SaveConfigResponse,
     SettingsDto,
@@ -87,6 +88,22 @@ impl ApiClient {
     /// Add a connection. `connection` is `{"id": ..., "type": ..., ...}` as the
     /// form built it — a `Value` for the same reason `create_pipeline` takes
     /// one.
+    /// The state buckets and how full they are, in name order.
+    pub async fn list_state_buckets(&self) -> Result<Vec<BucketSummary>, ApiError> {
+        let resp = Request::get(&format!("{}/api/state", self.base))
+            .send()
+            .await?;
+        Ok(resp.json::<Vec<BucketSummary>>().await?)
+    }
+
+    /// One bucket's contents, newest key first and capped by the server.
+    pub async fn state_bucket(&self, name: &str) -> Result<BucketContents, ApiError> {
+        let resp = Request::get(&format!("{}/api/state/{name}", self.base))
+            .send()
+            .await?;
+        Ok(resp.json::<BucketContents>().await?)
+    }
+
     pub async fn create_connection(&self, connection: &Value) -> Result<(), ApiError> {
         let resp = Request::post(&format!("{}/api/connections", self.base))
             .json(connection)?

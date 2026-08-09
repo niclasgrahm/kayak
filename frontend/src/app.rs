@@ -1,4 +1,5 @@
 use kayak_core::api_docs::{ApiDoc, endpoints};
+use kayak_core::state::{BucketContents, BucketSummary};
 use kayak_core::docs::{Family, FieldType, all_components};
 use kayak_core::{
     ConfigFormat, Connections, EdgeEnd, LayoutFile, PipelineDto, PipelineId, PortLayout, Side,
@@ -92,6 +93,7 @@ impl Mode {
 pub enum SidebarTab {
     Pipelines,
     Connections,
+    State,
 }
 
 /// One card's end of the feed, registered with [`Feed`] while it is mounted.
@@ -261,6 +263,19 @@ pub struct AppState {
     /// The named connections pipelines refer to. Re-fetched on the same trigger
     /// as the pipelines: adding one changes what the next form can offer.
     pub connections: LocalResource<Result<Connections, ApiError>>,
+    /// Bumped to re-read the state buckets, once a second while the tab that
+    /// shows them is open.
+    ///
+    /// A bare tick rather than a `LocalResource` like the two above, and that
+    /// is **not a style choice**: everything on this page — the navbar, the
+    /// sidebar and the whole canvas — is inside one `<Suspense>`, and a
+    /// resource read anywhere under it re-suspends the *boundary* every time it
+    /// refetches. A resource polled once a second therefore tears the canvas
+    /// down and rebuilds it once a second. The state tab reads its data through
+    /// an effect and a plain signal instead, so a poll touches nothing but the
+    /// rows it draws. Anything else that wants to poll needs the same treatment
+    /// or its own suspense boundary.
+    pub state_reload: RwSignal<u32>,
     pub events: Signal<Option<UiEvent>>,
     /// Where those events are delivered — see [`Feed`]. Cards register with it
     /// rather than each watching `events` themselves.
@@ -647,6 +662,7 @@ pub fn CanvasPage() -> impl IntoView {
             .await
         }
     });
+    let state_reload = RwSignal::new(0_u32);
     let connections = LocalResource::new(move || {
         reload.track();
         async move {
@@ -696,6 +712,7 @@ pub fn CanvasPage() -> impl IntoView {
     let state = AppState {
         pipelines,
         connections,
+        state_reload,
         events: data,
         feed,
         canvas_state,
@@ -1391,6 +1408,13 @@ pub fn Sidebar() -> impl IntoView {
                 >
                     "connections"
                 </button>
+                <button
+                    class="tab"
+                    class:active=move || is(SidebarTab::State)
+                    on:click=move |_| tab.set(SidebarTab::State)
+                >
+                    "state"
+                </button>
             </div>
             // two `Show`s rather than one with a fallback: each list keeps its
             // own state that way, so switching tabs doesn't disarm a delete or
@@ -1401,6 +1425,258 @@ pub fn Sidebar() -> impl IntoView {
             <Show when=move || is(SidebarTab::Connections)>
                 <ConnectionList />
             </Show>
+            <Show when=move || is(SidebarTab::State)>
+                <StateList />
+            </Show>
+        </div>
+    }
+}
+
+/// How often the buckets are re-read while the state tab is open.
+///
+/// A poll rather than a subscription, and deliberately: a bucket changes on
+/// every message that reaches a `remember`, so pushing that would be the
+/// `/events` firehose all over again for a readout nobody watches per-message.
+/// A second is fast enough to look live and slow enough to cost nothing.
+const STATE_POLL_MS: f64 = 1000.0;
+
+/// The state buckets, and what one of them is holding.
+///
+/// Read-only, which is the whole family: buckets are declared in the config and
+/// filled by `remember` transforms, so there is no `+` and no delete here —
+/// unlike the two tabs beside it, this one is a window rather than an editor.
+#[component]
+fn StateList() -> impl IntoView {
+    let state = expect_context::<AppState>();
+    // which bucket's card is open, and the viewport y its row was at when it
+    // opened — the same trick `ConnectionList` uses, and for the same reason:
+    // the sidebar scrolls, so the card is `position: fixed` and pinned to where
+    // the row was.
+    let opened = RwSignal::new(Option::<OpenBucket>::None);
+
+    // only while this tab is mounted, which is what makes the poll free when
+    // nobody is looking at it
+    let handle = set_interval_with_handle(
+        move || state.state_reload.update(|n| *n = n.wrapping_add(1)),
+        std::time::Duration::from_millis(STATE_POLL_MS as u64),
+    );
+    on_cleanup(move || {
+        if let Ok(handle) = handle {
+            handle.clear();
+        }
+    });
+
+    let list = NodeRef::<leptos::html::Div>::new();
+    let _ = use_event_listener_with_options(
+        document(),
+        leptos::ev::scroll,
+        move |ev| {
+            if scrolled_above(&ev, list) {
+                opened.set(None);
+            }
+        },
+        UseEventListenerOptions::default().capture(true),
+    );
+
+    // Fetched into a plain signal rather than held in a `LocalResource` — see
+    // `AppState::state_reload` for why a polled resource would rebuild the
+    // canvas. A failed read leaves the last good answer on screen: the list is
+    // a readout, and blanking it because one poll of many didn't land would be
+    // worse than showing a value a second old.
+    let buckets = RwSignal::new(Vec::<BucketSummary>::new());
+    Effect::new(move |_| {
+        // a revert can change which buckets exist; the timer is what makes the
+        // readout live
+        state.reload.track();
+        state.state_reload.track();
+        leptos::task::spawn_local(async move {
+            if let Ok(list) = (ApiClient {
+                base: String::new(),
+            })
+            .list_state_buckets()
+            .await
+            {
+                buckets.set(list);
+            }
+        });
+    });
+    let rows = move || buckets.get();
+
+    view! {
+        <div class="sidebar-header">
+            <span class="sidebar-title">"buckets"</span>
+        </div>
+        <div node_ref=list>
+            {move || {
+                let buckets = rows();
+                if buckets.is_empty() {
+                    // the common case, and worth saying rather than showing an
+                    // empty box: buckets are opt-in and most configs have none
+                    return view! {
+                        <div class="empty">"no state buckets declared"</div>
+                    }
+                        .into_any();
+                }
+                buckets
+                    .into_iter()
+                    .map(|bucket| {
+                        let name = bucket.name.clone();
+                        let is_open = name.clone();
+                        view! {
+                            <div
+                                class="tree-item"
+                                class:selected=move || {
+                                    opened.get().is_some_and(|o| o.name == is_open)
+                                }
+                                on:click=move |ev| {
+                                    let name = bucket.name.clone();
+                                    opened
+                                        .update(|open| {
+                                            *open = match open.take() {
+                                                Some(o) if o.name == name => None,
+                                                _ => Some(OpenBucket::at(name, &ev)),
+                                            };
+                                        });
+                                }
+                            >
+                                <span class="tree-label">{bucket.name.clone()}</span>
+                                // how full it is, which is the one number that
+                                // says whether anything is happening at all
+                                <span class="bucket-keys">
+                                    {format!("{}/{}", bucket.keys, bucket.max_keys)}
+                                </span>
+                            </div>
+                        }
+                    })
+                    .collect_view()
+                    .into_any()
+            }}
+        </div>
+        {move || {
+            opened
+                .get()
+                .map(|open| view! { <StateBucketCard open=open /> })
+        }}
+    }
+}
+
+/// Which bucket's card is open, and where to put it.
+#[derive(Clone, PartialEq)]
+struct OpenBucket {
+    name: String,
+    /// viewport y of the row's top edge
+    top: f64,
+}
+
+impl OpenBucket {
+    fn at(name: String, ev: &leptos::ev::MouseEvent) -> Self {
+        use wasm_bindgen::JsCast;
+        let top = ev
+            .current_target()
+            .and_then(|t| t.dyn_into::<leptos::web_sys::Element>().ok())
+            .map_or(0.0, |el| el.get_bounding_client_rect().top());
+        Self { name, top }
+    }
+}
+
+/// What one bucket is holding, keys and values.
+///
+/// Its own resource rather than a slice of the summaries: the list needs a
+/// count per bucket and the card needs every value of one, and asking for the
+/// second to draw the first would mean pulling every bucket's contents every
+/// second to render two numbers.
+#[component]
+fn StateBucketCard(open: OpenBucket) -> impl IntoView {
+    let state = expect_context::<AppState>();
+    let name = StoredValue::new(open.name.clone());
+
+    // A signal and an effect rather than a `LocalResource`, for the reason the
+    // list beside it uses one: this card is inside the page's single
+    // `<Suspense>`, and a resource refetching once a second re-suspends the
+    // whole boundary. See `AppState::state_reload`.
+    let contents = RwSignal::new(Option::<Result<BucketContents, String>>::None);
+    Effect::new(move |_| {
+        // the same tick the list polls on, so the card and the count beside it
+        // are never a second out of step with each other
+        state.state_reload.track();
+        leptos::task::spawn_local(async move {
+            let read = (ApiClient {
+                base: String::new(),
+            })
+            .state_bucket(&name.get_value())
+            .await;
+            contents.set(Some(read.map_err(|e| e.to_string())));
+        });
+    });
+
+    view! {
+        <div class="state-card" style:top=format!("{}px", open.top)>
+            <div class="state-card-name">{open.name}</div>
+            {move || match contents.get().as_ref().map(|r| r.as_ref()) {
+                Some(Ok(contents)) if contents.entries.is_empty() => {
+                    view! { <div class="empty">"nothing remembered yet"</div> }.into_any()
+                }
+                Some(Ok(contents)) => {
+                    let truncated = contents.truncated;
+                    let keys = contents.keys;
+                    let entries = contents.entries.clone();
+                    view! {
+                        <div class="state-entries">
+                            {entries
+                                .into_iter()
+                                .map(|entry| {
+                                    view! {
+                                        <div class="state-entry">
+                                            // a pipeline with no `state.key`
+                                            // holds one bucket-wide value under
+                                            // the empty key, which would
+                                            // otherwise draw a blank line
+                                            <div class="state-key" class:unkeyed=entry.key.is_empty()>
+                                                {if entry.key.is_empty() {
+                                                    "the whole bucket".to_string()
+                                                } else {
+                                                    entry.key.clone()
+                                                }}
+                                            </div>
+                                            <div class="property-list">
+                                                {entry
+                                                    .values
+                                                    .into_iter()
+                                                    .map(|(name, value)| {
+                                                        view! {
+                                                            <div class="property">
+                                                                <span class="property-name">{name}</span>
+                                                                <span class="property-value">
+                                                                    {inspector::render(&value)}
+                                                                </span>
+                                                            </div>
+                                                        }
+                                                    })
+                                                    .collect_view()}
+                                            </div>
+                                            <div class="state-updated">{entry.updated_at}</div>
+                                        </div>
+                                    }
+                                })
+                                .collect_view()}
+                        </div>
+                        <Show when=move || truncated>
+                            // the card is a page of a bucket that may hold
+                            // thousands; saying so is what stops it reading as
+                            // the whole truth
+                            <div class="state-truncated">
+                                {format!("showing the newest of {keys} keys")}
+                            </div>
+                        </Show>
+                    }
+                        .into_any()
+                }
+                // the list and the card read the same server, so this is the
+                // moment between a revert dropping a bucket and the list
+                // noticing
+                Some(Err(_)) => view! { <div class="empty">"bucket is gone"</div> }.into_any(),
+                None => view! { <div class="empty">"loading..."</div> }.into_any(),
+            }}
         </div>
     }
 }
@@ -3662,8 +3938,45 @@ fn ComponentDoc(
                     </div>
                 </For>
             </Show>
+            <MetadataTable metadata=component.metadata.clone() />
         </article>
     }
+}
+
+/// What an input attaches to a message when its `envelope` is set.
+///
+/// Its own section rather than more rows in the settings table, because these
+/// are not settings: nothing here is written in a config, and the names are what
+/// a *transform* downstream will address — `_meta.subject` — rather than what an
+/// input accepts. Empty for everything but an input, which is what makes this a
+/// no-op on the other three families.
+#[component]
+fn MetadataTable(metadata: Vec<kayak_core::metadata::MetaFieldDoc>) -> impl IntoView {
+    if metadata.is_empty() {
+        return ().into_any();
+    }
+    view! {
+        <div class="doc-metadata">
+            <div class="section-kind">"metadata"</div>
+            <p class="doc-metadata-note">
+                "attached under the "
+                <code>"envelope"</code>
+                "'s field, e.g. "
+                <code>"_meta.received_at"</code>
+            </p>
+            <div class="field-table">
+                <For each=move || metadata.clone() key=|f| f.name.clone() let:field>
+                    <div class="field">
+                        <code class="field-name">{field.name.clone()}</code>
+                        <div class="field-description">
+                            <Description text=field.description.clone() />
+                        </div>
+                    </div>
+                </For>
+            </div>
+        </div>
+    }
+    .into_any()
 }
 
 /// The settings table: name, type, whether it has to be there, and what it does.

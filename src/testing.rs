@@ -293,10 +293,12 @@ pub fn stub_config(id: &str) -> Config {
         inputs: vec![InputConfig {
             kind: InputKind::Dummy(DummyConfig { duration: 3600, payload: None, amplitude: None, period: None }),
             buffer: None,
+            envelope: None,
         }],
         transforms: Vec::<TransformConfig>::new(),
         outputs: vec![OutputConfig {
             kind: OutputKind::Stdout(StdoutOutputConfig {}),
         }],
+        state: None,
     }
 }

@@ -20,6 +20,20 @@ impl BuildTransform for ReduceTransformConfig {
         if self.aggregations.is_empty() {
             bail!("a reducer needs at least one aggregation");
         }
+        // group fields are written out under their leaf name (see `reduce`), so
+        // it is the leaves that have to be distinct — `a.id` and `b.id` are two
+        // different groupings that would land on one field.
+        let mut group_names = HashSet::new();
+        for field in &self.group_by {
+            let name = crate::fields::leaf(field);
+            if !group_names.insert(name.to_string()) {
+                bail!(
+                    "two group_by fields would both be written out as '{name}' — \
+                     rename one, or group by a field whose last segment differs"
+                );
+            }
+        }
+
         let mut names = HashSet::new();
         for aggregation in &self.aggregations {
             let name = aggregation.output.trim();
@@ -35,7 +49,7 @@ impl BuildTransform for ReduceTransformConfig {
             if !names.insert(name.to_string()) {
                 bail!("two aggregations are both called '{name}'");
             }
-            if self.group_by.iter().any(|g| g == name) {
+            if group_names.contains(name) {
                 bail!("the '{name}' aggregation would overwrite the group_by field of that name");
             }
         }
@@ -144,7 +158,13 @@ impl ReduceTransform {
     fn reduce(&self, group: &Group) -> anyhow::Result<Value> {
         let mut out = Map::new();
         for (name, value) in self.group_by.iter().zip(&group.key) {
-            out.insert(name.clone(), value.clone());
+            // a path is written out under its leaf: grouping by
+            // `_meta.machine_id` emits `machine_id`, because that is the field
+            // the messages coming out of here carry and nothing downstream
+            // should have to spell this pipeline's input shape. Two paths with
+            // the same leaf are refused at build time rather than one quietly
+            // overwriting the other.
+            out.insert(crate::fields::leaf(name).to_string(), value.clone());
         }
         for aggregation in &self.aggregations {
             let values = self.values_for(aggregation, &group.messages)?;
@@ -188,7 +208,7 @@ impl ReduceTransform {
 /// is there and empty" are the same fact for anything being aggregated, and
 /// treating them differently would make `sum` fail on one and not the other.
 fn present<'a>(message: &'a Value, field: &str) -> Option<&'a Value> {
-    match message.get(field) {
+    match crate::fields::get(message, field) {
         Some(Value::Null) | None => None,
         Some(value) => Some(value),
     }
@@ -728,6 +748,65 @@ mod tests {
         assert!(
             transform(config(vec![aggregation(ReduceFnKind::Count, None, "n")])).is_ok(),
             "count with no field counts messages"
+        );
+    }
+
+    /// A field is addressed the same way everywhere, and that includes a path
+    /// into a nested object — which is what makes in-band metadata usable
+    /// without the reducer knowing metadata exists.
+    #[tokio::test]
+    async fn a_nested_field_can_be_grouped_by_and_aggregated() -> anyhow::Result<()> {
+        let mut config = config(vec![aggregation(
+            ReduceFnKind::Avg,
+            Some("reading.value"),
+            "mean",
+        )]);
+        config.group_by = vec!["_meta.subject".to_string()];
+
+        let out = run(
+            config,
+            vec![
+                json!({ "reading": { "value": 1.0 }, "_meta": { "subject": "a" } }),
+                json!({ "reading": { "value": 3.0 }, "_meta": { "subject": "a" } }),
+                json!({ "reading": { "value": 8.0 }, "_meta": { "subject": "b" } }),
+            ],
+        )
+        .await?;
+
+        // one message per subject, in first-seen order, each carrying the group
+        // field under its leaf name
+        assert_eq!(
+            out,
+            vec![
+                json!({ "subject": "a", "mean": 2.0 }),
+                json!({ "subject": "b", "mean": 8.0 }),
+            ]
+        );
+        Ok(())
+    }
+
+    /// Group fields come out under their leaf, so two paths sharing one leaf
+    /// would silently land on the same field. Refused at build time, like every
+    /// other collision here.
+    #[test]
+    fn two_group_by_paths_with_the_same_leaf_are_refused() {
+        let mut config = config(vec![aggregation(ReduceFnKind::Count, None, "n")]);
+        config.group_by = vec!["a.id".to_string(), "b.id".to_string()];
+        let Err(err) = transform(config) else {
+            panic!("expected the collision to be refused");
+        };
+        assert!(format!("{err:#}").contains("'id'"), "got: {err:#}");
+    }
+
+    /// The collision check between an aggregation and a group field is on the
+    /// name that is actually written, not on the path that was configured.
+    #[test]
+    fn an_aggregation_may_not_overwrite_a_group_paths_leaf() {
+        let mut config = config(vec![aggregation(ReduceFnKind::Count, None, "subject")]);
+        config.group_by = vec!["_meta.subject".to_string()];
+        assert!(
+            transform(config).is_err(),
+            "an aggregation called 'subject' would overwrite the group field"
         );
     }
 }

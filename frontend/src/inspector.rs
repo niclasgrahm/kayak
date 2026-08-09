@@ -158,7 +158,11 @@ fn push_properties(name: &str, value: &Value, out: &mut Vec<Property>) {
 }
 
 /// Values are for reading, not for round-tripping: a string loses its quotes.
-fn render(value: &Value) -> String {
+///
+/// Public because the state bucket card renders remembered values the same way
+/// a config's are rendered — they are the same kind of thing on screen, and two
+/// spellings of "how a JSON value looks in a property row" would drift.
+pub fn render(value: &Value) -> String {
     match value {
         Value::String(s) => s.clone(),
         Value::Null => NO_VALUE.to_string(),
@@ -186,6 +190,7 @@ mod tests {
                 .map(|kind| TransformConfig { kind })
                 .collect(),
             outputs: vec![OutputConfig { kind: output }],
+            state: None,
         }
     }
 
@@ -210,6 +215,7 @@ mod tests {
         InputConfig {
             kind: InputKind::Dummy(DummyConfig { duration: 5, payload: None, amplitude: None, period: None }),
             buffer: None,
+            envelope: None,
         }
     }
 
@@ -236,6 +242,7 @@ mod tests {
                 InputConfig {
                     kind: InputKind::Dummy(DummyConfig { duration: 9, payload: None, amplitude: None, period: None }),
                     buffer: None,
+                    envelope: None,
                 },
             ],
             transforms: vec![],
@@ -250,6 +257,7 @@ mod tests {
                     }),
                 },
             ],
+            state: None,
         };
 
         let inputs = input_sections(&config);
@@ -273,6 +281,7 @@ mod tests {
             inputs: vec![dummy_input()],
             transforms: vec![],
             outputs: vec![],
+            state: None,
         };
         assert!(output_sections(&config).is_empty());
         assert_eq!(

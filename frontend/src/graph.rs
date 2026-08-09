@@ -2784,6 +2784,7 @@ mod tests {
                 upstream: upstream.to_string(),
             }),
             buffer: None,
+            envelope: None,
         }
     }
 
@@ -2792,6 +2793,7 @@ mod tests {
         kayak_core::config::InputConfig {
             kind: InputKind::Dummy(DummyConfig { duration: 1, payload: None, amplitude: None, period: None }),
             buffer: None,
+            envelope: None,
         }
     }
 
@@ -2804,6 +2806,7 @@ mod tests {
             outputs: vec![OutputConfig {
                 kind: OutputKind::Stdout(StdoutOutputConfig {}),
             }],
+            state: None,
         }
     }
 }

@@ -1,12 +1,10 @@
-- id: sensors
-  inputs:
-  - type: nats
-    connection: local-nats
-    subject: test.subject
-    max_batch: 500
-  transforms: []
-  outputs:
-  - type: stdout
+state:
+  heartbeat_peaks:
+    max_keys: 1
+  sensor_state:
+    max_keys: 500
+    idle_timeout_secs: 3600
+pipelines:
 - id: heartbeat
   inputs:
   - type: dummy
@@ -17,128 +15,38 @@
   transforms: []
   outputs:
   - type: stdout
-- id: sensors_60s_sum
+- id: ingest
   inputs:
-  - type: pipeline
-    upstream: sensors
-    buffer:
-      type: tumbling
-      window_seconds: 60
-  transforms:
-  - type: reducer
-    aggregations:
-    - function: sum
-      field: value
-      as: total
-    - function: median
-      field: value
-      as: median
-    - function: count_distinct
-      field: sensor
-      as: sensors
-  outputs:
-  - type: postgres
-    connection: local-postgres
-    table: sensor_sums
-- id: sensors_10s_avg
-  inputs:
-  - type: pipeline
-    upstream: sensors
-    buffer:
-      type: tumbling
-      window_seconds: 10
-  transforms:
-  - type: reducer
-    group_by:
-    - sensor
-    on_missing: skip
-    aggregations:
-    - function: avg
-      field: value
-      as: mean
-    - function: min
-      field: value
-      as: lowest
-    - function: max
-      field: value
-      as: highest
-    - function: count
-      as: readings
-  outputs:
-  - type: stdout
-- id: sensors_100_max
-  inputs:
-  - type: pipeline
-    upstream: sensors
-    buffer:
-      type: static
-      size: 100
-  transforms:
-  - type: reducer
-    aggregations:
-    - function: max
-      field: value
-      as: value
-    - function: count
-      as: readings
-    - function: max
-      field: ts
-      as: last_seen
-  outputs:
-  - type: nats
-    connection: local-nats
-    subject: test.aggregated.max
-- id: hot_readings
-  inputs:
-  - type: pipeline
-    upstream: sensors
-  transforms:
-  - type: filter
-    Numeric:
-      field: value
-      operator: GreaterThan
-      value: 90.0
-  outputs:
-  - type: postgres
-    connection: local-postgres
-    table: hot_readings
-- id: tagged_readings
-  inputs:
-  - type: pipeline
-    upstream: sensors
-  transforms:
-  - type: filter
-    String:
-      field: ts
-      operator: Contains
-      value: 'T08:'
-  outputs:
-  - type: stdout
-- id: hot_alerts
-  inputs:
-  - type: pipeline
-    upstream: hot_readings
-    buffer:
-      type: tumbling
-      window_seconds: 60
-  transforms:
   - type: http
-    url: http://localhost:8080/alerts
-    verb: POST
-  outputs:
-  - type: stdout
-- id: sensors_archive
-  inputs:
-  - type: pipeline
-    upstream: sensors
-    buffer:
-      type: static
-      size: 10
+    envelope:
+      type: wrap
+      payload: body
   transforms: []
   outputs:
-  - type: postgres
-    connection: local-postgres
-    table: readings
+  - type: stdout
+- id: kafka_events
+  inputs:
+  - type: kafka
+    connection: local-kafka
+    topic: test.events
+    group: kayak-sample
+    start_at: latest
+    max_batch: 500
+    envelope:
+      type: merge
+  transforms: []
+  outputs:
+  - type: stdout
+- id: sensors
+  inputs:
+  - type: nats
+    connection: local-nats
+    subject: test.subject
+    max_batch: 500
+    envelope:
+      type: merge
+  transforms: []
+  outputs:
   - type: stdout
 - id: everything
   inputs:
@@ -156,32 +64,6 @@
   - type: nats
     connection: local-nats
     subject: test.everything
-- id: kafka_events
-  inputs:
-  - type: kafka
-    connection: local-kafka
-    topic: test.events
-    group: kayak-sample
-    start_at: latest
-    max_batch: 500
-  transforms: []
-  outputs:
-  - type: stdout
-- id: slow_requests
-  inputs:
-  - type: pipeline
-    upstream: kafka_events
-  transforms:
-  - type: filter
-    Numeric:
-      field: latency_ms
-      operator: GreaterThan
-      value: 400.0
-  outputs:
-  - type: kafka
-    connection: local-kafka
-    topic: test.slow
-  - type: stdout
 - id: heartbeat_pairs
   inputs:
   - type: pipeline
@@ -193,6 +75,31 @@
     out_size: 2
   outputs:
   - type: stdout
+- id: heartbeat_peaks
+  inputs:
+  - type: pipeline
+    upstream: heartbeat
+  transforms:
+  - type: remember
+    when:
+    - type: numeric
+      field: value
+      operator: GreaterThan
+      value: 8.0
+    remember:
+    - field: value
+      as: last_peak
+    - field: current_time
+      as: last_peak_at
+  - type: recall
+    recall:
+    - last_peak
+    - last_peak_at
+    on_missing: 'null'
+  outputs:
+  - type: stdout
+  state:
+    bucket: heartbeat_peaks
 - id: heartbeat_to_disk
   inputs:
   - type: pipeline
@@ -219,9 +126,157 @@
     rotate:
       max_rows: 20
       interval_secs: 60
-- id: ingest
+- id: hot_readings
   inputs:
-  - type: http
+  - type: pipeline
+    upstream: sensors
+  transforms:
+  - type: filter
+    Numeric:
+      field: value
+      operator: GreaterThan
+      value: 90.0
+  outputs:
+  - type: postgres
+    connection: local-postgres
+    table: hot_readings
+- id: sensor_state
+  inputs:
+  - type: pipeline
+    upstream: sensors
+  transforms:
+  - type: remember
+    remember:
+    - field: value
+      as: last_value
+    - field: ts
+      as: last_seen
+  outputs: []
+  state:
+    bucket: sensor_state
+    key: sensor
+- id: sensors_100_max
+  inputs:
+  - type: pipeline
+    upstream: sensors
+    buffer:
+      type: static
+      size: 100
+  transforms:
+  - type: reducer
+    aggregations:
+    - function: max
+      as: value
+      field: value
+    - function: count
+      as: readings
+    - function: max
+      as: last_seen
+      field: ts
+  outputs:
+  - type: nats
+    connection: local-nats
+    subject: test.aggregated.max
+- id: sensors_10s_avg
+  inputs:
+  - type: pipeline
+    upstream: sensors
+    buffer:
+      type: tumbling
+      window_seconds: 10
+  transforms:
+  - type: reducer
+    aggregations:
+    - function: avg
+      as: mean
+      field: value
+    - function: min
+      as: lowest
+      field: value
+    - function: max
+      as: highest
+      field: value
+    - function: count
+      as: readings
+    group_by:
+    - sensor
+    - _meta.subject
+    on_missing: skip
+  outputs:
+  - type: stdout
+- id: sensors_60s_sum
+  inputs:
+  - type: pipeline
+    upstream: sensors
+    buffer:
+      type: tumbling
+      window_seconds: 60
+  transforms:
+  - type: reducer
+    aggregations:
+    - function: sum
+      as: total
+      field: value
+    - function: median
+      as: median
+      field: value
+    - function: count_distinct
+      as: sensors
+      field: sensor
+  outputs:
+  - type: postgres
+    connection: local-postgres
+    table: sensor_sums
+- id: sensors_archive
+  inputs:
+  - type: pipeline
+    upstream: sensors
+    buffer:
+      type: static
+      size: 10
   transforms: []
+  outputs:
+  - type: postgres
+    connection: local-postgres
+    table: readings
+  - type: stdout
+- id: slow_requests
+  inputs:
+  - type: pipeline
+    upstream: kafka_events
+  transforms:
+  - type: filter
+    Numeric:
+      field: latency_ms
+      operator: GreaterThan
+      value: 400.0
+  outputs:
+  - type: kafka
+    connection: local-kafka
+    topic: test.slow
+  - type: stdout
+- id: tagged_readings
+  inputs:
+  - type: pipeline
+    upstream: sensors
+  transforms:
+  - type: filter
+    String:
+      field: ts
+      operator: Contains
+      value: 'T08:'
+  outputs:
+  - type: stdout
+- id: hot_alerts
+  inputs:
+  - type: pipeline
+    upstream: hot_readings
+    buffer:
+      type: tumbling
+      window_seconds: 60
+  transforms:
+  - type: http
+    url: http://localhost:8080/alerts
+    verb: POST
   outputs:
   - type: stdout

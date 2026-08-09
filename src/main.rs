@@ -110,7 +110,15 @@ async fn main() -> anyhow::Result<()> {
     let listener = tokio::net::TcpListener::bind(&leptos_options.site_addr)
         .await
         .with_context(|| format!("failed to bind {}", leptos_options.site_addr))?;
-    axum::serve(listener, app.into_make_service())
+    // with_connect_info rather than the plain make service: it is what puts the
+    // peer address in the request extensions, which is where the `http` input's
+    // `remote_addr` metadata is read from. Nothing fails without it — the
+    // address is simply absent, as it is in the tests that drive the router
+    // directly — so this is the only place it has to be asked for.
+    axum::serve(
+        listener,
+        app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+    )
         .await
         .context("server error")?;
     Ok(())

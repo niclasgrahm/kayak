@@ -7,6 +7,7 @@ pub mod filter;
 pub mod http;
 pub mod reduce;
 pub mod splitter;
+pub mod state;
 
 pub trait BuildTransform {
     fn build(self, ctx: &mut BuildCtx) -> anyhow::Result<Box<dyn Transform>>;

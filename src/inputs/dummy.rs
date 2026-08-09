@@ -2,6 +2,7 @@ use crate::BuildCtx;
 use crate::inputs::BuildInput;
 use crate::inputs::InputSource;
 use crate::inputs::MessageBatch;
+use crate::inputs::envelope::Envelope;
 use anyhow::Result;
 use chrono::Utc;
 use rand::Rng;
@@ -21,12 +22,13 @@ const DEFAULT_AMPLITUDE: f64 = 1.0;
 const DEFAULT_PERIOD: f64 = 60.0;
 
 impl BuildInput for DummyConfig {
-    fn build(self, _ctx: &mut BuildCtx) -> Result<Box<dyn InputSource>> {
+    fn build(self, ctx: &mut BuildCtx) -> Result<Box<dyn InputSource>> {
         Ok(Box::new(DummyInput {
             interval: Duration::from_secs(self.duration),
             payload: self.payload.unwrap_or_default(),
             amplitude: self.amplitude.unwrap_or(DEFAULT_AMPLITUDE),
             period: self.period.unwrap_or(DEFAULT_PERIOD),
+            envelope: ctx.envelope("dummy", None),
             started: Instant::now(),
         }))
     }
@@ -37,6 +39,9 @@ pub struct DummyInput {
     payload: DummyPayload,
     amplitude: f64,
     period: f64,
+    /// What this input attaches to each message, if the config asked for any.
+    /// A dummy has nothing of its own to say, so this is the common set.
+    envelope: Envelope,
     /// The wave is sampled against wall clock rather than a message count, so
     /// its period is what the config says whatever `interval` is.
     started: Instant,
@@ -54,10 +59,14 @@ impl InputSource for DummyInput {
             }
             DummyPayload::Text => Value::String(sentence(&mut rand::rng())),
         };
-        Ok(Arc::new(vec![Arc::new(json!({
+        let message = json!({
             "value": value,
             "current_time": Utc::now().to_string(),
-        }))]))
+        });
+        // a dummy message is always an object, so neither envelope shape can
+        // fail to attach to it
+        let message = self.envelope.apply(message, Vec::new()).unwrap_or(Value::Null);
+        Ok(Arc::new(vec![Arc::new(message)]))
     }
 }
 

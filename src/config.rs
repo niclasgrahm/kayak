@@ -35,7 +35,14 @@ impl BuildInputConfig for InputKind {
 
 impl BuildInputConfig for InputConfig {
     fn build(self, ctx: &mut BuildCtx) -> Result<Box<dyn InputSource>> {
-        let inner = self.kind.build(ctx)?;
+        // `envelope` is the wrapper's field, but only the input kind knows what
+        // there is to attach — so it goes onto the context for the length of
+        // that build and comes straight back off, rather than leaking into the
+        // next input of the same pipeline.
+        let previous = std::mem::replace(&mut ctx.envelope, self.envelope);
+        let built = self.kind.build(ctx);
+        ctx.envelope = previous;
+        let inner = built?;
         Ok(match self.buffer {
             Some(BufferConfig::Static { size }) => {
                 Box::new(Buffered::new(inner, BufferKind::Static { size }))
@@ -61,6 +68,8 @@ impl BuildTransformConfig for TransformConfig {
             TransformKind::Splitter(c) => c.build(ctx),
             TransformKind::Reducer(c) => c.build(ctx),
             TransformKind::Filter(c) => c.build(ctx),
+            TransformKind::Remember(c) => c.build(ctx),
+            TransformKind::Recall(c) => c.build(ctx),
         }
     }
 }

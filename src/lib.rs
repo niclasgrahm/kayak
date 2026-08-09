@@ -8,10 +8,12 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::broadcast;
 
+pub mod buckets;
 pub mod config;
 pub mod connections;
 pub mod endpoints;
 pub mod events;
+pub mod fields;
 pub mod handlers;
 pub mod inputs;
 pub mod layout;
@@ -25,10 +27,14 @@ pub mod testing;
 pub mod transforms;
 
 pub use crate::endpoints::api_router;
+use crate::buckets::Buckets;
+use crate::inputs::envelope::{Envelope, Meta};
 use crate::inputs::http::Inboxes;
 use crate::secrets::{EnvStore, Resolved, SecretStore};
 use crate::state::{PipelineHandle, PipelineId, UiEvent};
-use kayak_core::config::Secret;
+use kayak_core::config::{EnvelopeConfig, Secret};
+use kayak_core::state::PipelineState;
+use serde_json::Value;
 use std::path::PathBuf;
 
 use kayak_core::connections::{
@@ -70,6 +76,31 @@ pub struct BuildCtx<'a> {
     /// passed in here for the same reason the connections are: the component
     /// needs it at build time and knows nothing about the server.
     pub inboxes: Arc<Inboxes>,
+    /// What the input currently being built should attach to its messages, from
+    /// the `envelope` on its [`kayak_core::config::InputConfig`].
+    ///
+    /// It rides here rather than being passed to `BuildInput::build` because it
+    /// belongs to the *wrapper* — `envelope` sits beside `buffer` on
+    /// `InputConfig`, so every input kind accepts it and none of them declare
+    /// it — while only the input itself can supply the interesting half of the
+    /// metadata. `BuildInputConfig for InputConfig` sets it around the kind's
+    /// build; nothing else should write it.
+    pub envelope: Option<EnvelopeConfig>,
+    /// The live state buckets, as they stand at the moment this pipeline is
+    /// built — the same kind of snapshot the connections are, and held by
+    /// [`crate::state::AppState`] for the same reason.
+    ///
+    /// Unlike the connections this one has *contents*, so the snapshot is of
+    /// the store rather than of a config: a rebuilt pipeline reattaches to what
+    /// its bucket already holds. See [`crate::buckets::Buckets::rebuilt`] for
+    /// the one case where it doesn't.
+    pub buckets: Arc<Buckets>,
+    /// Which bucket this pipeline's stateful transforms use, and what its
+    /// messages are keyed by, from the `state` on its `Config`.
+    ///
+    /// It rides here for the reason `envelope` does: the block belongs to the
+    /// pipeline, and the transforms that need it are built one level down.
+    pub state: Option<PipelineState>,
 }
 
 impl<'a> BuildCtx<'a> {
@@ -99,6 +130,9 @@ impl<'a> BuildCtx<'a> {
             connections: Arc::new(Connections::new()),
             data_dir: None,
             inboxes: Arc::new(Inboxes::new()),
+            envelope: None,
+            buckets: Arc::new(Buckets::new()),
+            state: None,
         }
     }
 
@@ -155,5 +189,38 @@ impl<'a> BuildCtx<'a> {
 
     pub fn s3_connection(&self, id: &str) -> anyhow::Result<&S3Connection> {
         Ok(self.connections.s3(id)?)
+    }
+
+    /// The same, with the live state buckets a pipeline's `state` names.
+    #[must_use]
+    pub fn with_buckets(mut self, buckets: Arc<Buckets>) -> Self {
+        self.buckets = buckets;
+        self
+    }
+
+    /// The same, with the pipeline's binding to one of those buckets.
+    #[must_use]
+    pub fn with_state(mut self, state: Option<PipelineState>) -> Self {
+        self.state = state;
+        self
+    }
+
+    /// The envelope this input should attach its messages to.
+    ///
+    /// Every input calls this, passing its kind and the connection it reads
+    /// through if it has one; what it knows per *message* — a subject, an
+    /// offset — it adds at `apply` time. An input that forgets to call it
+    /// simply attaches nothing, which is why `metadata::for_input` is a
+    /// declaration a test enforces rather than the only record of the fact.
+    #[must_use]
+    pub fn envelope(&self, kind: &'static str, connection: Option<&str>) -> Envelope {
+        let mut statics: Meta = vec![
+            ("pipeline", Value::String(self.pipeline_id.clone())),
+            ("input", Value::String(kind.to_string())),
+        ];
+        if let Some(connection) = connection {
+            statics.push(("connection", Value::String(connection.to_string())));
+        }
+        Envelope::new(self.envelope.as_ref(), statics)
     }
 }

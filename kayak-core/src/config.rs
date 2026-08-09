@@ -1,5 +1,6 @@
 use crate::PipelineId;
 use crate::connections::ConnectionId;
+use crate::state::PipelineState;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
@@ -359,14 +360,14 @@ pub struct BufferTransformConfig {
     pub size: usize,
 }
 
-#[derive(Clone, Debug, Deserialize, Serialize, JsonSchema)]
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, JsonSchema, PartialEq, Eq)]
 pub enum NumericFilterOperatorKind {
     GreaterThan,
     LessThan,
     EqualTo,
 }
 
-#[derive(Clone, Debug, Deserialize, Serialize, JsonSchema)]
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, JsonSchema, PartialEq, Eq)]
 pub enum StringFilterOperatorKind {
     EqualTo,
     Contains,
@@ -534,6 +535,115 @@ pub struct ReduceTransformConfig {
     pub on_missing: MissingFieldPolicy,
 }
 
+/// One test a message either passes or doesn't.
+///
+/// The same comparisons the `filter` transform makes, spelled as a tagged union
+/// so that a *list* of them can be configured and rendered as a form. Several
+/// conditions are read as "all of these" — there is no `or` and no nesting,
+/// because the moment either exists this is an expression language with a
+/// syntax to design, and everything so far has been reachable without one.
+#[derive(Clone, Debug, Deserialize, Serialize, JsonSchema, PartialEq)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum Condition {
+    /// Compares a field to a number. A message whose field is missing or isn't
+    /// a number does not match.
+    Numeric {
+        /// the field to test — a dotted path, like anywhere else
+        field: String,
+        operator: NumericFilterOperatorKind,
+        value: f64,
+    },
+    /// Compares a field to a string, the same way.
+    String {
+        /// the field to test — a dotted path, like anywhere else
+        field: String,
+        operator: StringFilterOperatorKind,
+        value: String,
+    },
+}
+
+/// One thing to put in the pipeline's state bucket, and what to call it there.
+#[derive(Clone, Debug, Deserialize, Serialize, JsonSchema, PartialEq)]
+pub struct Remembered {
+    /// the field to take the value from
+    pub field: String,
+    /// the name to remember it under, which is the name `recall` asks for it
+    /// by. Two entries may not share one.
+    #[serde(rename = "as")]
+    pub output: String,
+}
+
+/// Writes values from matching messages into the pipeline's state bucket,
+/// keyed by whatever the pipeline's `state.key` names.
+///
+/// The message itself is **passed on unchanged** — this is a tap on the stream,
+/// not a filter. A transform called `remember` that quietly swallowed what it
+/// remembered would be a surprise, and the message is usually still wanted.
+///
+/// Needs a `state` on the pipeline; it fails to build without one.
+#[derive(Clone, Debug, Deserialize, Serialize, JsonSchema, PartialEq)]
+#[schemars(title = "remember")]
+pub struct RememberTransformConfig {
+    /// which messages to remember from — all of these have to match. Leave it
+    /// out to remember from every message, which is right for a stream carrying
+    /// one kind of thing and wrong for one carrying several.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub when: Vec<Condition>,
+    /// what to take from a matching message. At least one, each with a distinct
+    /// `as`.
+    pub remember: Vec<Remembered>,
+}
+
+/// Writes values from the pipeline's state bucket onto every message, under the
+/// names they were remembered by.
+///
+/// This is how a slow-moving fact — the unit being produced, the recipe in
+/// force — reaches the fast stream that has to be attributed to it. The values
+/// land as top-level fields, so a `reducer` downstream can group by them
+/// without knowing where they came from.
+///
+/// Needs a `state` on the pipeline; it fails to build without one.
+#[derive(Clone, Debug, Deserialize, Serialize, JsonSchema, PartialEq)]
+#[schemars(title = "recall")]
+pub struct RecallTransformConfig {
+    /// the names to read out of the bucket, as `remember` wrote them. Each one
+    /// is written onto the message under the same name.
+    pub recall: Vec<String>,
+    /// what to do about a message whose key has nothing remembered under it yet
+    #[serde(default, skip_serializing_if = "RecallMissingPolicy::is_default")]
+    pub on_missing: RecallMissingPolicy,
+}
+
+/// What `recall` does when the bucket has nothing for a message's key.
+///
+/// It has its own set rather than sharing the reducer's [`MissingFieldPolicy`]
+/// because the right default is the opposite one: every stateful pipeline has a
+/// warm-up in which nothing has been remembered yet, so `error` would fail
+/// every pipeline on startup, and it is `null` that has no counterpart there.
+#[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, JsonSchema, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum RecallMissingPolicy {
+    /// Drop the message. The default: a reading that can't be attributed to the
+    /// thing it is about is usually noise, and passing it on unattributed makes
+    /// a reducer downstream lump every such message into one bogus group.
+    #[default]
+    Skip,
+    /// Pass the message on with the missing names as `null`.
+    Null,
+    /// Fail the pipeline. Only right when the bucket is filled by something
+    /// that has certainly run first.
+    Error,
+}
+
+impl RecallMissingPolicy {
+    /// Whether this is the value serde would supply anyway — so the field can
+    /// be left out of the JSON a config round-trips to.
+    #[must_use]
+    pub fn is_default(&self) -> bool {
+        *self == Self::default()
+    }
+}
+
 /// Cuts one batch into several smaller ones — the opposite of `buffer`.
 ///
 /// Note the current limitation: messages left over after the last whole chunk
@@ -561,6 +671,87 @@ pub enum BufferConfig {
     Tumbling { window_seconds: usize },
 }
 
+/// Whether — and how — an input attaches metadata about where a message came
+/// from.
+///
+/// The metadata itself is documented per input under "metadata" on this page:
+/// the subject a nats message arrived on, the topic, partition and offset of a
+/// kafka record, and so on, plus the pipeline and input kind that read it. It
+/// is attached **in band**, as ordinary fields on the message, so every
+/// transform can filter, group and aggregate on it exactly as it does on the
+/// payload's own fields — `"group_by": ["_meta.subject"]` needs nothing new.
+///
+/// Leaving this out is the default and means what it always meant: the message
+/// is passed on exactly as it arrived. Attaching metadata changes the shape of
+/// every message from this input, which is not something to do to a running
+/// config without being asked.
+#[derive(Clone, Debug, Deserialize, Serialize, JsonSchema, PartialEq, Eq)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum EnvelopeConfig {
+    /// Add the metadata as one more field on the message. The payload's own
+    /// fields stay exactly where they were, so nothing downstream has to
+    /// change.
+    ///
+    /// Only works on a payload that is a JSON *object*: a message that is a
+    /// bare number or string has nowhere to put the field, and is skipped with
+    /// a warning rather than taking the pipeline down. Use `wrap` for those.
+    Merge {
+        /// the field the metadata object is written to. Defaults to `_meta`.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        meta: Option<String>,
+    },
+    /// Put the whole payload under a field of its own, beside the metadata —
+    /// `{"value": <what arrived>, "_meta": {…}}`.
+    ///
+    /// Works whatever the payload is, which is what a source of bare readings
+    /// (a `1`, a `"recipe-a"`) needs. The cost is that every field reference
+    /// downstream now goes through the payload field: `value.temperature`
+    /// rather than `temperature`.
+    Wrap {
+        /// the field the original payload is written to. Defaults to `value`.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        payload: Option<String>,
+        /// the field the metadata object is written to. Defaults to `_meta`.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        meta: Option<String>,
+    },
+}
+
+/// The field an envelope writes metadata to when the config doesn't say.
+pub const DEFAULT_META_FIELD: &str = "_meta";
+/// The field a `wrap` envelope writes the payload to when the config doesn't
+/// say.
+pub const DEFAULT_PAYLOAD_FIELD: &str = "value";
+
+impl EnvelopeConfig {
+    /// The field the metadata object is written to.
+    #[must_use]
+    pub fn meta_field(&self) -> &str {
+        let (Self::Merge { meta } | Self::Wrap { meta, .. }) = self;
+        meta.as_deref()
+            .map_or(DEFAULT_META_FIELD, |name| match name.trim() {
+                "" => DEFAULT_META_FIELD,
+                name => name,
+            })
+    }
+
+    /// The field the payload is written to, for the shape that moves it.
+    #[must_use]
+    pub fn payload_field(&self) -> Option<&str> {
+        match self {
+            Self::Merge { .. } => None,
+            Self::Wrap { payload, .. } => {
+                Some(payload.as_deref().map_or(DEFAULT_PAYLOAD_FIELD, |name| {
+                    match name.trim() {
+                        "" => DEFAULT_PAYLOAD_FIELD,
+                        name => name,
+                    }
+                }))
+            }
+        }
+    }
+}
+
 #[derive(Clone, Debug, Deserialize, Serialize, JsonSchema)]
 pub struct InputConfig {
     #[serde(flatten)]
@@ -573,6 +764,12 @@ pub struct InputConfig {
     // back out of `GET /api/pipelines` is byte-identical to the one that went in
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub buffer: Option<BufferConfig>,
+
+    /// attach metadata about where each message came from — the subject, topic,
+    /// partition and so on listed under "metadata" below. Available on every
+    /// input kind. Omit it and messages are passed on exactly as they arrive.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub envelope: Option<EnvelopeConfig>,
 }
 /////// TRANSFORM
 #[derive(Clone, Debug, Deserialize, Serialize, JsonSchema)]
@@ -583,6 +780,8 @@ pub enum TransformKind {
     Splitter(SplitterTransformConfig),
     Reducer(ReduceTransformConfig),
     Filter(FilterTransformConfig),
+    Remember(RememberTransformConfig),
+    Recall(RecallTransformConfig),
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, JsonSchema)]
@@ -620,6 +819,11 @@ pub struct Config {
     /// may be empty — a pipeline that only feeds downstream pipelines needs no
     /// output of its own.
     pub outputs: Vec<OutputConfig>,
+    /// the state bucket this pipeline remembers things in, and what its
+    /// messages are keyed by. Only needed by a pipeline with a `remember` or
+    /// `recall` transform; those fail to build without it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub state: Option<PipelineState>,
 }
 
 impl Config {

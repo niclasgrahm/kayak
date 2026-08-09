@@ -1,8 +1,12 @@
 use crate::{
     BuildCtx,
-    inputs::{BuildInput, InputSource, MessageBatch},
+    inputs::{
+        BuildInput, InputSource, MessageBatch,
+        envelope::{Envelope, Meta},
+    },
     secrets::Resolved,
 };
+use serde_json::Value;
 use anyhow::{Context, Result};
 use futures_util::FutureExt;
 use tokio_stream::StreamExt;
@@ -27,6 +31,7 @@ impl BuildInput for NatsConfig {
             // one message per batch unless the config asks for more — see
             // `NatsInput::next`
             max_batch: crate::inputs::batch_cap(self.max_batch),
+            envelope: ctx.envelope("nats", Some(&self.connection)),
             sub: None,
         }))
     }
@@ -37,7 +42,47 @@ pub struct NatsInput {
     pub subject: String,
     /// Most messages in one batch. One unless the config says otherwise.
     pub max_batch: usize,
+    /// What this input attaches to each message, if the config asked for any.
+    pub envelope: Envelope,
     pub sub: Option<async_nats::Subscriber>,
+}
+
+/// A nats message's headers as JSON: an object of arrays, because a header may
+/// legitimately appear more than once and collapsing that would lose it.
+fn headers_of(message: &async_nats::Message) -> Value {
+    let Some(headers) = &message.headers else {
+        return Value::Object(serde_json::Map::new());
+    };
+    let mut out = serde_json::Map::new();
+    for (name, values) in headers.iter() {
+        out.insert(
+            name.to_string(),
+            Value::Array(
+                values
+                    .iter()
+                    .map(|v| Value::String(v.to_string()))
+                    .collect(),
+            ),
+        );
+    }
+    Value::Object(out)
+}
+
+/// What this input knows about one message: the concrete subject it arrived on
+/// — which is the whole reason a wildcard subscription is worth anything — plus
+/// the reply subject and headers.
+fn meta_of(message: &async_nats::Message) -> Meta {
+    vec![
+        ("subject", Value::String(message.subject.to_string())),
+        (
+            "reply",
+            message
+                .reply
+                .as_ref()
+                .map_or(Value::Null, |r| Value::String(r.to_string())),
+        ),
+        ("headers", headers_of(message)),
+    ]
 }
 
 #[async_trait::async_trait]
@@ -61,17 +106,34 @@ impl InputSource for NatsInput {
             .ok_or_else(|| anyhow::anyhow!("nats subscriber not initialized"))?;
 
         // a single malformed payload shouldn't kill the pipeline; skip it and
-        // wait for the next message
-        let decode = |payload: &[u8]| match serde_json::from_slice::<serde_json::Value>(payload) {
-            Ok(value) => Some(value),
-            Err(e) => {
+        // wait for the next message. The envelope skips for the same reason and
+        // is reported the same way — a `merge` envelope over a bare number has
+        // nowhere to put its field, which is a message this pipeline cannot
+        // read rather than a pipeline that is misconfigured.
+        let subject = &self.subject;
+        let envelope = &self.envelope;
+        let decode = move |message: &async_nats::Message| {
+            let value = match serde_json::from_slice::<Value>(&message.payload) {
+                Ok(value) => value,
+                Err(e) => {
+                    tracing::warn!("skipping non-json message on nats subject '{subject}': {e}");
+                    return None;
+                }
+            };
+            let own = if envelope.is_enabled() {
+                meta_of(message)
+            } else {
+                Vec::new()
+            };
+            let enveloped = envelope.apply(value, own);
+            if enveloped.is_none() {
                 tracing::warn!(
-                    "skipping non-json message on nats subject '{}': {}",
-                    self.subject,
-                    e
+                    "skipping a message on nats subject '{subject}': its payload is not a \
+                     json object, so a `merge` envelope has nowhere to attach metadata — \
+                     use a `wrap` envelope for a subject carrying bare values"
                 );
-                None
             }
+            enveloped
         };
 
         let mut batch: MessageBatch = Vec::new();
@@ -80,7 +142,7 @@ impl InputSource for NatsInput {
                 .next()
                 .await
                 .ok_or_else(|| anyhow::anyhow!("nats subscription on '{}' ended", self.subject))?;
-            if let Some(value) = decode(&msg.payload) {
+            if let Some(value) = decode(&msg) {
                 batch.push(Arc::new(value));
             }
         }
@@ -94,7 +156,7 @@ impl InputSource for NatsInput {
             };
             let msg = ready
                 .ok_or_else(|| anyhow::anyhow!("nats subscription on '{}' ended", self.subject))?;
-            if let Some(value) = decode(&msg.payload) {
+            if let Some(value) = decode(&msg) {
                 batch.push(Arc::new(value));
             }
         }

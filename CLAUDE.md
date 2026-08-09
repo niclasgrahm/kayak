@@ -91,6 +91,125 @@ classifies its 404 after the inbox lock is already released.
 a separate variant: one is fixed by creating the pipeline, the other by giving it
 the input.
 
+### Message metadata (the envelope)
+
+`InputConfig.envelope` sits beside `buffer` — available on every input kind,
+declared by none of them — and attaches what the input knows about a message to
+the message. **In band**, as ordinary JSON fields, and that is the decision the
+whole thing turns on.
+
+The argument is the transforms that change cardinality. Out of band (a
+`Message { value, meta }`, which is what Benthos does) `reduce`, `splitter`,
+`buffer` and the `http` transform each have to answer "whose metadata comes
+out?", and there is no good general answer — Benthos picks the first message's,
+arbitrarily. In band the question doesn't arise: metadata is data, so
+`group_by: ["_meta.subject"]` is a `group_by` and nothing in the reducer knows
+metadata exists. It also costs zero type changes — `MessageBatch =
+Vec<Arc<Value>>` is in all three traits, `testing.rs`, `BatchPreview` and every
+test — and shows up in the UI log for free. What it costs is that metadata
+reaches the outputs and can collide with a payload key; both are the user's
+call, which is why the field names are configurable and the whole thing is
+opt-in.
+
+Two shapes because a payload is not always an object: `merge` adds a field (and
+**skips a non-object payload with a warning**, like a non-JSON one), `wrap`
+moves the payload under a field of its own. Absent is byte-for-byte today's
+behaviour and that is a promise, the same one `batch_cap` makes — an input that
+quietly re-shaped its messages would break every field reference downstream.
+
+The split of responsibility is the one non-obvious part of the implementation.
+`envelope` is the *wrapper's* field but only the input knows the interesting
+half (a subject, an offset), so `BuildInputConfig for InputConfig` puts the
+config on `BuildCtx` around the kind's build and takes it straight off again;
+each input calls `ctx.envelope(kind, connection)` and adds its own per-message
+fields at `apply` time. An input that forgets to call it attaches nothing — the
+compiler can't catch that, which is why the metadata each input attaches is
+*declared* in `kayak-core/src/metadata.rs` and
+`every_input_declares_its_metadata` fails without an arm. `/docs` renders that
+declaration; nothing is written by hand.
+
+The `http` input is the one that needed plumbing: the request is gone by the
+time the run loop reads the messages, so `PostMeta` travels down the inbox
+channel with the batch. Its headers are an **allow-list**
+(`inputs::http::ALLOWED_HEADERS`) and must stay one — a deny-list or an `x-`
+prefix rule passes `x-api-key` through, and a credential written into an object
+store outlives the request by years. `main.rs` serves with
+`into_make_service_with_connect_info` so `remote_addr` exists; nothing fails
+without it (the router tests have no peer), which is why it's read out of the
+request extensions rather than taken as a `ConnectInfo` extractor.
+
+**Field paths** (`src/fields.rs`) are what make metadata reachable, and they are
+the *only* way any transform addresses a field — `filter`'s two comparisons and
+`reduce`'s `present()` all go through `fields::get`, so a path works everywhere
+or nowhere. **An exact key wins over a path**, which is what makes them a
+compatible addition rather than a breaking one: a source with dots in its field
+names keeps working and needs no escaping rule. A reducer writes a grouped path
+out under its **leaf** (`fields::leaf`) and refuses two paths sharing one at
+build time.
+
+### State buckets
+
+Named, **global**, declared at the top of the config file and referred to by the
+pipelines that use them — deliberately the shape connections already have. The
+argument for global over per-pipeline is the reference-data case: one pipeline
+remembers the current recipe per machine and six unrelated ones stamp it onto
+their output, which per-pipeline state can only answer with six copies and six
+edges that carry nothing else.
+
+**The unenforced rule is the important one and belongs in any review of this
+area**: two pipelines sharing a bucket are two run loops with no ordering
+between them, so ordering-sensitive correlation must live in *one* pipeline and
+sharing is only for state that doesn't change on the timescale of a message.
+Documented in `kayak_core::state`'s module docs and the readme; not preventable.
+
+`kayak-core/src/state.rs` holds the declaration (`StateBuckets`,
+`StateBucketConfig`, `PipelineState`) plus the API DTOs, since `api_docs` needs
+`schema_for!`. `src/buckets.rs` is the live store. Three properties there:
+
+- **In memory, and that is a decision rather than a stage.** The store is
+  touched per message (no network round trip), and durability without
+  checkpointed *input positions* would be worse than none — a core nats
+  subscription has no replay, so restoring a half-finished piece of work whose
+  remaining messages were never delivered yields an answer that is wrong
+  invisibly. A durable backend starts at the input, not here.
+- **Every bucket is bounded and there is no unbounded spelling.** Enforced in
+  the store rather than by the transforms, so a new stateful component can't
+  forget.
+- **Eviction is lazy — no sweeper task.** Expiry is applied when a bucket is
+  touched, which is what makes it work at all: transforms are only driven by
+  arriving batches and get no tick. This is the same missing tick behind the
+  "idle file output holds its part open" issue; solving that one properly would
+  let this be exact.
+
+`Buckets::rebuilt` is the revert rule: contents survive a reload, **unless that
+bucket's declaration changed** (its contents may not satisfy the new limits).
+That is what makes state survivable without being unaccountable — a revert
+rebuilds every pipeline, so emptying the buckets would make an edit to an
+unrelated pipeline cost an hour of accumulated state.
+
+`src/transforms/state.rs` is `remember` and `recall`. Two transforms rather than
+one because *chain order is the semantics*. `remember` is a **tap** — it passes
+its batch on unchanged. `recall` writes to the top level (so a downstream
+`group_by` needs no prefix) and defaults `on_missing` to `skip`, which is the
+opposite of the reducer's default and deliberately so: every stateful pipeline
+has a warm-up in which nothing is remembered, and `error` would fail them all at
+startup. Both warn **once per transform, not per message** about a key the
+stream doesn't carry — that's a config mistake, not an event, and a line per
+message buries the log.
+
+`Condition` is a new internally-tagged enum rather than reusing `FilterKind`
+(which is externally tagged): a `Vec<FilterKind>` would reflect as
+`FieldType::Json` and fail `no_component_field_needs_raw_json`. Several
+conditions mean *all of them*; there is no `or` and no nesting, because that is
+the point where this becomes an expression language.
+
+**The config file now has two spellings** (`kayak_core::state::ConfigFile`): a
+bare array of pipelines, or a document with `state` and `pipelines`. Both are
+permanent — `render_as_document` picks the array whenever there are no buckets,
+so no existing file changes by a byte when saved. `persist::read`/`write` are
+still the only places a *format* exists, and now also the only place the two
+spellings are told apart.
+
 ### Connections
 
 The systems pipelines talk to are declared once under a name, in a third file
@@ -218,6 +337,10 @@ gitignored; the build creates it.
 Config fields that can hold credentials are typed `Secret` (`kayak-core::config`), not `String`. They all live on *connections* now rather than on components. `Secret` only ever holds the *unresolved* `${NAME}` template, which is what makes it safe to serialize back out of `GET /api/pipelines` and to compile for wasm. Resolution happens at build time via `ctx.resolve()` and yields a `secrets::Resolved`, whose `Display`/`Debug` print the template rather than the value — so error contexts can name a connection without leaking it. Reaching the real value takes `.expose()`; flag new call sites in review, and never put a `Resolved` into anything `Serialize`. Stores (`EnvStore`, `FileStore`, `ChainStore`) live in `src/secrets.rs`; `main.rs` chains env ahead of `--secrets <file>`. `src/testing.rs` has `MapSecretStore` for tests. See "secrets" in `readme.md`.
 
 Note that `$defs` in the generated schema now holds non-component types (`Secret`), so anything reflecting over the schema has to distinguish those from components — see the docs section below.
+
+**Adding an input** additionally needs an arm in `kayak-core/src/metadata.rs`
+(`every_input_declares_its_metadata` fails without one) and a
+`ctx.envelope(...)` call in its `build`, applied per message in `next`.
 
 **Adding a component** therefore touches five places: the config struct + enum variant in `kayak-core/src/config.rs`, the `build()` dispatch arm in `src/config.rs`, the impl module, and a wire-format sample in `tests/config.rs` (which fails until you add it). The config struct also needs a doc comment, and its fields want one — that's what `/docs` shows, and a missing one fails a test in `kayak-core/src/docs.rs`.
 
@@ -491,7 +614,11 @@ The same applies to the edge handles: `ChannelGrip` and `PortGrip` are each two 
 
 Drags are tracked with window-level listeners rather than on the card (a fast pointer leaves the card behind, and a `mouseup` outside it would never arrive). The delta is divided by the zoom, applied to the geometry captured at press time rather than accumulated, and written into `arrangement` live so the edges follow; the `PUT` happens once, on release. It's a browser-tab property — the API accepts writes either way, which is fine for a dev tool but shouldn't be mistaken for enforcement. Edits apply to the runtime immediately, so `revert` (reload the file) is the only undo, and `unsaved changes` in the navbar is the only thing between a session's work and a restart.
 
-The sidebar has two tabs (`SidebarTab`), pipelines and connections, each with its own `+` and armed delete. The `+` in the pipelines tab opens `AddPipelineModal` (`frontend/src/app.rs`), whose pure half is `frontend/src/form.rs` — drafts in, `POST /api/pipelines` body or a list of `FormError`s out, unit tested like `graph.rs`/`inspector.rs`/`docs.rs`. One non-obvious constraint shapes the component: the field boxes are **uncontrolled** (`value=` once, `on:input` writes, never reads back), because the field list is rebuilt when the kind or variant changes and a rebuild on every keystroke would destroy the `<input>` being typed into. `DraftSignals` exists for the same reason — per-part signals so typing doesn't invalidate the list.
+The sidebar has three tabs (`SidebarTab`): pipelines and connections, each with its own `+` and armed delete, and **state**, which has neither — buckets are part of the graph's logic and live in the config file, so that tab is a window rather than an editor. It polls `GET /api/state` once a second *while mounted* (a bucket changes per message, so pushing it would be the `/events` firehose again for a readout nobody watches per-message) and a click opens a card pinned to the row's viewport y, the same trick `ConnectionList` uses.
+
+**A trap worth knowing before adding anything else that polls**: the navbar, the sidebar and the whole canvas are inside *one* `<Suspense>` in `Canvas`. A `LocalResource` read anywhere under it re-suspends that boundary on every refetch, so a resource polled once a second tears the canvas down and rebuilds it once a second — which is exactly what the first version of this tab did. The state tab therefore reads through an `Effect` + `spawn_local` into a plain `RwSignal` instead. The existing `pipelines`/`connections` resources are fine because they only refetch on an explicit `reload`; anything on a timer needs this treatment or a suspense boundary of its own.
+
+The `+` in the pipelines tab opens `AddPipelineModal` (`frontend/src/app.rs`), whose pure half is `frontend/src/form.rs` — drafts in, `POST /api/pipelines` body or a list of `FormError`s out, unit tested like `graph.rs`/`inspector.rs`/`docs.rs`. One non-obvious constraint shapes the component: the field boxes are **uncontrolled** (`value=` once, `on:input` writes, never reads back), because the field list is rebuilt when the kind or variant changes and a rebuild on every keystroke would destroy the `<input>` being typed into. `DraftSignals` exists for the same reason — per-part signals so typing doesn't invalidate the list.
 
 The pipelines tab has two arrangements and a search box, and which rows that comes to is `frontend/src/sidebar.rs` — pure, unit-tested, fed by `graph::pipelines_from` so the sidebar and the canvas derive from one description of the graph. `Flat` sorts by id *here* rather than trusting the server, which walks a `HashMap`. `Tree` has to answer the DAG: a pipeline with several upstreams is listed under each, in full under the **deepest** parent (ties by id) — the one the canvas draws the card below — and as a `repeat` row under the rest. A repeat doesn't recurse (it would draw a subtree twice, and would not terminate in a cycle) and gets no delete, since the armed state is keyed by id and two `×`s arming together read as two pipelines. Anything the walk can't reach — a cycle — is appended as a root rather than dropped. Search keeps the *ancestors* of a match and not its descendants; the rows are pre-order, which is what makes that a single backwards pass. The list is rebuilt wholesale rather than `<For>`-keyed because an id isn't unique in tree mode, and the search `<input>` sits outside that closure for the same reason the modal's fields are uncontrolled. The mode lives in `AppState` (the tab strip unmounts the list) and the query doesn't (a filter is transient).
 

@@ -1,8 +1,12 @@
 use crate::{
     BuildCtx,
-    inputs::{BuildInput, InputSource, MessageBatch},
+    inputs::{
+        BuildInput, InputSource, MessageBatch,
+        envelope::{Envelope, Meta},
+    },
     secrets::Resolved,
 };
+use serde_json::Value;
 use anyhow::{Context, Result};
 use futures_util::FutureExt;
 use kayak_core::config::{KafkaConfig, KafkaStartAt};
@@ -31,6 +35,7 @@ impl BuildInput for KafkaConfig {
             // is an optimisation, never something imposed on a pipeline that
             // wants its messages one at a time
             max_batch: crate::inputs::batch_cap(self.max_batch),
+            envelope: ctx.envelope("kafka", Some(&self.connection)),
             consumer: None,
         }))
     }
@@ -45,6 +50,8 @@ pub struct KafkaInput {
     /// [`KafkaInput::next`] for what raising it does and, just as importantly,
     /// what it doesn't.
     max_batch: usize,
+    /// What this input attaches to each message, if the config asked for any.
+    envelope: Envelope,
     /// Built on the first read, like the nats input: `build()` must not block
     /// on a broker that isn't up yet.
     consumer: Option<StreamConsumer>,
@@ -87,17 +94,59 @@ impl KafkaInput {
         };
         // a single malformed payload shouldn't kill the pipeline; skip it and
         // wait for the next record
-        match serde_json::from_slice(payload) {
-            Ok(value) => Some(value),
+        let value = match serde_json::from_slice(payload) {
+            Ok(value) => value,
             Err(e) => {
                 tracing::warn!(
                     "skipping non-json record on kafka topic '{}': {}",
                     self.topic,
                     e
                 );
-                None
+                return None;
             }
+        };
+
+        let own = if self.envelope.is_enabled() {
+            Self::meta_of(msg)
+        } else {
+            Vec::new()
+        };
+        let enveloped = self.envelope.apply(value, own);
+        if enveloped.is_none() {
+            tracing::warn!(
+                "skipping a record on kafka topic '{}': its payload is not a json object, \
+                 so a `merge` envelope has nowhere to attach metadata — use a `wrap` \
+                 envelope for a topic carrying bare values",
+                self.topic
+            );
         }
+        enveloped
+    }
+
+    /// What this input knows about one record. `topic`, `partition` and
+    /// `offset` together identify it exactly, which is what makes them worth
+    /// carrying: a message that came out wrong can be found again.
+    fn meta_of(msg: &rdkafka::message::BorrowedMessage<'_>) -> Meta {
+        vec![
+            ("topic", Value::String(msg.topic().to_string())),
+            ("partition", Value::from(msg.partition())),
+            ("offset", Value::from(msg.offset())),
+            (
+                "key",
+                msg.key().map_or(Value::Null, |key| {
+                    // a key is bytes, and one that isn't text is better
+                    // reported as absent than as replacement characters
+                    std::str::from_utf8(key).map_or(Value::Null, |k| Value::String(k.to_string()))
+                }),
+            ),
+            (
+                "timestamp",
+                msg.timestamp()
+                    .to_millis()
+                    .and_then(chrono::DateTime::from_timestamp_millis)
+                    .map_or(Value::Null, |t| Value::String(t.to_rfc3339())),
+            ),
+        ]
     }
 }
 

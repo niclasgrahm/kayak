@@ -4,6 +4,7 @@
 
 use std::time::Duration;
 
+use kayak::inputs::http::PostMeta;
 use kayak::state::{AppState, PipelineError};
 use kayak::testing::MapSecretStore;
 use kayak_core::config::{Config, InputKind};
@@ -159,7 +160,7 @@ async fn deleting_a_pipeline_cancels_its_run_loop() -> anyhow::Result<()> {
 #[tokio::test]
 async fn the_repository_config_file_starts_a_working_graph() -> anyhow::Result<()> {
     let declared: Vec<Config> =
-        serde_json::from_str(&std::fs::read_to_string("example_config/config.json")?)?;
+        kayak::persist::read(std::path::Path::new("example_config/config.json"))?.pipelines;
     // config.json references secrets, so it needs a store; the environment is
     // not something a test should depend on or write to
     //
@@ -244,7 +245,7 @@ async fn posted_messages_flow_through_the_pipeline() -> anyhow::Result<()> {
     let (tx, mut rx) = tokio::sync::mpsc::channel(8);
     pipeline.subscribe(tx);
 
-    let accepted = state.ingest("ingest", vec![json!({"n": 1}), json!({"n": 2})])?;
+    let accepted = state.ingest("ingest", vec![json!({"n": 1}), json!({"n": 2})], PostMeta::default())?;
     assert_eq!(accepted, 2);
 
     let got = tokio::time::timeout(Duration::from_secs(5), rx.recv())
@@ -254,6 +255,134 @@ async fn posted_messages_flow_through_the_pipeline() -> anyhow::Result<()> {
     assert_eq!(got.len(), 2);
     assert_eq!(got[0]["n"], json!(1));
     assert_eq!(got[1]["n"], json!(2));
+    Ok(())
+}
+
+/// The whole path an envelope takes: config → build → run loop → what a
+/// downstream sees. `merge` leaves the payload's own fields where they are, so
+/// nothing downstream of an input that grows an envelope has to change.
+#[tokio::test]
+async fn an_envelope_attaches_metadata_to_what_the_pipeline_emits() -> anyhow::Result<()> {
+    let state = AppState::new();
+    let pipeline = state.create_pipeline(serde_json::from_value(json!({
+        "id": "ingest",
+        "inputs": [{ "type": "http", "envelope": { "type": "merge" } }],
+        "transforms": [],
+        "outputs": [{ "type": "stdout" }]
+    }))?)?;
+
+    let (tx, mut rx) = tokio::sync::mpsc::channel(8);
+    pipeline.subscribe(tx);
+    state.ingest(
+        "ingest",
+        vec![json!({"n": 1})],
+        PostMeta::new("POST", None, [("x-request-id", "abc")]),
+    )?;
+
+    let got = tokio::time::timeout(Duration::from_secs(5), rx.recv())
+        .await?
+        .ok_or_else(|| anyhow::anyhow!("the pipeline emitted nothing"))?;
+
+    assert_eq!(got[0]["n"], json!(1), "the payload is left where it was");
+    assert_eq!(got[0]["_meta"]["pipeline"], json!("ingest"));
+    assert_eq!(got[0]["_meta"]["input"], json!("http"));
+    assert_eq!(got[0]["_meta"]["method"], json!("POST"));
+    assert_eq!(got[0]["_meta"]["headers"]["x-request-id"], json!("abc"));
+    Ok(())
+}
+
+/// `wrap` is the shape for a source of bare readings, and the reason both
+/// shapes exist: a `1` has nowhere to put a field, so the payload moves under
+/// one of its own.
+#[tokio::test]
+async fn a_wrap_envelope_carries_a_payload_that_is_not_an_object() -> anyhow::Result<()> {
+    let state = AppState::new();
+    let pipeline = state.create_pipeline(serde_json::from_value(json!({
+        "id": "ingest",
+        "inputs": [{
+            "type": "http",
+            "envelope": { "type": "wrap", "payload": "reading", "meta": "provenance" }
+        }],
+        "transforms": [],
+        "outputs": [{ "type": "stdout" }]
+    }))?)?;
+
+    let (tx, mut rx) = tokio::sync::mpsc::channel(8);
+    pipeline.subscribe(tx);
+    state.ingest("ingest", vec![json!(21.5)], PostMeta::default())?;
+
+    let got = tokio::time::timeout(Duration::from_secs(5), rx.recv())
+        .await?
+        .ok_or_else(|| anyhow::anyhow!("the pipeline emitted nothing"))?;
+
+    assert_eq!(got[0]["reading"], json!(21.5));
+    assert_eq!(got[0]["provenance"]["input"], json!("http"));
+    Ok(())
+}
+
+/// The default is the promise: an input with no `envelope` passes messages on
+/// byte for byte, which is what every config written before this existed
+/// relies on.
+#[tokio::test]
+async fn without_an_envelope_nothing_is_attached() -> anyhow::Result<()> {
+    let state = AppState::new();
+    let pipeline = state.create_pipeline(serde_json::from_value(json!({
+        "id": "ingest",
+        "inputs": [{ "type": "http" }],
+        "transforms": [],
+        "outputs": [{ "type": "stdout" }]
+    }))?)?;
+
+    let (tx, mut rx) = tokio::sync::mpsc::channel(8);
+    pipeline.subscribe(tx);
+    state.ingest(
+        "ingest",
+        vec![json!({"n": 1})],
+        PostMeta::new("POST", Some("10.0.0.1:1".to_string()), [("a", "b")]),
+    )?;
+
+    let got = tokio::time::timeout(Duration::from_secs(5), rx.recv())
+        .await?
+        .ok_or_else(|| anyhow::anyhow!("the pipeline emitted nothing"))?;
+    assert_eq!(*got[0], json!({ "n": 1 }));
+    Ok(())
+}
+
+/// Metadata is in band, so it is *data*: the transforms reach it with a dotted
+/// path and nothing about them had to learn what metadata is. This is the
+/// property the whole design was chosen for — and the shape the machine-data
+/// use case needs, where the machine's id only exists in the subject.
+#[tokio::test]
+async fn a_transform_can_group_by_a_metadata_field() -> anyhow::Result<()> {
+    let state = AppState::new();
+    let pipeline = state.create_pipeline(serde_json::from_value(json!({
+        "id": "ingest",
+        "inputs": [{ "type": "http", "envelope": { "type": "merge" } }],
+        "transforms": [{
+            "type": "reducer",
+            "group_by": ["_meta.method"],
+            "aggregations": [{ "function": "avg", "field": "n", "as": "mean" }]
+        }],
+        "outputs": [{ "type": "stdout" }]
+    }))?)?;
+
+    let (tx, mut rx) = tokio::sync::mpsc::channel(8);
+    pipeline.subscribe(tx);
+    state.ingest(
+        "ingest",
+        vec![json!({"n": 1}), json!({"n": 3})],
+        PostMeta::new("POST", None, [("content-type", "application/json")]),
+    )?;
+
+    let got = tokio::time::timeout(Duration::from_secs(5), rx.recv())
+        .await?
+        .ok_or_else(|| anyhow::anyhow!("the pipeline emitted nothing"))?;
+
+    assert_eq!(got.len(), 1, "one post, one group");
+    assert_eq!(got[0]["mean"], json!(2.0));
+    // written out under the path's leaf: what comes out of here says `method`,
+    // not `_meta.method`
+    assert_eq!(got[0]["method"], json!("POST"));
     Ok(())
 }
 
@@ -267,11 +396,11 @@ async fn posting_is_refused_differently_by_a_missing_pipeline_and_a_missing_inpu
     state.create_pipeline(idle("p1")?)?;
 
     assert!(matches!(
-        state.ingest("p1", vec![json!({"n": 1})]),
+        state.ingest("p1", vec![json!({"n": 1})], PostMeta::default()),
         Err(PipelineError::NotAccepting(ref id)) if id == "p1"
     ));
     assert!(matches!(
-        state.ingest("nobody", vec![json!({"n": 1})]),
+        state.ingest("nobody", vec![json!({"n": 1})], PostMeta::default()),
         Err(PipelineError::NotFound(ref id)) if id == "nobody"
     ));
     Ok(())
@@ -290,9 +419,9 @@ async fn an_empty_post_is_a_no_op_that_still_checks_the_endpoint() -> anyhow::Re
         "outputs": [{ "type": "stdout" }]
     }))?)?;
 
-    assert_eq!(state.ingest("ingest", vec![])?, 0);
+    assert_eq!(state.ingest("ingest", vec![], PostMeta::default())?, 0);
     assert!(matches!(
-        state.ingest("nobody", vec![]),
+        state.ingest("nobody", vec![], PostMeta::default()),
         Err(PipelineError::NotFound(_))
     ));
     Ok(())

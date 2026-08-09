@@ -11,7 +11,9 @@
 
 use std::collections::BTreeSet;
 
-use kayak_core::config::{Config, DummyPayload, InputConfig, InputKind, OutputKind, TransformKind};
+use kayak_core::config::{
+    Config, DummyPayload, EnvelopeConfig, InputConfig, InputKind, OutputKind, TransformKind,
+};
 use kayak_core::connections::{ConnectionKind, Connections};
 use schemars::schema_for;
 use serde_json::{Value, json};
@@ -81,6 +83,25 @@ fn transform_samples() -> Vec<(&'static str, Value)> {
             json!({
                 "type": "filter",
                 "Numeric": {"field": "value", "operator": "GreaterThan", "value": 10.0}
+            }),
+        ),
+        (
+            "remember",
+            json!({
+                "type": "remember",
+                "when": [
+                    {"type": "string", "field": "_meta.signal", "operator": "EqualTo",
+                     "value": "unit_id"}
+                ],
+                "remember": [{"field": "value", "as": "unit_id"}]
+            }),
+        ),
+        (
+            "recall",
+            json!({
+                "type": "recall",
+                "recall": ["unit_id", "recipe"],
+                "on_missing": "null"
             }),
         ),
     ]
@@ -334,7 +355,7 @@ fn a_component_without_its_connection_is_rejected() {
 #[test]
 fn the_repository_config_names_only_connections_that_are_configured() -> anyhow::Result<()> {
     let configs: Vec<Config> =
-        serde_json::from_str(&std::fs::read_to_string("example_config/config.json")?)?;
+        kayak::persist::read(std::path::Path::new("example_config/config.json"))?.pipelines;
     let connections: Connections = serde_json::from_str(&std::fs::read_to_string(
         "example_config/config.connections.json",
     )?)?;
@@ -346,6 +367,69 @@ fn the_repository_config_names_only_connections_that_are_configured() -> anyhow:
             "config.json names '{id}', which config.connections.json does not declare"
         );
     }
+    Ok(())
+}
+
+/// The sample covers every component kind on purpose, and the same goes for
+/// both envelope shapes — it is what the UI is inspected against and what
+/// anyone reads to find out how a feature is written down.
+#[test]
+fn the_repository_config_exercises_both_envelope_shapes() -> anyhow::Result<()> {
+    let configs: Vec<Config> =
+        kayak::persist::read(std::path::Path::new("example_config/config.json"))?.pipelines;
+    let envelopes: Vec<&EnvelopeConfig> = configs
+        .iter()
+        .flat_map(|c| &c.inputs)
+        .filter_map(|i| i.envelope.as_ref())
+        .collect();
+
+    assert!(
+        envelopes
+            .iter()
+            .any(|e| matches!(e, EnvelopeConfig::Merge { .. })),
+        "no input in the sample attaches metadata with a `merge` envelope"
+    );
+    assert!(
+        envelopes
+            .iter()
+            .any(|e| matches!(e, EnvelopeConfig::Wrap { .. })),
+        "no input in the sample attaches metadata with a `wrap` envelope"
+    );
+    Ok(())
+}
+
+/// `sensors_10s_avg` groups by `_meta.subject`, which only exists because the
+/// `sensors` input attaches it. The two are a pair: dropping that envelope
+/// would leave a reducer grouping on a field no message carries, and
+/// `on_missing: skip` means it would emit nothing rather than fail loudly.
+#[test]
+fn a_sample_reducer_grouping_on_metadata_has_an_input_that_attaches_it() -> anyhow::Result<()> {
+    let configs: Vec<Config> =
+        kayak::persist::read(std::path::Path::new("example_config/config.json"))?.pipelines;
+
+    let mut checked = 0;
+    for config in &configs {
+        let groups_on_metadata = config.transforms.iter().any(|t| match &t.kind {
+            TransformKind::Reducer(r) => r.group_by.iter().any(|g| g.starts_with("_meta.")),
+            _ => false,
+        });
+        if !groups_on_metadata {
+            continue;
+        }
+        checked += 1;
+        for upstream in config.upstreams() {
+            let Some(parent) = configs.iter().find(|c| c.id.as_ref() == Some(upstream)) else {
+                panic!("'{upstream}' is not in the sample")
+            };
+            assert!(
+                parent.inputs.iter().any(|i| i.envelope.is_some()),
+                "pipeline '{:?}' groups by a metadata field, but its upstream '{upstream}' \
+                 attaches none",
+                config.id
+            );
+        }
+    }
+    assert!(checked > 0, "the sample should demonstrate a metadata group_by");
     Ok(())
 }
 
@@ -381,6 +465,64 @@ fn an_input_buffer_parses_alongside_the_input_fields() -> anyhow::Result<()> {
     let input = only_input(&config);
     assert!(input.buffer.is_some(), "buffer config was dropped");
     assert!(matches!(input.kind, InputKind::Pipeline(_)));
+    Ok(())
+}
+
+/// `envelope` is the other decorator on `InputConfig`, and shares the flatten
+/// hazard with `buffer`: both sit alongside the input's own fields.
+#[test]
+fn an_input_envelope_parses_alongside_the_input_fields() -> anyhow::Result<()> {
+    let config: Config = serde_json::from_value(json!({
+        "id": "x",
+        "inputs": [{
+            "type": "nats",
+            "connection": "local-nats",
+            "subject": "*.temperature",
+            "envelope": { "type": "wrap", "payload": "reading" }
+        }],
+        "transforms": [],
+        "outputs": [{"type": "stdout"}]
+    }))?;
+
+    let input = only_input(&config);
+    let Some(envelope) = input.envelope.as_ref() else {
+        panic!("envelope config was dropped")
+    };
+    assert_eq!(envelope.payload_field(), Some("reading"));
+    // not given, so the default rather than nothing
+    assert_eq!(envelope.meta_field(), "_meta");
+    assert!(matches!(input.kind, InputKind::Nats(_)));
+    Ok(())
+}
+
+/// Both fields of both shapes are optional, so the tag alone is a whole
+/// envelope — and has to round-trip as one rather than growing nulls.
+#[test]
+fn an_envelope_round_trips_without_its_optional_fields() -> anyhow::Result<()> {
+    let sample = json!({
+        "type": "http",
+        "envelope": { "type": "merge" }
+    });
+    let input: InputConfig = serde_json::from_value(sample.clone())?;
+    let Some(envelope) = input.envelope.as_ref() else {
+        panic!("envelope config was dropped")
+    };
+    assert_eq!(envelope.meta_field(), "_meta");
+    assert_eq!(envelope.payload_field(), None, "merge moves no payload");
+    assert_eq!(serde_json::to_value(&input)?, sample);
+    Ok(())
+}
+
+#[test]
+fn an_input_without_an_envelope_is_valid_and_stays_absent() -> anyhow::Result<()> {
+    let sample = json!({"type": "dummy", "duration": 1});
+    let input: InputConfig = serde_json::from_value(sample.clone())?;
+    assert!(input.envelope.is_none());
+    assert_eq!(
+        serde_json::to_value(&input)?,
+        sample,
+        "an absent envelope must not serialize as null"
+    );
     Ok(())
 }
 
@@ -463,11 +605,16 @@ fn unknown_component_types_are_rejected() {
 /// example every new pipeline gets copied from, and the Dockerfile bakes it in.
 #[test]
 fn the_repository_config_file_parses() -> anyhow::Result<()> {
-    let raw = std::fs::read_to_string("example_config/config.json")?;
-    let configs: Vec<Config> = serde_json::from_str(&raw)?;
+    let file = kayak::persist::read(std::path::Path::new("example_config/config.json"))?;
     assert!(
-        !configs.is_empty(),
+        !file.pipelines.is_empty(),
         "config.json should describe at least one pipeline"
+    );
+    // the sample declares buckets, so it is also what pins the *document*
+    // spelling of a config file as a thing that really parses
+    assert!(
+        !file.state.is_empty(),
+        "config.json should declare at least one state bucket"
     );
     Ok(())
 }
@@ -488,13 +635,11 @@ fn the_repository_config_file_parses() -> anyhow::Result<()> {
 /// sequences raw would fail on it while missing nothing.
 #[test]
 fn the_repository_yaml_config_describes_the_same_graph() -> anyhow::Result<()> {
-    let as_json: Vec<Config> =
-        serde_json::from_str(&std::fs::read_to_string("example_config/config.json")?)?;
-    let as_yaml: Vec<Config> =
-        serde_norway::from_str(&std::fs::read_to_string("example_config/config.yaml")?)?;
+    let as_json = kayak::persist::read(std::path::Path::new("example_config/config.json"))?;
+    let as_yaml = kayak::persist::read(std::path::Path::new("example_config/config.yaml"))?;
     assert_eq!(
-        serde_json::to_value(kayak::persist::ordered(as_yaml))?,
-        serde_json::to_value(kayak::persist::ordered(as_json))?,
+        serde_json::to_value(kayak::persist::ordered(as_yaml.pipelines))?,
+        serde_json::to_value(kayak::persist::ordered(as_json.pipelines))?,
         "config.yaml has drifted from config.json; regenerate it"
     );
     Ok(())

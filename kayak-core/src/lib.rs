@@ -10,9 +10,12 @@ pub mod connections;
 pub mod docs;
 pub mod format;
 pub mod layout;
+pub mod metadata;
+pub mod state;
 
 pub use connections::{ConnectionId, ConnectionKind, Connections};
 pub use format::ConfigFormat;
+pub use state::{PipelineState, StateBucketConfig, StateBuckets};
 pub use layout::{EdgeEnd, LayoutFile, PipelineLayout, PortLayout, Side};
 
 /// One pipeline as the API reports it: the id it is running under, and the

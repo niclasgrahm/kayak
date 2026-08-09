@@ -3,11 +3,13 @@ use serde::Serialize;
 use tokio::sync::broadcast;
 
 use crate::BuildCtx;
-use crate::inputs::http::{IngestError, Inboxes};
+use crate::buckets::Buckets;
+use crate::inputs::http::{IngestError, Inboxes, PostMeta};
 use crate::pipeline::Pipeline;
 use crate::secrets::{EnvStore, SecretStore};
 use kayak_core::config::Config;
 use kayak_core::connections::ConnectionKind;
+use kayak_core::state::{ConfigFile, StateBuckets};
 pub use kayak_core::{ConfigFormat, ConnectionId, Connections, LayoutFile, PipelineId, UiEvent};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -181,6 +183,17 @@ pub struct AppState {
     /// a pipeline changes nothing about the running system, so making someone save
     /// it would be ceremony over a cosmetic act. See [`crate::layout`].
     layout: Mutex<LayoutFile>,
+    /// The live state buckets, and the declaration they were built from.
+    ///
+    /// Beside the graph rather than inside a pipeline because that is what
+    /// "global and named" means: one bucket, declared once, written by one
+    /// pipeline and read by several. Behind a lock because a revert *replaces*
+    /// the set — see [`crate::buckets::Buckets::rebuilt`] for what survives
+    /// that and what doesn't.
+    buckets: Mutex<Arc<Buckets>>,
+    /// What the config file declared, kept so a revert can tell an unchanged
+    /// bucket from one whose bounds moved.
+    declared_buckets: Mutex<StateBuckets>,
 }
 
 impl Default for AppState {
@@ -229,6 +242,8 @@ impl AppState {
             inboxes: Arc::new(Inboxes::new()),
             saved: Mutex::new(None),
             layout: Mutex::new(LayoutFile::default()),
+            buckets: Mutex::new(Arc::new(Buckets::new())),
+            declared_buckets: Mutex::new(StateBuckets::new()),
         }
     }
 
@@ -533,10 +548,14 @@ impl AppState {
             anyhow::bail!("the server has no config file");
         };
         tracing::debug!("Loading configuration from {}...", path.display());
-        let configs = crate::persist::read(&path)?;
+        let file = crate::persist::read(&path)?;
+
+        // the buckets have to exist before the pipelines that name them are
+        // built, for the same reason the connections do
+        self.adopt_buckets(file.state);
 
         let mut app = self.lock_pipelines();
-        for c in configs {
+        for c in file.pipelines {
             let id = c.id.clone().unwrap_or_else(|| "<generated>".to_string());
             Self::create_locked(self, &mut app, c)
                 .with_context(|| format!("failed to start pipeline '{id}' from config"))?;
@@ -628,6 +647,48 @@ impl AppState {
         Ok(())
     }
 
+    /// The live buckets, as a snapshot a build can hold.
+    #[must_use]
+    pub fn buckets(&self) -> Arc<Buckets> {
+        Arc::clone(&self.lock_buckets())
+    }
+
+    /// The buckets as the config declares them — what a save writes back out.
+    #[must_use]
+    pub fn declared_buckets(&self) -> StateBuckets {
+        self.lock_declared_buckets().clone()
+    }
+
+    /// Take on a config file's `state` section, keeping what the buckets that
+    /// are unchanged already hold.
+    ///
+    /// Called by a load and by a revert, which is the same operation twice —
+    /// and the reason the contents survive one is that a revert rebuilds every
+    /// pipeline in the graph, so emptying the buckets would make an edit to an
+    /// unrelated pipeline cost an hour of accumulated state.
+    fn adopt_buckets(&self, declared: StateBuckets) {
+        let rebuilt = {
+            let current = self.lock_buckets();
+            current.rebuilt(&declared)
+        };
+        *self.lock_buckets() = Arc::new(rebuilt);
+        *self.lock_declared_buckets() = declared;
+    }
+
+    fn lock_buckets(&self) -> MutexGuard<'_, Arc<Buckets>> {
+        self.buckets.lock().unwrap_or_else(|poisoned| {
+            tracing::warn!("buckets lock was poisoned; recovering");
+            poisoned.into_inner()
+        })
+    }
+
+    fn lock_declared_buckets(&self) -> MutexGuard<'_, StateBuckets> {
+        self.declared_buckets.lock().unwrap_or_else(|poisoned| {
+            tracing::warn!("declared buckets lock was poisoned; recovering");
+            poisoned.into_inner()
+        })
+    }
+
     /// A poisoned lock means another thread panicked while holding it. None of
     /// the code under this lock can leave the map half-updated, so recovering
     /// the guard is safe and keeps one panic from taking down every request.
@@ -675,7 +736,7 @@ impl AppState {
             return true;
         }
         let app = self.lock_pipelines();
-        let current = Self::fingerprint(&app);
+        let current = self.fingerprint(&app);
         let saved = self.lock_saved();
         match (&current, &*saved) {
             (Some(current), Some(saved)) => current != saved,
@@ -715,7 +776,7 @@ impl AppState {
     /// Record the current graph as the one on disk. Takes the held guard so the
     /// snapshot can't be of a map that changed in between.
     fn mark_saved(&self, app: &HashMap<PipelineId, PipelineHandle>) {
-        *self.lock_saved() = Self::fingerprint(app);
+        *self.lock_saved() = self.fingerprint(app);
     }
 
     /// The graph rendered to bytes, for comparing one moment against another.
@@ -724,8 +785,15 @@ impl AppState {
     /// and the answer to that doesn't change with the format a file happens to
     /// be written in. `None` if it can't be rendered, which callers read as
     /// "can't tell" rather than as an answer.
-    fn fingerprint(app: &HashMap<PipelineId, PipelineHandle>) -> Option<String> {
-        crate::persist::render(Self::configs_of(app), kayak_core::ConfigFormat::Json).ok()
+    /// Takes `&self` because the fingerprint covers the *file*, and the buckets
+    /// are part of it: declaring one is an unsaved change like adding a
+    /// pipeline is.
+    fn fingerprint(&self, app: &HashMap<PipelineId, PipelineHandle>) -> Option<String> {
+        crate::persist::render(
+            ConfigFile::new(self.declared_buckets(), Self::configs_of(app)),
+            kayak_core::ConfigFormat::Json,
+        )
+        .ok()
     }
 
     /// Write the running graph to `name`, a file in the server's save
@@ -778,7 +846,11 @@ impl AppState {
                 unknown.join(", ")
             );
         }
-        crate::persist::write(&target, configs, format)
+        crate::persist::write(
+            &target,
+            ConfigFile::new(self.declared_buckets(), configs),
+            format,
+        )
             .with_context(|| format!("failed to save the config to {}", target.display()))?;
         self.mark_saved(&app);
         drop(app);
@@ -915,7 +987,9 @@ impl AppState {
         )
         .with_connections(connections)
         .with_data_dir(self.data_dir.clone())
-        .with_inboxes(Arc::clone(&self.inboxes));
+        .with_inboxes(Arc::clone(&self.inboxes))
+        .with_buckets(self.buckets())
+        .with_state(pipeline.config.state.clone());
         // building the runtime only fails on things the config got wrong
         // (unknown upstream, unbuildable component)
         let join_handle = pipeline.start(ctx).map_err(|e| {
@@ -963,6 +1037,7 @@ impl AppState {
         &self,
         id: &str,
         messages: Vec<serde_json::Value>,
+        meta: PostMeta,
     ) -> Result<usize, PipelineError> {
         let accepted = messages.len();
         // the inbox lock is taken and released inside these, so classifying the
@@ -971,7 +1046,7 @@ impl AppState {
             self.inboxes.check(id)
         } else {
             let batch = Arc::new(messages.into_iter().map(Arc::new).collect());
-            self.inboxes.send(id, batch)
+            self.inboxes.send(id, batch, meta)
         };
         match sent {
             Ok(()) => Ok(accepted),

@@ -25,6 +25,7 @@ use crate::handlers::{
         openapi::{api_reference, get_openapi},
         pipeline::{create_pipeline, delete_pipeline, get_pipelines, ingest_messages},
         settings::{get_settings, revert_config, save_config},
+        state::{get_state_bucket, get_state_buckets},
     },
     ui::ui::events_handler,
 };
@@ -58,6 +59,8 @@ fn handler_for(doc: &ApiDoc) -> MethodRouter<Arc<AppState>> {
         Operation::DeletePipeline => route_of(method, delete_pipeline),
         Operation::IngestMessages => route_of(method, ingest_messages),
         Operation::ListConnections => route_of(method, get_connections),
+        Operation::ListStateBuckets => route_of(method, get_state_buckets),
+        Operation::GetStateBucket => route_of(method, get_state_bucket),
         Operation::CreateConnection => route_of(method, create_connection),
         Operation::DeleteConnection => route_of(method, delete_connection),
         Operation::GetSettings => route_of(method, get_settings),
