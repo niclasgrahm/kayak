@@ -26,7 +26,7 @@ use crate::form;
 use crate::graph::{
     Camera, CardGeom, Channel, Edge, FALLBACK_CARD_HEIGHT, GRID, PULSE_TICK_MS, PULSE_TICKS,
     PortHandle, approach, bounds, dragged, dragged_channel, dragged_port, edge_paths, focus_camera,
-    layout, pipelines_from, pulsed_edges, resized, tick_pulses, wheel_delta_pixels, zoom_at,
+    focus_zoom, layout, pipelines_from, pulsed_edges, resized, tick_pulses, wheel_delta_pixels, zoom_at,
 };
 use crate::inspector;
 use crate::log;
@@ -495,6 +495,11 @@ pub struct CanvasState {
     pub camera: RwSignal<Camera>,
     /// Size of the canvas viewport in css pixels; needed to centre a pipeline.
     pub viewport: RwSignal<(f64, f64)>,
+    /// The pipeline the user is currently working with — set by a click on a
+    /// card or on a sidebar row, and read by both so that the two lists agree
+    /// about which one is meant. Like `maximized` it is a way of *looking* at
+    /// the graph: it never reaches the layout file and doesn't survive a reload.
+    pub selected: RwSignal<Option<PipelineId>>,
     /// Set by the sidebar; consumed by the animation loop.
     pub focus_request: RwSignal<Option<PipelineId>>,
     /// Where the camera is gliding to, if anywhere.
@@ -513,6 +518,7 @@ impl CanvasState {
             maximized: RwSignal::new(None),
             camera: RwSignal::new(Camera::default()),
             viewport: RwSignal::new((0.0, 0.0)),
+            selected: RwSignal::new(None),
             focus_request: RwSignal::new(None),
             focus_target: RwSignal::new(None),
         }
@@ -520,6 +526,18 @@ impl CanvasState {
 
     fn geom_of(&self, id: &PipelineId) -> Option<CardGeom> {
         self.placements.with(|p| p.get(id).copied())
+    }
+
+    /// Mark a pipeline as the selected one.
+    ///
+    /// Guarded rather than a plain `set` because it is called from a mousedown
+    /// on a card: `update`-style writes mark a signal dirty whether or not the
+    /// value moved, so an unguarded write would re-run every card's selection
+    /// memo on every click, including the ones that change nothing.
+    fn select(&self, id: &PipelineId) {
+        if self.selected.with_untracked(|s| s.as_deref() != Some(id.as_str())) {
+            self.selected.set(Some(id.clone()));
+        }
     }
 
     /// Any direct camera control abandons an in-flight glide — otherwise the
@@ -948,16 +966,22 @@ pub fn CanvasPage() -> impl IntoView {
         // Asking to be shown a pipeline means the canvas, so a card filling it
         // gets out of the way — the glide would otherwise happen behind it and
         // read as the sidebar not working. Done here rather than in the sidebar
-        // because this is where a focus is acted on.
+        // because this is where a focus is acted on, and the selection goes with
+        // it for the same reason: whatever the camera is being pointed at is
+        // what the user means.
         canvas_state.maximized.set(None);
+        canvas_state.select(&id);
         let Some(geom) = canvas_state.geom_of(&id) else {
             return;
         };
-        let target = focus_camera(
-            canvas_state.camera.get_untracked(),
-            geom,
-            canvas_state.viewport.get_untracked(),
-        );
+        // Centring alone is not enough on a zoomed-out canvas: the card arrives
+        // in the middle of the screen and is still too small to read. The glide
+        // carries the zoom as well as the position — `approach` interpolates all
+        // three — so the card ends up framed rather than merely centred.
+        let viewport = canvas_state.viewport.get_untracked();
+        let camera = canvas_state.camera.get_untracked();
+        let zoom = focus_zoom(camera, geom, viewport);
+        let target = focus_camera(Camera { zoom, ..camera }, geom, viewport);
         canvas_state.focus_target.set(Some(target));
     });
 
@@ -1868,7 +1892,8 @@ fn PipelineList() -> impl IntoView {
                     .into_iter()
                     .map(|row| {
                         let Row { id, depth, repeat } = row;
-                        let (focus_id, arm_id, delete_id, is_armed) = (
+                        let (focus_id, arm_id, delete_id, is_armed, is_selected) = (
+                            id.clone(),
                             id.clone(),
                             id.clone(),
                             id.clone(),
@@ -1877,10 +1902,21 @@ fn PipelineList() -> impl IntoView {
                         let armed_here = Memo::new(move |_| {
                             armed.get().as_deref() == Some(is_armed.as_str())
                         });
+                        // Every row for a pipeline lights up, the repeats
+                        // included: a repeat is the same pipeline, and marking
+                        // only the full row would make the selection look lost
+                        // in tree mode.
+                        let selected_here = Memo::new(move |_| {
+                            state
+                                .canvas_state
+                                .selected
+                                .with(|s| s.as_deref() == Some(is_selected.as_str()))
+                        });
                         view! {
                             <div
                                 class="tree-item"
                                 class:repeat=repeat
+                                class:selected=move || selected_here.get()
                                 // one level of nesting per grid step; a flat
                                 // list is every row at zero, so this is the
                                 // same rule in both modes
@@ -4868,7 +4904,11 @@ pub fn Card(pipeline_id: PipelineId, config: Config) -> impl IntoView {
             return;
         }
         ev.prevent_default();
+        // the press must not reach the card's own selection handler *and* the
+        // canvas behind it; selecting is done here instead, so grabbing a card
+        // selects it exactly as clicking into it does
         ev.stop_propagation();
+        canvas.select(&stored_id.get_value());
         canvas.interrupt_focus();
         canvas.dragging.set(Some(Dragging {
             id: stored_id.get_value(),
@@ -4878,6 +4918,13 @@ pub fn Card(pipeline_id: PipelineId, config: Config) -> impl IntoView {
             pinned_height: pinned_height.get_untracked(),
         }));
     };
+
+    let selected_id = pipeline_id.clone();
+    let is_selected = Memo::new(move |_| {
+        canvas
+            .selected
+            .with(|s| s.as_deref() == Some(selected_id.as_str()))
+    });
 
     let dragging_id = pipeline_id.clone();
     let is_dragging = Memo::new(move |_| {
@@ -4900,7 +4947,20 @@ pub fn Card(pipeline_id: PipelineId, config: Config) -> impl IntoView {
             class:dragging=move || is_dragging.get()
             class:maximized=move || is_maximized.get()
             class:pinned=fixed_height
+            class:selected=move || is_selected.get()
             node_ref=card_ref
+            // Anywhere on the card, in both modes: a press is how you say which
+            // pipeline you mean, and it has to work while reading the log as
+            // well as on the title bar. Mousedown rather than click so that a
+            // drag — which never produces a click — selects too; the header's
+            // own handler stops propagation and calls this itself. The camera
+            // is deliberately *not* moved: this card is already on screen, and
+            // gliding it to the middle under the pointer would be a fight.
+            on:mousedown=move |ev| {
+                if ev.button() == 0 {
+                    canvas.select(&stored_id.get_value());
+                }
+            }
             style:left=move || format!("{}px", position.get().x)
             style:top=move || format!("{}px", position.get().y)
             style:width=move || format!("{}px", position.get().width)

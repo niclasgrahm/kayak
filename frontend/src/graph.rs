@@ -1130,6 +1130,36 @@ pub fn focus_camera(camera: Camera, target: CardGeom, viewport: (f64, f64)) -> C
     }
 }
 
+/// Space left around a card when the camera is zoomed to frame it, in css
+/// pixels. Enough that the neighbouring cards and the edges arriving at this one
+/// stay visible — a card filling the viewport edge to edge reads as a page
+/// rather than as a card on a canvas.
+const FOCUS_PADDING: f64 = 64.0;
+
+/// The most a focus will ever magnify. A card is drawn for 1:1, so zooming
+/// *past* that to fill the viewport with one small card makes the text large and
+/// the graph unreadable; focusing a card on an already zoomed-in canvas
+/// therefore pulls back to 1:1 rather than staying where it was.
+const FOCUS_MAX_ZOOM: f64 = 1.0;
+
+/// The zoom at which `target` fills the viewport with [`FOCUS_PADDING`] around
+/// it — what a focus glides to, alongside the centring [`focus_camera`] does.
+///
+/// Never magnifies past [`FOCUS_MAX_ZOOM`] and never past the canvas' own
+/// limits, so the answer is always a zoom the user could have reached by
+/// scrolling. A viewport that hasn't been measured yet has no answer, and the
+/// camera's current zoom is left alone.
+#[must_use]
+pub fn focus_zoom(camera: Camera, target: CardGeom, viewport: (f64, f64)) -> f64 {
+    let (vw, vh) = viewport;
+    if vw <= 0.0 || vh <= 0.0 || target.width <= 0.0 || target.height <= 0.0 {
+        return camera.zoom;
+    }
+    let fit = ((vw - 2.0 * FOCUS_PADDING) / target.width)
+        .min((vh - 2.0 * FOCUS_PADDING) / target.height);
+    fit.clamp(MIN_ZOOM, FOCUS_MAX_ZOOM)
+}
+
 /// The card geometry, in surface pixels, that exactly covers the canvas
 /// viewport at the camera's current position and zoom.
 ///
@@ -2577,6 +2607,80 @@ mod tests {
         let (cx, cy) = card.centre();
         assert_eq!((cx - focused.x) * focused.zoom, 400.0);
         assert_eq!((cy - focused.y) * focused.zoom, 300.0);
+    }
+
+    /// A card far bigger than the viewport is zoomed out until it fits, with
+    /// the padding left around it.
+    #[test]
+    fn focusing_zooms_out_until_the_card_fits() {
+        let camera = Camera::default();
+        let card = CardGeom {
+            x: 0.0,
+            y: 0.0,
+            width: 360.0,
+            height: 1200.0,
+        };
+        let zoom = focus_zoom(camera, card, (800.0, 600.0));
+
+        // the tall side is the binding one: 600 - 2*64 = 472 css px for 1200
+        assert!((zoom - 472.0 / 1200.0).abs() < 1e-9, "zoomed to {zoom}");
+        assert!(card.height * zoom <= 600.0 - 2.0 * FOCUS_PADDING + 1e-9);
+    }
+
+    /// A small card must not be blown up: a focus is a way of reading one card
+    /// without losing the graph around it.
+    #[test]
+    fn focusing_never_magnifies_past_one_to_one() {
+        let card = CardGeom {
+            x: 0.0,
+            y: 0.0,
+            width: 360.0,
+            height: 200.0,
+        };
+        for zoom in [0.3, 1.0, MAX_ZOOM] {
+            let camera = Camera {
+                zoom,
+                ..Camera::default()
+            };
+            assert_eq!(
+                focus_zoom(camera, card, (1600.0, 1000.0)),
+                FOCUS_MAX_ZOOM,
+                "a small card at zoom {zoom} was not framed at 1:1"
+            );
+        }
+    }
+
+    /// The canvas' own limits still hold — a focus can only land somewhere the
+    /// user could have scrolled to.
+    #[test]
+    fn a_focus_stays_within_the_zoom_limits() {
+        let card = CardGeom {
+            x: 0.0,
+            y: 0.0,
+            width: 360.0,
+            height: 40_000.0,
+        };
+        assert_eq!(
+            focus_zoom(Camera::default(), card, (800.0, 600.0)),
+            MIN_ZOOM
+        );
+    }
+
+    /// Before the canvas has been measured there is no fit to compute, and
+    /// guessing one would throw the camera away on the first click.
+    #[test]
+    fn focusing_without_a_viewport_leaves_the_zoom_alone() {
+        let camera = Camera {
+            zoom: 1.7,
+            ..Camera::default()
+        };
+        let card = CardGeom {
+            x: 0.0,
+            y: 0.0,
+            width: 360.0,
+            height: 200.0,
+        };
+        assert_eq!(focus_zoom(camera, card, (0.0, 0.0)), 1.7);
     }
 
     /// Zoom must not drift: whatever is under the cursor stays under it.

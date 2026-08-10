@@ -215,9 +215,13 @@ body {
     &:hover {
       background: var(--bg-hover);
     }
-    // later, when you add selection state:
+    // The selected pipeline, the same tint its card's title bar carries. The
+    // marker down the left is what survives the row being dimmed: a repeat row
+    // is greyed out, and a tint alone on one of those is easy to miss.
     &.selected {
       background: rgba(105, 156, 232, 0.25);
+      box-shadow: inset 2px 0 0 var(--accent);
+      color: var(--text);
     }
 
     // the connection's kind, and the name it belongs to: the name takes the
@@ -321,6 +325,27 @@ body {
     &:hover {
       opacity: 1;
       color: var(--text);
+    }
+  }
+
+  // The selected card: the one the sidebar and the canvas agree is being
+  // worked on. A border and a ring rather than a fill — a card is mostly
+  // content, and tinting the body would fight the log and the chart for the
+  // one colour they both use. The title bar carries the tint instead, which is
+  // also what the sidebar row does, so the two read as the same state.
+  //
+  // Above its neighbours, because overlapping cards are allowed and the
+  // selected one is the one being looked at. Kept ahead of `.maximized` so a
+  // card that is both still comes out in front.
+  &.selected {
+    border-color: var(--accent);
+    box-shadow:
+      0 0 0 1px var(--accent),
+      0 4px 16px rgba(0, 0, 0, 0.45);
+    z-index: 5;
+
+    > header {
+      background: rgba(105, 156, 232, 0.25);
     }
   }
 
