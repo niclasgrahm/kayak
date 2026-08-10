@@ -3605,6 +3605,11 @@ fn SaveAsModal() -> impl IntoView {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum DocsTab {
     Components,
+    /// What a pipeline can remember between batches. Its own tab rather than a
+    /// fifth family on the components tab, because a bucket is not a component:
+    /// nothing builds one into a pipeline, and the half of it worth reading is
+    /// the rules about sharing rather than the two fields it takes.
+    State,
     Http,
 }
 
@@ -3619,6 +3624,7 @@ pub enum DocsTab {
 pub fn DocsPage() -> impl IntoView {
     let all = StoredValue::new(all_components());
     let all_endpoints = StoredValue::new(endpoints());
+    let state_docs = StoredValue::new(kayak_core::docs::state_docs());
     let tab = RwSignal::new(DocsTab::Components);
     // one query per tab: a search for "nats" and a search for "409" are not the
     // same search, and carrying one into the other tab would show an empty page
@@ -3628,6 +3634,7 @@ pub fn DocsPage() -> impl IntoView {
     // queries are
     let selected = RwSignal::new(Option::<String>::None);
     let api_selected = RwSignal::new(Option::<String>::None);
+    let state_selected = RwSignal::new(Option::<String>::None);
     let groups = Memo::new(move |_| all.with_value(|all| docs::groups(all, &query.get())));
     let api_groups = Memo::new(move |_| {
         all_endpoints.with_value(|all| api_docs::groups(all, &api_query.get()))
@@ -3648,6 +3655,13 @@ pub fn DocsPage() -> impl IntoView {
                     </button>
                     <button
                         class="tab"
+                        class:active=move || is(DocsTab::State)
+                        on:click=move |_| tab.set(DocsTab::State)
+                    >
+                        "state"
+                    </button>
+                    <button
+                        class="tab"
                         class:active=move || is(DocsTab::Http)
                         on:click=move |_| tab.set(DocsTab::Http)
                     >
@@ -3658,6 +3672,9 @@ pub fn DocsPage() -> impl IntoView {
                 // canvas sidebar: each keeps its own search and scroll position
                 <Show when=move || is(DocsTab::Components)>
                     <DocsSidebar groups=groups query=query selected=selected />
+                </Show>
+                <Show when=move || is(DocsTab::State)>
+                    <StateSidebar docs=state_docs selected=state_selected />
                 </Show>
                 <Show when=move || is(DocsTab::Http)>
                     <ApiSidebar groups=api_groups query=api_query selected=api_selected />
@@ -3702,6 +3719,11 @@ pub fn DocsPage() -> impl IntoView {
                                 .collect_view()
                         }}
                     </Show>
+                </div>
+            </Show>
+            <Show when=move || is(DocsTab::State)>
+                <div class="docs-content">
+                    <StateReference docs=state_docs selected=state_selected />
                 </div>
             </Show>
             <Show when=move || is(DocsTab::Http)>
@@ -3964,6 +3986,218 @@ fn DocsSidebar(
                     .collect_view()
             }}
         </>
+    }
+}
+
+/// The state tab's sidebar: the sections, in reading order.
+///
+/// No search box, unlike the other two: this tab is four sections rather than a
+/// list of forty things, and a box that filtered nothing would only ask to be
+/// typed into.
+#[component]
+fn StateSidebar(
+    docs: StoredValue<Vec<kayak_core::docs::StateDoc>>,
+    selected: RwSignal<Option<String>>,
+) -> impl IntoView {
+    let sections = docs.with_value(|docs| docs::state_sections(docs));
+    view! {
+        <div class="nav-group">
+            <div class="nav-group-title">"state"</div>
+            <For each=move || sections.clone() key=|s| s.anchor.clone() let:section>
+                {
+                    let anchor = section.anchor.clone();
+                    let on_click = section.anchor.clone();
+                    view! {
+                        <div
+                            class="tree-item"
+                            class:selected=move || {
+                                selected.get().as_deref() == Some(anchor.as_str())
+                            }
+                            on:click=move |_| {
+                                selected.set(Some(on_click.clone()));
+                                scroll_to(&on_click);
+                            }
+                        >
+                            {section.title.clone()}
+                        </div>
+                    }
+                }
+            </For>
+        </div>
+    }
+}
+
+/// What a pipeline can remember between batches.
+///
+/// Part written and part generated, and the split is the one the rest of the
+/// page makes: the two config shapes are reflected out of `kayak_core::state`,
+/// so a bound that grows a field shows up here on its own. The prose around
+/// them is what a schema cannot say — why buckets are global, and what sharing
+/// one costs.
+#[component]
+fn StateReference(
+    docs: StoredValue<Vec<kayak_core::docs::StateDoc>>,
+    selected: RwSignal<Option<String>>,
+) -> impl IntoView {
+    let shapes = docs.get_value();
+    view! {
+        <section class="docs-family" id=docs::STATE_OVERVIEW>
+            <h2>"how state works"</h2>
+            <p class="doc-description">
+                "A "
+                <strong>"state bucket"</strong>
+                " is what a pipeline can remember between batches: a keyed store of values \
+                 taken off messages that have gone past, readable by messages that come \
+                 later. Buckets are declared once at the top of the config file, under "
+                <code>"state"</code>
+                ", and the pipelines that use one name it \u{2014} deliberately the shape \
+                 connections already have."
+            </p>
+            <p class="doc-description">
+                "Global rather than per-pipeline because of the case that makes state worth \
+                 having at all: one pipeline remembers the recipe currently running on each \
+                 machine, and six unrelated pipelines stamp it onto their output. \
+                 Per-pipeline state can only answer that with six copies of the same work."
+            </p>
+            <p class="doc-description doc-warning">
+                "The rule that is not enforced is the one to know. Two pipelines sharing a \
+                 bucket are two run loops with no ordering between them, so a reader can see \
+                 the value from before or after a given write depending on nothing it can \
+                 observe. Ordering-sensitive correlation belongs in "
+                <em>"one"</em>
+                " pipeline; sharing is only for state whose value does not change on the \
+                 timescale of a message. A recipe that updates hourly is safe to share. A \
+                 unit id that changes every cycle is not."
+            </p>
+            <p class="doc-description">
+                "Buckets live in memory. Their contents survive a revert \u{2014} unless that \
+                 bucket's declaration changed, since what it holds may not satisfy the new \
+                 limits \u{2014} and they do not survive a restart. Every bucket is bounded \
+                 and there is no spelling of \u{201c}unbounded\u{201d}: past "
+                <code>"max_keys"</code>
+                " the least recently written key is dropped, and "
+                <code>"idle_timeout_secs"</code>
+                " forgets a key that has not been written for a while. Expiry is applied when \
+                 a bucket is next touched rather than by a sweeper, so an idle bucket keeps \
+                 its keys until something writes to it again."
+            </p>
+            <pre class="doc-example">
+                {r#"{
+  "state": {
+    "machine_state": { "max_keys": 5000, "idle_timeout_secs": 3600 }
+  },
+  "pipelines": [
+    {
+      "id": "machine_cycles",
+      "state": { "bucket": "machine_state", "key": "_meta.machine_id" },
+      "inputs": [ ... ],
+      "transforms": [ ... ],
+      "outputs": [ ... ]
+    }
+  ]
+}"#}
+            </pre>
+            <p class="doc-description">
+                "A config file that declares no buckets stays the bare array of pipelines it \
+                 always was; the two-key document above is only needed once there is \
+                 something to put under "
+                <code>"state"</code>
+                "."
+            </p>
+        </section>
+        <section class="docs-family">
+            <h2>"declaring state"</h2>
+            {shapes
+                .into_iter()
+                .map(|shape| view! { <StateShapeDoc shape=shape selected=selected /> })
+                .collect_view()}
+        </section>
+        <section class="docs-family" id=docs::STATE_TRANSFORMS>
+            <h2>"remember and recall"</h2>
+            <p class="doc-description">
+                "Nothing reads or writes a bucket except two transforms, and there are two \
+                 rather than one because "
+                <em>"chain order is the semantics"</em>
+                ": "
+                <code>"remember"</code>
+                " puts what a message carries into the bucket, "
+                <code>"recall"</code>
+                " puts what the bucket holds onto a message, and which of them comes first \
+                 decides whether a message sees its own value."
+            </p>
+            <p class="doc-description">
+                <code>"remember"</code>
+                " is a tap \u{2014} it passes its batch on unchanged. "
+                <code>"recall"</code>
+                " writes to the top level, so a "
+                <code>"reducer"</code>
+                " downstream can group by a recalled name without knowing where it came from, \
+                 and it defaults "
+                <code>"on_missing"</code>
+                " to "
+                <code>"skip"</code>
+                ": every stateful pipeline has a warm-up in which nothing has been remembered \
+                 yet, and failing on that would fail them all at startup."
+            </p>
+            <p class="doc-description">
+                "Both need a "
+                <code>"state"</code>
+                " on their pipeline and fail to build without one. Their settings are in the \
+                 components tab, under transforms."
+            </p>
+        </section>
+        <section class="docs-family" id=docs::STATE_INSPECTING>
+            <h2>"inspecting a bucket"</h2>
+            <p class="doc-description">
+                "The canvas sidebar's "
+                <strong>"state"</strong>
+                " tab lists every declared bucket with the number of keys it is holding, and \
+                 a click opens a card of the keys themselves. It is a window rather than an \
+                 editor, and has no "
+                <code>"+"</code>
+                " or delete: a bucket is part of the graph's logic, so it is declared in the \
+                 config file like the pipelines that use it."
+            </p>
+            <p class="doc-description">
+                "It polls "
+                <code>"GET /api/state"</code>
+                " once a second while it is open \u{2014} a bucket changes with every message, \
+                 so pushing it would be a firehose for a readout nobody watches per-message. "
+                <code>"GET /api/state/{bucket}"</code>
+                " is one bucket's contents, a page of keys at a time. Both are in the http \
+                 api tab."
+            </p>
+        </section>
+    }
+}
+
+/// One of the two config shapes, under the same furniture a component gets: the
+/// path it goes at in place of a `type` tag, its doc comment, its fields.
+#[component]
+fn StateShapeDoc(
+    shape: kayak_core::docs::StateDoc,
+    selected: RwSignal<Option<String>>,
+) -> impl IntoView {
+    let anchor = docs::state_anchor_id(&shape);
+    let is_selected = anchor.clone();
+    let description = shape.description.clone().unwrap_or_default();
+
+    view! {
+        <article
+            class="doc-card"
+            class:selected=move || selected.get().as_deref() == Some(is_selected.as_str())
+            id=anchor
+        >
+            <header>
+                <span class="doc-kind">{shape.title.clone()}</span>
+                // where it goes in the file, in place of the `"type": "..."` a
+                // component's header carries: neither shape has a tag, and the
+                // path is the equivalent thing you actually type
+                <code class="doc-tag">{shape.path.clone()}</code>
+            </header>
+            <Description text=description />
+            <FieldTable fields=shape.fields.clone() />
+        </article>
     }
 }
 

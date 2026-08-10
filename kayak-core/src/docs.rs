@@ -14,6 +14,7 @@
 use crate::config::{InputConfig, InputKind, OutputKind, TransformKind};
 use crate::connections::ConnectionKind;
 use crate::metadata::MetaFieldDoc;
+use crate::state::{PipelineState, StateBucketConfig};
 use schemars::{JsonSchema, schema_for};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -218,6 +219,57 @@ pub fn all_components() -> Vec<ComponentDoc> {
     docs.extend(of(json_schema_of_output(), Family::Output));
     docs.extend(of(json_schema_of_connection(), Family::Connection));
     docs
+}
+
+/// One of the config shapes state is declared with, as the reference shows it.
+///
+/// Not a [`ComponentDoc`]: neither of these is a component. A bucket is not
+/// built into a pipeline and has no `type` tag to select it, so giving it a
+/// [`Family`] would put it in the "add pipeline" form's list of things a
+/// pipeline can be made of, where it does not belong. What it shares with a
+/// component is the only part worth sharing — the fields are reflected out of
+/// the config type, so the doc comments on [`crate::state`] are the docs.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct StateDoc {
+    /// What the shape is called, from its `schemars(title = ...)` — "state
+    /// bucket", "pipeline state".
+    pub title: String,
+    /// Where it goes in the config file, as a path — `state.<name>`, or the
+    /// `state` key of one pipeline. The schema can't know this; it is the one
+    /// hand-written part, and it is what tells the two shapes apart on the page.
+    pub path: String,
+    /// The config struct's doc comment.
+    pub description: Option<String>,
+    pub fields: Vec<FieldDoc>,
+}
+
+/// The two halves of declaring state: the bucket, and a pipeline's binding to
+/// one.
+///
+/// Generated here rather than written on the page for the reason every other
+/// table on `/docs` is: a bound that changes or a field that grows must not
+/// leave the reference behind.
+#[must_use]
+pub fn state_docs() -> Vec<StateDoc> {
+    vec![
+        state_doc(
+            &serde_json::to_value(schema_for!(StateBucketConfig)).unwrap_or(Value::Null),
+            "state.<name>",
+        ),
+        state_doc(
+            &serde_json::to_value(schema_for!(PipelineState)).unwrap_or(Value::Null),
+            "pipelines[].state",
+        ),
+    ]
+}
+
+fn state_doc(schema: &Value, path: &str) -> StateDoc {
+    StateDoc {
+        title: schema["title"].as_str().unwrap_or(path).to_string(),
+        path: path.to_string(),
+        description: description_of(schema),
+        fields: fields_of(schema, schema),
+    }
 }
 
 /// Just the connections, for the places that offer *those* rather than
@@ -666,6 +718,47 @@ mod tests {
 
     fn field_names(component: &ComponentDoc) -> Vec<&str> {
         component.fields.iter().map(|f| f.name.as_str()).collect()
+    }
+
+    /// The state reference is generated like everything else on the page, so a
+    /// bound that grows a field must not leave it behind. It also has to stay
+    /// *out* of the component list — a bucket is not something a pipeline is
+    /// made of, and the "add pipeline" form offers whatever is in there.
+    #[test]
+    fn state_documents_the_bucket_and_the_pipeline_binding() {
+        let docs = state_docs();
+        let titles: Vec<&str> = docs.iter().map(|d| d.title.as_str()).collect();
+        assert_eq!(titles, ["state bucket", "pipeline state"]);
+        assert_eq!(docs[0].path, "state.<name>");
+
+        for doc in &docs {
+            assert!(
+                doc.description.is_some(),
+                "'{}' is documented with no description",
+                doc.title
+            );
+        }
+
+        let bucket: Vec<&str> = docs[0].fields.iter().map(|f| f.name.as_str()).collect();
+        assert_eq!(bucket, ["idle_timeout_secs", "max_keys"]);
+        // both bounds are optional because both default — there is no spelling
+        // of "unbounded", which is the property the page is there to say
+        assert!(docs[0].fields.iter().all(|f| !f.required));
+
+        let binding = &docs[1];
+        assert_eq!(
+            binding
+                .fields
+                .iter()
+                .map(|f| (f.name.as_str(), f.required))
+                .collect::<Vec<_>>(),
+            [("bucket", true), ("key", false)]
+        );
+
+        assert!(
+            all_components().iter().all(|c| c.kind != "state"),
+            "a state bucket is not a component"
+        );
     }
 
     /// The reflection walks `oneOf` and can silently drop a variant it doesn't

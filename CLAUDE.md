@@ -653,6 +653,26 @@ the reflection, which already carries the whole tree.
 
 `FieldType::PipelineId` is the one field type the schema alone can't derive: a pipeline id is a `String` like any other, so the field says so where it's declared — `#[schemars(extend("x-pipeline-id" = true))]` on `PipelineConfig.upstream` — and `docs.rs` looks for the marker, not for the field's name. The rule about not knowing component names covers their field names too, so any component that grows a reference to another pipeline gets the dropdown by adding that attribute. The options can't come from the schema either: they are the running graph, so `AddPipelineModal` derives them from the pipeline list and passes them down to `FieldEditor`. That control is the only one in the modal that reads its value back — the list can arrive after the modal opened, and a rebuild must re-mark what was already chosen rather than drop it.
 
+### The state tab of `/docs`
+
+`/docs` has a third tab explaining state buckets, and it is **not** a fifth
+`Family`: a bucket is not a component — nothing builds one into a pipeline, and
+`all_components()` is what the "add pipeline" form offers, so putting it there
+would offer a bucket as a thing a pipeline is made of. `docs::state_docs()`
+reflects `StateBucketConfig` and `PipelineState` into `StateDoc`s instead — same
+`FieldDoc`s, same `FieldTable`, no `Family` — and each carries the **path** it
+goes at in the file (`state.<name>`, `pipelines[].state`) in place of the
+`"type"` tag a component's header shows.
+
+The prose around them is written rather than reflected, and that is the split:
+the fields are generated so a bound that grows a field can't leave the page
+behind, while *why buckets are global* and *what sharing one costs* are things a
+schema cannot say. `frontend/src/docs.rs::state_sections` is the pure half — it
+interleaves the written sections with the generated ones so the sidebar is one
+list in reading order, and `STATE_OVERVIEW`/`STATE_TRANSFORMS`/`STATE_INSPECTING`
+are constants because the page renders the anchors and the sidebar links to
+them. No search box on this tab: four sections is not a list to filter.
+
 ### The HTTP API reference (`/api/openapi.json`, `/api/reference`, the `/docs` tab)
 
 Three consumers off the one table in `kayak-core/src/api_docs.rs` — the same table `api_router` is folded over, so none of them can describe a server that doesn't exist.

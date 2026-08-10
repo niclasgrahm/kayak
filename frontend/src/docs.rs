@@ -6,7 +6,7 @@
 //! called in the URL. Like `graph` and `inspector`, it's pure and unit-tested —
 //! the Leptos components in `app.rs` just render what it returns.
 
-use kayak_core::docs::{ComponentDoc, Family};
+use kayak_core::docs::{ComponentDoc, Family, StateDoc};
 
 /// The families in pipeline order, which is the order the sidebar lists them.
 /// Connections come last: they are what the components above them refer to,
@@ -78,6 +78,62 @@ pub fn total(groups: &[Group]) -> usize {
 #[must_use]
 pub fn requirement_label(required: bool) -> &'static str {
     if required { "required" } else { "optional" }
+}
+
+/// One entry in the state tab's sidebar: an anchor and what to call it.
+///
+/// The tab is part written and part generated — the concepts are prose, the two
+/// config shapes are reflected — and the sidebar has to list both in reading
+/// order, so it is built here rather than being two lists rendered next to each
+/// other.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct StateSection {
+    pub anchor: String,
+    pub title: String,
+}
+
+/// The anchor of the written section that opens the state tab, and of the two
+/// that close it. Named constants because the page renders them and the sidebar
+/// links to them, and a typo in either would be a link that silently goes
+/// nowhere.
+pub const STATE_OVERVIEW: &str = "state-overview";
+pub const STATE_TRANSFORMS: &str = "state-transforms";
+pub const STATE_INSPECTING: &str = "state-inspecting";
+
+/// The state tab's sections: what state *is*, then how it is declared (one
+/// section per shape, generated), then how it is used and how it is looked at.
+#[must_use]
+pub fn state_sections(docs: &[StateDoc]) -> Vec<StateSection> {
+    let mut sections = vec![StateSection {
+        anchor: STATE_OVERVIEW.to_string(),
+        title: "how state works".to_string(),
+    }];
+    sections.extend(docs.iter().map(|doc| StateSection {
+        anchor: state_anchor_id(doc),
+        title: doc.title.clone(),
+    }));
+    sections.push(StateSection {
+        anchor: STATE_TRANSFORMS.to_string(),
+        title: "remember and recall".to_string(),
+    });
+    sections.push(StateSection {
+        anchor: STATE_INSPECTING.to_string(),
+        title: "inspecting a bucket".to_string(),
+    });
+    sections
+}
+
+/// A generated section's anchor, from its title — the same job [`anchor_id`]
+/// does for a component, and prefixed for the same reason its family is: `state`
+/// is a word the other tabs use too.
+#[must_use]
+pub fn state_anchor_id(doc: &StateDoc) -> String {
+    let slug: String = doc
+        .title
+        .chars()
+        .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
+        .collect();
+    format!("state-{}", slug.to_lowercase())
 }
 
 /// A run of description text, so `like this` in a doc comment renders as code
@@ -207,6 +263,48 @@ mod tests {
         anchors.sort_unstable();
         anchors.dedup();
         assert_eq!(anchors.len(), count, "two components share an anchor");
+    }
+
+    /// The written sections and the generated ones are one list, in reading
+    /// order — the concepts first, the config shapes in the middle, and the two
+    /// "now what" sections last.
+    #[test]
+    fn the_state_tab_lists_its_written_and_generated_sections_in_order() {
+        let docs = kayak_core::docs::state_docs();
+        let sections = state_sections(&docs);
+        let titles: Vec<&str> = sections.iter().map(|s| s.title.as_str()).collect();
+        assert_eq!(
+            titles,
+            [
+                "how state works",
+                "state bucket",
+                "pipeline state",
+                "remember and recall",
+                "inspecting a bucket",
+            ]
+        );
+        assert_eq!(sections[0].anchor, STATE_OVERVIEW);
+        assert_eq!(sections[1].anchor, state_anchor_id(&docs[0]));
+    }
+
+    /// A sidebar entry that scrolls to nothing is worse than no entry, and every
+    /// anchor here is one half of a pair.
+    #[test]
+    fn state_anchors_are_unique() {
+        let sections = state_sections(&kayak_core::docs::state_docs());
+        let mut anchors: Vec<&str> = sections.iter().map(|s| s.anchor.as_str()).collect();
+        let count = anchors.len();
+        anchors.sort_unstable();
+        anchors.dedup();
+        assert_eq!(anchors.len(), count, "two sections share an anchor");
+    }
+
+    /// Titles carry spaces; an id may not.
+    #[test]
+    fn a_generated_section_anchor_is_slugged() {
+        let docs = kayak_core::docs::state_docs();
+        assert_eq!(state_anchor_id(&docs[0]), "state-state-bucket");
+        assert_eq!(state_anchor_id(&docs[1]), "state-pipeline-state");
     }
 
     #[test]

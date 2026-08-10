@@ -1395,6 +1395,47 @@ body {
   }
 }
 
+// ---------------------------------------------------------------------------
+// The state tab of /docs. Its two config shapes reuse .doc-card and .field-table
+// like the other tabs do; what is new is that this tab has prose *outside* a
+// card — the concepts — and one worked example of the file.
+// ---------------------------------------------------------------------------
+
+// A paragraph on its own is not inside a card, so it needs the padding the card
+// would have given it.
+.docs-content > section > .doc-description {
+  margin: 0 0 10px;
+  line-height: 1.6;
+  color: var(--text-dim);
+
+  strong,
+  em {
+    color: var(--text);
+  }
+}
+
+// The unenforced rule about sharing a bucket. Marked rather than merely stated:
+// it is the one paragraph on the page that says what will silently go wrong.
+.doc-warning {
+  border-left: 2px solid var(--accent);
+  padding-left: 10px;
+}
+
+// What the config file actually looks like. Scrolls rather than wraps — a
+// wrapped json line stops being json you can copy.
+.doc-example {
+  background: var(--bg-panel);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  color: var(--text-dim);
+  font-family: var(--font-mono);
+  font-size: 11.5px;
+  line-height: 1.5;
+  margin: 0 0 10px;
+  overflow-x: auto;
+  padding: 10px;
+}
+
 // Backticked words in a doc comment.
 .doc-description code {
   background: var(--bg-canvas);
