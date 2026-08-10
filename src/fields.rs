@@ -53,9 +53,20 @@ pub fn leaf(field: &str) -> &str {
     field.rsplit('.').next().unwrap_or(field)
 }
 
+/// The top-level key a path reads through: its first segment.
+///
+/// The counterpart of [`leaf`], and what a column mapping's "which fields does
+/// something read" question comes to — a column reading `sensor.id` makes
+/// `sensor` a mapped field, since the alternative is to call every message with
+/// a nested object unmapped.
+#[must_use]
+pub fn root_segment(field: &str) -> &str {
+    field.split('.').next().unwrap_or(field)
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{get, leaf};
+    use super::{get, leaf, root_segment};
     use serde_json::json;
 
     #[test]
@@ -115,5 +126,12 @@ mod tests {
         assert_eq!(leaf("_meta.subject"), "subject");
         assert_eq!(leaf("value"), "value");
         assert_eq!(leaf("a.b.c"), "c");
+    }
+
+    #[test]
+    fn a_paths_root_is_its_first_segment() {
+        assert_eq!(root_segment("_meta.subject"), "_meta");
+        assert_eq!(root_segment("value"), "value");
+        assert_eq!(root_segment("a.b.c"), "a");
     }
 }

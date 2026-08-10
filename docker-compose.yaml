@@ -121,10 +121,16 @@ services:
     command:
       - |
         # the sensor id is what the sample's grouping reducer groups by, so
-        # there has to be more than one of them
+        # there has to be more than one of them.
+        #
+        # `$$` is how a variable reaches the *shell*: compose interpolates a
+        # bare `$name` itself and there is no `sensor` in its environment, so
+        # `$sensor` published an empty id and `$sensors` left shuf with nothing
+        # to pick from. Command substitution is left alone by compose, which is
+        # why `$(date)` beside it needs no escaping.
         sensors="north south east west"
         while true; do
-          sensor=$(echo $sensors | tr ' ' '\n' | shuf -n 1)
-          nats --server nats://nats:4222 pub test.subject "{\"ts\":\"$(date -Iseconds)\",\"sensor\":\"$sensor\",\"value\":$((RANDOM % 101))}"
+          sensor=$$(echo $$sensors | tr ' ' '\n' | shuf -n 1)
+          nats --server nats://nats:4222 pub test.subject "{\"ts\":\"$(date -Iseconds)\",\"sensor\":\"$$sensor\",\"value\":$((RANDOM % 101))}"
           sleep 1
         done

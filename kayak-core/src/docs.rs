@@ -1260,4 +1260,39 @@ mod tests {
         );
         assert!(filter.matches("numeric"), "should match a variant name");
     }
+
+    /// The mapping is a list of forms rather than a JSON box, which is the
+    /// whole reason the element is reflected as a `FieldDoc` — see
+    /// `FieldType::List`.
+    #[test]
+    fn a_postgres_columns_field_is_a_list_of_described_columns() {
+        let postgres = all_components()
+            .into_iter()
+            .find(|c| c.kind == "postgres" && matches!(c.family, Family::Output))
+            .unwrap_or_else(|| panic!("the postgres output should be documented"));
+        let columns = postgres
+            .fields
+            .iter()
+            .find(|f| f.name == "columns")
+            .unwrap_or_else(|| panic!("the postgres output should document its columns"));
+        let FieldType::List(element) = &columns.field_type else {
+            panic!("columns should be a list, not {:?}", columns.field_type);
+        };
+        let FieldType::Object(fields) = &element.field_type else {
+            panic!("a column should be an object, not {:?}", element.field_type);
+        };
+        let names: Vec<&str> = fields.iter().map(|f| f.name.as_str()).collect();
+        assert!(names.contains(&"name"), "{names:?}");
+        assert!(names.contains(&"type"), "{names:?}");
+        assert!(names.contains(&"field"), "{names:?}");
+        // the type is a closed set, so the form gets a dropdown for it
+        let column_type = fields
+            .iter()
+            .find(|f| f.name == "type")
+            .unwrap_or_else(|| panic!("a column should document its type"));
+        let FieldType::Enum(values) = &column_type.field_type else {
+            panic!("a column type should be a closed set, not {:?}", column_type.field_type);
+        };
+        assert!(values.iter().any(|v| v == "float"), "{values:?}");
+    }
 }

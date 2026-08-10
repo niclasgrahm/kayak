@@ -1,4 +1,5 @@
 use crate::PipelineId;
+use crate::columns::{ColumnMapping, ExtraFieldPolicy, TableIndex};
 use crate::connections::ConnectionId;
 use crate::state::PipelineState;
 use schemars::JsonSchema;
@@ -311,9 +312,17 @@ pub struct NatsOutputConfig {
 /// Inserts every message in the batch into a postgres table, one row per
 /// message.
 ///
-/// The table is created on connect if it isn't there, with a `jsonb` column
-/// holding the whole message. Mapping fields out into real columns and types is
-/// not supported yet.
+/// With `columns`, each entry names a column, its type and the field to read —
+/// `{"name": "temperature", "type": "float", "field": "reading.temp_c"}`, and
+/// `field` defaults to the column's name. Without them the table gets a single
+/// `jsonb` column holding the whole message, which is what this output has
+/// always done.
+///
+/// The table is created if it isn't there, from the columns above; set
+/// `create_table` to false for a table someone else owns. Creation never
+/// *alters* an existing table — a table whose shape has moved on fails the
+/// insert with the server's own error rather than being migrated from a config
+/// file.
 #[derive(Clone, Debug, Deserialize, Serialize, JsonSchema)]
 #[schemars(title = "postgres")]
 pub struct PostgresOutputConfig {
@@ -326,6 +335,26 @@ pub struct PostgresOutputConfig {
     /// schema-qualified (`analytics.readings`); letters, digits and underscores
     /// only, since it cannot be sent as a query parameter.
     pub table: String,
+    /// which message field goes in which column. Leave it out to store each
+    /// message whole, as JSON, in a `payload` column.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub columns: Vec<ColumnMapping>,
+    /// create the table on connect if it does not exist. Defaults to true.
+    // omitted rather than written as `null` when absent, so a config saved back
+    // out is the file someone hand-wrote — same rule as the port
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub create_table: Option<bool>,
+    /// the columns forming the created table's primary key. With none, the
+    /// table gets an `id` of its own and a `received_at` timestamp; naming one
+    /// here says the data carries its own identity and drops both.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub primary_key: Vec<String>,
+    /// indexes to create with the table. Each names mapped columns, in order.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub indexes: Vec<TableIndex>,
+    /// what to do about a message carrying fields no column reads
+    #[serde(default, skip_serializing_if = "ExtraFieldPolicy::is_default")]
+    pub on_extra_fields: ExtraFieldPolicy,
 }
 
 /// Publishes every message in the batch to a kafka topic, one message per
