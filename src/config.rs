@@ -70,6 +70,7 @@ impl BuildTransformConfig for TransformConfig {
             TransformKind::Filter(c) => c.build(ctx),
             TransformKind::Remember(c) => c.build(ctx),
             TransformKind::Recall(c) => c.build(ctx),
+            TransformKind::Map(c) => c.build(ctx),
         }
     }
 }

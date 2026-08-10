@@ -11,6 +11,7 @@ pub mod connections;
 pub mod docs;
 pub mod format;
 pub mod layout;
+pub mod mapping;
 pub mod metadata;
 pub mod state;
 

@@ -1,6 +1,7 @@
 use crate::PipelineId;
 use crate::columns::{ColumnMapping, ExtraFieldPolicy, TableIndex};
 use crate::connections::ConnectionId;
+use crate::mapping::MapTransformConfig;
 use crate::state::PipelineState;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -811,6 +812,7 @@ pub enum TransformKind {
     Filter(FilterTransformConfig),
     Remember(RememberTransformConfig),
     Recall(RecallTransformConfig),
+    Map(MapTransformConfig),
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, JsonSchema)]

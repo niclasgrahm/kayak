@@ -100,6 +100,84 @@ pipelines:
   - type: stdout
   state:
     bucket: heartbeat_peaks
+- id: heartbeat_shaped
+  inputs:
+  - type: pipeline
+    upstream: heartbeat
+  transforms:
+  - type: map
+    mappings:
+    - type: constant
+      as: line
+      value:
+        type: text
+        value: line-3
+    # reads `line`, which the mapping above wrote: mappings apply in order
+    - type: concat
+      as: asset
+      parts:
+      - type: value
+        value: heartbeat/
+      - type: field
+        field: line
+    - type: copy
+      from: current_time
+      as: observed_at
+    # (value * 1.8) + 32 in two steps through an intermediate the last
+    # mapping drops again — one operation per mapping, deliberately
+    - type: arithmetic
+      as: _scaled
+      operator: multiply
+      left:
+        type: field
+        field: value
+      right:
+        type: value
+        value: 1.8
+    - type: arithmetic
+      as: fahrenheit
+      operator: add
+      left:
+        type: field
+        field: _scaled
+      right:
+        type: value
+        value: 32.0
+    - type: cast
+      from: value
+      to: text
+      as: value_text
+    - type: drop
+      from:
+      - _scaled
+      - current_time
+  outputs:
+  - type: stdout
+- id: sensors_projected
+  inputs:
+  - type: pipeline
+    upstream: sensors
+  transforms:
+  # the other shape: only the mapped fields come out, which is what
+  # prepares a message for an output with a shape of its own
+  - type: map
+    keep: mapped
+    on_missing: omit
+    mappings:
+    - type: copy
+      from: _meta.subject
+    - type: copy
+      from: sensor
+    - type: coalesce
+      as: reading
+      from:
+      - value
+      - reading
+    - type: copy
+      from: ts
+      as: recorded_at
+  outputs:
+  - type: stdout
 - id: heartbeat_to_disk
   inputs:
   - type: pipeline

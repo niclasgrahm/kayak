@@ -368,12 +368,20 @@ fn fields_of(root: &Value, def: &Value) -> Vec<FieldDoc> {
 /// How far into a field's own shape the reflection will go before giving up and
 /// calling it [`FieldType::Json`].
 ///
-/// Nothing in the config nests anywhere near this deep. The bound is here
-/// because a schema *may* refer to itself — a config type that contains its own
-/// kind — and this walk follows `$ref`s, so without a floor such a type would
-/// recurse until the stack ran out. Degrading to a JSON box is the same answer
-/// this module already gives for a shape it can't render.
-const MAX_NESTING: usize = 4;
+/// The bound is here because a schema *may* refer to itself — a config type
+/// that contains its own kind — and this walk follows `$ref`s, so without a
+/// floor such a type would recurse until the stack ran out. Degrading to a JSON
+/// box is the same answer this module already gives for a shape it can't
+/// render.
+///
+/// It is a stack guard and not a statement about how deep a config *should*
+/// nest, which is why raising it is the right answer when something legitimate
+/// reaches it. The deepest thing in the config today is a `map`'s
+/// `mappings[].concat.parts[].value` — a list of a union containing a list of a
+/// union — at five, so this is one clear of it. Anything that made a JSON box
+/// appear where a real control belongs fails
+/// [`no_component_field_needs_raw_json`](tests::no_component_field_needs_raw_json).
+const MAX_NESTING: usize = 6;
 
 fn fields_at(root: &Value, def: &Value, depth: usize) -> Vec<FieldDoc> {
     let Some(properties) = def["properties"].as_object() else {
@@ -957,6 +965,61 @@ mod tests {
         assert_eq!(union.tag, "type");
         let names: Vec<&str> = union.variants.iter().map(|v| v.name.as_str()).collect();
         assert_eq!(names, ["merge", "wrap"]);
+    }
+
+    /// The deepest shape in the config, and the one that set [`MAX_NESTING`]:
+    /// a `map`'s mappings are a **list of a union**, and one of those variants
+    /// carries a **list of a union** of its own. Every level has to survive the
+    /// walk, or the form renders a JSON box where a control belongs — which is
+    /// exactly what happened when the bound was one level short of this.
+    #[test]
+    fn a_maps_mappings_are_walked_all_the_way_down() {
+        let map = component("map");
+        let mappings = field(&map, "mappings");
+        let FieldType::List(element) = &mappings.field_type else {
+            panic!("mappings is {:?}, not a list", mappings.field_type);
+        };
+        let FieldType::Union(union) = &element.field_type else {
+            panic!("a mapping is {:?}, not a union", element.field_type);
+        };
+        assert_eq!(union.tag, "type");
+        let names: Vec<&str> = union.variants.iter().map(|v| v.name.as_str()).collect();
+        assert_eq!(
+            names,
+            [
+                "copy",
+                "constant",
+                "coalesce",
+                "cast",
+                "concat",
+                "arithmetic",
+                "drop"
+            ]
+        );
+
+        // the second level: concat's parts, and the literal text inside one
+        let concat = union
+            .variants
+            .iter()
+            .find(|v| v.name == "concat")
+            .unwrap_or_else(|| panic!("no concat variant"));
+        let parts = concat
+            .fields
+            .iter()
+            .find(|f| f.name == "parts")
+            .unwrap_or_else(|| panic!("concat has no parts field"));
+        let FieldType::List(part) = &parts.field_type else {
+            panic!("parts is {:?}, not a list", parts.field_type);
+        };
+        let FieldType::Union(part) = &part.field_type else {
+            panic!("a part is {:?}, not a union", part.field_type);
+        };
+        let literal = part
+            .variants
+            .iter()
+            .find(|v| v.name == "value")
+            .unwrap_or_else(|| panic!("no literal part variant"));
+        assert_eq!(literal.fields[0].field_type, FieldType::Text);
     }
 
     /// The `filter` transform's fields depend on which filter it is, so they're

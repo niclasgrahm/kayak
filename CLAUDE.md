@@ -377,6 +377,58 @@ Four properties are load-bearing:
 `fields::root_segment` is the counterpart to `leaf`, added for the
 `on_extra_fields` check: a column reading `sensor.id` claims `sensor`.
 
+### The map transform
+
+`map` is the only transform that **writes** a field the config named, which is
+why `src/fields.rs` grew `set`/`remove` beside `get`. The write rule is spelled
+out in that module's docs and everything that writes has to follow it: an
+existing **literal key** wins (so a write round-trips a read), otherwise the
+path is created, and a path running through a non-object is **refused, not
+overwritten** — replacing a scalar with an object loses data invisibly.
+
+The split is `kayak-core/src/mapping.rs` (declaration) against
+`src/transforms/map.rs` (evaluation), the same line `columns.rs` draws and for
+the same reason: the declaration has to compile for wasm so the form can render
+it, the evaluation needs chrono and a JSON parser.
+
+Five properties are load-bearing:
+
+- **One message in, one message out, always.** That is what keeps `map` out of
+  `filter`/`splitter`/`reduce` territory, and it is why `MapMissingPolicy` has
+  no "drop the message" arm. Don't add one.
+- **`mappings` is an ordered list and the order is the semantics.** A mapping
+  reads what earlier ones wrote — that is how a two-step arithmetic works. A map
+  keyed by target name is unavailable for two independent reasons: JSON object
+  key order isn't guaranteed, and a `HashMap` reflects as `FieldType::Json` and
+  fails `no_component_field_needs_raw_json`.
+- **`map` reshapes; it does not compute.** One arithmetic operation per mapping,
+  no nesting, no conditionals. The point where chaining reads badly is the
+  boundary where a scripting language is the honest answer, and it is meant to
+  be visible. Don't grow `Operand` into an expression tree.
+- **`cast` is the one place in kayak that coerces**, against the column
+  mapping's "check, never convert". `CastType` is deliberately *not*
+  `ColumnType`: `integer`/`bigint` are one thing in JSON, `decimal` can't be
+  held distinctly by `serde_json`, and `json` means "parse this string" here
+  rather than "store whatever this is".
+- **A present value that won't convert is an error whatever `on_missing` says.**
+  `on_missing` is about a sparse stream; a `"twelve"` in a float field is a
+  stream that isn't what the config claims, and folding the two together hides
+  it forever.
+
+There is deliberately **no** build-time check that a mapping reads a field a
+later mapping writes — the message may already carry it, so the check has false
+positives and a false refusal is worse than the warning.
+
+`Literal` (a tagged union of text/number/boolean/null) exists because a bare
+`serde_json::Value` field would reflect as a hand-write-the-JSON box. Reach for
+it rather than `Value` anywhere a component config needs a literal.
+
+Note this is what pushed `docs.rs::MAX_NESTING` from 4 to 6:
+`mappings[].concat.parts[].value` is a list of a union containing a list of a
+union, at depth five. That constant is a stack guard against self-referential
+schemas, not a statement about how deep config should nest — raise it when
+something legitimate reaches it.
+
 ### Secrets
 
 Config fields that can hold credentials are typed `Secret` (`kayak-core::config`), not `String`. They all live on *connections* now rather than on components. `Secret` only ever holds the *unresolved* `${NAME}` template, which is what makes it safe to serialize back out of `GET /api/pipelines` and to compile for wasm. Resolution happens at build time via `ctx.resolve()` and yields a `secrets::Resolved`, whose `Display`/`Debug` print the template rather than the value — so error contexts can name a connection without leaking it. Reaching the real value takes `.expose()`; flag new call sites in review, and never put a `Resolved` into anything `Serialize`. Stores (`EnvStore`, `FileStore`, `ChainStore`) live in `src/secrets.rs`; `main.rs` chains env ahead of `--secrets <file>`. `src/testing.rs` has `MapSecretStore` for tests. See "secrets" in `readme.md`.

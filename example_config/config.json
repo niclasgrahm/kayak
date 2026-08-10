@@ -186,6 +186,137 @@
       ]
     },
     {
+      "id": "heartbeat_shaped",
+      "inputs": [
+        {
+          "type": "pipeline",
+          "upstream": "heartbeat"
+        }
+      ],
+      "transforms": [
+        {
+          "type": "map",
+          "mappings": [
+            {
+              "type": "constant",
+              "value": {
+                "type": "text",
+                "value": "line-3"
+              },
+              "as": "line"
+            },
+            {
+              "type": "concat",
+              "as": "asset",
+              "parts": [
+                {
+                  "type": "value",
+                  "value": "heartbeat/"
+                },
+                {
+                  "type": "field",
+                  "field": "line"
+                }
+              ]
+            },
+            {
+              "type": "copy",
+              "from": "current_time",
+              "as": "observed_at"
+            },
+            {
+              "type": "arithmetic",
+              "as": "_scaled",
+              "operator": "multiply",
+              "left": {
+                "type": "field",
+                "field": "value"
+              },
+              "right": {
+                "type": "value",
+                "value": 1.8
+              }
+            },
+            {
+              "type": "arithmetic",
+              "as": "fahrenheit",
+              "operator": "add",
+              "left": {
+                "type": "field",
+                "field": "_scaled"
+              },
+              "right": {
+                "type": "value",
+                "value": 32.0
+              }
+            },
+            {
+              "type": "cast",
+              "from": "value",
+              "to": "text",
+              "as": "value_text"
+            },
+            {
+              "type": "drop",
+              "from": [
+                "_scaled",
+                "current_time"
+              ]
+            }
+          ]
+        }
+      ],
+      "outputs": [
+        {
+          "type": "stdout"
+        }
+      ]
+    },
+    {
+      "id": "sensors_projected",
+      "inputs": [
+        {
+          "type": "pipeline",
+          "upstream": "sensors"
+        }
+      ],
+      "transforms": [
+        {
+          "type": "map",
+          "keep": "mapped",
+          "on_missing": "omit",
+          "mappings": [
+            {
+              "type": "copy",
+              "from": "_meta.subject"
+            },
+            {
+              "type": "copy",
+              "from": "sensor"
+            },
+            {
+              "type": "coalesce",
+              "from": [
+                "value",
+                "reading"
+              ],
+              "as": "reading"
+            },
+            {
+              "type": "copy",
+              "from": "ts",
+              "as": "recorded_at"
+            }
+          ]
+        }
+      ],
+      "outputs": [
+        {
+          "type": "stdout"
+        }
+      ]
+    },
+    {
       "id": "hot_readings",
       "inputs": [
         {

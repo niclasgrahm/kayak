@@ -104,6 +104,38 @@ fn transform_samples() -> Vec<(&'static str, Value)> {
                 "on_missing": "null"
             }),
         ),
+        // deliberately one of every mapping kind: `mappings` is a list of a
+        // tagged union, which is the most intricate shape in the config, and a
+        // sample that only covered `copy` would let the other six drift.
+        (
+            "map",
+            json!({
+                "type": "map",
+                "mappings": [
+                    {"type": "copy", "from": "_meta.subject"},
+                    {"type": "copy", "from": "id", "as": "sensor.id",
+                     "default": {"type": "text", "value": "unknown"}},
+                    {"type": "constant", "value": {"type": "text", "value": "line-3"},
+                     "as": "line"},
+                    {"type": "coalesce", "from": ["temp_c", "readings.celsius"],
+                     "as": "celsius_in", "default": {"type": "null"}},
+                    {"type": "cast", "from": "recorded_at", "to": "timestamp"},
+                    {"type": "concat", "as": "asset", "parts": [
+                        {"type": "field", "field": "site"},
+                        {"type": "value", "value": "/"},
+                        {"type": "field", "field": "machine"}
+                    ]},
+                    {"type": "arithmetic", "as": "_offset", "operator": "subtract",
+                     "left": {"type": "field", "field": "fahrenheit"},
+                     "right": {"type": "value", "value": 32.0}},
+                    {"type": "arithmetic", "as": "celsius", "operator": "divide",
+                     "left": {"type": "field", "field": "_offset"},
+                     "right": {"type": "value", "value": 1.8}},
+                    {"type": "drop", "from": ["_offset", "_meta"]}
+                ],
+                "on_missing": "omit"
+            }),
+        ),
     ]
 }
 

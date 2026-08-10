@@ -5,6 +5,7 @@ use crate::{BuildCtx, inputs::MessageBatch};
 pub mod buffer;
 pub mod filter;
 pub mod http;
+pub mod map;
 pub mod reduce;
 pub mod splitter;
 pub mod state;
