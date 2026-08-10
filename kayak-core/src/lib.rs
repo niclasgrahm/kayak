@@ -5,6 +5,7 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 pub mod api_docs;
+pub mod columns;
 pub mod config;
 pub mod connections;
 pub mod docs;
@@ -13,6 +14,7 @@ pub mod layout;
 pub mod metadata;
 pub mod state;
 
+pub use columns::{ColumnMapping, ColumnType, ExtraFieldPolicy, MissingColumnPolicy, TableIndex};
 pub use connections::{ConnectionId, ConnectionKind, Connections};
 pub use format::ConfigFormat;
 pub use state::{PipelineState, StateBucketConfig, StateBuckets};

@@ -817,6 +817,17 @@ same rotation, so the two can be watched side by side — one directory filling 
 one bucket. Unlike its twin it does need `docker compose up`, for the rustfs it
 writes to.
 
+**Both spellings of the postgres output are in there on purpose.**
+`hot_readings` maps columns — a nullable and a not-null one, a `timestamp` read
+from `ts`, a `text` read from `_meta.subject`, an audit column holding the whole
+message, and an index — while `sensors_archive` maps none and so still writes
+the single-`payload` table, which is the compatibility promise being exercised
+rather than described. `sensor_sums` maps the reducer's three answers, which is
+the case column mapping is really for: a rollup whose columns are the query.
+Note that the mapped tables are created from the config, so a database that
+already holds a `hot_readings` from before this landed has to have it dropped —
+creation is `IF NOT EXISTS` and never alters.
+
 ## connections
 
 A kafka cluster or a nats server is usually shared. One pipeline per topic on
@@ -1012,6 +1023,70 @@ made (a one-shot `mc` container does that). It writes to a tmpfs, so the bucket
 is empty again after a `docker compose down` — which is what you want from a
 fixture.
 
+## database outputs and column mapping
+
+The postgres output writes one row per message. Without a `columns` list it
+writes the table it has always written — an `id`, a `received_at` and the whole
+message in a `jsonb` `payload` — and with one, each message field lands in a
+real column with a real type:
+
+```jsonc
+// config.json
+{ "type": "postgres", "connection": "local-postgres", "table": "readings",
+  "columns": [
+    { "name": "sensor",      "type": "text",      "nullable": false },
+    { "name": "value",       "type": "float",     "nullable": false },
+    { "name": "recorded_at", "type": "timestamp", "field": "ts" },
+    { "name": "subject",     "type": "text",      "field": "_meta.subject" },
+    { "name": "raw",         "type": "json",      "message": true }
+  ],
+  "indexes": [ { "columns": ["recorded_at"] } ] }
+```
+
+`field` defaults to the column's name, so a message that already uses those
+names needs nothing but a name and a type. It is a [field path](#field-paths)
+like every other field reference here, which is what makes `_meta.subject`
+reach whatever the input's envelope attached, and `message: true` is the audit
+column — the whole message, and the only source that can never be missing.
+
+**The types are logical, not postgres'.** `float` rather than `double
+precision`, `timestamp` rather than `timestamptz`. The list —
+`text integer bigint float decimal boolean timestamp date uuid json` — lives in
+`kayak-core/src/columns.rs` with the rest of the mapping, and each database
+output renders it into its own DDL. That is the point of the split: the next
+database output reuses the mapping whole, and a config written against one does
+not have to be rewritten to point at another. Being a closed set, it also
+becomes a dropdown in the add-pipeline form for free.
+
+**Values are checked, never coerced.** A string `"12.5"` in a `float` column
+fails the batch rather than arriving as a number, because a mapping that accepts
+anything guarantees nothing. What is lenient is how a value travels: every
+mapped column is bound as text and cast in the statement
+(`$2::text::NUMERIC`), which keeps a number's own digits — nothing routes a
+decimal through an f64 — and hands the parsing of a timestamp or a uuid to the
+server, whose error about a malformed one is better than anything reimplemented
+here. A `timestamp` takes a string the server parses, or a number read as
+**seconds** since the epoch.
+
+**A missing field writes `NULL`** by default; `on_missing` takes `error` or
+`skip_row` (leave the whole message out) instead. A column declared
+`"nullable": false` defaults to `error`, since there is nothing else it could
+do, and telling one to write null is refused when the pipeline is built rather
+than discovered as a constraint violation an hour into a run. A field that is
+present but `null` counts as missing — the same reading the reducer takes.
+`on_extra_fields: "error"` is the opposite direction: for a stream whose shape
+is supposed to be fixed, a new field appearing is news rather than noise.
+
+**Creating the table.** On by default, `IF NOT EXISTS`, and it never *alters*: a
+table whose shape has moved on fails the insert with the server's own error
+rather than being migrated from a config file, which is a far bigger promise
+than "create it if it isn't there". `create_table: false` is for a table someone
+else owns. Without a `primary_key` the created table gets an `id` and a
+`received_at` of its own; naming one says the data carries its own identity and
+drops both — and makes those columns not-null, because postgres would anyway.
+`indexes` are created with the table and are named after it and their columns.
+A `primary_key` or an `index` naming a column nothing maps fails the build.
+
 ## secrets
 
 Config files are meant to be version controlled, so they carry *references* to
@@ -1174,11 +1249,15 @@ untested offline; what *is* tested is everything that decides *what* is uploaded
 with the file output and covered end-to-end there against a real directory — plus
 every build-time refusal in `outputs::s3::tests` (no rotation trigger, plaintext
 endpoint without `allow_http`, a connection of the wrong kind), which are the
-rules with a decision in them. What *is* tested offline for postgres is the part with a
-decision in it: `Table::parse` in `src/outputs/postgres.rs`, which validates the
-configured table name and builds the two statements. The table name cannot be a
-bind parameter, so it is interpolated into the SQL text, and that check is the
-only thing standing between `config.json` and an arbitrary statement.
+rules with a decision in them. What *is* tested offline for postgres is
+everything with a decision in it, which is now most of the output: `Table::parse`
+and `Identifier::parse`, which validate every name that reaches the SQL text —
+neither a table nor a column can be a bind parameter, so those checks are the
+only thing standing between `config.json` and an arbitrary statement — the
+statements built from a mapping (`outputs::postgres::tests`), and the mapping
+itself in `outputs::columns::tests`: which value is accepted into which type,
+what a missing field does, and every build-time refusal. What needs a server is
+the round trip, which is the part with no decision in it.
 
 `docker compose up` also brings up a single-node kafka (KRaft, no zookeeper) on
 :9092 with a publisher putting one JSON line a second on `test.events`, which
@@ -1235,6 +1314,11 @@ other spelling.
 - [ ] make sure to clean up old template based UI stuff
       (2026-08-04: `/docs` and `templates/docs.html` are gone — Askama is now
       only used by the dead `/ui` index handler, which is all that's left)
+- [x] map message fields onto real database columns, with types
+      (done 2026-08-10: `columns` on the postgres output, plus `create_table`,
+      `primary_key` and `indexes`. The mapping and its logical types live in
+      `kayak-core/src/columns.rs` so the next database output reuses them whole.
+      See "database outputs and column mapping" above.)
 - [ ] add time based buffer for the transform buffer
 - [ ] make outputs optional (for example, when a parent pipeline is only used to push data to children)
 - [x] think about necessary metadata to add to each message

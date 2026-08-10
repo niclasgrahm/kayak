@@ -207,7 +207,39 @@
         {
           "type": "postgres",
           "connection": "local-postgres",
-          "table": "hot_readings"
+          "table": "hot_readings",
+          "columns": [
+            {
+              "name": "sensor",
+              "type": "text",
+              "nullable": false
+            },
+            {
+              "name": "value",
+              "type": "float",
+              "nullable": false
+            },
+            {
+              "name": "recorded_at",
+              "type": "timestamp",
+              "field": "ts"
+            },
+            {
+              "name": "subject",
+              "type": "text",
+              "field": "_meta.subject"
+            },
+            {
+              "name": "raw",
+              "type": "json",
+              "message": true
+            }
+          ],
+          "indexes": [
+            {
+              "columns": ["recorded_at"]
+            }
+          ]
         }
       ]
     },
@@ -339,7 +371,21 @@
         {
           "type": "postgres",
           "connection": "local-postgres",
-          "table": "sensor_sums"
+          "table": "sensor_sums",
+          "columns": [
+            {
+              "name": "total",
+              "type": "float"
+            },
+            {
+              "name": "median",
+              "type": "float"
+            },
+            {
+              "name": "sensors",
+              "type": "integer"
+            }
+          ]
         }
       ]
     },

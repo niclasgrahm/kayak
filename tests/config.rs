@@ -143,7 +143,18 @@ fn output_samples() -> Vec<(&'static str, Value)> {
             json!({
                 "type": "postgres",
                 "connection": "local-postgres",
-                "table": "readings"
+                "table": "readings",
+                "columns": [
+                    {"name": "sensor_id", "type": "text", "field": "sensor.id", "nullable": false},
+                    {"name": "temperature", "type": "float", "on_missing": "skip_row"},
+                    {"name": "raw", "type": "json", "message": true}
+                ],
+                "create_table": true,
+                "primary_key": ["sensor_id"],
+                "indexes": [{"columns": ["temperature"], "unique": false}],
+                // `ignore` is the default and is dropped on the way out, so the
+                // sample names the other one — a round trip has to carry it
+                "on_extra_fields": "error"
             }),
         ),
     ]

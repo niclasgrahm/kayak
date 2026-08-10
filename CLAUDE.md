@@ -332,6 +332,51 @@ both. Change one and change the other. The container image doesn't pass it
 flag on the command line — that's the readme's deployment section. `dev_data` is
 gitignored; the build creates it.
 
+### Column mapping (the database outputs)
+
+`columns` on the postgres output maps message fields onto real columns and
+types. It lives in **`kayak-core/src/columns.rs`**, not in the postgres config,
+and that placement is the design: every database output asks the same two
+questions — which field goes in which column, and what to do about a message
+that doesn't carry it — so the next one (clickhouse, mysql) reuses the mapping
+whole and only renders the DDL differently.
+
+Which is why the types are **logical** (`float`, `timestamp`, `json`) rather than
+one server's spelling. A config naming `double precision` would have to be
+rewritten to point elsewhere, and a closed set reflects as a dropdown in the
+add-pipeline form for free.
+
+The split of work mirrors that: `src/outputs/columns.rs` is the neutral half —
+`ColumnPlan::build` validates, `plan.row(message)` produces `Vec<Option<String>>`
+or `Row::Skipped`, and nothing in it knows any SQL. `src/outputs/postgres.rs`
+is only names, DDL and placeholders. Keep new mapping work on the neutral side
+of that line.
+
+Four properties are load-bearing:
+
+- **Absent `columns` is byte-for-byte the old table** (`id`/`received_at`/
+  `payload` jsonb), the same promise `batch_cap` and `envelope` make. `Layout`
+  has the two arms for exactly this; `sensors_archive` in `example_config/` is
+  the one that exercises it and must stay unmapped.
+- **Values are checked, never coerced** — `"12.5"` into a `float` is an error.
+  But every value *travels* as text and is cast in the statement
+  (`$2::text::NUMERIC`), which is what keeps a number's own digits and hands
+  timestamp/uuid parsing to the server. Don't "fix" that into driver-native
+  binding: it would pull a type mapping into the neutral module and route
+  decimals through f64.
+- **Everything contradictory is refused at build time** — a not-null column told
+  to write null, a `message: true` column that isn't `json`, a key or index
+  naming an unmapped column. Same rule as the reducer's.
+- **Creation never alters.** `IF NOT EXISTS` and nothing else; a table whose
+  shape has moved on fails the insert with postgres' error. Migrating a live
+  table from a config file is a much bigger promise and is deliberately not
+  made. Naming a `primary_key` drops the implicit `id`/`received_at` and makes
+  those columns not-null (`ColumnPlan::require_not_null`), because postgres
+  would anyway.
+
+`fields::root_segment` is the counterpart to `leaf`, added for the
+`on_extra_fields` check: a column reading `sensor.id` claims `sensor`.
+
 ### Secrets
 
 Config fields that can hold credentials are typed `Secret` (`kayak-core::config`), not `String`. They all live on *connections* now rather than on components. `Secret` only ever holds the *unresolved* `${NAME}` template, which is what makes it safe to serialize back out of `GET /api/pipelines` and to compile for wasm. Resolution happens at build time via `ctx.resolve()` and yields a `secrets::Resolved`, whose `Display`/`Debug` print the template rather than the value — so error contexts can name a connection without leaking it. Reaching the real value takes `.expose()`; flag new call sites in review, and never put a `Resolved` into anything `Serialize`. Stores (`EnvStore`, `FileStore`, `ChainStore`) live in `src/secrets.rs`; `main.rs` chains env ahead of `--secrets <file>`. `src/testing.rs` has `MapSecretStore` for tests. See "secrets" in `readme.md`.

@@ -3,6 +3,7 @@ use std::sync::Arc;
 
 use crate::{BuildCtx, inputs::MessageBatch};
 
+pub mod columns;
 pub mod file;
 pub mod kafka;
 pub mod nats;
