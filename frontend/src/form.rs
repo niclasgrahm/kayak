@@ -956,6 +956,63 @@ mod tests {
         Ok(())
     }
 
+    /// A column mapping is the deepest thing the form builds — a list of
+    /// objects, one of whose fields is a list of its own (`indexes.0.columns`)
+    /// — so it is the one that says the recursion goes all the way down rather
+    /// than stopping at the first row.
+    #[test]
+    fn a_column_mapping_can_be_built_from_the_form() -> anyhow::Result<()> {
+        let postgres = component(Family::Output, "postgres");
+        let draft = filled(
+            Family::Output,
+            "postgres",
+            &[
+                ("connection", "local-postgres"),
+                ("table", "readings"),
+                ("columns", "2"),
+                ("columns.0.name", "sensor"),
+                ("columns.0.type", "text"),
+                ("columns.0.nullable", "false"),
+                ("columns.1.name", "recorded_at"),
+                ("columns.1.type", "timestamp"),
+                ("columns.1.field", "ts"),
+                ("columns.1.on_missing", "skip_row"),
+                ("create_table", "true"),
+                ("primary_key", "1"),
+                ("primary_key.0", "sensor"),
+                ("indexes", "1"),
+                ("indexes.0.columns", "1"),
+                ("indexes.0.columns.0", "recorded_at"),
+                ("indexes.0.unique", "true"),
+            ],
+        );
+        let json = component_json(&postgres, &draft).map_err(|e| anyhow::anyhow!("{e:?}"))?;
+        assert_eq!(
+            json,
+            json!({
+                "type": "postgres",
+                "connection": "local-postgres",
+                "table": "readings",
+                "columns": [
+                    {"name": "sensor", "type": "text", "nullable": false},
+                    {"name": "recorded_at", "type": "timestamp", "field": "ts",
+                     "on_missing": "skip_row"}
+                ],
+                "create_table": true,
+                "primary_key": ["sensor"],
+                "indexes": [{"columns": ["recorded_at"], "unique": true}]
+            })
+        );
+
+        // ...and it is the config the server takes, not just the shape of one
+        let config: Config = serde_json::from_value(
+            build_config("p", &[dummy_input(), draft], &docs())
+                .map_err(|e| anyhow::anyhow!("{e:?}"))?,
+        )?;
+        assert_eq!(config.outputs.len(), 1);
+        Ok(())
+    }
+
     /// A list with no rows is an absent field rather than `[]` — the same
     /// bargain the nested object makes — unless it is required, which is a
     /// message about the list itself.
