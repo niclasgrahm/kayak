@@ -39,7 +39,14 @@ fn input_samples() -> Vec<(&'static str, Value)> {
                 "period": 30.0
             }),
         ),
-        ("http", json!({"type": "http", "capacity": 256})),
+        (
+            "http",
+            json!({
+                "type": "http",
+                "capacity": 256,
+                "auth": {"type": "bearer", "token": "${INGEST_TOKEN}"}
+            }),
+        ),
         (
             "nats",
             json!({"type": "nats", "connection": "local-nats", "subject": "test.subject"}),

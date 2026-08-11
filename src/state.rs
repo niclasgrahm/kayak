@@ -5,7 +5,7 @@ use tokio::sync::broadcast;
 use crate::BuildCtx;
 use crate::auth::Auth;
 use crate::buckets::Buckets;
-use crate::inputs::http::{Inboxes, IngestError, PostMeta};
+use crate::inputs::http::{Credentials, Inboxes, IngestError, PostMeta};
 use crate::pipeline::Pipeline;
 use crate::secrets::{EnvStore, SecretStore};
 use kayak_core::config::Config;
@@ -37,6 +37,11 @@ pub enum PipelineError {
     /// A pipeline's `http` input queue is full — it is not reading as fast as
     /// something is posting. A 503: try again, nothing was lost but this batch.
     Backpressure(PipelineId),
+    /// The pipeline's `http` input has an `auth` and the post didn't satisfy
+    /// it. A 401, and separate from the server's own sign-in for the reason
+    /// [`kayak_core::config::HttpAuthConfig`] gives: this is the data plane's
+    /// credential, and having an account is neither necessary nor sufficient.
+    Unauthorized(PipelineId),
     /// A connection someone asked to delete is still named by running
     /// pipelines. Deleting it would leave them running on settings nothing
     /// records, and the next revert would refuse to rebuild them.
@@ -59,6 +64,10 @@ impl std::fmt::Display for PipelineError {
             Self::Backpressure(id) => write!(
                 f,
                 "pipeline '{id}' is not keeping up; its http input queue is full"
+            ),
+            Self::Unauthorized(id) => write!(
+                f,
+                "pipeline '{id}' requires a credential this post did not carry"
             ),
             Self::DuplicateId(id) => write!(f, "pipeline with id '{id}' already exists"),
             Self::ConnectionInUse(id, used_by) => write!(
@@ -1061,24 +1070,37 @@ impl AppState {
     /// posts is not the same thing as one that doesn't exist, and the two are
     /// told apart here rather than at the HTTP layer — both are a 404, but only
     /// one of them is fixed by creating the pipeline.
+    ///
+    /// `credentials` are what the request presented, unfiltered; whether any of
+    /// it is *wanted* is the input's business and is answered inside the inbox
+    /// registry, where the requirement lives and dies with the endpoint.
+    ///
+    /// Note what the three answers give away to a caller with no credentials: a
+    /// protected pipeline 401s, an unprotected one 202s and a missing one 404s,
+    /// so the status code says whether a pipeline exists and whether it is
+    /// guarded. Unavoidable while the credential is per-pipeline — the pipeline
+    /// has to be found before its requirement can be read — and acceptable
+    /// here, where the ids are on a canvas anyway.
     pub fn ingest(
         &self,
         id: &str,
         messages: Vec<serde_json::Value>,
         meta: PostMeta,
+        credentials: &Credentials,
     ) -> Result<usize, PipelineError> {
         let accepted = messages.len();
         // the inbox lock is taken and released inside these, so classifying the
         // failure below can take the pipelines lock without holding it
         let sent = if accepted == 0 {
-            self.inboxes.check(id)
+            self.inboxes.check(id, credentials)
         } else {
             let batch = Arc::new(messages.into_iter().map(Arc::new).collect());
-            self.inboxes.send(id, batch, meta)
+            self.inboxes.send(id, batch, meta, credentials)
         };
         match sent {
             Ok(()) => Ok(accepted),
             Err(IngestError::Full(_)) => Err(PipelineError::Backpressure(id.to_string())),
+            Err(IngestError::Unauthorized(_)) => Err(PipelineError::Unauthorized(id.to_string())),
             Err(IngestError::NoInbox(_)) => {
                 if self.lock_pipelines().contains_key(id) {
                     Err(PipelineError::NotAccepting(id.to_string()))

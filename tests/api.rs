@@ -412,12 +412,23 @@ fn posted_config(id: &str) -> Value {
 }
 
 async fn post_messages(app: &Router, id: &str, body: &Value) -> anyhow::Result<(StatusCode, Value)> {
-    let req = Request::builder()
+    post_messages_with(app, id, body, &[]).await
+}
+
+async fn post_messages_with(
+    app: &Router,
+    id: &str,
+    body: &Value,
+    headers: &[(&str, &str)],
+) -> anyhow::Result<(StatusCode, Value)> {
+    let mut req = Request::builder()
         .method("POST")
         .uri(format!("/api/pipelines/{id}/messages"))
-        .header(header::CONTENT_TYPE, "application/json")
-        .body(Body::from(serde_json::to_vec(body)?))?;
-    send(app, req).await
+        .header(header::CONTENT_TYPE, "application/json");
+    for (name, value) in headers {
+        req = req.header(*name, *value);
+    }
+    send(app, req.body(Body::from(serde_json::to_vec(body)?))?).await
 }
 
 #[tokio::test]
@@ -452,6 +463,85 @@ async fn posting_to_an_unknown_pipeline_is_a_404() -> anyhow::Result<()> {
         body["error"].as_str().is_some_and(|e| e.contains("nobody")),
         "the error should name the id: {body}"
     );
+    Ok(())
+}
+
+/// An `http` input with an `auth` refuses a post that doesn't carry the token,
+/// and takes one that does — through the whole router, which is what pins the
+/// 401. A literal token here rather than a `${NAME}`; a real config would use
+/// the reference, and `Secret` passes a value with no `${` through untouched.
+#[tokio::test]
+async fn an_authenticated_endpoint_wants_its_token() -> anyhow::Result<()> {
+    let app = app();
+    post_stream(
+        &app,
+        &json!({
+            "id": "guarded",
+            "inputs": [{ "type": "http", "auth": {"type": "bearer", "token": "hunter2"} }],
+            "transforms": [],
+            "outputs": [{ "type": "stdout" }]
+        }),
+    )
+    .await?;
+
+    let (status, body) = post_messages(&app, "guarded", &json!({"n": 1})).await?;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+    assert!(
+        body["error"].as_str().is_some_and(|e| e.contains("guarded")),
+        "the error should name the pipeline: {body}"
+    );
+    assert!(
+        !serde_json::to_string(&body)?.contains("hunter2"),
+        "the response told the caller the token: {body}"
+    );
+
+    let (status, _) = post_messages_with(
+        &app,
+        "guarded",
+        &json!({"n": 1}),
+        &[("wrong-header", "Bearer hunter2")],
+    )
+    .await?;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+
+    let (status, body) = post_messages_with(
+        &app,
+        "guarded",
+        &json!({"n": 1}),
+        &[("authorization", "Bearer hunter2")],
+    )
+    .await?;
+    assert_eq!(status, StatusCode::ACCEPTED);
+    assert_eq!(body, json!({"accepted": 1}));
+    Ok(())
+}
+
+/// The token is a *pipeline's*, so it does not open another one — the thing a
+/// single server-wide ingest key could not promise.
+#[tokio::test]
+async fn one_pipelines_token_does_not_open_another() -> anyhow::Result<()> {
+    let app = app();
+    for (id, token) in [("first", "token-one"), ("second", "token-two")] {
+        post_stream(
+            &app,
+            &json!({
+                "id": id,
+                "inputs": [{ "type": "http", "auth": {"type": "bearer", "token": token} }],
+                "transforms": [],
+                "outputs": [{ "type": "stdout" }]
+            }),
+        )
+        .await?;
+    }
+
+    let (status, _) = post_messages_with(
+        &app,
+        "second",
+        &json!({"n": 1}),
+        &[("authorization", "Bearer token-one")],
+    )
+    .await?;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
     Ok(())
 }
 

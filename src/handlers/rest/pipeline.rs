@@ -1,6 +1,10 @@
 use std::sync::Arc;
 
-use crate::{handlers::error::AppError, inputs::http::PostMeta, state::AppState};
+use crate::{
+    handlers::error::AppError,
+    inputs::http::{Credentials, PostMeta},
+    state::AppState,
+};
 use axum::{
     Json,
     extract::{ConnectInfo, Path, State},
@@ -63,8 +67,18 @@ pub async fn ingest_messages(
             .iter()
             .map(|(name, value)| (name.as_str(), value.to_str().unwrap_or_default())),
     );
-    // AppError maps the two failures apart: nothing to post to is a 404, a
-    // pipeline that is behind is a 503
-    let accepted = state.ingest(&pipeline_id, payload.into_messages(), meta)?;
+    // the unfiltered headers, and the only place they are read as credentials.
+    // Built separately from the metadata above rather than shared with it,
+    // because that one is deliberately stripped to the headers it is safe to
+    // write into the data.
+    let credentials = Credentials::new(
+        headers
+            .iter()
+            .map(|(name, value)| (name.as_str(), value.to_str().unwrap_or_default())),
+    );
+    // AppError maps the failures apart: nothing to post to is a 404, a
+    // credential that didn't satisfy the input is a 401, a pipeline that is
+    // behind is a 503
+    let accepted = state.ingest(&pipeline_id, payload.into_messages(), meta, &credentials)?;
     Ok((StatusCode::ACCEPTED, Json(IngestResponse { accepted })))
 }

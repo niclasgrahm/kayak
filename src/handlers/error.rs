@@ -45,6 +45,12 @@ where
             // the pipeline is there and behind, which is a "come back" rather
             // than a "you asked for the wrong thing"
             Some(PipelineError::Backpressure(_)) => StatusCode::SERVICE_UNAVAILABLE,
+            // an `http` input's own credential, not the server's sign-in. No
+            // `WWW-Authenticate` here for the reason `auth::refuse` gives: the
+            // header is indistinguishable to a browser from a demand for the
+            // login it already has, and nothing that posts data needs the
+            // challenge in order to know to send credentials.
+            Some(PipelineError::Unauthorized(_)) => StatusCode::UNAUTHORIZED,
             // both are "the server's state disagrees with what you asked for",
             // and both are fixed by doing something else first
             Some(PipelineError::DuplicateId(_) | PipelineError::ConnectionInUse(..)) => {

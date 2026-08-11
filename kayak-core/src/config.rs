@@ -186,6 +186,49 @@ pub struct HttpInputConfig {
     /// alternative is holding a request open until the pipeline catches up.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub capacity: Option<usize>,
+    /// what a post must present to be accepted. Absent — the default — means
+    /// the endpoint takes anything that reaches it, which is what every
+    /// pipeline with an `http` input has always done.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub auth: Option<HttpAuthConfig>,
+}
+
+/// How a post to a pipeline's endpoint proves it is allowed.
+///
+/// This is the **data plane's** own credential and has nothing to do with the
+/// accounts in the settings file: those are people signing in to look at and
+/// edit the graph, this is one system pushing data into one pipeline. A machine
+/// posting readings should not need an account that can rewrite the config, and
+/// a person with such an account should not thereby be able to post readings.
+///
+/// The token is a fixed string the sender repeats on every request, which makes
+/// it **only as private as the transport**. kayak speaks plain HTTP; putting
+/// TLS in front of it is the deployment's job, and without that the token is
+/// readable by anything on the path. It is the same trade every log-ingest API
+/// makes, and worth making deliberately rather than by accident.
+#[derive(Clone, Debug, Deserialize, Serialize, JsonSchema)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum HttpAuthConfig {
+    /// A token in the standard `Authorization` header, as
+    /// `Authorization: Bearer <token>`. The one to reach for unless the system
+    /// doing the posting can't set that header.
+    Bearer {
+        /// the token a post must carry. A `${NAME}` reference, so the config
+        /// file holds the name and the secret store holds the value.
+        token: Secret,
+    },
+    /// A fixed value in a header of your choosing — for webhook senders that
+    /// can't set `Authorization` but can add a header of their own, which is
+    /// most of them.
+    Header {
+        /// the header's name, matched case-insensitively. It may not be one of
+        /// the headers an `envelope` passes through, since that would write the
+        /// credential into the messages.
+        name: String,
+        /// the exact value that header must have. A `${NAME}` reference, as
+        /// above.
+        value: Secret,
+    },
 }
 
 /// Takes another pipeline's output as its input. This is what makes the

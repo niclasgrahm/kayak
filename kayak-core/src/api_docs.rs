@@ -255,7 +255,8 @@ pub enum Access {
     /// software rather than the deployment (the component reference and the
     /// spec — they say what kayak is, not what this server is running), and the
     /// ingest endpoint, which is a data plane rather than a control plane and
-    /// gets its own mechanism later.
+    /// has its own mechanism — the `auth` on the `http` input it serves, which
+    /// is per pipeline and checked by the input rather than by the router.
     Public,
     /// Any authenticated user. Everything that looks at the running graph
     /// without changing it.
@@ -604,7 +605,13 @@ pub fn endpoints() -> Vec<ApiDoc> {
                           Accepted means queued, not processed. The batch is handed to \
                           the pipeline's run loop and the response is sent without \
                           waiting for the outputs, so a 202 says nothing about whether \
-                          the data has landed anywhere.",
+                          the data has landed anywhere.\n\n\
+                          This endpoint does not use the server's sign-in — it is a data \
+                          plane, and a system pushing readings should not need an account \
+                          that can rewrite the graph. Protecting it is the `http` input's \
+                          own `auth` field: a token the sender repeats in a header, \
+                          declared per pipeline. Without one the endpoint takes anything \
+                          that reaches it, which is the default.",
             tag: Tag::Pipelines,
             access: Access::Public,
             params: vec![ParamDoc {
@@ -625,6 +632,14 @@ pub fn endpoints() -> Vec<ApiDoc> {
                     "No pipeline is running under that id, or the one that is has no \
                      `http` input to post to.",
                 ),
+                ResponseDoc {
+                    status: 401,
+                    description: "The input has an `auth` and this post didn't satisfy it. \
+                                  This is the input's own credential, not the server's \
+                                  sign-in: an account on the server does not let you post, \
+                                  and the token does not let you do anything else.",
+                    body: Body::Json("ApiError"),
+                },
                 ResponseDoc {
                     status: 503,
                     description: "The pipeline's queue is full — it is not reading as fast \

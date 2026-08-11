@@ -870,6 +870,68 @@ Three rules worth knowing:
 There is no envelope and no schema — whatever is posted is what the transforms
 see, same as every other input.
 
+### protecting the endpoint
+
+By default the endpoint takes anything that reaches it, which is what every
+pipeline with an `http` input has always done. `auth` on the input changes that:
+
+```json
+{
+  "id": "ingest",
+  "inputs": [
+    { "type": "http", "auth": { "type": "bearer", "token": "${INGEST_TOKEN}" } }
+  ],
+  "transforms": [],
+  "outputs": [{ "type": "stdout" }]
+}
+```
+
+```bash
+curl -X POST localhost:6767/api/pipelines/ingest/messages \
+     -H "authorization: Bearer $INGEST_TOKEN" \
+     -H 'content-type: application/json' \
+     -d '{"sensor": "a", "value": 91}'
+```
+
+A post without the token is a 401. There is a second spelling for senders that
+can't set `Authorization` — which is most webhook sources — where the header is
+yours to choose:
+
+```json
+{ "type": "http", "auth": { "type": "header", "name": "x-api-key", "value": "${INGEST_TOKEN}" } }
+```
+
+Five things about it are deliberate:
+
+- **It is the data plane's own credential, and has nothing to do with the
+  accounts in the settings file.** A machine posting readings should not need an
+  account that can rewrite the graph, and an operator with such an account
+  should not thereby be able to post readings. The two never meet: this endpoint
+  stays `Public` in the API table whether or not the server has sign-in.
+- **The token is per pipeline**, so revoking one publisher doesn't touch the
+  others. That is the whole argument against a single server-wide ingest key.
+- **It is only as private as the transport.** The token is a fixed string
+  repeated on every request, so on plain HTTP it is readable by anything on the
+  path. Terminate TLS in front of kayak. This is the same trade every log-ingest
+  API makes; it is worth making on purpose.
+- **The token lives in the secret store**, like every other credential — the
+  config file holds `${INGEST_TOKEN}` and can be committed. A reference nobody
+  set stops the pipeline at build time rather than turning into a token nobody
+  can guess, and a token that resolves to *empty* is refused too, since an empty
+  header would satisfy it.
+- **`auth` may not use a header an `envelope` copies.** Refused at build time,
+  not filtered afterwards: filtering is the step that gets forgotten, and a
+  credential written into an object store outlives the request by years. The
+  comparison is constant-time, and a refused post never reaches the queue — so
+  someone without the token can't fill it and turn the holder's 202 into a 503.
+
+What the status codes give away, since it is worth knowing rather than
+discovering: a guarded pipeline 401s, an unguarded one 202s and a missing one
+404s, so a caller with no token can learn which pipelines exist and which are
+protected. Unavoidable while the credential is per-pipeline — the pipeline has
+to be found before its requirement can be read — and a fair trade here, where
+the ids are on a canvas anyway.
+
 `POST /api/pipelines/{id}/messages` is in the generated reference like the rest
 of the API. The registry the handler finds the input through is
 `src/inputs/http.rs`: the input claims its pipeline's id when it is built and
@@ -1389,13 +1451,14 @@ Three limits, stated rather than implied:
   credentials on the wire, and a session cookie is only marked `Secure` when the
   request arrived over TLS (from the proxy's `X-Forwarded-Proto`). Nothing here
   refuses to run without it, but nothing here makes it safe either.
-- **`POST /api/pipelines/{id}/messages` is not covered.** The ingest endpoint is
-  a data plane, not a control plane: a device posting readings is not an
-  operator, and sharing the operators' credentials with every publisher is wrong
-  the moment there is more than one. It stays reachable without credentials even
-  on a server with accounts, and gets its own mechanism — per-pipeline tokens —
-  later. If that is not acceptable for a deployment, keep the ingest path off
-  the public network.
+- **`POST /api/pipelines/{id}/messages` is not covered, and never will be.** The
+  ingest endpoint is a data plane, not a control plane: a device posting
+  readings is not an operator, and sharing the operators' credentials with every
+  publisher is wrong the moment there is more than one. It stays reachable
+  without an account even on a server with accounts, and has its own mechanism —
+  the per-pipeline `auth` on the `http` input, under "protecting the endpoint"
+  above. That one is opt-in, so an input with no `auth` is still open to anyone
+  who can reach it.
 - **Nothing is rate limited.** A wrong password costs an attacker nothing but
   the round trip, so an account is only as good as its password. Password
   *hashing* is likewise not here yet — passwords are compared against the value
@@ -1592,11 +1655,25 @@ other spelling.
       without the flag. The required role lives in the `api_docs` table beside
       everything else about an endpoint, so the reference, the spec and the
       middleware are one fact. See "authentication" above.)
-- [ ] **protect the http input.** `POST /api/pipelines/{id}/messages` is
-      deliberately outside the auth system — a device posting readings is not an
-      operator, and one shared credential for every publisher is wrong the moment
-      there is a second one. Wants per-pipeline tokens, declared on the `http`
-      input itself, so revoking one publisher doesn't touch the others.
+- [x] protect the http input
+      (done 2026-08-11: an optional `auth` on the `http` input — a bearer token,
+      or a fixed value in a header of your choosing — checked by the inbox
+      registry, so the credential lives and dies with the endpoint it guards.
+      Per pipeline, `${NAME}` out of the secret store, constant-time, and
+      refused at build time if it names a header the `envelope` copies. Absent
+      by default. See "protecting the endpoint" above.)
+- [ ] **an hmac option for the http input's `auth`.** The bearer token is a
+      shared secret that travels on every request, so it is only as private as
+      the transport. A GitHub-style signature over the body
+      (`x-hub-signature-256`) keeps the secret off the wire entirely and is what
+      most webhook senders already speak. It slots in as a third
+      `HttpAuthConfig` variant — the registry check is already the right shape —
+      but it needs the raw body, which the handler currently hands straight to
+      the JSON extractor, so it is its own change.
+- [ ] **nothing rate-limits the ingest endpoint.** A wrong token costs an
+      attacker a round trip, same as a wrong password, so a short token on a
+      public network is guessable. The `auth` check is constant-time, which is a
+      different problem.
 - [ ] **hashed passwords in the settings file.** Passwords resolve from the
       secret store today, which keeps the file committable but means the value
       lives in the environment. Argon2id hashes would let the file stand alone —

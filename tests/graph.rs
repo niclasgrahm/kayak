@@ -4,7 +4,7 @@
 
 use std::time::Duration;
 
-use kayak::inputs::http::PostMeta;
+use kayak::inputs::http::{Credentials, PostMeta};
 use kayak::state::{AppState, PipelineError};
 use kayak::testing::MapSecretStore;
 use kayak_core::config::{Config, InputKind};
@@ -245,7 +245,7 @@ async fn posted_messages_flow_through_the_pipeline() -> anyhow::Result<()> {
     let (tx, mut rx) = tokio::sync::mpsc::channel(8);
     pipeline.subscribe(tx);
 
-    let accepted = state.ingest("ingest", vec![json!({"n": 1}), json!({"n": 2})], PostMeta::default())?;
+    let accepted = state.ingest("ingest", vec![json!({"n": 1}), json!({"n": 2})], PostMeta::default(), &Credentials::none())?;
     assert_eq!(accepted, 2);
 
     let got = tokio::time::timeout(Duration::from_secs(5), rx.recv())
@@ -277,6 +277,7 @@ async fn an_envelope_attaches_metadata_to_what_the_pipeline_emits() -> anyhow::R
         "ingest",
         vec![json!({"n": 1})],
         PostMeta::new("POST", None, [("x-request-id", "abc")]),
+        &Credentials::none(),
     )?;
 
     let got = tokio::time::timeout(Duration::from_secs(5), rx.recv())
@@ -309,7 +310,7 @@ async fn a_wrap_envelope_carries_a_payload_that_is_not_an_object() -> anyhow::Re
 
     let (tx, mut rx) = tokio::sync::mpsc::channel(8);
     pipeline.subscribe(tx);
-    state.ingest("ingest", vec![json!(21.5)], PostMeta::default())?;
+    state.ingest("ingest", vec![json!(21.5)], PostMeta::default(), &Credentials::none())?;
 
     let got = tokio::time::timeout(Duration::from_secs(5), rx.recv())
         .await?
@@ -339,6 +340,7 @@ async fn without_an_envelope_nothing_is_attached() -> anyhow::Result<()> {
         "ingest",
         vec![json!({"n": 1})],
         PostMeta::new("POST", Some("10.0.0.1:1".to_string()), [("a", "b")]),
+        &Credentials::none(),
     )?;
 
     let got = tokio::time::timeout(Duration::from_secs(5), rx.recv())
@@ -372,6 +374,7 @@ async fn a_transform_can_group_by_a_metadata_field() -> anyhow::Result<()> {
         "ingest",
         vec![json!({"n": 1}), json!({"n": 3})],
         PostMeta::new("POST", None, [("content-type", "application/json")]),
+        &Credentials::none(),
     )?;
 
     let got = tokio::time::timeout(Duration::from_secs(5), rx.recv())
@@ -396,11 +399,11 @@ async fn posting_is_refused_differently_by_a_missing_pipeline_and_a_missing_inpu
     state.create_pipeline(idle("p1")?)?;
 
     assert!(matches!(
-        state.ingest("p1", vec![json!({"n": 1})], PostMeta::default()),
+        state.ingest("p1", vec![json!({"n": 1})], PostMeta::default(), &Credentials::none()),
         Err(PipelineError::NotAccepting(ref id)) if id == "p1"
     ));
     assert!(matches!(
-        state.ingest("nobody", vec![json!({"n": 1})], PostMeta::default()),
+        state.ingest("nobody", vec![json!({"n": 1})], PostMeta::default(), &Credentials::none()),
         Err(PipelineError::NotFound(ref id)) if id == "nobody"
     ));
     Ok(())
@@ -419,9 +422,9 @@ async fn an_empty_post_is_a_no_op_that_still_checks_the_endpoint() -> anyhow::Re
         "outputs": [{ "type": "stdout" }]
     }))?)?;
 
-    assert_eq!(state.ingest("ingest", vec![], PostMeta::default())?, 0);
+    assert_eq!(state.ingest("ingest", vec![], PostMeta::default(), &Credentials::none())?, 0);
     assert!(matches!(
-        state.ingest("nobody", vec![], PostMeta::default()),
+        state.ingest("nobody", vec![], PostMeta::default(), &Credentials::none()),
         Err(PipelineError::NotFound(_))
     ));
     Ok(())

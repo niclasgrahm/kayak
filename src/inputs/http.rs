@@ -19,12 +19,14 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 
 use anyhow::Result;
-use kayak_core::config::HttpInputConfig;
+use kayak_core::config::{HttpAuthConfig, HttpInputConfig};
+use subtle::ConstantTimeEq;
 use tokio::sync::mpsc;
 
 use crate::BuildCtx;
 use crate::inputs::envelope::{Envelope, Meta};
 use crate::inputs::{BuildInput, InputSource, MessageBatch};
+use crate::secrets::Resolved;
 use crate::state::PipelineId;
 use serde_json::Value;
 
@@ -33,9 +35,10 @@ pub const DEFAULT_CAPACITY: usize = 1024;
 
 /// Why a posted batch didn't reach a pipeline.
 ///
-/// Two cases rather than one because they are two different things for the
-/// client to do about it: nothing is listening (fix the request), or something
-/// is listening and behind (send it again).
+/// Three cases rather than one because they are three different things for the
+/// client to do about it: nothing is listening (fix the request), something is
+/// listening and behind (send it again), or something is listening and you may
+/// not have it (fix the credentials).
 #[derive(Debug)]
 pub enum IngestError {
     /// Nothing is registered under this id — the pipeline doesn't exist, or it
@@ -44,6 +47,8 @@ pub enum IngestError {
     /// The pipeline's queue is full: it is not reading as fast as this is being
     /// posted.
     Full(PipelineId),
+    /// The input has an `auth` and the post didn't satisfy it.
+    Unauthorized(PipelineId),
 }
 
 impl std::fmt::Display for IngestError {
@@ -53,6 +58,10 @@ impl std::fmt::Display for IngestError {
             Self::Full(id) => write!(
                 f,
                 "pipeline '{id}' is not keeping up; its http input queue is full"
+            ),
+            Self::Unauthorized(id) => write!(
+                f,
+                "pipeline '{id}' requires a credential this post did not carry"
             ),
         }
     }
@@ -75,6 +84,157 @@ pub const ALLOWED_HEADERS: &[&str] = &[
     "x-correlation-id",
     "traceparent",
 ];
+
+/// The headers of a post, before anything has been filtered out of them.
+///
+/// A **separate type from [`PostMeta`], deliberately.** `PostMeta` is what a
+/// message may end up carrying, so it is filtered to [`ALLOWED_HEADERS`] the
+/// moment it is built; this is what a credential is checked against, so it is
+/// unfiltered — and keeping them apart is what makes it impossible for the
+/// credential to take the metadata's path into an object store. Nothing in here
+/// is `Serialize`, and it should stay that way.
+#[derive(Clone, Default)]
+pub struct Credentials {
+    /// Lower-cased header names against their values, since header names are
+    /// case-insensitive on the wire and a config spells one of them.
+    headers: HashMap<String, String>,
+}
+
+impl Credentials {
+    /// From a request's headers.
+    pub fn new<I, N, V>(headers: I) -> Self
+    where
+        I: IntoIterator<Item = (N, V)>,
+        N: AsRef<str>,
+        V: AsRef<str>,
+    {
+        Self {
+            headers: headers
+                .into_iter()
+                .map(|(name, value)| {
+                    (
+                        name.as_ref().to_ascii_lowercase(),
+                        value.as_ref().to_string(),
+                    )
+                })
+                .collect(),
+        }
+    }
+
+    /// What a caller presented, when they presented nothing. What every
+    /// non-HTTP caller — a test, an internal replay — has.
+    #[must_use]
+    pub fn none() -> Self {
+        Self::default()
+    }
+
+    fn get(&self, header: &str) -> Option<&str> {
+        self.headers.get(header).map(String::as_str)
+    }
+}
+
+/// A credential printed by mistake is a credential leaked, so this prints the
+/// names it holds and none of the values.
+impl std::fmt::Debug for Credentials {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Credentials")
+            .field("headers", &self.headers.keys().collect::<Vec<_>>())
+            .finish()
+    }
+}
+
+/// What a post must carry for an input to take it — the live half of
+/// [`HttpAuthConfig`].
+///
+/// Both spellings come to the same thing, which is why there is one struct and
+/// not an enum: a header name, an optional scheme word in front of the value,
+/// and the value itself.
+pub struct Requirement {
+    /// Lower-cased, to match [`Credentials`].
+    header: String,
+    /// `Bearer` for the bearer spelling, nothing for a plain header. Matched
+    /// case-insensitively, since [RFC 7235] says the scheme is.
+    ///
+    /// [RFC 7235]: https://www.rfc-editor.org/rfc/rfc7235#section-2.1
+    scheme: Option<&'static str>,
+    expected: Resolved,
+}
+
+impl Requirement {
+    /// Build the requirement an input's config asks for, resolving its secret.
+    ///
+    /// Two things are refused here rather than at the first post. An **empty
+    /// token** would be satisfied by an empty header, i.e. by nothing, and is
+    /// nearly always an unset `${NAME}` that resolved to a blank. And a header
+    /// name on [`ALLOWED_HEADERS`] would put the credential into every message
+    /// the input envelopes — the one mistake this whole area exists to prevent,
+    /// and one that is invisible until you read the data months later.
+    fn build(config: &HttpAuthConfig, ctx: &BuildCtx) -> Result<Self> {
+        let (header, scheme, secret) = match config {
+            HttpAuthConfig::Bearer { token } => ("authorization".to_string(), Some("Bearer"), token),
+            HttpAuthConfig::Header { name, value } => {
+                let header = name.trim().to_ascii_lowercase();
+                anyhow::ensure!(!header.is_empty(), "an http input's `auth` header needs a name");
+                anyhow::ensure!(
+                    !ALLOWED_HEADERS.contains(&header.as_str()),
+                    "an http input's `auth` cannot use the '{header}' header: it is one of the \
+                     headers an `envelope` copies into the messages, so the credential would be \
+                     written out with the data"
+                );
+                (header, None, value)
+            }
+        };
+        let expected = ctx.resolve(secret)?;
+        anyhow::ensure!(
+            !expected.expose().is_empty(),
+            "the credential for an http input's `auth` is empty, so any post would satisfy it; \
+             check that '{expected}' is set in the secret store"
+        );
+        Ok(Self {
+            header,
+            scheme,
+            expected,
+        })
+    }
+
+    /// Whether a post carrying these headers may be accepted.
+    ///
+    /// The value comparison is constant-time, so how long a rejection takes
+    /// doesn't say how much of the token was right. A **missing** header
+    /// returns early without one, and that is not the same oversight: whether a
+    /// header is present is not a secret-dependent fact, so there is nothing
+    /// for the timing to leak.
+    fn permits(&self, credentials: &Credentials) -> bool {
+        let Some(presented) = credentials.get(&self.header) else {
+            return false;
+        };
+        let presented = match self.scheme {
+            None => presented,
+            Some(scheme) => {
+                let Some(rest) = strip_scheme(presented, scheme) else {
+                    return false;
+                };
+                rest
+            }
+        };
+        // `expose` is one of the few places a real secret is reached; it goes
+        // straight into the comparison and is not held, logged or copied
+        self.expected
+            .expose()
+            .as_bytes()
+            .ct_eq(presented.as_bytes())
+            .into()
+    }
+}
+
+/// `"Bearer hunter2"` against `"Bearer"` gives `"hunter2"`.
+///
+/// The scheme is case-insensitive and the separator is at least one space, so
+/// `bearer  x` is the same credential as `Bearer x`.
+fn strip_scheme<'a>(value: &'a str, scheme: &str) -> Option<&'a str> {
+    let (word, rest) = value.split_once(' ')?;
+    word.eq_ignore_ascii_case(scheme).then(|| rest.trim_start())
+}
 
 /// What the handler knows about the request a batch was posted in.
 ///
@@ -147,6 +307,24 @@ struct Inbox {
     /// the one that has since taken its id.
     token: u64,
     tx: mpsc::Sender<Posted>,
+    /// What a post must present, if the input asked for anything.
+    ///
+    /// It lives on the registration rather than on the input for the same
+    /// reason the channel does: the requirement's lifetime is then exactly the
+    /// endpoint's, so deleting the pipeline takes the credential down with the
+    /// path it protected and there is no second thing to remember to remove.
+    auth: Option<Requirement>,
+}
+
+impl Inbox {
+    /// Whether these credentials satisfy this registration.
+    fn permits(&self, pipeline_id: &str, credentials: &Credentials) -> Result<(), IngestError> {
+        match &self.auth {
+            None => Ok(()),
+            Some(required) if required.permits(credentials) => Ok(()),
+            Some(_) => Err(IngestError::Unauthorized(pipeline_id.to_string())),
+        }
+    }
 }
 
 /// Where the http inputs of the running pipelines can be reached, by id.
@@ -187,6 +365,7 @@ impl Inboxes {
         pipeline_id: PipelineId,
         capacity: usize,
         envelope: Envelope,
+        auth: Option<Requirement>,
     ) -> Result<HttpInput> {
         let mut inboxes = self.lock();
         anyhow::ensure!(
@@ -195,7 +374,7 @@ impl Inboxes {
         );
         let token = self.next_token.fetch_add(1, Ordering::Relaxed);
         let (tx, rx) = mpsc::channel(capacity);
-        inboxes.insert(pipeline_id.clone(), Inbox { token, tx });
+        inboxes.insert(pipeline_id.clone(), Inbox { token, tx, auth });
         drop(inboxes);
         Ok(HttpInput {
             pipeline_id,
@@ -216,12 +395,14 @@ impl Inboxes {
         pipeline_id: &str,
         batch: Arc<MessageBatch>,
         meta: PostMeta,
+        credentials: &Credentials,
     ) -> Result<(), IngestError> {
         let sender = {
             let inboxes = self.lock();
             let Some(inbox) = inboxes.get(pipeline_id) else {
                 return Err(IngestError::NoInbox(pipeline_id.to_string()));
             };
+            inbox.permits(pipeline_id, credentials)?;
             inbox.tx.clone()
         };
         sender
@@ -232,12 +413,16 @@ impl Inboxes {
     /// Whether a pipeline is accepting posts, without sending anything. What an
     /// empty post is answered from — it should still 404 on a pipeline that
     /// isn't listening rather than be accepted by nobody.
-    pub fn check(&self, pipeline_id: &str) -> Result<(), IngestError> {
-        if self.lock().contains_key(pipeline_id) {
-            Ok(())
-        } else {
-            Err(IngestError::NoInbox(pipeline_id.to_string()))
-        }
+    ///
+    /// Credentials are checked here too. An empty post is still a post, and an
+    /// unauthenticated caller learning which pipelines are up by sending `[]`
+    /// to each of them is exactly the enumeration the credential is for.
+    pub fn check(&self, pipeline_id: &str, credentials: &Credentials) -> Result<(), IngestError> {
+        let inboxes = self.lock();
+        let Some(inbox) = inboxes.get(pipeline_id) else {
+            return Err(IngestError::NoInbox(pipeline_id.to_string()));
+        };
+        inbox.permits(pipeline_id, credentials)
     }
 
     /// Take an endpoint down now, whoever holds it.
@@ -283,11 +468,17 @@ impl BuildInput for HttpInputConfig {
     fn build(self, ctx: &mut BuildCtx) -> Result<Box<dyn InputSource>> {
         let capacity = self.capacity.unwrap_or(DEFAULT_CAPACITY);
         anyhow::ensure!(capacity > 0, "an http input's `capacity` must be at least 1");
+        let auth = self
+            .auth
+            .as_ref()
+            .map(|config| Requirement::build(config, ctx))
+            .transpose()?;
         let envelope = ctx.envelope("http", None);
         Ok(Box::new(ctx.inboxes.register(
             ctx.pipeline_id.clone(),
             capacity,
             envelope,
+            auth,
         )?))
     }
 }
@@ -344,23 +535,49 @@ impl InputSource for HttpInput {
 
 #[cfg(test)]
 mod tests {
-    use super::{IngestError, Inboxes, PostMeta};
+    use super::{Credentials, HttpAuthConfig, IngestError, Inboxes, PostMeta, Requirement};
+    use crate::BuildCtx;
     use crate::inputs::envelope::Envelope;
-    use kayak_core::config::EnvelopeConfig;
     use crate::inputs::{InputSource, MessageBatch};
+    use crate::testing::MapSecretStore;
+    use kayak_core::config::EnvelopeConfig;
     use serde_json::json;
+    use std::collections::HashMap;
     use std::sync::Arc;
 
     fn batch(n: i64) -> Arc<MessageBatch> {
         Arc::new(vec![Arc::new(json!({ "n": n }))])
     }
 
+    /// A requirement built the way a pipeline builds one, against a secret
+    /// store holding `TOKEN`.
+    fn requirement(config: &HttpAuthConfig) -> anyhow::Result<Requirement> {
+        let mut pipelines = HashMap::new();
+        let (events, _rx) = tokio::sync::broadcast::channel(4);
+        let secrets = Arc::new(MapSecretStore::new(
+            "the test secrets",
+            &[("TOKEN", "hunter2"), ("BLANK", "")],
+        ));
+        let ctx = BuildCtx::with_secrets(&mut pipelines, "p1".to_string(), events, secrets);
+        Requirement::build(config, &ctx)
+    }
+
+    fn bearer(token: &str) -> HttpAuthConfig {
+        HttpAuthConfig::Bearer {
+            token: token.into(),
+        }
+    }
+
+    fn presenting(header: &str, value: &str) -> Credentials {
+        Credentials::new([(header, value)])
+    }
+
     #[tokio::test]
     async fn a_posted_batch_arrives_at_the_input() -> anyhow::Result<()> {
         let inboxes = Arc::new(Inboxes::new());
-        let mut input = inboxes.register("p1".to_string(), 4, Envelope::none())?;
+        let mut input = inboxes.register("p1".to_string(), 4, Envelope::none(), None)?;
 
-        inboxes.send("p1", batch(1), PostMeta::default())?;
+        inboxes.send("p1", batch(1), PostMeta::default(), &Credentials::none())?;
 
         let got = input.next().await?;
         assert_eq!(got.len(), 1);
@@ -372,10 +589,10 @@ mod tests {
     fn posting_to_a_pipeline_with_no_http_input_says_so() {
         let inboxes = Arc::new(Inboxes::new());
         assert!(matches!(
-            inboxes.send("nobody", batch(1), PostMeta::default()),
+            inboxes.send("nobody", batch(1), PostMeta::default(), &Credentials::none()),
             Err(IngestError::NoInbox(ref id)) if id == "nobody"
         ));
-        assert!(matches!(inboxes.check("nobody"), Err(IngestError::NoInbox(_))));
+        assert!(matches!(inboxes.check("nobody", &Credentials::none()), Err(IngestError::NoInbox(_))));
     }
 
     /// Two http inputs on one pipeline would share one endpoint, so the second
@@ -383,8 +600,8 @@ mod tests {
     #[test]
     fn one_pipeline_can_only_claim_its_endpoint_once() {
         let inboxes = Arc::new(Inboxes::new());
-        let _first = inboxes.register("p1".to_string(), 4, Envelope::none());
-        assert!(inboxes.register("p1".to_string(), 4, Envelope::none()).is_err());
+        let _first = inboxes.register("p1".to_string(), 4, Envelope::none(), None);
+        assert!(inboxes.register("p1".to_string(), 4, Envelope::none(), None).is_err());
     }
 
     /// Past the queue's capacity a post is refused rather than held: the
@@ -392,11 +609,11 @@ mod tests {
     #[test]
     fn a_full_queue_is_refused_rather_than_waited_on() {
         let inboxes = Arc::new(Inboxes::new());
-        let _input = inboxes.register("p1".to_string(), 1, Envelope::none());
+        let _input = inboxes.register("p1".to_string(), 1, Envelope::none(), None);
 
-        assert!(inboxes.send("p1", batch(1), PostMeta::default()).is_ok());
+        assert!(inboxes.send("p1", batch(1), PostMeta::default(), &Credentials::none()).is_ok());
         assert!(matches!(
-            inboxes.send("p1", batch(2), PostMeta::default()),
+            inboxes.send("p1", batch(2), PostMeta::default(), &Credentials::none()),
             Err(IngestError::Full(ref id)) if id == "p1"
         ));
     }
@@ -406,11 +623,11 @@ mod tests {
     #[test]
     fn an_endpoint_can_be_taken_down_before_its_input_is_dropped() {
         let inboxes = Arc::new(Inboxes::new());
-        let input = inboxes.register("p1".to_string(), 4, Envelope::none());
+        let input = inboxes.register("p1".to_string(), 4, Envelope::none(), None);
         inboxes.evict("p1");
 
         assert!(matches!(
-            inboxes.send("p1", batch(1), PostMeta::default()),
+            inboxes.send("p1", batch(1), PostMeta::default(), &Credentials::none()),
             Err(IngestError::NoInbox(_))
         ));
         drop(input);
@@ -422,13 +639,13 @@ mod tests {
     #[test]
     fn dropping_the_input_gives_up_the_endpoint() {
         let inboxes = Arc::new(Inboxes::new());
-        let input = inboxes.register("p1".to_string(), 4, Envelope::none());
+        let input = inboxes.register("p1".to_string(), 4, Envelope::none(), None);
         assert_eq!(inboxes.len(), 1);
 
         drop(input);
         assert!(inboxes.is_empty());
         assert!(matches!(
-            inboxes.send("p1", batch(1), PostMeta::default()),
+            inboxes.send("p1", batch(1), PostMeta::default(), &Credentials::none()),
             Err(IngestError::NoInbox(_))
         ));
     }
@@ -480,7 +697,7 @@ mod tests {
             Some(&EnvelopeConfig::Merge { meta: None }),
             vec![("pipeline", json!("p1"))],
         );
-        let mut input = inboxes.register("p1".to_string(), 4, envelope)?;
+        let mut input = inboxes.register("p1".to_string(), 4, envelope, None)?;
 
         inboxes.send(
             "p1",
@@ -490,6 +707,7 @@ mod tests {
                 Some("10.0.0.7:51000".to_string()),
                 [("x-request-id", "abc"), ("authorization", "Bearer x")],
             ),
+            &Credentials::none(),
         )?;
 
         let got = input.next().await?;
@@ -508,8 +726,13 @@ mod tests {
     #[tokio::test]
     async fn without_an_envelope_a_posted_message_is_untouched() -> anyhow::Result<()> {
         let inboxes = Arc::new(Inboxes::new());
-        let mut input = inboxes.register("p1".to_string(), 4, Envelope::none())?;
-        inboxes.send("p1", batch(1), PostMeta::new("POST", None, [("a", "b")]))?;
+        let mut input = inboxes.register("p1".to_string(), 4, Envelope::none(), None)?;
+        inboxes.send(
+            "p1",
+            batch(1),
+            PostMeta::new("POST", None, [("a", "b")]),
+            &Credentials::none(),
+        )?;
 
         assert_eq!(*input.next().await?[0], json!({ "n": 1 }));
         Ok(())
@@ -521,16 +744,241 @@ mod tests {
     #[tokio::test]
     async fn a_late_drop_does_not_unregister_its_successor() -> anyhow::Result<()> {
         let inboxes = Arc::new(Inboxes::new());
-        let old = inboxes.register("p1".to_string(), 4, Envelope::none())?;
+        let old = inboxes.register("p1".to_string(), 4, Envelope::none(), None)?;
         let old_token = old.token;
         drop(old);
-        let mut new = inboxes.register("p1".to_string(), 4, Envelope::none())?;
+        let mut new = inboxes.register("p1".to_string(), 4, Envelope::none(), None)?;
 
         // as it would be from the old pipeline's task, after the rebuild
         inboxes.unregister("p1", old_token);
 
-        inboxes.send("p1", batch(7), PostMeta::default())?;
+        inboxes.send("p1", batch(7), PostMeta::default(), &Credentials::none())?;
         assert_eq!(new.next().await?[0]["n"], json!(7));
         Ok(())
+    }
+
+    /// The whole point of the feature: with `auth`, the right token gets in.
+    #[tokio::test]
+    async fn a_post_carrying_the_bearer_token_is_accepted() -> anyhow::Result<()> {
+        let inboxes = Arc::new(Inboxes::new());
+        let auth = requirement(&bearer("${TOKEN}"))?;
+        let mut input = inboxes.register("p1".to_string(), 4, Envelope::none(), Some(auth))?;
+
+        inboxes.send(
+            "p1",
+            batch(1),
+            PostMeta::default(),
+            &presenting("authorization", "Bearer hunter2"),
+        )?;
+
+        assert_eq!(input.next().await?[0]["n"], json!(1));
+        Ok(())
+    }
+
+    /// And the other half: everything else is refused, including the *template*
+    /// — a store that didn't resolve must not leave `${TOKEN}` working as a
+    /// password.
+    #[test]
+    fn a_post_without_the_right_token_is_refused() -> anyhow::Result<()> {
+        let inboxes = Arc::new(Inboxes::new());
+        let auth = requirement(&bearer("${TOKEN}"))?;
+        let _input = inboxes.register("p1".to_string(), 4, Envelope::none(), Some(auth))?;
+
+        for (header, value) in [
+            ("authorization", "Bearer wrong"),
+            ("authorization", "Bearer "),
+            ("authorization", "Bearer hunter2x"),
+            ("authorization", "hunter2"),
+            ("authorization", "${TOKEN}"),
+            ("authorization", "Basic hunter2"),
+            ("x-api-key", "hunter2"),
+        ] {
+            assert!(
+                matches!(
+                    inboxes.send("p1", batch(1), PostMeta::default(), &presenting(header, value)),
+                    Err(IngestError::Unauthorized(ref id)) if id == "p1"
+                ),
+                "'{header}: {value}' was accepted"
+            );
+        }
+        // and no credentials at all
+        assert!(matches!(
+            inboxes.send("p1", batch(1), PostMeta::default(), &Credentials::none()),
+            Err(IngestError::Unauthorized(_))
+        ));
+        Ok(())
+    }
+
+    /// A refused post must not take a place in the queue — otherwise anyone who
+    /// can reach the endpoint can fill it and turn the 401 into a 503 for the
+    /// sender who *does* have the token.
+    #[test]
+    fn a_refused_post_never_reaches_the_queue() -> anyhow::Result<()> {
+        let inboxes = Arc::new(Inboxes::new());
+        let auth = requirement(&bearer("${TOKEN}"))?;
+        // capacity of one, so a single wrongly-accepted post would fill it
+        let _input = inboxes.register("p1".to_string(), 1, Envelope::none(), Some(auth))?;
+
+        for _ in 0..10 {
+            assert!(matches!(
+                inboxes.send("p1", batch(1), PostMeta::default(), &Credentials::none()),
+                Err(IngestError::Unauthorized(_))
+            ));
+        }
+        // the queue is still empty, so the holder of the token gets in
+        inboxes.send(
+            "p1",
+            batch(1),
+            PostMeta::default(),
+            &presenting("authorization", "Bearer hunter2"),
+        )?;
+        Ok(())
+    }
+
+    /// Header names are case-insensitive on the wire and RFC 7235 makes the
+    /// scheme so too, so `AUTHORIZATION: bearer x` is the same credential.
+    #[test]
+    fn the_header_name_and_the_scheme_are_both_case_insensitive() -> anyhow::Result<()> {
+        let auth = requirement(&bearer("${TOKEN}"))?;
+        for (header, value) in [
+            ("authorization", "Bearer hunter2"),
+            ("Authorization", "bearer hunter2"),
+            ("AUTHORIZATION", "BEARER hunter2"),
+            // more than one space after the scheme is still one credential
+            ("authorization", "Bearer   hunter2"),
+        ] {
+            assert!(
+                auth.permits(&presenting(header, value)),
+                "'{header}: {value}' was refused"
+            );
+        }
+        Ok(())
+    }
+
+    /// The other spelling, for senders that can't set `Authorization`. No
+    /// scheme word: the header's whole value is the credential.
+    #[test]
+    fn a_header_credential_matches_the_whole_value() -> anyhow::Result<()> {
+        let auth = requirement(&HttpAuthConfig::Header {
+            name: "X-Api-Key".to_string(),
+            value: "${TOKEN}".into(),
+        })?;
+
+        assert!(auth.permits(&presenting("x-api-key", "hunter2")));
+        assert!(auth.permits(&presenting("X-API-KEY", "hunter2")));
+        // not stripped of a scheme, and not matched loosely
+        assert!(!auth.permits(&presenting("x-api-key", "Bearer hunter2")));
+        assert!(!auth.permits(&presenting("x-api-key", " hunter2")));
+        assert!(!auth.permits(&presenting("authorization", "hunter2")));
+        Ok(())
+    }
+
+    /// The credential must not be reachable through the metadata, which is the
+    /// reason `auth` may not name an allow-listed header. Refused at build time
+    /// rather than filtered later: filtering is the thing that gets forgotten.
+    #[test]
+    fn auth_cannot_use_a_header_the_envelope_copies() {
+        for name in super::ALLOWED_HEADERS {
+            let result = requirement(&HttpAuthConfig::Header {
+                name: (*name).to_string(),
+                value: "${TOKEN}".into(),
+            });
+            let Err(err) = result else {
+                panic!("'{name}' was accepted as an auth header, so the credential would be \
+                        written into the messages");
+            };
+            assert!(format!("{err:#}").contains(name), "{err:#}");
+        }
+    }
+
+    /// An empty credential is satisfied by an empty header, i.e. by anything —
+    /// and it is nearly always a `${NAME}` nobody set. Refusing to build says so
+    /// at startup instead of accepting every post forever.
+    #[test]
+    fn an_empty_credential_is_refused() {
+        for config in [
+            bearer(""),
+            bearer("${BLANK}"),
+            HttpAuthConfig::Header {
+                name: "x-api-key".to_string(),
+                value: "${BLANK}".into(),
+            },
+        ] {
+            assert!(
+                requirement(&config).is_err(),
+                "an empty credential built: {config:?}"
+            );
+        }
+    }
+
+    /// A `${NAME}` the store doesn't have stops the pipeline rather than
+    /// becoming a token nobody can guess — the same rule every other secret has.
+    #[test]
+    fn an_unresolvable_token_fails_to_build() {
+        let Err(err) = requirement(&bearer("${NOPE}")) else {
+            panic!("a pipeline built on a secret that isn't set");
+        };
+        assert!(format!("{err:#}").contains("NOPE"), "{err:#}");
+    }
+
+    /// An auth header may not be one the envelope copies, so a credential can't
+    /// reach the messages that way. This is the same fact from the data's side.
+    #[tokio::test]
+    async fn the_credential_never_reaches_the_metadata() -> anyhow::Result<()> {
+        let inboxes = Arc::new(Inboxes::new());
+        let auth = requirement(&bearer("${TOKEN}"))?;
+        let envelope = Envelope::new(Some(&EnvelopeConfig::Merge { meta: None }), vec![]);
+        let mut input = inboxes.register("p1".to_string(), 4, envelope, Some(auth))?;
+
+        inboxes.send(
+            "p1",
+            batch(1),
+            PostMeta::new("POST", None, [("authorization", "Bearer hunter2")]),
+            &presenting("authorization", "Bearer hunter2"),
+        )?;
+
+        let got = input.next().await?;
+        let rendered = serde_json::to_string(&*got[0])?;
+        assert!(!rendered.contains("hunter2"), "{rendered}");
+        assert!(!rendered.contains("authorization"), "{rendered}");
+        Ok(())
+    }
+
+    /// An empty post is still a post: `[]` to every id in turn is exactly how
+    /// you would find out which pipelines are up without a token.
+    #[test]
+    fn an_empty_post_is_checked_too() -> anyhow::Result<()> {
+        let inboxes = Arc::new(Inboxes::new());
+        let auth = requirement(&bearer("${TOKEN}"))?;
+        let _input = inboxes.register("p1".to_string(), 4, Envelope::none(), Some(auth))?;
+
+        assert!(matches!(
+            inboxes.check("p1", &Credentials::none()),
+            Err(IngestError::Unauthorized(_))
+        ));
+        inboxes.check("p1", &presenting("authorization", "Bearer hunter2"))?;
+        Ok(())
+    }
+
+    /// Absent `auth` is what every pipeline with an `http` input has always
+    /// had, and stays that way: anything that reaches the endpoint gets in.
+    #[test]
+    fn without_auth_a_post_needs_no_credentials() -> anyhow::Result<()> {
+        let inboxes = Arc::new(Inboxes::new());
+        let _input = inboxes.register("p1".to_string(), 4, Envelope::none(), None)?;
+
+        inboxes.send("p1", batch(1), PostMeta::default(), &Credentials::none())?;
+        inboxes.check("p1", &Credentials::none())?;
+        Ok(())
+    }
+
+    /// Anything that prints a request is a place a token can escape into a log,
+    /// so this one prints the header names and none of the values.
+    #[test]
+    fn credentials_do_not_print_their_values() {
+        let credentials = presenting("authorization", "Bearer hunter2");
+        let printed = format!("{credentials:?}");
+        assert!(!printed.contains("hunter2"), "{printed}");
+        assert!(printed.contains("authorization"), "{printed}");
     }
 }

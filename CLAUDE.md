@@ -86,10 +86,38 @@ request open until a pipeline catches up just moves the timeout somewhere less
 visible. Lock order is the existing one — pipelines before inboxes; `ingest`
 classifies its 404 after the inbox lock is already released.
 
-`PipelineError` grew `NotAccepting` (a running pipeline with no `http` input) and
-`Backpressure` (503). `NotAccepting` is a 404 like `NotFound` and is deliberately
-a separate variant: one is fixed by creating the pipeline, the other by giving it
-the input.
+`PipelineError` grew `NotAccepting` (a running pipeline with no `http` input),
+`Backpressure` (503) and `Unauthorized` (401). `NotAccepting` is a 404 like
+`NotFound` and is deliberately a separate variant: one is fixed by creating the
+pipeline, the other by giving it the input.
+
+**`auth` is the endpoint's own credential and is not the server's sign-in.**
+That separation is the design, not an omission: the ingest path stays
+`Access::Public` in the api_docs table however the server is configured, because
+a device posting readings is not an operator and one shared credential for every
+publisher is wrong the moment there are two. `HttpAuthConfig`
+(`kayak-core::config`) has a `bearer` and a `header` variant; `Requirement`
+(`src/inputs/http.rs`) is the live half. Optional, and absent is byte-for-byte
+the old behaviour — the same promise `batch_cap` and `envelope` make.
+
+It rides on the **`Inboxes` registration**, not on the input, so the
+requirement's lifetime is exactly the endpoint's and deleting a pipeline takes
+the credential down with the path it guarded. Four rules there are load-bearing.
+`Credentials` is a **separate type from `PostMeta`** and unfiltered, which is
+what makes it impossible for a credential to take the metadata's path into an
+object store — never make it `Serialize`, and its `Debug` prints header names
+only. A header on `ALLOWED_HEADERS` is **refused at build time** rather than
+filtered later, as is a credential that resolves to empty. The check happens
+before the `try_send`, so someone without the token can't fill the queue and
+turn the holder's 202 into a 503. And `check` (the empty-post path) is
+authenticated too — `[]` to every id in turn is otherwise a free enumeration.
+
+Known and accepted: the status code says whether a pipeline exists and whether
+it is guarded (401 / 202 / 404). Unavoidable while the credential is
+per-pipeline. There is no rate limiting and no `WWW-Authenticate` header — the
+latter for the reason `auth::refuse` gives. HMAC over the body is the sketched
+third variant and is in the readme's TODO; it needs the raw body, which the
+handler hands straight to the JSON extractor.
 
 ### Message metadata (the envelope)
 
