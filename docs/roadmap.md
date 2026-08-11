@@ -111,6 +111,38 @@ re-derive. See the [guide](guide.md) for how the finished parts behave, and
       tracked with the rest of the machine-cycle work under "the machine-cycle
       scenario" below.)
 
+## ecosystem positioning
+
+Came out of comparing kayak against the closest existing tools (Benthos/Bento,
+Redpanda Connect, NiFi, Arroyo, Conduit, StreamPipes, Vector, Fluvio) — see the
+readme's "why" for the short version. The ideas hold up; the gaps below are
+what stand between "well-built prototype" and "something worth someone else
+picking up."
+
+- [ ] **no durability or scaling story.** State lives in one process' memory
+      (see "state" in the guide) and there is no checkpointing of input
+      positions, so kayak is honestly a single-node tool today. That's a
+      legitimate niche — Benthos proved "stream processing without Flink's
+      operational weight" is a real market — but it needs to be a *stated*
+      scope rather than a gap people discover by hitting it. Either write that
+      boundary down explicitly (readme + guide), or decide it's worth chasing
+      and scope what a distributed mode would need, starting at the input as
+      the durability argument under "state" already says.
+- [ ] **the connector list is thin.** nats, kafka, http and two dummies in;
+      postgres, file, s3 and stdout out — against Benthos/Redpanda Connect's
+      300+. The five-touchpoint recipe for adding a component (config enum,
+      `build()` arm, impl module, wire-format sample, doc comment) is cheap by
+      design, but "cheap to add" isn't "already there" for someone evaluating
+      whether kayak fits their stack today. Candidates worth prioritising:
+      MQTT and webhook-shaped inputs, a generic HTTP/webhook output, ClickHouse
+      or another OLAP sink alongside postgres.
+- [ ] **no license file.** Can't be adopted by anyone else without one,
+      whatever the code quality. Pick one before calling anything past this
+      point "released."
+- [ ] **no release/packaging story beyond the Dockerfile.** No crates.io
+      publish, no versioned releases, no CHANGELOG. Fine for a project in
+      active development; blocking for "someone else can depend on this."
+
 ## the machine-cycle scenario
 
 The worked case this is being built towards, kept here so the remaining pieces
@@ -184,12 +216,12 @@ not at the pieces downstream of it.
 Found during the error-handling pass on 2026-08-03. Each one needs a decision,
 which is why they weren't just fixed.
 
-- [ ] **splitter drops the remainder.** `src/transforms/splitter.rs` — with
-      `out_size: 3` and a 10-message batch, message 10 is silently discarded
-      (the existing `// TODO: theres stuff left here`). Decide whether leftovers
-      are emitted as a short final batch or held until the next `apply()`.
-      `known_bug_the_remainder_is_currently_discarded` pins today's behaviour;
-      flip that test when the decision is made.
+- [x] **splitter drops the remainder.** (fixed 2026-08-11: a leftover is emitted
+      as a **short final batch**, not held for the next `apply()` — a transform
+      gets no tick, so a remainder on a stream that then goes quiet would be held
+      for the life of the pipeline, and the same missing tick is behind the idle
+      file part and the lazy bucket eviction. `out_size: 0` is now refused at
+      build time rather than quietly emitting a batch per message.)
 - [ ] **the http transform ignores `verb`.** Every request is a POST regardless
       of what the config says. Honouring it would change behaviour for existing
       configs, so it needs a decision first.
