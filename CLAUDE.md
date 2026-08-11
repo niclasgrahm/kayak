@@ -503,7 +503,19 @@ of it are useful — messages in the group, or messages that carried the field.
 makes `max` over an ISO timestamp the latest one; mixed types are an error
 rather than a guess.
 
-Buffering is an input decorator, not a transform: `InputConfig.buffer` wraps any `InputSource` in `inputs::Buffered` (static N-message or tumbling time window). There is *also* a `buffer` transform — different thing, different place.
+Buffering is an input decorator, not a transform: `InputConfig.buffer` wraps any
+`InputSource` in `inputs::Buffered`. Three spellings — `static` (a count),
+`tumbling` (a window), `batch` (both, whichever first) — but one behaviour:
+`BufferKind::limits` flattens them to a pair of `Option`s and `next()` has one
+loop, because the combined case is not a third thing, it is the other two at
+once. Two rules are load-bearing. **A buffer never emits an empty batch**, and
+the way that is achieved is that the window opens at the *first message of the
+batch* rather than at the call — so windows are not wall-clock aligned, and what
+a buffer promises is a latency bound rather than a cadence. And `size` counts
+**messages, not arriving batches**, overshooting rather than splitting one, the
+same floor-not-ceiling rule `max_rows` follows. There is *also* a `buffer`
+transform — different thing, different place — and `max_batch` on kafka/nats is a
+third thing again: it never waits.
 
 **`max_batch` on the kafka and nats inputs is a third thing again, and its
 default is a promise.** `inputs::batch_cap` is where that promise lives: absent

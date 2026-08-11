@@ -527,8 +527,9 @@
           "type": "pipeline",
           "upstream": "sensors",
           "buffer": {
-            "type": "static",
-            "size": 10
+            "type": "batch",
+            "size": 10,
+            "window_seconds": 30
           }
         }
       ],

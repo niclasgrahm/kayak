@@ -234,10 +234,10 @@ Four things the field types decide:
 - a field with fields of its own — a file output's `rotate` — is those fields,
   indented under it;
 - a field that is a *choice* of shapes — an input's `buffer`, which is `static`
-  with a `size` or `tumbling` with a `window_seconds` — is the choice first and
-  then whichever fields it implies. Pick `tumbling` and the `size` box is
-  replaced by a `window_seconds` box; nothing you filled in for the other one is
-  sent;
+  with a `size`, `tumbling` with a `window_seconds`, or `batch` with both — is
+  the choice first and then whichever fields it implies. Pick `tumbling` and the
+  `size` box is replaced by a `window_seconds` box; nothing you filled in for the
+  other one is sent;
 - an enum-shaped component (the `filter` transform) gets a `form` picker for its
   `Numeric` / `String` variants, and its fields follow the choice — the same
   idea one level up.
@@ -518,6 +518,40 @@ Merging runs a pump task per input (`inputs::merge`) rather than `select!`ing
 over them. Selecting drops the losing futures on every iteration, and an input
 that waits on a timer would have its timer restarted every time a chattier
 sibling produced — starving it forever. There's a test for exactly that.
+
+### buffering an input
+
+`buffer` sits beside `envelope` on any input and gathers messages into bigger
+batches before the transforms see them. It has three shapes, which are the same
+two limits with different halves left off:
+
+```jsonc
+{"buffer": {"type": "static",   "size": 100}}                        // count
+{"buffer": {"type": "tumbling", "window_seconds": 10}}               // time
+{"buffer": {"type": "batch",    "size": 100, "window_seconds": 10}}  // either
+```
+
+`batch` closes on whichever limit is reached first, which is what a stream with a
+varying rate wants: the count bounds how big a batch gets when the input is busy,
+and the window bounds how long a message waits when it is quiet. It is the usual
+choice in front of an output that pays per write — the `sensors_archive` pipeline
+in the sample buffers that way ahead of its postgres insert.
+
+Two rules hold for all three:
+
+- **A buffer never emits an empty batch.** The window opens when the *first
+  message of the batch* arrives, not when the buffer was asked for one, so an
+  input that goes quiet emits nothing at all rather than a tick of nothing every
+  window. The cost, and it is deliberate: windows aren't aligned to a wall clock.
+  What a buffer promises is a bound on how long a message waits, not a cadence.
+- **`size` is a floor, not a ceiling.** An arriving batch is never split, so an
+  input already batching on its own can overshoot — the same rule a file output's
+  `max_rows` follows.
+
+Don't confuse it with the two neighbours it reads like. `max_batch` on the kafka
+and nats inputs never *waits*: it takes one message and drains whatever has
+already arrived, so a quiet topic still yields batches of one. And the `buffer`
+*transform* is a different component in a different place.
 
 ## message metadata
 

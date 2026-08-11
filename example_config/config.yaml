@@ -336,8 +336,9 @@ pipelines:
   - type: pipeline
     upstream: sensors
     buffer:
-      type: static
+      type: batch
       size: 10
+      window_seconds: 30
   transforms: []
   outputs:
   - type: postgres

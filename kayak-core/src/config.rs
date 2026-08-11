@@ -737,11 +737,42 @@ pub enum InputKind {
     Nats(NatsConfig),
     Pipeline(PipelineConfig),
 }
+/// How an input's messages are gathered into batches before the transforms see
+/// them.
+///
+/// All three shapes are the same two limits with different halves left off — a
+/// count, a time, or both, whichever is reached first. **A buffer never emits an
+/// empty batch**: the clock starts when the first message of a batch arrives,
+/// not when the window was asked for, so an input that goes quiet emits nothing
+/// rather than a tick of nothing.
+///
+/// `size` is a floor rather than a ceiling, the same rule a file output's
+/// `max_rows` follows: an arriving batch is never split, so an input already
+/// producing batches of its own (`max_batch` on kafka and nats) can overshoot.
 #[derive(Clone, Debug, Deserialize, Serialize, JsonSchema)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum BufferConfig {
-    Static { size: usize },
-    Tumbling { window_seconds: usize },
+    /// Wait for a number of messages, however long that takes.
+    Static {
+        /// how many messages to gather before the batch is handed on
+        size: usize,
+    },
+    /// Wait for a length of time, however few messages that gathers — but at
+    /// least one. The window opens when the first message arrives.
+    Tumbling {
+        /// how long to gather messages for, measured from the first one
+        window_seconds: usize,
+    },
+    /// Both limits: whichever is reached first ends the batch. The usual
+    /// choice for a stream whose rate varies, since it bounds the batch size
+    /// when the input is busy and the latency when it is quiet.
+    Batch {
+        /// how many messages end the batch immediately
+        size: usize,
+        /// how long to wait for them, measured from the first message in the
+        /// batch
+        window_seconds: usize,
+    },
 }
 
 /// Whether — and how — an input attaches metadata about where a message came
@@ -831,7 +862,8 @@ pub struct InputConfig {
     pub kind: InputKind,
 
     /// batch messages from this input before the transforms see them — by
-    /// count (`static`) or by time (`tumbling`). Available on every input kind.
+    /// count (`static`), by time (`tumbling`) or by whichever comes first
+    /// (`batch`). Never emits an empty batch. Available on every input kind.
     /// Not to be confused with the `buffer` transform.
     // omitted rather than emitted as `null` when absent, so a config that comes
     // back out of `GET /api/pipelines` is byte-identical to the one that went in

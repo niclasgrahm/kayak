@@ -7,7 +7,6 @@ use crate::outputs::BuildOutput;
 use crate::outputs::OutputDestination;
 use crate::transforms::BuildTransform;
 use crate::transforms::Transform;
-use kayak_core::config::BufferConfig;
 use kayak_core::config::InputConfig;
 use kayak_core::config::InputKind;
 use kayak_core::config::OutputConfig;
@@ -44,13 +43,7 @@ impl BuildInputConfig for InputConfig {
         ctx.envelope = previous;
         let inner = built?;
         Ok(match self.buffer {
-            Some(BufferConfig::Static { size }) => {
-                Box::new(Buffered::new(inner, BufferKind::Static { size }))
-            }
-            Some(BufferConfig::Tumbling { window_seconds }) => Box::new(Buffered::new(
-                inner,
-                BufferKind::Tumbling { window_seconds },
-            )),
+            Some(buffer) => Box::new(Buffered::new(inner, BufferKind::from(buffer))),
             None => inner,
         })
     }

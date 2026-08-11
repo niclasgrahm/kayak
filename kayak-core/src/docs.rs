@@ -866,7 +866,7 @@ mod tests {
     fn an_optional_field_is_named_by_its_inner_type() {
         assert_eq!(
             field(&component("dummy"), "buffer").type_name,
-            "static | tumbling"
+            "static | tumbling | batch"
         );
     }
 
@@ -1212,13 +1212,13 @@ mod tests {
     fn a_tagged_union_field_carries_its_tag_and_its_variants() {
         let dummy = component("dummy");
         let buffer = field(&dummy, "buffer");
-        assert_eq!(buffer.type_name, "static | tumbling");
+        assert_eq!(buffer.type_name, "static | tumbling | batch");
         let FieldType::Union(union) = &buffer.field_type else {
             panic!("buffer is a choice of shapes, not a {:?}", buffer.field_type);
         };
         assert_eq!(union.tag, "type");
         let names: Vec<&str> = union.variants.iter().map(|v| v.name.as_str()).collect();
-        assert_eq!(names, ["static", "tumbling"]);
+        assert_eq!(names, ["static", "tumbling", "batch"]);
 
         // the fields differ per variant — which is why the choice has to come
         // first — and the tag is not among them, since it *is* the choice
@@ -1242,6 +1242,15 @@ mod tests {
         assert_eq!(
             fields_of("tumbling"),
             [("window_seconds".to_string(), FieldType::Integer, true)]
+        );
+        // the combined variant asks for both, which is the whole reason the
+        // form has to rebuild its boxes when the choice changes
+        assert_eq!(
+            fields_of("batch"),
+            [
+                ("size".to_string(), FieldType::Integer, true),
+                ("window_seconds".to_string(), FieldType::Integer, true)
+            ]
         );
     }
 

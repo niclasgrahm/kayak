@@ -628,7 +628,7 @@ async fn a_running_pipeline_still_reports_its_input_dying() {
     assert_eq!(errors[0].0, Stage::Input);
 }
 
-/// The `Buffered` input decorator collects `size` upstream batches into one.
+/// The `Buffered` input decorator collects `size` *messages* into one batch.
 #[tokio::test]
 async fn a_static_buffer_merges_upstream_batches() -> anyhow::Result<()> {
     let mut buffered = Buffered::new(
@@ -652,6 +652,43 @@ async fn a_static_buffer_merges_upstream_batches() -> anyhow::Result<()> {
     Ok(())
 }
 
+/// `size` counts messages, not upstream batches. An input doing its own
+/// batching (`max_batch` on kafka and nats) hands the buffer several messages at
+/// a time, and counting the arrivals would make `size: 100` mean anything
+/// between 100 and 100×`max_batch`.
+#[tokio::test]
+async fn a_static_buffer_counts_messages_rather_than_upstream_batches() -> anyhow::Result<()> {
+    let mut buffered = Buffered::new(
+        Box::new(ScriptedInput::new(
+            vec![batch(vec![json!({"n": 1}), json!({"n": 2}), json!({"n": 3})])],
+            WhenExhausted::Pend,
+        )),
+        BufferKind::Static { size: 3 },
+    );
+
+    let out = tokio::time::timeout(Duration::from_secs(5), buffered.next()).await??;
+    assert_eq!(out.len(), 3, "one batch of three messages fills a size of 3");
+    Ok(())
+}
+
+/// A batch is never split, so `size` is a floor rather than a ceiling — the
+/// same rule a file output's `max_rows` follows.
+#[tokio::test]
+async fn a_static_buffer_overshoots_rather_than_splitting_an_upstream_batch() -> anyhow::Result<()>
+{
+    let mut buffered = Buffered::new(
+        Box::new(ScriptedInput::new(
+            vec![batch(vec![json!({"n": 1}), json!({"n": 2}), json!({"n": 3})])],
+            WhenExhausted::Pend,
+        )),
+        BufferKind::Static { size: 2 },
+    );
+
+    let out = tokio::time::timeout(Duration::from_secs(5), buffered.next()).await??;
+    assert_eq!(out.len(), 3, "the arriving batch should not have been cut");
+    Ok(())
+}
+
 /// A tumbling window closes on time even when the upstream goes quiet, and
 /// emits whatever it collected. Runs on a paused clock, so the 10s window costs
 /// no wall time.
@@ -669,6 +706,152 @@ async fn a_tumbling_buffer_closes_when_the_window_elapses() -> anyhow::Result<()
     let values: Vec<_> = out.iter().map(|m| (**m).clone()).collect();
     assert_eq!(values, vec![json!({"n": 1})]);
     Ok(())
+}
+
+/// The window opens when the first message of the batch arrives, not when the
+/// buffer was asked for one. A ticker at 4s under a 10s window is therefore
+/// read at t=4, 8 and 12 and closes at t=14 — clocking from the call would have
+/// closed at t=10 with two.
+#[tokio::test(start_paused = true)]
+async fn a_tumbling_window_opens_at_the_first_message_not_at_the_call() -> anyhow::Result<()> {
+    let mut buffered = Buffered::new(
+        Box::new(Ticking::new(Duration::from_secs(4), json!({"n": 1}))),
+        BufferKind::Tumbling { window_seconds: 10 },
+    );
+
+    let out = buffered.next().await?;
+    assert_eq!(out.len(), 3, "the window should run from t=4 to t=14");
+    Ok(())
+}
+
+/// The point of the whole change: an input that never speaks must never produce
+/// a batch. The old tumbling buffer woke every window and handed the transforms
+/// an empty batch to chew on.
+#[tokio::test(start_paused = true)]
+async fn a_quiet_input_never_produces_an_empty_batch() {
+    let mut buffered = Buffered::new(
+        Box::new(ScriptedInput::new(vec![], WhenExhausted::Pend)),
+        BufferKind::Tumbling { window_seconds: 1 },
+    );
+
+    // an hour of windows on a paused clock; not one of them may close
+    let result = tokio::time::timeout(Duration::from_hours(1), buffered.next()).await;
+    assert!(
+        result.is_err(),
+        "a buffer over a silent input emitted a batch"
+    );
+}
+
+/// An empty batch from upstream is not a message: it neither fills the buffer
+/// nor starts its clock, so it can't turn into an emitted empty batch either.
+#[tokio::test(start_paused = true)]
+async fn an_empty_upstream_batch_neither_fills_the_buffer_nor_starts_its_clock()
+-> anyhow::Result<()> {
+    let mut buffered = Buffered::new(
+        Box::new(ScriptedInput::new(
+            vec![batch(vec![]), batch(vec![json!({"n": 1})])],
+            WhenExhausted::Pend,
+        )),
+        BufferKind::Tumbling { window_seconds: 10 },
+    );
+
+    let started = tokio::time::Instant::now();
+    let out = buffered.next().await?;
+    let values: Vec<_> = out.iter().map(|m| (**m).clone()).collect();
+    assert_eq!(values, vec![json!({"n": 1})]);
+    // both batches arrive at once, so a window started by the empty one would
+    // have closed at the same moment — what says it didn't is that the batch
+    // waited the full window rather than being cut short by it
+    assert!(
+        started.elapsed() >= Duration::from_secs(10),
+        "the window closed early: {:?}",
+        started.elapsed()
+    );
+    Ok(())
+}
+
+/// The combined buffer: the count ends the batch when the input is busy...
+#[tokio::test(start_paused = true)]
+async fn a_batch_buffer_closes_on_the_count_when_the_messages_are_there() -> anyhow::Result<()> {
+    let mut buffered = Buffered::new(
+        Box::new(ScriptedInput::new(
+            vec![
+                batch(vec![json!({"n": 1})]),
+                batch(vec![json!({"n": 2})]),
+                batch(vec![json!({"n": 3})]),
+            ],
+            WhenExhausted::Pend,
+        )),
+        BufferKind::Batch {
+            size: 3,
+            window_seconds: 600,
+        },
+    );
+
+    let started = tokio::time::Instant::now();
+    let out = buffered.next().await?;
+    assert_eq!(out.len(), 3);
+    assert!(
+        started.elapsed() < Duration::from_mins(10),
+        "it waited out the window instead of closing on the count"
+    );
+    Ok(())
+}
+
+/// ...and the window ends it when they aren't, without waiting for a count that
+/// may never be reached.
+#[tokio::test(start_paused = true)]
+async fn a_batch_buffer_closes_on_the_window_when_the_count_is_out_of_reach() -> anyhow::Result<()>
+{
+    let mut buffered = Buffered::new(
+        Box::new(Ticking::new(Duration::from_secs(4), json!({"n": 1}))),
+        BufferKind::Batch {
+            size: 1_000,
+            window_seconds: 10,
+        },
+    );
+
+    let out = buffered.next().await?;
+    assert_eq!(out.len(), 3, "the window should run from t=4 to t=14");
+    Ok(())
+}
+
+/// A zero size can only mean "don't batch", the same reading `batch_cap` gives
+/// it. Taking it literally would mean a full batch before a single message
+/// arrived — an empty one, forever.
+#[tokio::test]
+async fn a_size_of_zero_reads_as_one_rather_than_emitting_nothing() -> anyhow::Result<()> {
+    let mut buffered = Buffered::new(
+        Box::new(ScriptedInput::new(
+            vec![batch(vec![json!({"n": 1})])],
+            WhenExhausted::Pend,
+        )),
+        BufferKind::Static { size: 0 },
+    );
+
+    let out = tokio::time::timeout(Duration::from_secs(5), buffered.next()).await??;
+    assert_eq!(out.len(), 1);
+    Ok(())
+}
+
+/// An upstream that fails while the buffer is part-way through a batch reports
+/// the failure rather than returning what it has — the run loop needs to hear
+/// that the input is gone, and a partial batch says nothing about it.
+#[tokio::test]
+async fn a_buffer_reports_its_upstream_failing_rather_than_emitting_short() {
+    let mut buffered = Buffered::new(
+        Box::new(ScriptedInput::new(
+            vec![batch(vec![json!({"n": 1})])],
+            WhenExhausted::Fail,
+        )),
+        BufferKind::Static { size: 100 },
+    );
+
+    let result = tokio::time::timeout(Duration::from_secs(5), buffered.next()).await;
+    assert!(
+        matches!(result, Ok(Err(_))),
+        "expected the upstream's error to come through"
+    );
 }
 
 /// Several inputs are merged into one stream: the pipeline sees every batch

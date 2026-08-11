@@ -12,7 +12,8 @@
 use std::collections::BTreeSet;
 
 use kayak_core::config::{
-    Config, DummyPayload, EnvelopeConfig, InputConfig, InputKind, OutputKind, TransformKind,
+    BufferConfig, Config, DummyPayload, EnvelopeConfig, InputConfig, InputKind, OutputKind,
+    TransformKind,
 };
 use kayak_core::connections::{ConnectionKind, Connections};
 use schemars::schema_for;
@@ -516,6 +517,54 @@ fn an_input_buffer_parses_alongside_the_input_fields() -> anyhow::Result<()> {
     assert!(input.buffer.is_some(), "buffer config was dropped");
     assert!(matches!(input.kind, InputKind::Pipeline(_)));
     Ok(())
+}
+
+/// Every shape of buffer has to survive the round trip, and the two older ones
+/// have to parse exactly as they always did — a config file written before
+/// `batch` existed is not allowed to change meaning or stop loading.
+#[test]
+fn every_buffer_shape_parses_and_round_trips() -> anyhow::Result<()> {
+    for (wire, expected) in [
+        (
+            json!({"type": "static", "size": 10}),
+            BufferConfig::Static { size: 10 },
+        ),
+        (
+            json!({"type": "tumbling", "window_seconds": 30}),
+            BufferConfig::Tumbling { window_seconds: 30 },
+        ),
+        (
+            json!({"type": "batch", "size": 10, "window_seconds": 30}),
+            BufferConfig::Batch {
+                size: 10,
+                window_seconds: 30,
+            },
+        ),
+    ] {
+        let parsed: BufferConfig = serde_json::from_value(wire.clone())?;
+        assert_eq!(
+            format!("{parsed:?}"),
+            format!("{expected:?}"),
+            "parsed {wire} as the wrong buffer"
+        );
+        assert_eq!(serde_json::to_value(&parsed)?, wire, "{wire} did not survive");
+    }
+    Ok(())
+}
+
+/// `batch` needs both limits — half of one is one of the other two, and serde
+/// filling in a zero would silently mean "close the window immediately".
+#[test]
+fn a_batch_buffer_missing_a_limit_is_refused() {
+    assert!(
+        serde_json::from_value::<BufferConfig>(json!({"type": "batch", "size": 10})).is_err(),
+        "a batch buffer with no window should not parse"
+    );
+    assert!(
+        serde_json::from_value::<BufferConfig>(json!({"type": "batch", "window_seconds": 30}))
+            .is_err(),
+        "a batch buffer with no size should not parse"
+    );
 }
 
 /// `envelope` is the other decorator on `InputConfig`, and shares the flatten
