@@ -65,6 +65,33 @@ services:
       timeout: 3s
       retries: 10
 
+  # the clickhouse output in example_config/config.json writes here. 8123 is the
+  # HTTP interface, which is the one this output speaks; the password is what
+  # ${CLICKHOUSE_PASSWORD} has to resolve to — see
+  # example_config/secrets.example.json.
+  #
+  # The database is created by the image from CLICKHOUSE_DB: an output creates
+  # tables and never databases, so something has to make it once.
+  clickhouse:
+    image: clickhouse/clickhouse-server:25.3
+    ports:
+      - "8123:8123"
+    environment:
+      CLICKHOUSE_DB: kayak
+      CLICKHOUSE_USER: kayak
+      CLICKHOUSE_PASSWORD: hunter2
+    # the server refuses to start with the default 1024 on some hosts; this is
+    # the value its own documentation asks compose users for
+    ulimits:
+      nofile:
+        soft: 262144
+        hard: 262144
+    healthcheck:
+      test: ["CMD-SHELL", "wget --no-verbose --tries=1 --spider http://127.0.0.1:8123/ping || exit 1"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
   # an S3-compatible object store for the `s3` output to write into, so the
   # object-store path can be exercised without an AWS account. Single drive and
   # no console — this is a target for writes, not a deployment.

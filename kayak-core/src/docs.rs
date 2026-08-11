@@ -1101,7 +1101,10 @@ mod tests {
             .into_iter()
             .map(|c| c.kind)
             .collect();
-        assert_eq!(kinds, ["kafka", "nats", "postgres", "file", "s3"]);
+        assert_eq!(
+            kinds,
+            ["kafka", "nats", "postgres", "clickhouse", "file", "s3"]
+        );
 
         // a file connection is the odd one out — a directory rather than a
         // server — and documents itself through the same machinery regardless

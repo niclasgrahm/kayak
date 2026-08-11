@@ -18,6 +18,7 @@ pub mod fields;
 pub mod handlers;
 pub mod inputs;
 pub mod layout;
+pub mod listen;
 pub mod openapi;
 pub mod outputs;
 pub mod persist;
@@ -40,7 +41,8 @@ use serde_json::Value;
 use std::path::PathBuf;
 
 use kayak_core::connections::{
-    Connections, FileConnection, KafkaConnection, NatsConnection, PostgresConnection, S3Connection,
+    ClickhouseConnection, Connections, FileConnection, KafkaConnection, NatsConnection,
+    PostgresConnection, S3Connection,
 };
 
 /// Threaded through every `build()` call. It carries the pipeline map — needed
@@ -183,6 +185,10 @@ impl<'a> BuildCtx<'a> {
 
     pub fn postgres_connection(&self, id: &str) -> anyhow::Result<&PostgresConnection> {
         Ok(self.connections.postgres(id)?)
+    }
+
+    pub fn clickhouse_connection(&self, id: &str) -> anyhow::Result<&ClickhouseConnection> {
+        Ok(self.connections.clickhouse(id)?)
     }
 
     pub fn file_connection(&self, id: &str) -> anyhow::Result<&FileConnection> {

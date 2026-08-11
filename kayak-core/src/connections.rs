@@ -144,6 +144,48 @@ pub struct S3Connection {
     pub allow_http: Option<bool>,
 }
 
+/// A ClickHouse server, as one user connects to it over its HTTP interface.
+///
+/// The same split [`PostgresConnection`] makes: the server, the database and
+/// the user are the connection's; the *table* belongs to the output that writes
+/// it.
+///
+/// The HTTP interface rather than the native protocol because it is what every
+/// ClickHouse deployment exposes — including ClickHouse Cloud, where 8443 is the
+/// only port there is — and because it takes an insert as a body in a named
+/// format, which is exactly the shape a batch of messages already has.
+#[derive(Clone, Debug, Deserialize, Serialize, JsonSchema, PartialEq, Eq)]
+#[schemars(title = "clickhouse")]
+pub struct ClickhouseConnection {
+    /// url of the HTTP interface, e.g. `http://localhost:8123` for the server in
+    /// `docker-compose.yaml`, or `https://<host>:8443` for ClickHouse Cloud.
+    pub url: String,
+    /// the database to write into. It has to exist already — an output creates
+    /// tables, never databases.
+    pub database: String,
+    /// the user to connect as
+    pub user: String,
+    /// that user's password. May reference secrets as `${NAME}` — see "secrets"
+    /// in the readme, and prefer a reference to a literal here.
+    pub password: Secret,
+    /// allow a plaintext `http://` url. Defaults to false: the credentials
+    /// above go with every insert, so sending them in the clear is a decision
+    /// worth writing down. The local server in `docker-compose.yaml` is the
+    /// case that legitimately wants it.
+    // omitted rather than written as `null` when absent, so a connection saved
+    // back out is the file someone hand-wrote — same rule as a postgres port
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub allow_http: Option<bool>,
+}
+
+impl ClickhouseConnection {
+    /// Whether a plaintext url is allowed here. Not unless it says so.
+    #[must_use]
+    pub fn allows_http(&self) -> bool {
+        self.allow_http.unwrap_or(false)
+    }
+}
+
 /// Every kind of system a connection can describe.
 ///
 /// Tagged the same way the component enums are, so a connection reads like the
@@ -156,6 +198,7 @@ pub enum ConnectionKind {
     Kafka(KafkaConnection),
     Nats(NatsConnection),
     Postgres(PostgresConnection),
+    Clickhouse(ClickhouseConnection),
     File(FileConnection),
     S3(S3Connection),
 }
@@ -169,6 +212,7 @@ impl ConnectionKind {
             Self::Kafka(_) => KAFKA,
             Self::Nats(_) => NATS,
             Self::Postgres(_) => POSTGRES,
+            Self::Clickhouse(_) => CLICKHOUSE,
             Self::File(_) => FILE,
             Self::S3(_) => S3,
         }
@@ -178,6 +222,7 @@ impl ConnectionKind {
 pub const KAFKA: &str = "kafka";
 pub const NATS: &str = "nats";
 pub const POSTGRES: &str = "postgres";
+pub const CLICKHOUSE: &str = "clickhouse";
 pub const FILE: &str = "file";
 pub const S3: &str = "s3";
 
@@ -252,9 +297,9 @@ impl Connections {
         self.0.is_empty()
     }
 
-    /// The kafka cluster called `id`, or an error naming what went wrong. The
-    /// three accessors exist so a component asks for the kind it can actually
-    /// use, and a mismatch is reported where it can say which kind was wanted.
+    /// The kafka cluster called `id`, or an error naming what went wrong. One
+    /// accessor per kind, so a component asks for the kind it can actually use
+    /// and a mismatch is reported where it can say which kind was wanted.
     pub fn kafka(&self, id: &str) -> Result<&KafkaConnection, ConnectionError> {
         match self.lookup(id, KAFKA)? {
             ConnectionKind::Kafka(c) => Ok(c),
@@ -273,6 +318,13 @@ impl Connections {
         match self.lookup(id, POSTGRES)? {
             ConnectionKind::Postgres(c) => Ok(c),
             other => Err(ConnectionError::wrong_kind(id, POSTGRES, other)),
+        }
+    }
+
+    pub fn clickhouse(&self, id: &str) -> Result<&ClickhouseConnection, ConnectionError> {
+        match self.lookup(id, CLICKHOUSE)? {
+            ConnectionKind::Clickhouse(c) => Ok(c),
+            other => Err(ConnectionError::wrong_kind(id, CLICKHOUSE, other)),
         }
     }
 

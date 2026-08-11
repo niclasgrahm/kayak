@@ -23,8 +23,22 @@ data := "dev_data"
 # checks as the one part of the UI nobody ever looks at; `dev-yaml` below is
 # the escape hatch when a login is in the way. See {{example}}/server.yaml.
 
+# Kills whatever is bound to :6767. `cargo leptos watch` sometimes gets left
+# running detached (e.g. after a terminal closes without Ctrl-C), and a
+# leftover holding the port makes the next `dev` fail with a bind error
+# instead of a useful message — so both dev recipes clear it first.
+
+# free :6767 by killing whatever process is bound to it
+kill-dev-server:
+  #!/usr/bin/env sh
+  pid=$(lsof -ti tcp:6767)
+  if [ -n "$pid" ]; then
+    echo "killing process on :6767 ($pid)"
+    kill -9 $pid
+  fi
+
 # dev server on :6767, hot reload, against example_config/ — asks for a login
-dev: secrets
+dev: kill-dev-server secrets
   cargo leptos watch -- --config {{example}}/config.json --secrets {{example}}/secrets.json --data-dir {{data}} --server-config {{example}}/server.yaml
 
 # The same graph in its other spelling, and deliberately *without* a
@@ -33,7 +47,7 @@ dev: secrets
 # when the thing being worked on is not the login.
 
 # the same graph in its other spelling, no login — worth running now and then so the YAML path doesn't rot
-dev-yaml: secrets
+dev-yaml: kill-dev-server secrets
   cargo leptos watch -- --config {{example}}/config.yaml --secrets {{example}}/secrets.json --data-dir {{data}}
 
 # It is gitignored — nothing named secrets.json is committed, whatever is in it

@@ -20,7 +20,7 @@
 //! false` column told to write null when a field is missing, an index on a
 //! column nothing maps.
 
-use anyhow::{Result, anyhow, bail};
+use anyhow::{Context, Result, anyhow, bail};
 use kayak_core::columns::{ColumnMapping, ColumnType, ExtraFieldPolicy, MissingColumnPolicy};
 use serde_json::Value;
 use std::collections::BTreeSet;
@@ -30,7 +30,7 @@ use crate::fields;
 /// A SQL identifier that has been checked and can be interpolated into a
 /// statement.
 ///
-/// The same reason [`crate::outputs::postgres::Table`] exists: a column name
+/// The same reason [`Table`] exists: a column name
 /// cannot be a bind parameter — the server only takes those where a *value*
 /// goes — so it ends up in the SQL text, and anything reaching the SQL text
 /// from config has to be checked first. Deliberately stricter than any server
@@ -70,6 +70,68 @@ impl Identifier {
     #[must_use]
     pub fn as_str(&self) -> &str {
         &self.name
+    }
+}
+
+/// A validated, optionally qualified table name.
+///
+/// Here rather than in one output for the reason the rest of this module is:
+/// every database output names a table the same way — bare, or qualified by the
+/// thing that holds it (a postgres schema, a clickhouse database) — and the
+/// checking is the same job in both. What differs is only the DDL around it.
+///
+/// The table cannot be a bind parameter — a server only takes those where a
+/// *value* goes — so it ends up in the SQL text, and anything reaching the SQL
+/// text from config has to be checked first.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Table {
+    parts: Vec<Identifier>,
+}
+
+impl Table {
+    /// Accepts `readings` or `analytics.readings`; each part must look like an
+    /// unquoted identifier. Deliberately stricter than any server is — a table
+    /// named `"drop table"` is legal in postgres and not worth supporting.
+    ///
+    /// `qualifier` names the first part in the error message, since the two
+    /// servers call it different things — a schema in postgres, a database in
+    /// clickhouse.
+    pub fn parse(name: &str, qualifier: &str) -> Result<Self> {
+        let parts: Vec<&str> = name.split('.').collect();
+        if parts.len() > 2 {
+            bail!("invalid table name '{name}': expected 'table' or '{qualifier}.table'");
+        }
+        let parts = parts
+            .iter()
+            .map(|part| {
+                Identifier::parse(part, "table name")
+                    .with_context(|| format!("in table name '{name}'"))
+            })
+            .collect::<Result<Vec<_>>>()?;
+        Ok(Self { parts })
+    }
+
+    /// The name as it goes into a statement. Quoted so that a name colliding
+    /// with a keyword still works, and because the identifier is case-sensitive
+    /// once quoted — which is what makes what the config says the name of the
+    /// table that appears. Both postgres and clickhouse read `"x"` as an
+    /// identifier.
+    #[must_use]
+    pub fn quoted(&self) -> String {
+        self.parts
+            .iter()
+            .map(Identifier::quoted)
+            .collect::<Vec<_>>()
+            .join(".")
+    }
+
+    /// The bare table name, without its qualifier — what a generated index name
+    /// is built from.
+    #[must_use]
+    pub fn bare(&self) -> &str {
+        self.parts
+            .last()
+            .map_or("table", |identifier| identifier.as_str())
     }
 }
 

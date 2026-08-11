@@ -197,6 +197,24 @@ fn output_samples() -> Vec<(&'static str, Value)> {
                 "on_extra_fields": "error"
             }),
         ),
+        (
+            "clickhouse",
+            json!({
+                "type": "clickhouse",
+                "connection": "local-clickhouse",
+                "table": "readings",
+                "columns": [
+                    {"name": "sensor_id", "type": "text", "field": "sensor.id", "nullable": false},
+                    {"name": "temperature", "type": "float", "on_missing": "skip_row"},
+                    {"name": "raw", "type": "json", "message": true}
+                ],
+                "create_table": true,
+                // the sorting key, not a primary key — clickhouse has no unique
+                // constraint, and the name says which of the two this is
+                "order_by": ["sensor_id"],
+                "on_extra_fields": "error"
+            }),
+        ),
     ]
 }
 
@@ -222,6 +240,17 @@ fn connection_samples() -> Vec<(&'static str, Value)> {
                 "user": "kayak",
                 "password": "${POSTGRES_PASSWORD}",
                 "port": 5432
+            }),
+        ),
+        (
+            "clickhouse",
+            json!({
+                "type": "clickhouse",
+                "url": "http://localhost:8123",
+                "database": "kayak",
+                "user": "kayak",
+                "password": "${CLICKHOUSE_PASSWORD}",
+                "allow_http": true
             }),
         ),
         ("file", json!({"type": "file", "root": "./out/events"})),

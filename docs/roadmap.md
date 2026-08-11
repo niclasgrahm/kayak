@@ -129,13 +129,14 @@ picking up."
       and scope what a distributed mode would need, starting at the input as
       the durability argument under "state" already says.
 - [ ] **the connector list is thin.** nats, kafka, http and two dummies in;
-      postgres, file, s3 and stdout out — against Benthos/Redpanda Connect's
-      300+. The five-touchpoint recipe for adding a component (config enum,
-      `build()` arm, impl module, wire-format sample, doc comment) is cheap by
-      design, but "cheap to add" isn't "already there" for someone evaluating
-      whether kayak fits their stack today. Candidates worth prioritising:
-      MQTT and webhook-shaped inputs, a generic HTTP/webhook output, ClickHouse
-      or another OLAP sink alongside postgres.
+      postgres, clickhouse, file, s3 and stdout out — against Benthos/Redpanda
+      Connect's 300+. The five-touchpoint recipe for adding a component (config
+      enum, `build()` arm, impl module, wire-format sample, doc comment) is
+      cheap by design, but "cheap to add" isn't "already there" for someone
+      evaluating whether kayak fits their stack today. Candidates worth
+      prioritising: MQTT and webhook-shaped inputs, a generic HTTP/webhook
+      output, and mysql — which, like clickhouse, is a `ColumnPlan` plus a DDL
+      renderer and nothing else.
 - [ ] **no license file.** Can't be adopted by anyone else without one,
       whatever the code quality. Pick one before calling anything past this
       point "released."
@@ -251,10 +252,24 @@ which is why they weren't just fixed.
       checked when a batch arrives, so a pipeline that goes quiet does not close
       its part on the interval. Wants a timer, which means the output needs a
       tick it does not currently get.
-- [ ] **`--port` does nothing.** `src/main.rs` only logs it; the listener binds
-      `leptos_options.site_addr` from `Cargo.toml`. Running the binary outside
-      `cargo leptos` therefore falls back to port 3000. Either wire the arg into
-      the leptos options or drop it.
+- [x] **`--port` does nothing.** (fixed 2026-08-11: replaced with `--listen`,
+      which takes a whole `SocketAddr` and actually binds. `src/listen.rs` holds
+      the precedence rule — `--listen` > `LEPTOS_SITE_ADDR` > `Cargo.toml` — and
+      its tests; the flag is an `Option` so that absent is byte-for-byte the old
+      behaviour and `cargo leptos watch` keeps working.)
+- [ ] **serving under a path prefix.** An ingress at `example.com/kayak/` needs
+      the prefix in every URL the server emits, and the wasm bundle is built
+      once so it cannot be compiled in — it has to reach the browser from the
+      SSR'd HTML (a `<meta>` read on hydrate, rather than a `<base href>`, which
+      silently re-points every relative URL on the page). Touches
+      `ApiClient.base` (already a field, already always empty — that seam is
+      cut), the `/events` literal in `app.rs`, the `/pkg/` URLs in `shell`,
+      `leptos_router`'s base, `Router::nest`, the session cookie's `Path=/` (two
+      kayaks behind one host otherwise clobber each other's sessions) and the
+      OpenAPI `servers` entry. Call the flag `base_path`, not `base_url`: an
+      external origin is a *different* feature, wanted by OIDC redirect URIs and
+      nothing that exists today. A host-based ingress needs none of this and
+      works now.
 - [x] **hurl tests are stale.** (fixed 2026-08-03: replaced with
       `hurl/tests/pipelines-crud.hurl`, which hits `/api/pipelines` and asserts the
       409/422/204 codes. Its old job is now done in-process by `tests/api.rs`.)

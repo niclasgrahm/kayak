@@ -11,7 +11,7 @@ use crate::{
     inputs::MessageBatch,
     outputs::{
         BuildOutput, OutputDestination,
-        columns::{ColumnPlan, Identifier, Row},
+        columns::{ColumnPlan, Identifier, Row, Table},
     },
     secrets::Resolved,
 };
@@ -33,7 +33,7 @@ impl BuildOutput for PostgresOutputConfig {
     fn build(self, ctx: &mut BuildCtx) -> Result<Box<dyn OutputDestination>> {
         // rejected at build time rather than on first insert: a bad table name
         // should fail the pipeline that owns it, not surface an hour later
-        let table = Table::parse(&self.table)?;
+        let table = Table::parse(&self.table, "schema")?;
         let layout = Layout::build(&self, &table)?;
         let server = ctx
             .postgres_connection(&self.connection)
@@ -54,56 +54,6 @@ impl BuildOutput for PostgresOutputConfig {
             layout,
             client: None,
         }))
-    }
-}
-
-/// A validated table name, quoted for interpolation into a statement.
-///
-/// The table cannot be a bind parameter — postgres only takes those where a
-/// *value* goes — so it ends up in the SQL text, and anything reaching the SQL
-/// text from config has to be checked first.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Table {
-    parts: Vec<Identifier>,
-}
-
-impl Table {
-    /// Accepts `readings` or `analytics.readings`; each part must look like an
-    /// unquoted postgres identifier. Deliberately stricter than postgres itself
-    /// — a table named `"drop table"` is legal there and not worth supporting.
-    pub fn parse(name: &str) -> Result<Self> {
-        let parts: Vec<&str> = name.split('.').collect();
-        if parts.len() > 2 {
-            bail!("invalid postgres table name '{name}': expected 'table' or 'schema.table'");
-        }
-        let parts = parts
-            .iter()
-            .map(|part| {
-                Identifier::parse(part, "postgres table name")
-                    .with_context(|| format!("in table name '{name}'"))
-            })
-            .collect::<Result<Vec<_>>>()?;
-        Ok(Self { parts })
-    }
-
-    /// The name as it goes into a statement. Quoted so that a name colliding
-    /// with a keyword still works, and because the identifier is case-sensitive
-    /// once quoted — which is what makes what the config says the name of the
-    /// table that appears.
-    fn quoted(&self) -> String {
-        self.parts
-            .iter()
-            .map(Identifier::quoted)
-            .collect::<Vec<_>>()
-            .join(".")
-    }
-
-    /// The bare table name, without a schema — what a generated index name is
-    /// built from.
-    fn bare(&self) -> &str {
-        self.parts
-            .last()
-            .map_or("table", |identifier| identifier.as_str())
     }
 }
 
@@ -563,7 +513,7 @@ mod tests {
     }
 
     fn layout(config: &PostgresOutputConfig) -> anyhow::Result<(Table, Layout)> {
-        let table = Table::parse(&config.table)?;
+        let table = Table::parse(&config.table, "schema")?;
         let layout = Layout::build(config, &table)?;
         Ok((table, layout))
     }
@@ -613,7 +563,7 @@ mod tests {
             "readings'",
         ] {
             assert!(
-                Table::parse(name).is_err(),
+                Table::parse(name, "schema").is_err(),
                 "'{name}' should have been rejected"
             );
         }

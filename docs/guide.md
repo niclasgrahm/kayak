@@ -1338,6 +1338,60 @@ drops both — and makes those columns not-null, because postgres would anyway.
 `indexes` are created with the table and are named after it and their columns.
 A `primary_key` or an `index` naming a column nothing maps fails the build.
 
+### clickhouse
+
+The `clickhouse` output takes the same `columns` list, spelled exactly the same
+way — that is what the mapping being database-neutral is *for*, and a config
+pointed at one server moves to the other by changing the type and the
+connection:
+
+```jsonc
+// config.json
+{ "type": "clickhouse", "connection": "local-clickhouse", "table": "sensor_readings",
+  "columns": [
+    { "name": "sensor",      "type": "text" },
+    { "name": "value",       "type": "float" },
+    { "name": "recorded_at", "type": "timestamp", "field": "ts" },
+    { "name": "raw",         "type": "json",      "message": true }
+  ],
+  "order_by": ["recorded_at", "sensor"] }
+```
+
+Three things differ, and each is ClickHouse being itself rather than a gap.
+
+**`order_by` in place of `primary_key`.** ClickHouse has no auto-increment
+column and no unique constraint, so there is no surrogate key to fall back on
+and nothing here pretends otherwise: `order_by` names the MergeTree *sorting*
+key — how the table is laid out and indexed — and it does not deduplicate.
+Naming none gets you a `received_at` of its own, sorted by that, which is the
+honest analogue of postgres' `id`/`received_at` pair. Named columns are made
+not-null, because ClickHouse will not sort by a nullable one. There is no
+`indexes` field: the sorting key is the index.
+
+**A batch is one insert.** Postgres executes a statement per message; ClickHouse
+merges parts in the background and a row-at-a-time insert makes a part per row.
+So a batch becomes one request — which makes an input `buffer` worth more here
+than anywhere else, and `sensors_to_clickhouse` in the sample buffers 100
+messages or 5 seconds ahead of its insert.
+
+**It speaks the HTTP interface**, which is the port every deployment exposes
+(and the only one ClickHouse Cloud has). The connection is a `url`, a
+`database`, a `user` and a `password`; the database has to exist already, since
+an output creates tables and never databases. A plaintext `http://` url needs
+`"allow_http": true` on the connection — the credentials go with every insert —
+which is exactly the rule the s3 connection follows, and what the local server
+in `docker-compose.yaml` asks for.
+
+Rows travel as `JSONCompactEachRow` rather than as text with a cast, which is
+the same division of labour spelled the way this server spells it: a number's
+own digits go across untouched, and the server parses a timestamp or a uuid.
+`json` columns are created as `String` holding the JSON text — `JSONExtract`
+reads them — and `date` as `Date32`, since `Date` starts in 1970.
+
+`docker compose up` brings up ClickHouse on `:8123` with the database `kayak`
+and the role `kayak` (password `hunter2`, which is what `${CLICKHOUSE_PASSWORD}`
+resolves to in `example_config/secrets.example.json`).
+
 ## secrets
 
 Config files are meant to be version controlled, so they carry *references* to
@@ -1546,7 +1600,7 @@ working:
 
 ```bash
 docker run -p 6767:6767 \
-  -e NATS_PASSWORD=hunter2 -e POSTGRES_PASSWORD=hunter2 \
+  -e NATS_PASSWORD=hunter2 -e POSTGRES_PASSWORD=hunter2 -e CLICKHOUSE_PASSWORD=hunter2 \
   kayak --config /usr/share/kayak/example/config.json --data-dir /kayak/dev_data
 ```
 
@@ -1566,7 +1620,11 @@ Points worth knowing before it goes anywhere real:
   UI.
 - **Port 6767**, set through `LEPTOS_SITE_ADDR` in the image (`0.0.0.0`, since
   the `Cargo.toml` default of `127.0.0.1` reaches nothing from outside a
-  container). That env var is what binds — not `--port`.
+  container). `--listen 0.0.0.0:8080` on the command line overrides it; without
+  the flag that env var is what binds. Binding every interface is right *here* —
+  the isolation is which ports the container publishes, not which address it
+  listens on — and is the thing to think twice about on a host, since an
+  unauthenticated kayak is a control plane.
 - **Probes are plain HTTP.** The image carries no `curl` or `wget`, so an
   exec-style healthcheck has nothing to run: use a Kubernetes `httpGet` against
   `GET /api/pipelines`, which is also what a compose healthcheck should reach
@@ -1619,8 +1677,8 @@ Timing-dependent tests use `#[tokio::test(start_paused = true)]` so a 10-second
 window costs no wall time.
 
 Not covered by `just test`, and deliberately so: the NATS and kafka
-input/outputs, the HTTP transform, the postgres output and the upload half of the
-s3 output, which are thin wrappers over their clients — they need
+input/outputs, the HTTP transform, the database outputs' round trip and the
+upload half of the s3 output, which are thin wrappers over their clients — they need
 `docker compose up` and are exercised by
 `just start-baseline` / `just test-http`. For s3 that means the `PUT` itself is
 untested offline; what *is* tested is everything that decides *what* is uploaded
@@ -1638,6 +1696,13 @@ itself in `outputs::columns::tests`: which value is accepted into which type,
 what a missing field does, and every build-time refusal. What needs a server is
 the round trip, which is the part with no decision in it.
 
+`outputs::clickhouse::tests` is the same list one item longer, because that
+output writes its own wire format rather than handing values to a driver: the
+DDL and the insert, the sorting key's effect on both, the build-time refusals
+(including the plaintext url), and — the one that is really about the *pair* of
+modules — that every column type comes out of the mapping as text the row
+builder turns into a parseable JSON line.
+
 `docker compose up` also brings up a single-node kafka (KRaft, no zookeeper) on
 :9092 with a publisher putting one JSON line a second on `test.events`, which
 the `kafka_events` pipeline consumes and `slow_requests` filters back out to
@@ -1653,11 +1718,13 @@ a server the next one can sit idle for ~45s before kafka rebalances the
 partition onto it. Both of those cost me a confusing ten minutes; they are kafka
 working as designed, not the pipeline being wrong.
 
-`docker compose up` also brings up postgres on :5432 (database `kayak`, role
-`kayak`, password `hunter2`), which is where the `sensors_archive` pipeline in
-`config.json` writes. That pipeline names the `local-postgres` connection in
-`config.connections.json`, whose password is a `${POSTGRES_PASSWORD}` reference,
-so running the server against the sample config needs a secret:
+`docker compose up` also brings up postgres on :5432 and ClickHouse on :8123
+(both database `kayak`, role `kayak`, password `hunter2`), which is where
+`sensors_archive` and `sensors_to_clickhouse` in `config.json` write. Those
+pipelines name the `local-postgres` and `local-clickhouse` connections in
+`config.connections.json`, whose passwords are `${POSTGRES_PASSWORD}` and
+`${CLICKHOUSE_PASSWORD}` references, so running the server against the sample
+config needs secrets:
 
 ```bash
 just dev

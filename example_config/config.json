@@ -546,6 +546,57 @@
       ]
     },
     {
+      "id": "sensors_to_clickhouse",
+      "inputs": [
+        {
+          "type": "pipeline",
+          "upstream": "sensors",
+          "buffer": {
+            "type": "batch",
+            "size": 100,
+            "window_seconds": 5
+          }
+        }
+      ],
+      "transforms": [],
+      "outputs": [
+        {
+          "type": "clickhouse",
+          "connection": "local-clickhouse",
+          "table": "sensor_readings",
+          "columns": [
+            {
+              "name": "sensor",
+              "type": "text"
+            },
+            {
+              "name": "value",
+              "type": "float"
+            },
+            {
+              "name": "recorded_at",
+              "type": "timestamp",
+              "field": "ts"
+            },
+            {
+              "name": "subject",
+              "type": "text",
+              "field": "_meta.subject"
+            },
+            {
+              "name": "raw",
+              "type": "json",
+              "message": true
+            }
+          ],
+          "order_by": [
+            "recorded_at",
+            "sensor"
+          ]
+        }
+      ]
+    },
+    {
       "id": "slow_requests",
       "inputs": [
         {

@@ -10,8 +10,8 @@ flows between them, and a log and throughput chart on each one.
 Pipelines are configured, not coded: nats, kafka, http and a couple of dummy
 inputs; transforms for filtering, reducing/aggregating, reshaping fields,
 buffering, splitting and remembering state across messages; outputs to
-postgres, files, S3-compatible object storage and stdout. Messages are plain
-JSON the whole way through — no schema to define up front. A pipeline can feed
+postgres, ClickHouse, files, S3-compatible object storage and stdout. Messages
+are plain JSON the whole way through — no schema to define up front. A pipeline can feed
 another pipeline, so the graph is a DAG, not just a list of independent jobs.
 
 Everything is driven from one Axum server with a Leptos web UI on top. The
@@ -34,7 +34,7 @@ happening, not just trust that it is.
 You'll need [Rust](https://rustup.rs), [`just`](https://github.com/casey/just),
 and [`cargo-leptos`](https://github.com/leptos-rs/cargo-leptos)
 (`cargo install cargo-leptos`). Docker is optional — needed only for the nats,
-kafka, postgres and S3 pipelines in the sample graph.
+kafka, database and S3 pipelines in the sample graph.
 
 ```bash
 just dev
@@ -47,7 +47,7 @@ first run. Sign in as `niclas` / `hunter2` (admin) or `viewer` / `hunter2`
 sides of the login are there to look at.
 
 To see every pipeline in the sample actually flowing (nats, kafka, postgres,
-S3), bring up the systems it talks to first:
+ClickHouse, S3), bring up the systems it talks to first:
 
 ```bash
 docker compose up

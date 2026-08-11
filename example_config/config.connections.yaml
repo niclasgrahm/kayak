@@ -1,3 +1,10 @@
+local-clickhouse:
+  type: clickhouse
+  url: http://localhost:8123
+  database: kayak
+  user: kayak
+  password: ${CLICKHOUSE_PASSWORD}
+  allow_http: true
 local-files:
   type: file
   root: dev_data/events

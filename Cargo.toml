@@ -63,7 +63,10 @@ chrono = "0.4.44"
 clap = { version = "4.6.1", features = ["derive"] }
 futures-util = "0.3.32"
 petname = "3.0.0"
-reqwest = { version = "0.13.4", features = ["json"]}
+# `query` is what the clickhouse output builds its request with: the statement
+# travels in the query string of the HTTP interface, so it has to be encoded by
+# something that is not string concatenation.
+reqwest = { version = "0.13.4", features = ["json", "query"]}
 schemars = "1.2.1"
 serde = { version = "1.0.228", features = ["derive", "rc"] }
 serde_json = "1.0.149"

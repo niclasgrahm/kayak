@@ -16,6 +16,7 @@ use tracing::Level;
 use clap::Parser;
 use kayak::api_router;
 use kayak::auth::Auth;
+use kayak::listen;
 use kayak::secrets::{ChainStore, EnvStore, FileStore, SecretStore};
 use kayak::state::AppState;
 use kayak_core::server_config::ServerConfig;
@@ -61,8 +62,22 @@ struct Args {
     /// running unchanged. See `kayak_core::server_config` for the file's shape.
     #[arg(long)]
     server_config: Option<PathBuf>,
-    #[arg(long, default_value_t = 6767)]
-    port: u16,
+    /// The address and port to bind, as one value — `127.0.0.1:6767`,
+    /// `0.0.0.0:6767`, `[::]:6767`. One argument rather than a host beside a
+    /// port because that is what binding takes, and because reassembling the
+    /// two gets IPv6 wrong.
+    ///
+    /// Without this flag the address is whatever the leptos options already
+    /// say: `LEPTOS_SITE_ADDR` if it is set — which is how `cargo leptos
+    /// watch` and the container image both speak — and otherwise the
+    /// `site-addr` in `Cargo.toml`. See `kayak::listen` for why this is not
+    /// defaulted here.
+    ///
+    /// Loopback is reachable only from this machine; anything else is
+    /// reachable from wherever that interface is, which on an unauthenticated
+    /// server means anyone who can reach the port can rewrite the config.
+    #[arg(long)]
+    listen: Option<SocketAddr>,
 }
 
 /// The environment ahead of the secrets file, so an env var wins on a name
@@ -77,15 +92,10 @@ fn secret_store(path: Option<&PathBuf>) -> anyhow::Result<Arc<dyn SecretStore>> 
 }
 
 /// Say so, once, when an unauthenticated server is reachable from off the
-/// machine.
-///
-/// Not a refusal: the open default is what makes a first run and a local
-/// `just dev` work, and turning it into an error would break every deployment
-/// that predates authentication. But an open *control plane* — one where
-/// anyone who can reach the port can delete a pipeline or rewrite the config —
-/// on an address other than loopback is worth one loud line in the log.
+/// machine. The decision is `listen::is_open_to_the_network`, which is where
+/// the reasoning and the tests are; this is only the line.
 fn warn_if_open_to_the_network(config: &ServerConfig, addr: SocketAddr) {
-    if config.requires_auth() || addr.ip().is_loopback() {
+    if !listen::is_open_to_the_network(config, addr) {
         return;
     }
     tracing::warn!(
@@ -110,8 +120,6 @@ async fn main() -> anyhow::Result<()> {
             _ => "info",
         })
         .init();
-    let addr = format!("0.0.0.0:{}", args.port);
-    tracing::info!("Starting server on {}", addr);
 
     let secrets = secret_store(args.secrets.as_ref()).context("failed to load secrets")?;
     // the accounts resolve against the same store the pipelines do — one place
@@ -155,10 +163,16 @@ async fn main() -> anyhow::Result<()> {
         .fallback(leptos_axum::file_and_error_handler(shell))
         .with_state(leptos_options.clone());
     let app = api.merge(leptos);
-    let listener = tokio::net::TcpListener::bind(&leptos_options.site_addr)
+    // the flag if one was given, otherwise whatever LEPTOS_SITE_ADDR or the
+    // Cargo.toml `site-addr` already settled on — and the address that is
+    // logged is the one that is bound, which is the whole point of resolving
+    // it in one place.
+    let addr = listen::resolve(args.listen, leptos_options.site_addr);
+    let listener = tokio::net::TcpListener::bind(addr)
         .await
-        .with_context(|| format!("failed to bind {}", leptos_options.site_addr))?;
-    warn_if_open_to_the_network(&server_config, leptos_options.site_addr);
+        .with_context(|| format!("failed to bind {addr}"))?;
+    tracing::info!("Listening on {addr}");
+    warn_if_open_to_the_network(&server_config, addr);
     // with_connect_info rather than the plain make service: it is what puts the
     // peer address in the request extensions, which is where the `http` input's
     // `remote_addr` metadata is read from. Nothing fails without it — the

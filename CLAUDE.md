@@ -46,7 +46,7 @@ Three workspace crates:
 
 ### The pipeline model
 
-A **pipeline** is one `inputs → [transforms] → outputs` chain. A pipeline may have several inputs (merged into one stream) and several outputs (each gets every batch); `inputs` and `outputs` are JSON arrays, and there is no singular form. Pipelines are identified by `id` (from config, or a random `petname` if omitted) and form a **graph**: the `pipeline` input kind subscribes to another pipeline's output, so one pipeline can fan out to several downstream ones. `example_config/config.json` (with `config.connections.json` beside it) is the worked example and deliberately covers every component kind and every connection kind: two roots (a NATS source and a dummy ticker), a fan-out of seven under the source, one pipeline (`everything`) fed by three inputs — two upstreams and a nats subject another pipeline publishes to — one pipeline with two outputs of different kinds, and one pipeline at depth 3. Keep it that way when adding a component — it's what the UI is inspected against, and `tests/graph.rs` builds the whole file.
+A **pipeline** is one `inputs → [transforms] → outputs` chain. A pipeline may have several inputs (merged into one stream) and several outputs (each gets every batch); `inputs` and `outputs` are JSON arrays, and there is no singular form. Pipelines are identified by `id` (from config, or a random `petname` if omitted) and form a **graph**: the `pipeline` input kind subscribes to another pipeline's output, so one pipeline can fan out to several downstream ones. `example_config/config.json` (with `config.connections.json` beside it) is the worked example and deliberately covers every component kind and every connection kind: two roots (a NATS source and a dummy ticker), a wide fan-out under the source, one pipeline (`everything`) fed by three inputs — two upstreams and a nats subject another pipeline publishes to — one pipeline with two outputs of different kinds, and one pipeline at depth 3. Keep it that way when adding a component — it's what the UI is inspected against, and `tests/graph.rs` builds the whole file.
 
 Data flowing through is always `Arc<MessageBatch>` — a batch of `Arc<serde_json::Value>`. There is no typed schema; everything is untyped JSON, and transforms address fields by name.
 
@@ -366,8 +366,9 @@ gitignored; the build creates it.
 types. It lives in **`kayak-core/src/columns.rs`**, not in the postgres config,
 and that placement is the design: every database output asks the same two
 questions — which field goes in which column, and what to do about a message
-that doesn't carry it — so the next one (clickhouse, mysql) reuses the mapping
-whole and only renders the DDL differently.
+that doesn't carry it — so the next one reuses the mapping whole and only
+renders the DDL differently. The clickhouse output is that claim collected:
+it declares no mapping types of its own.
 
 Which is why the types are **logical** (`float`, `timestamp`, `json`) rather than
 one server's spelling. A config naming `double precision` would have to be
@@ -376,9 +377,11 @@ add-pipeline form for free.
 
 The split of work mirrors that: `src/outputs/columns.rs` is the neutral half —
 `ColumnPlan::build` validates, `plan.row(message)` produces `Vec<Option<String>>`
-or `Row::Skipped`, and nothing in it knows any SQL. `src/outputs/postgres.rs`
-is only names, DDL and placeholders. Keep new mapping work on the neutral side
-of that line.
+or `Row::Skipped`, `Identifier` and `Table` check everything that reaches the SQL
+text, and nothing in it knows any SQL. `src/outputs/postgres.rs` is only names,
+DDL and placeholders. Keep new mapping work on the neutral side of that line —
+`Table` moved there when clickhouse needed it, which is the shape that question
+takes.
 
 Four properties are load-bearing:
 
@@ -404,6 +407,46 @@ Four properties are load-bearing:
 
 `fields::root_segment` is the counterpart to `leaf`, added for the
 `on_extra_fields` check: a column reading `sensor.id` claims `sensor`.
+
+### The clickhouse output
+
+The second consumer of the mapping, and the thing that keeps `columns.rs`
+honest: it adds no `ColumnType`, no policy and no mapping concept — only DDL, a
+wire format and a request. Three differences from postgres, each of them
+ClickHouse being itself rather than a gap, and none of them worth erasing:
+
+- **`order_by`, not `primary_key`.** No auto-increment column and no unique
+  constraint exist here, so there is no surrogate key to fall back on and
+  `order_by` is `MergeTree`'s *sorting* key — an index and a layout, not a
+  uniqueness claim. The name is the honest one and should stay. Naming none gets
+  the implicit `received_at` and sorts by it; named columns go through
+  `require_not_null` for the same reason postgres' key columns do. There is
+  deliberately **no `indexes` field**: the sorting key is the index.
+- **A batch is one insert**, not a statement per message — a columnar store that
+  merges parts in the background makes a part per row otherwise. This is why an
+  input `buffer` matters more in front of this output than anywhere else, and
+  why `Layout::body` builds the whole body before anything is sent.
+- **Values travel as `JSONCompactEachRow`**, which is the same division of labour
+  `$n::text::NUMERIC` buys on the postgres side, spelled the way this server
+  spells it. `token()` decides which of the plan's checked texts is *already*
+  JSON — that is an invariant of the **pair** of modules rather than of either
+  half, which is why `every_column_type_produces_a_json_line` pins it by parsing
+  the line back.
+
+Three smaller things that were each found the hard way and are load-bearing.
+`Content-Length` is set explicitly, including on the bodyless statements: a POST
+that is neither chunked nor length-declared is a 411 here, not a statement. The
+DDL and the connection check go down the same `execute` as an insert, which is
+what makes `create_table: false` still fail at startup rather than on the first
+batch — an HTTP client opens nothing, so there is no "connect" to find it out.
+And the two settings on every request are not tuning: `date_time_input_format=
+best_effort` is what makes an RFC 3339 timestamp parse at all, and
+`input_format_null_as_default=0` is the backstop that keeps a column that cannot
+hold a null from quietly holding a zero.
+
+`json` is a `String` holding the JSON text (`JSONExtract` reads it) and `date` a
+`Date32`; the connection is the HTTP interface with `allow_http` following the
+s3 connection's rule, since the credentials go with every insert.
 
 ### The map transform
 
@@ -818,6 +861,6 @@ The pipelines tab has two arrangements and a search box, and which rows that com
 ## Notes
 
 - `docs/roadmap.md` holds the current TODO list — check it for what's in flight before proposing work.
-- Leptos config lives in the root `Cargo.toml` under `[[workspace.metadata.leptos]]`; `site-addr` there (6767) is what the binary actually binds, not the `--port` arg.
+- Leptos config lives in the root `Cargo.toml` under `[[workspace.metadata.leptos]]`; `site-addr` there (6767) is what the binary binds unless `LEPTOS_SITE_ADDR` or `--listen` says otherwise. `src/listen.rs` holds that precedence rule (`--listen` > env > `Cargo.toml`) and the loopback warning, both pure and tested — the flag is an `Option<SocketAddr>` and **must stay one**, because a clap default would win over the env var and break `cargo leptos watch` and the container image alike.
 - `Dockerfile` is a two-stage cargo-leptos build, documented in `docs/guide.md`'s "deployment" section. The runtime image is the *runtime and nothing else*: binary, site directory, `LEPTOS_SITE_*` env vars, uid 10001, `ENTRYPOINT` = the binary so container args are server flags. **No config is baked in** — bare it serves an empty graph, and a deployment mounts one into `/kayak` (the WORKDIR, owned by the run user because saving writes there). The sample is carried at `/usr/share/kayak/example` for a tour, connections and layout file beside it under the same stem or they stop being found. The builder installs `cmake` for `rdkafka-sys`; nothing else, since TLS is rustls and zlib is vendored.
 - **`example_config/` is the sample everything is tried against**, and it is one directory because the set travels together: the connections and layout files are *derived* from the config's path, so they only find each other side by side. `tests/config.rs` and `tests/graph.rs` read the files from there by relative path, so moving or renaming them breaks those tests — which is the point, the sample is not allowed to rot. `secrets.json` is gitignored anywhere in the tree; `just dev` creates the sample's from `secrets.example.json`.

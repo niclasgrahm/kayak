@@ -81,6 +81,7 @@ impl BuildOutputConfig for OutputConfig {
             OutputKind::Kafka(c) => c.build(ctx),
             OutputKind::Nats(c) => c.build(ctx),
             OutputKind::Postgres(c) => c.build(ctx),
+            OutputKind::Clickhouse(c) => c.build(ctx),
         }
     }
 }

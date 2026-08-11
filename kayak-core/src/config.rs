@@ -401,6 +401,55 @@ pub struct PostgresOutputConfig {
     pub on_extra_fields: ExtraFieldPolicy,
 }
 
+/// Inserts every batch into a ClickHouse table, one insert per batch.
+///
+/// `columns` is spelled exactly as the postgres output's is — each entry names
+/// a column, its type and the field to read, and `field` defaults to the
+/// column's name. Without them the table gets a single column holding each
+/// message as JSON text.
+///
+/// Where it differs from postgres is what a created table is *sorted* by.
+/// ClickHouse has no auto-increment column and no unique constraint, so there
+/// is no surrogate `id` to fall back on: `order_by` names the MergeTree sorting
+/// key, and a table that names none is sorted by the `received_at` timestamp it
+/// gets for free. A sorting key does not deduplicate — naming one says how the
+/// table is laid out and indexed, not that its rows are unique.
+///
+/// The table is created if it isn't there; set `create_table` to false for a
+/// table someone else owns. Creation never *alters* an existing table.
+#[derive(Clone, Debug, Deserialize, Serialize, JsonSchema)]
+#[schemars(title = "clickhouse")]
+pub struct ClickhouseOutputConfig {
+    /// name of the clickhouse connection to insert through — see "connections"
+    /// in the readme. The url, database and user live there; the table below is
+    /// this output's own.
+    #[schemars(extend("x-connection" = "clickhouse"))]
+    pub connection: ConnectionId,
+    /// the table to insert into, created if it does not exist. Optionally
+    /// database-qualified (`analytics.readings`), which overrides the
+    /// connection's database; letters, digits and underscores only, since it
+    /// cannot be sent as a query parameter.
+    pub table: String,
+    /// which message field goes in which column. Leave it out to store each
+    /// message whole, as JSON text, in a `payload` column.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub columns: Vec<ColumnMapping>,
+    /// create the table on start if it does not exist. Defaults to true.
+    // omitted rather than written as `null` when absent, so a config saved back
+    // out is the file someone hand-wrote — same rule as the postgres port
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub create_table: Option<bool>,
+    /// the columns the created table is sorted by — MergeTree's sorting key, and
+    /// its index. With none, the table gets a `received_at` timestamp of its own
+    /// and is sorted by that. Named columns are made `NOT NULL`, since a
+    /// nullable key is not something ClickHouse sorts by.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub order_by: Vec<String>,
+    /// what to do about a message carrying fields no column reads
+    #[serde(default, skip_serializing_if = "ExtraFieldPolicy::is_default")]
+    pub on_extra_fields: ExtraFieldPolicy,
+}
+
 /// Publishes every message in the batch to a kafka topic, one message per
 /// record. Records are sent without a key, so they round-robin across the
 /// topic's partitions.
@@ -905,6 +954,7 @@ pub enum OutputKind {
     Kafka(KafkaOutputConfig),
     Nats(NatsOutputConfig),
     Postgres(PostgresOutputConfig),
+    Clickhouse(ClickhouseOutputConfig),
 }
 #[derive(Clone, Debug, Deserialize, Serialize, JsonSchema)]
 pub struct OutputConfig {
@@ -978,6 +1028,7 @@ impl Config {
             OutputKind::Kafka(c) => Some(&c.connection),
             OutputKind::Nats(c) => Some(&c.connection),
             OutputKind::Postgres(c) => Some(&c.connection),
+            OutputKind::Clickhouse(c) => Some(&c.connection),
             OutputKind::File(c) => Some(&c.connection),
             OutputKind::S3(c) => Some(&c.connection),
             OutputKind::Stdout(_) => None,
