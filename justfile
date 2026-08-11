@@ -15,12 +15,24 @@ data := "dev_data"
 # frontend. Everything the sample connects to comes up with `docker compose up`;
 # without it the nats, kafka and postgres pipelines report connection errors on
 # their cards and the rest still runs.
+#
+# It runs **with authentication on** — sign in as `niclas` / `hunter2`, or as
+# `viewer` / `hunter2` to see what a read-only account gets. The password comes
+# from the secrets file the same recipe creates, so there is nothing to set up.
+# Developing against the open path would leave the login page and the role
+# checks as the one part of the UI nobody ever looks at; `dev-yaml` below is
+# the escape hatch when a login is in the way. See {{example}}/server.yaml.
 
-# dev server on :6767, hot reload, against example_config/
+# dev server on :6767, hot reload, against example_config/ — asks for a login
 dev: secrets
-  cargo leptos watch -- --config {{example}}/config.json --secrets {{example}}/secrets.json --data-dir {{data}}
+  cargo leptos watch -- --config {{example}}/config.json --secrets {{example}}/secrets.json --data-dir {{data}} --server-config {{example}}/server.yaml
 
-# the same graph in its other spelling — worth running now and then so the YAML path doesn't rot
+# The same graph in its other spelling, and deliberately *without* a
+# `--server-config`: it is what this recipe is for (the YAML config path) plus
+# the one way to get at the canvas without signing in, which is worth having
+# when the thing being worked on is not the login.
+
+# the same graph in its other spelling, no login — worth running now and then so the YAML path doesn't rot
 dev-yaml: secrets
   cargo leptos watch -- --config {{example}}/config.yaml --secrets {{example}}/secrets.json --data-dir {{data}}
 

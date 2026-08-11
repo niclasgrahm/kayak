@@ -1,0 +1,29 @@
+# How the dev server is run, as against what the graph is — see
+# "authentication" in the readme, and `kayak_core::server_config` for the shape.
+#
+# This file is what `just dev` passes to `--server-config`, so a dev session
+# exercises the authenticated path rather than the open one. **That is the
+# point of it being here**: an auth system nobody logs into during development
+# is one that rots, and the login page is otherwise the only part of the UI
+# that never gets looked at.
+#
+# It is not what a deployment should copy. One account with a password that is
+# in a committed example file is a development convenience; a real one names
+# accounts per person and resolves them from something that is not in the
+# repository.
+auth:
+  type: basic
+  users:
+    # The password resolves from the secrets file `just dev` also passes, which
+    # `just secrets` creates from `secrets.example.json` — so it is `hunter2`,
+    # like every other sample credential here, and nothing in the repository
+    # holds a password anyone could mistake for a real one.
+    niclas:
+      password: ${KAYAK_ADMIN_PASSWORD}
+      role: admin
+    # A second account with the other role, because the interesting thing to
+    # try during development is what a reader *cannot* do: no edit toggle, no
+    # delete buttons, and a 403 from anything that would change the graph.
+    viewer:
+      password: ${KAYAK_VIEWER_PASSWORD}
+      role: read

@@ -888,12 +888,22 @@ the run loop's.
 | `config.connections.{json,yaml}` | the systems those pipelines name |
 | `config.layout.json` | where the cards sit on the canvas |
 | `secrets.example.json` | what the `${NAME}` references resolve against |
+| `server.yaml` | the accounts `just dev` runs with |
 
 One directory because the set travels together: the connections and layout files
 are *derived* from the config's path, so they only find each other when they sit
 side by side. `tests/config.rs` and `tests/graph.rs` load these files, so a
 sample that stops parsing — or a component added to the JSON and not the YAML —
 fails `just test` rather than rotting quietly.
+
+`server.yaml` is the odd one out: it is not part of the graph and is not
+derived from the config's path, because it describes *the server* rather than
+the work (see "authentication" above). It is here so that `just dev` runs
+**with a login** — sign in as `niclas` / `hunter2` for an admin, or
+`viewer` / `hunter2` to see what a read-only account gets. Developing against
+the open path would leave the login page and the role checks as the one part of
+the UI nobody ever looks at. `just dev-yaml` passes no `--server-config` and is
+the way past the login when the login is not what is being worked on.
 
 `ingest` is the http input's sample and needs nothing running either — it is a
 root pipeline with no source, waiting to be posted to (see "posting into a
