@@ -249,11 +249,71 @@ impl From<gloo_net::Error> for ApiError {
     }
 }
 
+impl ApiError {
+    /// What a failed sign-in should say.
+    ///
+    /// Its own wording rather than the server's, for the one case that matters:
+    /// a 401 from `POST /api/auth/login` is **always** "wrong username or
+    /// password", whatever the body said. The server takes care not to
+    /// distinguish an unknown user from a wrong password — in its wording and
+    /// in its timing — and it would be a poor joke to undo that here by
+    /// printing whatever came back.
+    ///
+    /// The other two arms are worth telling apart because the fix differs: a
+    /// network failure means the tab could not reach the server at all, which
+    /// no amount of retyping a password will help.
+    #[must_use]
+    pub fn login_message(&self) -> String {
+        match self {
+            Self::Unauthorized(_) => "wrong username or password".to_string(),
+            Self::Network(_) => "could not reach the server — is it still running?".to_string(),
+            // a 500, or a body the server could not parse: rare, and the
+            // server's own message is the useful thing to show
+            Self::Rejected(message) => message.clone(),
+        }
+    }
+}
+
 impl std::fmt::Display for ApiError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             ApiError::Network(msg) => write!(f, "Network error: {msg}"),
             ApiError::Rejected(msg) | ApiError::Unauthorized(msg) => write!(f, "{msg}"),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::ApiError;
+
+    /// The server is careful not to say whether the username exists — not in
+    /// the body and not in the timing. Echoing its message back would be
+    /// harmless today and a leak the day someone makes that body more helpful,
+    /// so the wording is fixed here instead.
+    #[test]
+    fn a_rejected_sign_in_never_says_which_half_was_wrong() {
+        let message = ApiError::Unauthorized("no such user 'sam'".to_string()).login_message();
+        assert_eq!(message, "wrong username or password");
+        assert!(!message.contains("sam"));
+    }
+
+    /// A different problem with a different fix: retyping the password will
+    /// not help if the server is not there.
+    #[test]
+    fn an_unreachable_server_says_so_rather_than_blaming_the_password() {
+        let message = ApiError::Network("connection refused".to_string()).login_message();
+        assert!(message.contains("could not reach the server"), "{message}");
+        assert!(!message.contains("password"), "{message}");
+    }
+
+    /// Anything else is the server explaining itself, and that explanation is
+    /// the useful thing to show.
+    #[test]
+    fn any_other_failure_shows_what_the_server_said() {
+        assert_eq!(
+            ApiError::Rejected("the session store is poisoned".to_string()).login_message(),
+            "the session store is poisoned"
+        );
     }
 }

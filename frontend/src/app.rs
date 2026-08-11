@@ -339,9 +339,23 @@ pub struct AppState {
     /// Held beside `mode` rather than folded into it because they answer
     /// different questions: `mode` is "am I editing right now", this is "may I".
     /// [`AppState::editing`] requires both, so a reader cannot end up in edit
-    /// mode however the signal got set — the server would refuse the calls
+    /// mode however the mode signal got set — the server would refuse the calls
     /// anyway, and offering buttons that 403 is worse than not offering them.
-    pub may_edit: Signal<bool>,
+    ///
+    /// **A plain `bool`, and it has to be one.** The obvious spelling is a
+    /// `Signal::derive` over the session, and that spelling crashes the app on
+    /// sign-out: the derived signal would be owned by `CanvasPage` while
+    /// subscribing to `session.auth`, which is the signal [`AuthGate`] disposes
+    /// `CanvasPage` *from*. Signing out then notifies the readers of a value
+    /// whose owner is being torn down in the same pass, and reading a disposed
+    /// signal panics.
+    ///
+    /// Nothing is lost, because there is nothing to be reactive about: an
+    /// identity can only change by going through `AuthGate`, which remounts
+    /// this whole tree and recomputes it. The role is fixed for the life of the
+    /// mount, so capturing it at construction is the honest shape as well as
+    /// the safe one.
+    pub may_edit: bool,
     /// Whether the "add pipeline" modal is open.
     pub adding: RwSignal<bool>,
     /// The pipeline the modal should open already fed by, when it was opened
@@ -415,7 +429,7 @@ impl AppState {
     }
 
     fn editing(&self) -> bool {
-        self.may_edit.get() && self.mode.get().is_edit()
+        self.may_edit && self.mode.get().is_edit()
     }
 }
 
@@ -756,10 +770,18 @@ impl Session {
         });
     }
 
-    /// Everything the UI asks about the caller, with the not-yet-known state
+    /// Whether the caller may change the graph, with the not-yet-known state
     /// folded into the safe answer: nothing is editable until we know.
+    ///
+    /// **Read untracked, deliberately.** Every caller is inside the tree
+    /// [`AuthGate`] mounts, and subscribing to `auth` from in there means being
+    /// notified by the very change that disposes you — see
+    /// [`AppState::may_edit`] for the crash that causes. An identity change
+    /// remounts the tree, so a snapshot is not stale.
     pub fn may_edit(self) -> bool {
-        self.auth.get().is_some_and(|auth| auth.may_edit())
+        self.auth
+            .get_untracked()
+            .is_some_and(|auth| auth.may_edit())
     }
 
     pub fn username(self) -> Option<String> {
@@ -836,10 +858,19 @@ fn LoginPage() -> impl IntoView {
                     password.set(String::new());
                     session.auth.set(Some(auth));
                 }
-                Err(err) => failure.set(Some(err.to_string())),
+                // its own wording rather than `to_string`, so a 401 always
+                // reads the same whatever the body said — see
+                // `ApiError::login_message`
+                Err(err) => failure.set(Some(err.login_message())),
             }
         });
     };
+
+    // A failure is about the credentials that were *submitted*, so it stops
+    // being true the moment either field is edited. Leaving it up would put
+    // "wrong username or password" under a password that has since been
+    // corrected, which reads as the correction having been rejected too.
+    let editing = move || failure.set(None);
 
     view! {
         <div class="login-page">
@@ -855,24 +886,41 @@ fn LoginPage() -> impl IntoView {
                 <input
                     id="login-username"
                     class="text-input"
+                    class:invalid=move || failure.get().is_some()
                     autocomplete="username"
                     autofocus
                     prop:value=move || username.get()
-                    on:input=move |ev| username.set(event_target_value(&ev))
+                    on:input=move |ev| {
+                        editing();
+                        username.set(event_target_value(&ev));
+                    }
                 />
                 <label for="login-password">"password"</label>
                 <input
                     id="login-password"
                     class="text-input"
+                    class:invalid=move || failure.get().is_some()
                     type="password"
                     autocomplete="current-password"
                     prop:value=move || password.get()
-                    on:input=move |ev| password.set(event_target_value(&ev))
+                    on:input=move |ev| {
+                        editing();
+                        password.set(event_target_value(&ev));
+                    }
                 />
+                // `role="alert"` so it is announced when it appears rather than
+                // only being findable by looking. It is the one thing on this
+                // page that arrives without the user causing it to be drawn.
                 {move || {
                     failure
                         .get()
-                        .map(|message| view! { <p class="login-error">{message}</p> })
+                        .map(|message| {
+                            view! {
+                                <p class="login-error" role="alert">
+                                    {message}
+                                </p>
+                            }
+                        })
                 }}
                 <button class="button primary" type="submit" disabled=move || busy.get()>
                     {move || if busy.get() { "signing in..." } else { "sign in" }}
@@ -973,7 +1021,8 @@ pub fn CanvasPage() -> impl IntoView {
         save_directory,
         unsaved,
         mode: RwSignal::new(Mode::ReadOnly),
-        may_edit: Signal::derive(move || session.may_edit()),
+        // read once, not subscribed to — see the field's docs
+        may_edit: session.may_edit(),
         adding: RwSignal::new(false),
         add_upstream: RwSignal::new(None),
         adding_connection: RwSignal::new(false),
@@ -3649,7 +3698,7 @@ fn ModeControls(state: AppState) -> impl IntoView {
             // greyed-out button is an invitation to go and ask why. The server
             // refuses the calls regardless — this only keeps the UI from
             // offering what it would refuse.
-            <Show when=move || state.may_edit.get()>
+            <Show when=move || state.may_edit>
             <button
                 class="button mode-toggle"
                 class:active=move || state.editing()

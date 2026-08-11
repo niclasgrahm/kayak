@@ -2042,10 +2042,23 @@ body {
     text-align: center;
   }
 
+  // Given the same treatment as an armed delete rather than being quiet red
+  // text: it is the only thing on this page that appears without the user
+  // having asked to see it, and a failed sign-in that reads as nothing having
+  // happened is the whole reason it exists.
   .login-error {
     color: var(--error);
+    background: var(--error-bg);
+    border: 1px solid var(--error);
+    border-radius: 2px;
     font-size: 11px;
-    margin: 4px 0 0;
+    padding: 6px 8px;
+    margin: 8px 0 0;
+  }
+
+  // the fields the message is about, so the eye has somewhere to go from it
+  .text-input.invalid {
+    border-color: var(--error);
   }
 }
 
