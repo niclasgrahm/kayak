@@ -1,0 +1,228 @@
+# roadmap
+
+What's in flight, what's planned, and what's known to be broken — kept here so
+the next piece of work is a list to check rather than a conversation to
+re-derive. See the [guide](guide.md) for how the finished parts behave, and
+[`CLAUDE.md`](../CLAUDE.md) for how they're implemented.
+
+## currently working on
+
+- [x] expose a standardised http api specification
+      (done 2026-08-07: OpenAPI 3.1 at `/api/openapi.json`, rendered at
+      `/api/reference`, plus an "http api" tab on `/docs` — all three off the
+      one table `api_router` is built from. See "the http api reference" above.)
+- [x] let systems push data in over http
+      (done 2026-08-08: the `http` input, serving
+      `POST /api/pipelines/{id}/messages` off the pipeline's own id. See
+      "posting into a pipeline" above.)
+- [ ] add filter transform
+- [x] add some kind of component plugin registry which can be used to generate docs
+      (done 2026-08-04: no registry in the end — `/docs` reflects over the config
+      schemas instead, so a component documents itself through its doc comments.
+      See "the component reference" above.)
+
+## todo
+
+- [x] basic authentication
+      (done 2026-08-11: a `--server-config` file with an `auth` section, two
+      roles, HTTP Basic for machines and a session cookie for the browser. Off
+      without the flag. The required role lives in the `api_docs` table beside
+      everything else about an endpoint, so the reference, the spec and the
+      middleware are one fact. See "authentication" above.)
+- [x] protect the http input
+      (done 2026-08-11: an optional `auth` on the `http` input — a bearer token,
+      or a fixed value in a header of your choosing — checked by the inbox
+      registry, so the credential lives and dies with the endpoint it guards.
+      Per pipeline, `${NAME}` out of the secret store, constant-time, and
+      refused at build time if it names a header the `envelope` copies. Absent
+      by default. See "protecting the endpoint" above.)
+- [ ] **an hmac option for the http input's `auth`.** The bearer token is a
+      shared secret that travels on every request, so it is only as private as
+      the transport. A GitHub-style signature over the body
+      (`x-hub-signature-256`) keeps the secret off the wire entirely and is what
+      most webhook senders already speak. It slots in as a third
+      `HttpAuthConfig` variant — the registry check is already the right shape —
+      but it needs the raw body, which the handler currently hands straight to
+      the JSON extractor, so it is its own change.
+- [ ] **nothing rate-limits the ingest endpoint.** A wrong token costs an
+      attacker a round trip, same as a wrong password, so a short token on a
+      public network is guessable. The `auth` check is constant-time, which is a
+      different problem.
+- [ ] **hashed passwords in the settings file.** Passwords resolve from the
+      secret store today, which keeps the file committable but means the value
+      lives in the environment. Argon2id hashes would let the file stand alone —
+      but they need a `kayak hash-password` subcommand to be usable at all, so
+      it is its own change rather than a tweak to the config type.
+- [ ] **sessions do not survive a restart.** They are a `HashMap` in the
+      process, which is what makes logout genuinely revoke; the cost is that a
+      deploy signs everyone out. Fixing it properly means a signing key with
+      somewhere to live and a rotation story, which is a bigger decision than it
+      looks.
+- [ ] **nothing rate-limits a failed login.** An account is only as good as its
+      password. A per-address backoff on `POST /api/auth/login` is the cheap
+      version; it needs somewhere to keep the counters that isn't a memory leak.
+
+- [ ] make sure to clean up old template based UI stuff
+      (2026-08-04: `/docs` and `templates/docs.html` are gone — Askama is now
+      only used by the dead `/ui` index handler, which is all that's left)
+- [x] map message fields onto real database columns, with types
+      (done 2026-08-10: `columns` on the postgres output, plus `create_table`,
+      `primary_key` and `indexes`. The mapping and its logical types live in
+      `kayak-core/src/columns.rs` so the next database output reuses them whole.
+      See "database outputs and column mapping" above.)
+- [x] a transform that reshapes a message
+      (done 2026-08-10: `map` — copy, constant, coalesce, cast, concat,
+      arithmetic and drop over an ordered list of mappings, with `keep` and
+      `on_missing`. Declared in `kayak-core/src/mapping.rs`, evaluated in
+      `src/transforms/map.rs`, and it is what gave `fields` a write side. See
+      "reshaping messages" above.)
+- [ ] **a scripted transform (rhai).** Weighed against `map` and deliberately
+      deferred: most of what was missing was a *map*, and answering that with an
+      embedded language would have been answering a narrow question with a wide
+      one. What `map` doesn't reach is arithmetic more than one operation deep,
+      per-field conditionals and string manipulation, and that is the case to
+      revisit this on — the boundary is legible on purpose. Notes if it happens:
+      rhai costs ~1–2 MB of binary (against wasmtime's 10–20 and V8's 30–50) and
+      is sandboxed by default, but the op budget is load-bearing (a script runs
+      synchronously inside the run loop's task, so an unbounded loop wedges a
+      tokio worker, not just that pipeline), and the `Value` → `Dynamic`
+      conversion has to be a custom type with copy-on-write rather than
+      `rhai::serde` — the naive round trip deep-clones every message twice and
+      would cost more than the interpreter.
+- [ ] add time based buffer for the transform buffer
+- [ ] make outputs optional (for example, when a parent pipeline is only used to push data to children)
+- [x] think about necessary metadata to add to each message
+      (done 2026-08-08: `envelope` on any input, attached in band. See "message
+      metadata" above — and note the field paths that came with it, which make
+      nested payloads reachable for the first time.)
+- [x] deal with all unwraps -- this will bite us in the ass soon otherwise
+      (done 2026-08-03: no unwrap/expect left in src/; see "known issues" below
+      for the things that pass turned up but didn't change)
+- [x] show config in the "cards" in the web ui
+      (done 2026-08-04: tabbed property list, see "the canvas" above)
+- [x] give pipeline ability to have multiple inputs
+      (done 2026-08-04: and multiple outputs. `inputs` and `outputs` are arrays
+      in the config now — a breaking wire-format change, the singular `input`
+      and `output` keys are gone. See "pipelines" below.)
+- [ ] new transform (i guess?): wait_for_condition (should it be called buffer_until_condition? or perhaps both are needed?)
+      for example, we need to wait for x: a and z: b. for this, we also need the multiple input thing
+      (2026-08-09: the state half of this landed — named buckets plus `remember`
+      and `recall`, see "state" above. What is left is the *session window*, now
+      tracked with the rest of the machine-cycle work under "the machine-cycle
+      scenario" below.)
+
+## the machine-cycle scenario
+
+The worked case this is being built towards, kept here so the remaining pieces
+are a list rather than a conversation to re-derive. An injection-moulding
+machine publishes to nats — `<machine>.cycle_status` (1 opens a cycle, 0 closes
+it), `<machine>.unit_id`, `<machine>.recipe`, `<machine>.temperature` and
+`<machine>.pressure` at 2 Hz. Per cycle we want the average pressure per unit on
+one subject, and every temperature reading of that cycle posted as one array to
+an ML service with the answer published on another.
+
+The target graph is four pipelines: one reads `*.*` and attributes the readings,
+one cuts them into cycles, and two reduce each cycle. **One wildcard
+subscription rather than five inputs is load-bearing** — merged inputs have no
+ordering between them, so a `cycle_status: 0` could overtake the last reading of
+its own cycle, while a single subscription is delivered in publish order.
+
+Already in: the envelope (the subject is where `machine_id` lives), field paths,
+and state buckets with `remember`/`recall` (attributing readings to the current
+unit and recipe).
+
+Left to build, roughly in dependency order:
+
+- [ ] **the session window transform** — the heart of it. Keyed by the
+      pipeline's `state.key`, opened and closed by `Condition` lists (the same
+      type `remember` already takes), emitting one batch per completed cycle so
+      that a downstream `reducer` over the whole batch *is* a per-cycle
+      aggregation. Needs `max_messages` so a cycle that never closes is capped
+      rather than fatal, and a `linger` on close — a small grace period before
+      emitting — which is the cheap answer to the boundary race. Decide whether
+      the boundary messages are included (I'd say yes: they're data).
+- [ ] **a tick for transforms** — the window's idle-timeout needs one, and so
+      does the "idle file output holds its part open" issue below. Transforms
+      are currently only ever driven by an arriving batch, which is also why
+      bucket eviction is lazy. One mechanism, three users.
+- [ ] **`subject_fields` on the nats input** — name the subject's tokens so
+      `machine_7.temperature` arrives as `_meta.machine_id` and `_meta.signal`.
+      Without it a wildcard subscription is unusable, since nothing can address
+      part of a subject. Small, and unblocks keying by machine.
+- [ ] **request shaping and response merging on the http transform** — it
+      currently posts the batch verbatim and *replaces* it with the reply, so
+      the ML call can neither send `{machine_id, unit_id, temperatures: [...]}`
+      nor keep the identifiers it needs to publish the answer under. Wants
+      headers/auth, a timeout and a retry too, and while in there: `verb` is
+      accepted and ignored (see known issues).
+- [ ] **templated output subjects and topics** — `kayak.{machine_id}.avg_pressure`.
+      Without it every machine's results land on one subject with the id only in
+      the body, which throws away the routing nats is for.
+- [ ] **compound conditions on `filter`** — `remember` already takes a list of
+      `Condition` meaning "all of these", while `filter` still takes a single
+      externally-tagged `FilterKind`. Moving `filter` onto the same type would
+      make one spelling of "a test on a message" and let a filter match on two
+      fields, which the cycle pipelines want. A wire-format change to `filter`.
+- [ ] **rename `RecallMissingPolicy::Null`** — probably to `keep`, reading
+      against `skip`. Bare `on_missing: null` in YAML parses as a null and fails
+      with `invalid type: unit value`, which points nowhere near the problem;
+      the value has to be quoted. Kayak's own writer quotes it, so this only
+      bites hand-written config — but it shouldn't bite at all.
+- [ ] **a `map` transform** (set / rename / copy / drop a field) — no way to
+      reshape a message today. Mostly wanted for things the items above cover
+      specifically, so it is last; worth doing if a third case turns up.
+
+Not planned, and worth knowing why: **event-time windows with watermarks.** The
+linger above is a fudge over arrival order. Doing it properly means reading the
+OPC timestamps and holding windows open against a watermark, which is a much
+larger concept — and the durability argument under "state" says the same thing:
+correctness across restarts starts at the input, with checkpointed positions,
+not at the pieces downstream of it.
+
+## known issues
+
+Found during the error-handling pass on 2026-08-03. Each one needs a decision,
+which is why they weren't just fixed.
+
+- [ ] **splitter drops the remainder.** `src/transforms/splitter.rs` — with
+      `out_size: 3` and a 10-message batch, message 10 is silently discarded
+      (the existing `// TODO: theres stuff left here`). Decide whether leftovers
+      are emitted as a short final batch or held until the next `apply()`.
+      `known_bug_the_remainder_is_currently_discarded` pins today's behaviour;
+      flip that test when the decision is made.
+- [ ] **the http transform ignores `verb`.** Every request is a POST regardless
+      of what the config says. Honouring it would change behaviour for existing
+      configs, so it needs a decision first.
+- [ ] **dead pipelines stay in the map.** When a run loop exits (e.g. its input
+      errored), the `PipelineHandle` stays in `AppState`, so `GET /api/pipelines`
+      lists a pipeline that isn't running. `join_handle` is never inspected.
+      Needs a real lifecycle/status concept — running / stopped / failed —
+      probably surfaced in the UI cards too.
+- [x] **file output has a hardcoded path.** (fixed 2026-08-07: it now takes a
+      `file` connection, a `path` under it, a `format` and a `rotate` policy,
+      and is sandboxed by `--data-dir`. See "file output" above.)
+- [ ] **parquet file output.** The format is `ndjson` or `json_array` so far.
+      Parquet needs the arrow ecosystem — worth a feature gate, given what it
+      costs every build — and raises a question the JSON formats don't: messages
+      are untyped, so a writer has to infer a schema and decide what to do with
+      the batch that does not match it.
+- [x] **object-store (s3) output.** (done 2026-08-08: a separate `s3` output and
+      `s3` connection sharing `src/outputs/rotate.rs` whole, with rustfs in
+      `docker-compose.yaml` to write into. See "s3 output" above. Azure Blob and
+      GCS are the same shape again — a connection kind, a destination module and
+      a `FieldType::Connection` marker — and `object_store` already speaks both,
+      so they are feature flags and config rather than new machinery.)
+- [ ] **date partitioning.** `dt=2026-08-07/` in the path is what makes an
+      object store queryable, and is a different thing from rotation. Needs the
+      writer to hold several open parts keyed by partition rather than one.
+- [ ] **an idle file output holds its part open.** `interval_secs` is only
+      checked when a batch arrives, so a pipeline that goes quiet does not close
+      its part on the interval. Wants a timer, which means the output needs a
+      tick it does not currently get.
+- [ ] **`--port` does nothing.** `src/main.rs` only logs it; the listener binds
+      `leptos_options.site_addr` from `Cargo.toml`. Running the binary outside
+      `cargo leptos` therefore falls back to port 3000. Either wire the arg into
+      the leptos options or drop it.
+- [x] **hurl tests are stale.** (fixed 2026-08-03: replaced with
+      `hurl/tests/pipelines-crud.hurl`, which hits `/api/pipelines` and asserts the
+      409/422/204 codes. Its old job is now done in-process by `tests/api.rs`.)

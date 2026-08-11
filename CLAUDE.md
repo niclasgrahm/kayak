@@ -32,7 +32,7 @@ These two rules are not negotiable and apply to every change, however small:
 1. **New code ships with tests.** Any new or changed behaviour — a component, a handler, a config field, a bug fix — needs a test that fails without the change. A bug fix without a regression test is not a fix. If something genuinely can't be tested offline (a real NATS connection, say), say so explicitly and explain why rather than skipping quietly.
 2. **`just ci` must be green before a task is called done.** That's `just lint` (clippy `-D warnings`) plus `just test`. Not "compiles", not "the new test passes" — the whole suite. If tests fail, report the failure and the output; never describe a task as complete with a red suite, and never disable, `#[ignore]` or weaken an existing test to get to green. A test that turns out to encode the wrong behaviour is a conversation to have first, not something to edit away.
 
-Testing is documented in `readme.md` under "testing" — read that before adding tests. In short: the runtime lives in `src/lib.rs` (not `main.rs`) so `tests/` can reach it; `src/testing.rs` holds the test doubles; `PipelineRuntime::from_parts` drives a run loop without a config; `api_router()` is called through `tower::oneshot` so HTTP tests need no socket. Adding a component config variant fails `tests/config.rs` until a wire-format sample is added — that's intentional.
+Testing is documented in `docs/guide.md` under "testing" — read that before adding tests. In short: the runtime lives in `src/lib.rs` (not `main.rs`) so `tests/` can reach it; `src/testing.rs` holds the test doubles; `PipelineRuntime::from_parts` drives a run loop without a config; `api_router()` is called through `tower::oneshot` so HTTP tests need no socket. Adding a component config variant fails `tests/config.rs` until a wire-format sample is added — that's intentional.
 
 Lints are strict by design: clippy `pedantic` plus `unwrap_used`/`expect_used` as warnings, and `clippy.toml` makes those apply in tests too. Removing remaining `.unwrap()`s is active work — flag new ones in review.
 
@@ -116,7 +116,7 @@ Known and accepted: the status code says whether a pipeline exists and whether
 it is guarded (401 / 202 / 404). Unavoidable while the credential is
 per-pipeline. There is no rate limiting and no `WWW-Authenticate` header — the
 latter for the reason `auth::refuse` gives. HMAC over the body is the sketched
-third variant and is in the readme's TODO; it needs the raw body, which the
+third variant and is in `docs/roadmap.md`; it needs the raw body, which the
 handler hands straight to the JSON extractor.
 
 ### Message metadata (the envelope)
@@ -188,7 +188,7 @@ edges that carry nothing else.
 area**: two pipelines sharing a bucket are two run loops with no ordering
 between them, so ordering-sensitive correlation must live in *one* pipeline and
 sharing is only for state that doesn't change on the timescale of a message.
-Documented in `kayak_core::state`'s module docs and the readme; not preventable.
+Documented in `kayak_core::state`'s module docs and `docs/guide.md`; not preventable.
 
 `kayak-core/src/state.rs` holds the declaration (`StateBuckets`,
 `StateBucketConfig`, `PipelineState`) plus the API DTOs, since `api_docs` needs
@@ -357,7 +357,7 @@ longer loads on a server with no `--data-dir` — so `just dev` and
 (`dev_data/events`) is relative, resolving against the working directory in
 both. Change one and change the other. The container image doesn't pass it
 (nothing is baked in there), so running the sample out of the image takes the
-flag on the command line — that's the readme's deployment section. `dev_data` is
+flag on the command line — see `docs/guide.md`'s deployment section. `dev_data` is
 gitignored; the build creates it.
 
 ### Column mapping (the database outputs)
@@ -459,7 +459,7 @@ something legitimate reaches it.
 
 ### Secrets
 
-Config fields that can hold credentials are typed `Secret` (`kayak-core::config`), not `String`. They all live on *connections* now rather than on components. `Secret` only ever holds the *unresolved* `${NAME}` template, which is what makes it safe to serialize back out of `GET /api/pipelines` and to compile for wasm. Resolution happens at build time via `ctx.resolve()` and yields a `secrets::Resolved`, whose `Display`/`Debug` print the template rather than the value — so error contexts can name a connection without leaking it. Reaching the real value takes `.expose()`; flag new call sites in review, and never put a `Resolved` into anything `Serialize`. Stores (`EnvStore`, `FileStore`, `ChainStore`) live in `src/secrets.rs`; `main.rs` chains env ahead of `--secrets <file>`. `src/testing.rs` has `MapSecretStore` for tests. See "secrets" in `readme.md`.
+Config fields that can hold credentials are typed `Secret` (`kayak-core::config`), not `String`. They all live on *connections* now rather than on components. `Secret` only ever holds the *unresolved* `${NAME}` template, which is what makes it safe to serialize back out of `GET /api/pipelines` and to compile for wasm. Resolution happens at build time via `ctx.resolve()` and yields a `secrets::Resolved`, whose `Display`/`Debug` print the template rather than the value — so error contexts can name a connection without leaking it. Reaching the real value takes `.expose()`; flag new call sites in review, and never put a `Resolved` into anything `Serialize`. Stores (`EnvStore`, `FileStore`, `ChainStore`) live in `src/secrets.rs`; `main.rs` chains env ahead of `--secrets <file>`. `src/testing.rs` has `MapSecretStore` for tests. See "secrets" in `docs/guide.md`.
 
 Note that `$defs` in the generated schema now holds non-component types (`Secret`), so anything reflecting over the schema has to distinguish those from components — see the docs section below.
 
@@ -805,7 +805,7 @@ The pipelines tab has two arrangements and a search box, and which rows that com
 
 ## Notes
 
-- `readme.md` holds the current TODO list — check it for what's in flight before proposing work.
+- `docs/roadmap.md` holds the current TODO list — check it for what's in flight before proposing work.
 - Leptos config lives in the root `Cargo.toml` under `[[workspace.metadata.leptos]]`; `site-addr` there (6767) is what the binary actually binds, not the `--port` arg.
-- `Dockerfile` is a two-stage cargo-leptos build, documented in the readme's "deployment" section. The runtime image is the *runtime and nothing else*: binary, site directory, `LEPTOS_SITE_*` env vars, uid 10001, `ENTRYPOINT` = the binary so container args are server flags. **No config is baked in** — bare it serves an empty graph, and a deployment mounts one into `/kayak` (the WORKDIR, owned by the run user because saving writes there). The sample is carried at `/usr/share/kayak/example` for a tour, connections and layout file beside it under the same stem or they stop being found. The builder installs `cmake` for `rdkafka-sys`; nothing else, since TLS is rustls and zlib is vendored.
+- `Dockerfile` is a two-stage cargo-leptos build, documented in `docs/guide.md`'s "deployment" section. The runtime image is the *runtime and nothing else*: binary, site directory, `LEPTOS_SITE_*` env vars, uid 10001, `ENTRYPOINT` = the binary so container args are server flags. **No config is baked in** — bare it serves an empty graph, and a deployment mounts one into `/kayak` (the WORKDIR, owned by the run user because saving writes there). The sample is carried at `/usr/share/kayak/example` for a tour, connections and layout file beside it under the same stem or they stop being found. The builder installs `cmake` for `rdkafka-sys`; nothing else, since TLS is rustls and zlib is vendored.
 - **`example_config/` is the sample everything is tried against**, and it is one directory because the set travels together: the connections and layout files are *derived* from the config's path, so they only find each other side by side. `tests/config.rs` and `tests/graph.rs` read the files from there by relative path, so moving or renaming them breaks those tests — which is the point, the sample is not allowed to rot. `secrets.json` is gitignored anywhere in the tree; `just dev` creates the sample's from `secrets.example.json`.
