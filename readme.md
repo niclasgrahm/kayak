@@ -1265,6 +1265,133 @@ the value takes an explicit `.expose()`, which is the thing to grep for in
 review. Writing a password inline instead of referencing it defeats all of
 this — that's the habit the syntax exists to replace.
 
+## authentication
+
+**Off by default, and that is deliberate.** A server started without
+`--server-config` asks nobody for anything and behaves exactly as kayak did
+before this existed — which is what makes `just dev` on a laptop a single
+command, and what keeps an upgrade from locking an existing deployment out of
+its own server. Turning a security control off by default is a real cost; the
+thing that takes the edge off it is that the server logs a warning at startup
+when it is unauthenticated *and* bound to something other than loopback.
+
+Turning it on is one file, named with `--server-config` and written as JSON or
+YAML:
+
+```yaml
+# kayak.server.yaml
+auth:
+  type: basic
+  users:
+    niclas:
+      password: ${KAYAK_NICLAS_PASSWORD}
+      role: admin
+    grafana:
+      password: ${KAYAK_DASHBOARD_PASSWORD}
+      role: read
+```
+
+```bash
+kayak --config config.json --secrets secrets.json --server-config kayak.server.yaml
+```
+
+The file describes **how the server is run**, as against what the graph is —
+which is why, unlike the connections file, its path is not derived from the
+config's. It belongs to the process, so two configs served by one server share
+it. It is read and never written: nothing reachable over HTTP may change who is
+allowed to reach the server.
+
+`auth` is a tagged enum rather than a boolean beside a map, and that is the
+point of the shape. `auth: false` sitting above a populated `users:` — an
+operator believing they are protected and not being — is not expressible here,
+because there is nowhere to write it. The two states are the two variants,
+`none` and `basic`, and `basic` with no users refuses to start rather than
+serving a server nobody can log into.
+
+Passwords are `Secret`s, so they hold `${NAME}` references resolved against the
+same store everything else uses (the environment, then `--secrets`). The
+settings file stays committable. A literal password works and is what a
+throwaway deployment will write, but it puts a real credential in a file that
+gets committed, which is the habit the reference syntax exists to replace — see
+[secrets](#secrets).
+
+### two roles
+
+- **`admin`** — everything: create and delete pipelines and connections, save
+  and revert the config file, rearrange the canvas.
+- **`read`** — see everything, change nothing. The default for an account whose
+  `role` is left out, because the field someone forgets should be the harmless
+  one.
+
+Two rather than more because the split that matters first is "can change what
+the server is running" against "can watch it". Anything finer — per pipeline,
+per connection — needs a model of *which* resources, which is a much larger
+feature than a third role.
+
+Which role an endpoint needs is declared in `kayak-core/src/api_docs.rs`
+alongside everything else about it, and `api_router` is folded over that same
+table — so the access shown on `/docs`, the `security` in the OpenAPI spec and
+the check the middleware makes are one fact rather than three that agree today.
+Note the two entries that a "GET is read, everything else is admin" rule would
+get wrong: `POST /api/pipelines/{id}/messages` is public (see below), and
+`PUT /api/layout` is admin, because it writes a file that gets committed. A
+reader can look at the canvas; they just can't rearrange it.
+
+In the UI a reader gets no edit toggle at all — hidden rather than disabled,
+which is the rule the rest of the canvas follows. The server refuses the calls
+regardless; the UI only avoids offering what it would refuse.
+
+### two ways in
+
+Both resolve to the same identity, so a role means the same thing however you
+got in.
+
+```bash
+curl -u niclas:hunter2 localhost:6767/api/pipelines            # anything that is not a browser
+curl -c jar -X POST localhost:6767/api/auth/login \
+  -H 'content-type: application/json' \
+  -d '{"username":"niclas","password":"hunter2"}'              # the browser's path
+```
+
+The session cookie is not a convenience. `EventSource` — which the canvas
+consumes `GET /events` with — cannot set request headers at all, so a browser
+has no way to present Basic credentials on the one endpoint it needs most. The
+alternatives were a token in the query string, which ends up in every access log
+the request passes through, or a cookie.
+
+Sessions live in memory and are dropped on `POST /api/auth/logout`, which means
+signing out genuinely signs you out everywhere that cookie was copied to — the
+thing a signed, stateless cookie could not do. The cost is that they do not
+survive a restart, so a deploy logs everyone out. That trade is the right way
+round for a dev tool, and it means there is no signing key to invent, store or
+rotate.
+
+A 401 deliberately carries **no `WWW-Authenticate` header**. Sending one makes
+the browser throw its own credential dialog over the app, which is exactly what
+the login page exists to replace, and there is no way to send it to `curl` and
+not to a browser. Nothing is lost: `curl -u` sends its credentials preemptively.
+
+### what this does not do
+
+Three limits, stated rather than implied:
+
+- **Terminate TLS in front of it.** Basic credentials over plain HTTP are
+  credentials on the wire, and a session cookie is only marked `Secure` when the
+  request arrived over TLS (from the proxy's `X-Forwarded-Proto`). Nothing here
+  refuses to run without it, but nothing here makes it safe either.
+- **`POST /api/pipelines/{id}/messages` is not covered.** The ingest endpoint is
+  a data plane, not a control plane: a device posting readings is not an
+  operator, and sharing the operators' credentials with every publisher is wrong
+  the moment there is more than one. It stays reachable without credentials even
+  on a server with accounts, and gets its own mechanism — per-pipeline tokens —
+  later. If that is not acceptable for a deployment, keep the ingest path off
+  the public network.
+- **Nothing is rate limited.** A wrong password costs an attacker nothing but
+  the round trip, so an account is only as good as its password. Password
+  *hashing* is likewise not here yet — passwords are compared against the value
+  from the secret store, in constant time, and hashes need a
+  `kayak hash-password` helper to be usable at all.
+
 ## deployment
 
 The `Dockerfile` builds one image that is the *runtime* and nothing else: the
@@ -1448,6 +1575,31 @@ other spelling.
       See "the component reference" above.)
 
 ## todo
+
+- [x] basic authentication
+      (done 2026-08-11: a `--server-config` file with an `auth` section, two
+      roles, HTTP Basic for machines and a session cookie for the browser. Off
+      without the flag. The required role lives in the `api_docs` table beside
+      everything else about an endpoint, so the reference, the spec and the
+      middleware are one fact. See "authentication" above.)
+- [ ] **protect the http input.** `POST /api/pipelines/{id}/messages` is
+      deliberately outside the auth system — a device posting readings is not an
+      operator, and one shared credential for every publisher is wrong the moment
+      there is a second one. Wants per-pipeline tokens, declared on the `http`
+      input itself, so revoking one publisher doesn't touch the others.
+- [ ] **hashed passwords in the settings file.** Passwords resolve from the
+      secret store today, which keeps the file committable but means the value
+      lives in the environment. Argon2id hashes would let the file stand alone —
+      but they need a `kayak hash-password` subcommand to be usable at all, so
+      it is its own change rather than a tweak to the config type.
+- [ ] **sessions do not survive a restart.** They are a `HashMap` in the
+      process, which is what makes logout genuinely revoke; the cost is that a
+      deploy signs everyone out. Fixing it properly means a signing key with
+      somewhere to live and a rotation story, which is a bigger decision than it
+      looks.
+- [ ] **nothing rate-limits a failed login.** An account is only as good as its
+      password. A per-address backoff on `POST /api/auth/login` is the cheap
+      version; it needs somewhere to keep the counters that isn't a memory leak.
 
 - [ ] make sure to clean up old template based UI stuff
       (2026-08-04: `/docs` and `templates/docs.html` are gone — Askama is now

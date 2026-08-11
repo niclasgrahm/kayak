@@ -2000,3 +2000,95 @@ body {
   font-size: 11px;
   padding: 2px 0 0;
 }
+
+// The sign-in page.
+//
+// A whole page rather than a modal over the canvas, because there is no canvas
+// behind it — every call the canvas makes would come back 401. It borrows the
+// modal's card treatment so signing in doesn't look like a different product
+// from the thing it signs you into.
+.login-page {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 100vh;
+  background: var(--bg-canvas);
+}
+
+.login {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  width: 280px;
+  padding: 24px;
+  background: var(--bg-panel);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+
+  .brand {
+    font-weight: 600;
+    letter-spacing: 0.04em;
+    font-size: 16px;
+    margin-bottom: 12px;
+  }
+
+  label {
+    color: var(--text-dim);
+    font-size: 11px;
+  }
+
+  .button {
+    margin-top: 12px;
+    text-align: center;
+  }
+
+  .login-error {
+    color: var(--error);
+    font-size: 11px;
+    margin: 4px 0 0;
+  }
+}
+
+// Who you are, in the navbar. Absent entirely on a server with no accounts.
+.account {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-right: 16px;
+
+  .account-name {
+    color: var(--text-dim);
+    font-size: 11px;
+  }
+
+  .button.subtle {
+    font-size: 11px;
+    padding: 2px 8px;
+    background: transparent;
+  }
+}
+
+// Who may call an endpoint, beside its method on the reference page.
+//
+// Quieter than the method badge on purpose: the method is what you are looking
+// for, the access is what you check once. It sits at the end of the header row
+// so the paths still line up down the page.
+.access-badge {
+  flex: none;
+  margin-left: auto;
+  font-family: var(--font-mono);
+  font-size: 10px;
+  letter-spacing: 0.04em;
+  border-radius: 2px;
+  padding: 1px 5px;
+  border: 1px solid var(--border);
+  color: var(--text-dim);
+
+  // the only one worth colouring: everything else on the page is readable by
+  // anyone who can read the page at all
+  &.access-admin {
+    color: #d8a657;
+    border-color: rgba(216, 166, 87, 0.4);
+    background: rgba(216, 166, 87, 0.1);
+  }
+}

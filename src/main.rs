@@ -15,8 +15,11 @@ use tracing::Level;
 
 use clap::Parser;
 use kayak::api_router;
+use kayak::auth::Auth;
 use kayak::secrets::{ChainStore, EnvStore, FileStore, SecretStore};
 use kayak::state::AppState;
+use kayak_core::server_config::ServerConfig;
+use std::net::SocketAddr;
 
 #[derive(Parser)]
 struct Args {
@@ -48,6 +51,16 @@ struct Args {
     /// arbitrary path. Separate from where `--config` is saved, on purpose.
     #[arg(long)]
     data_dir: Option<PathBuf>,
+    /// How the server itself is run, as JSON or YAML — who is allowed to reach
+    /// it, and whatever else belongs to the deployment rather than to the
+    /// graph. Not derived from the config's name, unlike the connections file:
+    /// it belongs to the process, so two configs served by one server share it.
+    ///
+    /// **Without this flag the server authenticates nobody**, which is what
+    /// makes a local `just dev` work and what keeps an existing deployment
+    /// running unchanged. See `kayak_core::server_config` for the file's shape.
+    #[arg(long)]
+    server_config: Option<PathBuf>,
     #[arg(long, default_value_t = 6767)]
     port: u16,
 }
@@ -61,6 +74,25 @@ fn secret_store(path: Option<&PathBuf>) -> anyhow::Result<Arc<dyn SecretStore>> 
         stores.push(Box::new(FileStore::from_path(path)?));
     }
     Ok(Arc::new(ChainStore::new(stores)))
+}
+
+/// Say so, once, when an unauthenticated server is reachable from off the
+/// machine.
+///
+/// Not a refusal: the open default is what makes a first run and a local
+/// `just dev` work, and turning it into an error would break every deployment
+/// that predates authentication. But an open *control plane* — one where
+/// anyone who can reach the port can delete a pipeline or rewrite the config —
+/// on an address other than loopback is worth one loud line in the log.
+fn warn_if_open_to_the_network(config: &ServerConfig, addr: SocketAddr) {
+    if config.requires_auth() || addr.ip().is_loopback() {
+        return;
+    }
+    tracing::warn!(
+        "no authentication is configured and {addr} is not loopback: anyone who can reach \
+         this port can create and delete pipelines, edit connections and rewrite the config \
+         file. Pass --server-config with an 'auth' section to require a login."
+    );
 }
 
 #[tokio::main]
@@ -82,6 +114,16 @@ async fn main() -> anyhow::Result<()> {
     tracing::info!("Starting server on {}", addr);
 
     let secrets = secret_store(args.secrets.as_ref()).context("failed to load secrets")?;
+    // the accounts resolve against the same store the pipelines do — one place
+    // a `${NAME}` can come from, whether it is a broker's password or a login
+    let secrets_for_auth = Arc::clone(&secrets);
+    let server_config = match &args.server_config {
+        Some(path) => {
+            tracing::info!("Loading server config from {}", path.display());
+            kayak::server_config::read_required(path)?
+        }
+        None => ServerConfig::default(),
+    };
     let connections = args.connections.as_deref();
     let data_dir = args.data_dir.clone();
     let state = match &args.config {
@@ -92,6 +134,12 @@ async fn main() -> anyhow::Result<()> {
             .with_data_dir(data_dir)
             .context("failed to prepare the data directory")?,
     };
+
+    let auth = Arc::new(
+        Auth::from_config(&server_config, secrets_for_auth.as_ref())
+            .context("failed to load the accounts")?,
+    );
+    let state = state.with_auth(auth);
 
     let conf = get_configuration(None)?;
     let leptos_options = conf.leptos_options;
@@ -110,6 +158,7 @@ async fn main() -> anyhow::Result<()> {
     let listener = tokio::net::TcpListener::bind(&leptos_options.site_addr)
         .await
         .with_context(|| format!("failed to bind {}", leptos_options.site_addr))?;
+    warn_if_open_to_the_network(&server_config, leptos_options.site_addr);
     // with_connect_info rather than the plain make service: it is what puts the
     // peer address in the request extensions, which is where the `http` input's
     // `remote_addr` metadata is read from. Nothing fails without it — the
@@ -119,7 +168,7 @@ async fn main() -> anyhow::Result<()> {
         listener,
         app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
     )
-        .await
-        .context("server error")?;
+    .await
+    .context("server error")?;
     Ok(())
 }

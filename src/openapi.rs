@@ -14,7 +14,7 @@
 //! `$ref`s rewritten to match, which is the only reason this is more than a
 //! `serde_json::json!` literal.
 
-use kayak_core::api_docs::{ApiDoc, Body, TAGS, endpoints, schemas};
+use kayak_core::api_docs::{Access, ApiDoc, Body, TAGS, endpoints, schemas};
 use serde_json::{Map, Value, json};
 
 /// Where a hoisted definition ends up, and what a rewritten `$ref` points at.
@@ -42,7 +42,45 @@ pub fn document() -> Value {
         },
         "tags": tags(),
         "paths": paths(),
-        "components": { "schemas": components() },
+        "components": {
+            "schemas": components(),
+            "securitySchemes": security_schemes(),
+        },
+    })
+}
+
+/// The two ways a caller proves who they are.
+///
+/// Both are declared even on a server that authenticates nobody, and that is
+/// deliberate: the spec describes the *API*, and whether a particular
+/// deployment turns authentication on is a property of that deployment. A
+/// generated client has to be able to send credentials either way.
+///
+/// There is no top-level `security` requirement, because there is no
+/// requirement that holds for the whole API — three endpoints are reachable
+/// without credentials by design, and the `OpenAPI` way to say "this one is open"
+/// is an empty `security` on the operation. Per-operation throughout is one
+/// rule rather than a rule with exceptions.
+fn security_schemes() -> Value {
+    json!({
+        "basicAuth": {
+            "type": "http",
+            "scheme": "basic",
+            "description":
+                "HTTP Basic credentials, checked against the accounts in the server's \
+                 `--server-config` file. This is what anything that is not a browser \
+                 should use.",
+        },
+        "cookieAuth": {
+            "type": "apiKey",
+            "in": "cookie",
+            "name": crate::auth::SESSION_COOKIE,
+            "description":
+                "A session cookie from `POST /api/auth/login`. It exists for browsers: \
+                 `EventSource`, which `GET /events` is consumed with, cannot send \
+                 headers, so Basic credentials are not available on the one endpoint \
+                 the UI needs most.",
+        },
     })
 }
 
@@ -120,7 +158,41 @@ fn operation(endpoint: &ApiDoc) -> Value {
         }
         responses.insert(response.status.to_string(), Value::Object(body));
     }
+
+    // Derived from `access` rather than written into each table entry, so the
+    // documented failure and the enforced one cannot disagree. A public
+    // endpoint never produces either; a `read` one can only 401, since there is
+    // no role below it to be refused for.
+    if endpoint.access.is_protected() {
+        responses.entry("401".to_string()).or_insert_with(|| {
+            json!({
+                "description": "No credentials, or credentials that were not recognised.",
+                "content": content(Body::Json("ApiError")),
+            })
+        });
+    }
+    if endpoint.access == Access::Admin {
+        responses.entry("403".to_string()).or_insert_with(|| {
+            json!({
+                "description":
+                    "Signed in, but without the `admin` role this endpoint needs.",
+                "content": content(Body::Json("ApiError")),
+            })
+        });
+    }
     operation.insert("responses".into(), Value::Object(responses));
+
+    // An empty array is OpenAPI's way of spelling "this one needs nothing",
+    // and is why there is no document-level default to override.
+    operation.insert(
+        "security".into(),
+        if endpoint.access.is_protected() {
+            json!([{ "basicAuth": [] }, { "cookieAuth": [] }])
+        } else {
+            json!([])
+        },
+    );
+    operation.insert("x-kayak-access".into(), json!(endpoint.access.label()));
 
     Value::Object(operation)
 }
@@ -283,6 +355,64 @@ mod tests {
         }
     }
 
+    /// Every operation says what it needs, and says it the way the table does.
+    /// An endpoint whose spec claimed it was open while the middleware refused
+    /// it would send a client to write code that cannot work.
+    #[test]
+    fn every_operation_declares_the_access_the_router_enforces() {
+        let document = document();
+        for endpoint in endpoints() {
+            let operation = &document["paths"][endpoint.path][endpoint.method.key()];
+            let security = &operation["security"];
+            if endpoint.access.is_protected() {
+                assert_eq!(
+                    security,
+                    &json!([{ "basicAuth": [] }, { "cookieAuth": [] }]),
+                    "{} {} does not accept either credential scheme",
+                    endpoint.method.label(),
+                    endpoint.path
+                );
+                assert!(
+                    operation["responses"]["401"].is_object(),
+                    "{} {} can 401 but does not document it",
+                    endpoint.method.label(),
+                    endpoint.path
+                );
+            } else {
+                // an empty array, not an absent key: absent would inherit a
+                // document-level default, and "open" has to be said out loud
+                assert_eq!(
+                    security,
+                    &json!([]),
+                    "{} {} is public but the spec asks for credentials",
+                    endpoint.method.label(),
+                    endpoint.path
+                );
+                // and *not* "a public endpoint never 401s": `login` is public
+                // and answers 401 to a wrong password. The two 401s mean
+                // different things — "you are not signed in" against "those
+                // credentials are wrong" — and only the first is derived here.
+            }
+            let admin = endpoint.access == Access::Admin;
+            assert_eq!(
+                operation["responses"]["403"].is_object(),
+                admin,
+                "{} {} documents a 403 iff it is admin-only",
+                endpoint.method.label(),
+                endpoint.path
+            );
+        }
+    }
+
+    #[test]
+    fn both_credential_schemes_are_declared() {
+        let document = document();
+        let schemes = &document["components"]["securitySchemes"];
+        assert_eq!(schemes["basicAuth"]["scheme"], "basic");
+        assert_eq!(schemes["cookieAuth"]["in"], "cookie");
+        assert_eq!(schemes["cookieAuth"]["name"], crate::auth::SESSION_COOKIE);
+    }
+
     #[test]
     fn the_document_declares_itself_as_openapi_3_1() {
         let document = document();
@@ -366,7 +496,13 @@ mod tests {
     fn shared_definitions_are_hoisted_out_of_the_roots_that_carried_them() {
         let document = document();
         let schemas = &document["components"]["schemas"];
-        for name in ["Config", "InputConfig", "OutputConfig", "NatsConfig", "Secret"] {
+        for name in [
+            "Config",
+            "InputConfig",
+            "OutputConfig",
+            "NatsConfig",
+            "Secret",
+        ] {
             assert!(
                 schemas[name].is_object(),
                 "'{name}' did not make it into components/schemas"
@@ -435,8 +571,8 @@ mod tests {
     #[test]
     fn failure_responses_are_documented_with_the_shared_error_body() {
         let document = document();
-        let conflict = &document["paths"]["/api/connections/{connection_id}"]["delete"]
-            ["responses"]["409"];
+        let conflict =
+            &document["paths"]["/api/connections/{connection_id}"]["delete"]["responses"]["409"];
         assert_eq!(
             conflict["content"]["application/json"]["schema"]["$ref"],
             "#/components/schemas/ApiError"
@@ -453,7 +589,13 @@ mod tests {
         // the rest of kayak is dark; the reference opening light reads as a
         // different application
         assert!(page.contains(r#""darkMode":true"#));
-        assert!(!page.contains("http://"), "the page reaches off this server");
-        assert!(!page.contains("https://"), "the page reaches off this server");
+        assert!(
+            !page.contains("http://"),
+            "the page reaches off this server"
+        );
+        assert!(
+            !page.contains("https://"),
+            "the page reaches off this server"
+        );
     }
 }

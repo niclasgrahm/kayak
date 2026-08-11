@@ -1,9 +1,9 @@
 use kayak_core::api_docs::{ApiDoc, endpoints};
-use kayak_core::state::{BucketContents, BucketSummary};
 use kayak_core::docs::{Family, FieldType, all_components};
+use kayak_core::state::{BucketContents, BucketSummary};
 use kayak_core::{
-    ConfigFormat, Connections, EdgeEnd, LayoutFile, PipelineDto, PipelineId, PortLayout, Side,
-    UiEvent, config::Config,
+    AuthDto, ConfigFormat, Connections, EdgeEnd, LayoutFile, PipelineDto, PipelineId, PortLayout,
+    Side, UiEvent, config::Config,
 };
 use leptos::prelude::*;
 use leptos_meta::*;
@@ -26,7 +26,8 @@ use crate::form;
 use crate::graph::{
     Camera, CardGeom, Channel, Edge, FALLBACK_CARD_HEIGHT, GRID, PULSE_TICK_MS, PULSE_TICKS,
     PortHandle, approach, bounds, dragged, dragged_channel, dragged_port, edge_paths, focus_camera,
-    focus_zoom, layout, pipelines_from, pulsed_edges, resized, tick_pulses, wheel_delta_pixels, zoom_at,
+    focus_zoom, layout, pipelines_from, pulsed_edges, resized, tick_pulses, wheel_delta_pixels,
+    zoom_at,
 };
 use crate::inspector;
 use crate::log;
@@ -332,6 +333,15 @@ pub struct AppState {
     /// afternoon's work and a restart.
     pub unsaved: Signal<bool>,
     pub mode: RwSignal<Mode>,
+    /// Whether this caller may change the graph at all — an admin, or anyone
+    /// on a server with no accounts configured.
+    ///
+    /// Held beside `mode` rather than folded into it because they answer
+    /// different questions: `mode` is "am I editing right now", this is "may I".
+    /// [`AppState::editing`] requires both, so a reader cannot end up in edit
+    /// mode however the signal got set — the server would refuse the calls
+    /// anyway, and offering buttons that 403 is worse than not offering them.
+    pub may_edit: Signal<bool>,
     /// Whether the "add pipeline" modal is open.
     pub adding: RwSignal<bool>,
     /// The pipeline the modal should open already fed by, when it was opened
@@ -405,7 +415,7 @@ impl AppState {
     }
 
     fn editing(&self) -> bool {
-        self.mode.get().is_edit()
+        self.may_edit.get() && self.mode.get().is_edit()
     }
 }
 
@@ -535,7 +545,10 @@ impl CanvasState {
     /// value moved, so an unguarded write would re-run every card's selection
     /// memo on every click, including the ones that change nothing.
     fn select(&self, id: &PipelineId) {
-        if self.selected.with_untracked(|s| s.as_deref() != Some(id.as_str())) {
+        if self
+            .selected
+            .with_untracked(|s| s.as_deref() != Some(id.as_str()))
+        {
             self.selected.set(Some(id.clone()));
         }
     }
@@ -579,10 +592,7 @@ impl CanvasState {
         } else {
             (client.0 - drag.origin.0) / zoom
         };
-        self.set_channel(
-            &drag.edge,
-            Some(dragged_channel(drag.start_offset, delta)),
-        );
+        self.set_channel(&drag.edge, Some(dragged_channel(drag.start_offset, delta)));
     }
 
     fn set_channel(&self, edge: &Edge, offset: Option<f64>) {
@@ -688,12 +698,187 @@ fn persist_arrangement(arrangement: LayoutFile) {
 pub fn App() -> impl IntoView {
     provide_meta_context();
     view! {
-        <Router>
-            <Routes fallback=|| view! { <p class="empty">"no such page"</p> }>
-                <Route path=path!("") view=CanvasPage />
-                <Route path=path!("/docs") view=DocsPage />
-            </Routes>
-        </Router>
+        <AuthGate>
+            <Router>
+                <Routes fallback=|| view! { <p class="empty">"no such page"</p> }>
+                    <Route path=path!("") view=CanvasPage />
+                    <Route path=path!("/docs") view=DocsPage />
+                </Routes>
+            </Router>
+        </AuthGate>
+    }
+}
+
+/// Who this tab is signed in as, shared by everything that cares.
+///
+/// A plain signal filled by an effect rather than a `LocalResource`, and that
+/// is the same decision the state tab documents: a resource read inside the
+/// canvas's `<Suspense>` re-suspends the whole boundary every time it refetches,
+/// and this one is re-read after every sign-in and every 401. Nothing here is
+/// allowed to tear the canvas down.
+#[derive(Clone, Copy)]
+pub struct Session {
+    /// `None` until the first answer arrives — which is a third state and has
+    /// to be, since "we have not asked yet" must not draw a login page that is
+    /// about to be replaced by the canvas.
+    pub auth: RwSignal<Option<AuthDto>>,
+}
+
+impl Session {
+    /// Ask the server again. Called on load, after signing in or out, and
+    /// whenever a call comes back 401.
+    pub fn refresh(self) {
+        leptos::task::spawn_local(async move {
+            let answer = ApiClient {
+                base: String::new(),
+            }
+            .whoami()
+            .await;
+            // A network failure leaves the last answer standing rather than
+            // logging the tab out: a dropped connection is not a sign-out, and
+            // treating it as one would throw someone back to the login form
+            // every time their laptop woke up.
+            if let Ok(auth) = answer {
+                self.auth.set(Some(auth));
+            }
+        });
+    }
+
+    /// What a call coming back 401 means: whatever this tab thought, it is
+    /// signed out now. Setting it directly rather than re-asking makes the
+    /// login form appear on the same frame as the failure.
+    pub fn signed_out(self) {
+        self.auth.update(|auth| {
+            if let Some(auth) = auth {
+                auth.username = None;
+                auth.role = None;
+            }
+        });
+    }
+
+    /// Everything the UI asks about the caller, with the not-yet-known state
+    /// folded into the safe answer: nothing is editable until we know.
+    pub fn may_edit(self) -> bool {
+        self.auth.get().is_some_and(|auth| auth.may_edit())
+    }
+
+    pub fn username(self) -> Option<String> {
+        self.auth.get().and_then(|auth| auth.username)
+    }
+
+    pub fn role(self) -> Option<String> {
+        self.auth
+            .get()
+            .and_then(|auth| auth.role)
+            .map(|role| role.label().to_string())
+    }
+}
+
+/// Nothing renders until we know whether this server wants a login, and the
+/// login form renders instead of the app while it does.
+///
+/// The gate is above the router rather than inside each page, because "is this
+/// tab signed in" is one question for the whole tab. It means `/docs` is behind
+/// the login too even though the endpoints that feed it are public — the
+/// reference stays fetchable by tooling, which is what that decision was for,
+/// while the *app* is one app rather than a canvas you can't see beside a
+/// reference you can.
+#[component]
+fn AuthGate(children: ChildrenFn) -> impl IntoView {
+    let session = Session {
+        auth: RwSignal::new(None),
+    };
+    provide_context(session);
+    Effect::new(move |_| session.refresh());
+
+    view! {
+        {move || match session.auth.get() {
+            // the first paint, before the server has answered: no login form,
+            // no canvas, nothing that will be replaced a moment later
+            None => view! { <p class="empty">"..."</p> }.into_any(),
+            Some(auth) if auth.needs_login() => view! { <LoginPage /> }.into_any(),
+            Some(_) => children().into_any(),
+        }}
+    }
+}
+
+/// The sign-in form.
+///
+/// Deliberately the whole page rather than a modal over the canvas: there is no
+/// canvas to put it over, since every call behind it would come back 401.
+#[component]
+fn LoginPage() -> impl IntoView {
+    let session = expect_context::<Session>();
+    let username = RwSignal::new(String::new());
+    let password = RwSignal::new(String::new());
+    let failure = RwSignal::new(Option::<String>::None);
+    let busy = RwSignal::new(false);
+
+    let submit = move || {
+        if busy.get_untracked() {
+            return;
+        }
+        busy.set(true);
+        failure.set(None);
+        let (name, secret) = (username.get_untracked(), password.get_untracked());
+        leptos::task::spawn_local(async move {
+            let result = ApiClient {
+                base: String::new(),
+            }
+            .login(&name, &secret)
+            .await;
+            busy.set(false);
+            match result {
+                Ok(auth) => {
+                    // the password signal is dropped with the component, but
+                    // clearing it means it isn't sitting in a signal while the
+                    // canvas mounts either
+                    password.set(String::new());
+                    session.auth.set(Some(auth));
+                }
+                Err(err) => failure.set(Some(err.to_string())),
+            }
+        });
+    };
+
+    view! {
+        <div class="login-page">
+            <form
+                class="login"
+                on:submit=move |ev| {
+                    ev.prevent_default();
+                    submit();
+                }
+            >
+                <div class="brand">"kayak"</div>
+                <label for="login-username">"username"</label>
+                <input
+                    id="login-username"
+                    class="text-input"
+                    autocomplete="username"
+                    autofocus
+                    prop:value=move || username.get()
+                    on:input=move |ev| username.set(event_target_value(&ev))
+                />
+                <label for="login-password">"password"</label>
+                <input
+                    id="login-password"
+                    class="text-input"
+                    type="password"
+                    autocomplete="current-password"
+                    prop:value=move || password.get()
+                    on:input=move |ev| password.set(event_target_value(&ev))
+                />
+                {move || {
+                    failure
+                        .get()
+                        .map(|message| view! { <p class="login-error">{message}</p> })
+                }}
+                <button class="button primary" type="submit" disabled=move || busy.get()>
+                    {move || if busy.get() { "signing in..." } else { "sign in" }}
+                </button>
+            </form>
+        </div>
     }
 }
 
@@ -701,6 +886,7 @@ pub fn App() -> impl IntoView {
 /// zoomable canvas of cards.
 #[component]
 pub fn CanvasPage() -> impl IntoView {
+    let session = expect_context::<Session>();
     // read *before* the async block so the resource depends on it: bumping it
     // is how an edit gets the list re-fetched
     let reload = RwSignal::new(0u32);
@@ -756,6 +942,20 @@ pub fn CanvasPage() -> impl IntoView {
             .and_then(|res| res.as_ref().ok().map(|s| s.unsaved_changes))
             .unwrap_or(false)
     });
+    // A session can end while a tab is open — it expires, someone signs out
+    // elsewhere, or the server restarts and forgets every session it had. The
+    // canvas would then sit there showing a graph nobody is allowed to read, so
+    // the first 401 puts the login form back. The pipeline list is the right
+    // place to watch: it is re-fetched on every edit, so a session that has
+    // gone is noticed at the next thing anyone does.
+    Effect::new(move |_| {
+        if let Some(res) = pipelines.get()
+            && matches!(res.as_ref(), Err(ApiError::Unauthorized(_)))
+        {
+            session.signed_out();
+        }
+    });
+
     let UseEventSourceReturn { data, .. } =
         use_event_source::<UiEvent, codee::string::JsonSerdeCodec>("/events");
 
@@ -773,6 +973,7 @@ pub fn CanvasPage() -> impl IntoView {
         save_directory,
         unsaved,
         mode: RwSignal::new(Mode::ReadOnly),
+        may_edit: Signal::derive(move || session.may_edit()),
         adding: RwSignal::new(false),
         add_upstream: RwSignal::new(None),
         adding_connection: RwSignal::new(false),
@@ -1825,9 +2026,8 @@ fn PipelineList() -> impl IntoView {
     });
     // whether the list is empty because nothing matched or because there is
     // nothing to match — two different things to say
-    let any_pipelines = Memo::new(move |_| {
-        matches!(state.pipelines.get(), Some(Ok(list)) if !list.is_empty())
-    });
+    let any_pipelines =
+        Memo::new(move |_| matches!(state.pipelines.get(), Some(Ok(list)) if !list.is_empty()));
     let load_error = Memo::new(move |_| match state.pipelines.get() {
         Some(Err(err)) => Some(err.to_string()),
         _ => None,
@@ -3271,10 +3471,57 @@ pub fn Navbar() -> impl IntoView {
                 <A href="/docs">"docs"</A>
             </nav>
             {state.map(|state| view! { <ModeControls state=state /> })}
+            <Account />
             <div class="zoom-level" title="scroll to zoom, drag to pan">
                 {zoom}
             </div>
         </aside>
+    }
+}
+
+/// Who you are signed in as, and the way out.
+///
+/// Absent entirely on a server with no accounts — there is nobody to be, and a
+/// "signed in as nobody" chip would be noise on the setup nearly everybody
+/// runs locally. The role is shown beside the name because it is the answer to
+/// "why can't I see the edit button", which is otherwise a mystery.
+#[component]
+fn Account() -> impl IntoView {
+    let session = use_context::<Session>();
+    let username = move || session.and_then(Session::username);
+    let role = move || session.and_then(Session::role);
+
+    let sign_out = move || {
+        leptos::task::spawn_local(async move {
+            // The answer doesn't matter: the server drops the session on its
+            // side and clears the cookie, and if the call fails the session is
+            // no more valid than it was. Either way this tab is done with it.
+            let _ = ApiClient {
+                base: String::new(),
+            }
+            .logout()
+            .await;
+            if let Some(session) = session {
+                session.signed_out();
+            }
+        });
+    };
+
+    view! {
+        <Show when=move || username().is_some()>
+            <div class="account">
+                <span class="account-name" title=move || {
+                    role().map_or_else(String::new, |role| format!("signed in as {role}"))
+                }>{username}</span>
+                <button
+                    class="button subtle"
+                    title="sign out"
+                    on:click=move |_| sign_out()
+                >
+                    "sign out"
+                </button>
+            </div>
+        </Show>
     }
 }
 
@@ -3397,6 +3644,12 @@ fn ModeControls(state: AppState) -> impl IntoView {
                 }}
             </Show>
 
+            // Hidden rather than disabled for a reader, which is the rule the
+            // rest of the canvas follows: read-only really is read-only, and a
+            // greyed-out button is an invitation to go and ask why. The server
+            // refuses the calls regardless — this only keeps the UI from
+            // offering what it would refuse.
+            <Show when=move || state.may_edit.get()>
             <button
                 class="button mode-toggle"
                 class:active=move || state.editing()
@@ -3418,6 +3671,7 @@ fn ModeControls(state: AppState) -> impl IntoView {
             >
                 {move || if state.editing() { "editing" } else { "edit" }}
             </button>
+            </Show>
         </div>
     }
 }
@@ -3636,9 +3890,8 @@ pub fn DocsPage() -> impl IntoView {
     let api_selected = RwSignal::new(Option::<String>::None);
     let state_selected = RwSignal::new(Option::<String>::None);
     let groups = Memo::new(move |_| all.with_value(|all| docs::groups(all, &query.get())));
-    let api_groups = Memo::new(move |_| {
-        all_endpoints.with_value(|all| api_docs::groups(all, &api_query.get()))
-    });
+    let api_groups =
+        Memo::new(move |_| all_endpoints.with_value(|all| api_docs::groups(all, &api_query.get())));
     let is = move |which: DocsTab| tab.get() == which;
 
     view! {
@@ -3866,6 +4119,13 @@ fn EndpointDoc(endpoint: ApiDoc, selected: RwSignal<Option<String>>) -> impl Int
                 )>{method.label()}</span>
                 <code class="endpoint-path">{endpoint.path}</code>
                 <code class="doc-tag">{endpoint.operation_id()}</code>
+                // Who may call it, from the same table entry the router builds
+                // its middleware from — so this badge cannot describe a server
+                // that would answer differently.
+                <span
+                    class=format!("access-badge access-{}", endpoint.access.label())
+                    title=endpoint.access.description()
+                >{endpoint.access.label()}</span>
             </header>
             <p class="endpoint-summary">{endpoint.summary}</p>
             <Description text=endpoint.description.to_string() />
@@ -4484,9 +4744,8 @@ fn SectionView(
 fn LogRow(entry: log::Entry, names: StoredValue<log::ComponentNames>) -> impl IntoView {
     let state = expect_context::<AppState>();
     let ts = entry.ts;
-    let text = names.with_value(|names| {
-        log::summary(&entry, names.name(entry.stage, entry.component))
-    });
+    let text =
+        names.with_value(|names| log::summary(&entry, names.name(entry.stage, entry.component)));
 
     view! {
         // Every class here is prefixed, and that is not just tidiness: the
@@ -5001,11 +5260,8 @@ pub fn Card(pipeline_id: PipelineId, config: Config) -> impl IntoView {
     let id = pipeline_id.clone();
 
     let maximized_id = pipeline_id.clone();
-    let is_maximized = Memo::new(move |_| {
-        canvas
-            .maximized
-            .with(|m| m.as_ref() == Some(&maximized_id))
-    });
+    let is_maximized =
+        Memo::new(move |_| canvas.maximized.with(|m| m.as_ref() == Some(&maximized_id)));
 
     // Paused here rather than in `MessageLog`, because this is where the stream
     // reaches the log and pausing it anywhere further down would only be

@@ -29,11 +29,12 @@ use serde_json::Value;
 use crate::config::Config;
 use crate::connections::{Connections, CreateConnectionRequest};
 use crate::docs::ComponentDoc;
-use crate::state::{BucketContents, BucketSummary};
 use crate::layout::LayoutFile;
+use crate::server_config::Role;
+use crate::state::{BucketContents, BucketSummary};
 use crate::{
-    IngestRequest, IngestResponse, PipelineDto, SaveConfigRequest, SaveConfigResponse, SettingsDto,
-    UiEvent,
+    AuthDto, IngestRequest, IngestResponse, LoginRequest, PipelineDto, SaveConfigRequest,
+    SaveConfigResponse, SettingsDto, UiEvent,
 };
 
 /// The error body every failing request comes back with.
@@ -113,6 +114,9 @@ pub enum Operation {
     ListComponents,
     GetOpenApi,
     ApiReference,
+    Login,
+    Logout,
+    WhoAmI,
 }
 
 impl Operation {
@@ -138,6 +142,9 @@ impl Operation {
             Self::ListComponents => "listComponents",
             Self::GetOpenApi => "getOpenApi",
             Self::ApiReference => "apiReference",
+            Self::Login => "login",
+            Self::Logout => "logout",
+            Self::WhoAmI => "whoAmI",
         }
     }
 }
@@ -156,17 +163,19 @@ pub enum Tag {
     Config,
     Layout,
     Events,
+    Auth,
     Reference,
 }
 
 /// Every tag, in the order pages list them.
-pub const TAGS: [Tag; 7] = [
+pub const TAGS: [Tag; 8] = [
     Tag::Pipelines,
     Tag::Connections,
     Tag::State,
     Tag::Config,
     Tag::Layout,
     Tag::Events,
+    Tag::Auth,
     Tag::Reference,
 ];
 
@@ -180,6 +189,7 @@ impl Tag {
             Self::Config => "config",
             Self::Layout => "layout",
             Self::Events => "events",
+            Self::Auth => "auth",
             Self::Reference => "reference",
         }
     }
@@ -210,8 +220,88 @@ impl Tag {
                  written to its own file, and immediately."
             }
             Self::Events => "What the pipelines are doing, as it happens.",
+            Self::Auth => {
+                "Signing in and out. Present on every server; on one with no accounts \
+                 configured they report that there is nothing to sign into."
+            }
             Self::Reference => "The API describing itself.",
         }
+    }
+}
+
+/// Who may call an endpoint.
+///
+/// This sits in the table for the reason everything else does: `api_router` is
+/// **built from this table**, so the access an endpoint is documented with is
+/// the access the middleware enforces, not a second fact that agrees with it
+/// today. A new endpoint can't be added without answering the question, and it
+/// can't be answered in two places.
+///
+/// The alternative — deriving it from the method, GET being read and everything
+/// else admin — is wrong on the two endpoints that matter most:
+/// `POST /api/pipelines/{id}/messages` is a POST that is not an administrative
+/// act at all, and `PUT /api/layout` is a write to a committed file.
+///
+/// On a server with [`AuthConfig::None`](crate::server_config::AuthConfig) none
+/// of this applies: nobody is identified, so nothing is checked and every
+/// endpoint behaves as it did before roles existed.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Access {
+    /// No credentials needed even when authentication is on.
+    ///
+    /// Three kinds of thing end up here and they are not an accident: the
+    /// endpoints you need *in order* to log in, the ones that describe the
+    /// software rather than the deployment (the component reference and the
+    /// spec — they say what kayak is, not what this server is running), and the
+    /// ingest endpoint, which is a data plane rather than a control plane and
+    /// gets its own mechanism later.
+    Public,
+    /// Any authenticated user. Everything that looks at the running graph
+    /// without changing it.
+    Read,
+    /// Changes what the server is running, or writes a file. Requires
+    /// [`Role::Admin`].
+    Admin,
+}
+
+impl Access {
+    #[must_use]
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Public => "public",
+            Self::Read => "read",
+            Self::Admin => "admin",
+        }
+    }
+
+    /// What the reference says about who may call this.
+    #[must_use]
+    pub fn description(self) -> &'static str {
+        match self {
+            Self::Public => "Callable without credentials, even when authentication is on.",
+            Self::Read => "Any signed-in user.",
+            Self::Admin => "Signed-in users with the `admin` role.",
+        }
+    }
+
+    /// Whether a caller in this role may make the call. `None` is a caller who
+    /// presented no credentials at all.
+    #[must_use]
+    pub fn permits(self, role: Option<Role>) -> bool {
+        match (self, role) {
+            (Self::Public, _) => true,
+            (Self::Read, Some(_)) | (Self::Admin, Some(Role::Admin)) => true,
+            (Self::Read | Self::Admin, None) | (Self::Admin, Some(Role::Read)) => false,
+        }
+    }
+
+    /// Whether reaching this endpoint takes credentials at all — which is what
+    /// decides whether the spec attaches a security requirement to it, and
+    /// whether a 401 is among its documented outcomes.
+    #[must_use]
+    pub fn is_protected(self) -> bool {
+        !matches!(self, Self::Public)
     }
 }
 
@@ -313,6 +403,9 @@ pub struct ApiDoc {
     /// reference — blank lines separate paragraphs, `backticks` are code.
     pub description: &'static str,
     pub tag: Tag,
+    /// Who may call it. Enforced by the middleware the router applies from this
+    /// same entry, so the documentation and the check are one fact.
+    pub access: Access,
     pub params: Vec<ParamDoc>,
     pub request: Option<RequestDoc>,
     pub responses: Vec<ResponseDoc>,
@@ -414,6 +507,7 @@ pub fn endpoints() -> Vec<ApiDoc> {
                           created since startup is here and not in the config file, and \
                           `GET /api/settings` is what says whether the two have diverged.",
             tag: Tag::Pipelines,
+            access: Access::Read,
             params: vec![],
             request: None,
             responses: vec![
@@ -441,6 +535,7 @@ pub fn endpoints() -> Vec<ApiDoc> {
                           file is a load source and a save target, never a mirror of the \
                           runtime.",
             tag: Tag::Pipelines,
+            access: Access::Admin,
             params: vec![],
             request: Some(RequestDoc {
                 body: Body::Json("Config"),
@@ -477,6 +572,7 @@ pub fn endpoints() -> Vec<ApiDoc> {
                           from it.\n\n\
                           Like creating one, this writes nothing to disk.",
             tag: Tag::Pipelines,
+            access: Access::Admin,
             params: vec![ParamDoc {
                 name: "pipeline_id",
                 description: "The id the pipeline is running under.",
@@ -510,6 +606,7 @@ pub fn endpoints() -> Vec<ApiDoc> {
                           waiting for the outputs, so a 202 says nothing about whether \
                           the data has landed anywhere.",
             tag: Tag::Pipelines,
+            access: Access::Public,
             params: vec![ParamDoc {
                 name: "pipeline_id",
                 description: "The id of the pipeline to post to.",
@@ -548,6 +645,7 @@ pub fn endpoints() -> Vec<ApiDoc> {
                           Credentials come back as the unresolved `${NAME}` templates \
                           they are configured as, never as their values.",
             tag: Tag::Connections,
+            access: Access::Read,
             params: vec![],
             request: None,
             responses: vec![ResponseDoc {
@@ -568,6 +666,7 @@ pub fn endpoints() -> Vec<ApiDoc> {
                           part of the graph's logic and live in the config file, so \
                           this family is read-only.",
             tag: Tag::State,
+            access: Access::Read,
             params: vec![],
             request: None,
             responses: vec![ResponseDoc {
@@ -591,6 +690,7 @@ pub fn endpoints() -> Vec<ApiDoc> {
                           lock, so it is consistent with itself and stale the moment it \
                           is sent.",
             tag: Tag::State,
+            access: Access::Read,
             params: vec![ParamDoc {
                 name: "bucket",
                 description: "Name of the bucket, as declared in the config.",
@@ -622,6 +722,7 @@ pub fn endpoints() -> Vec<ApiDoc> {
                           does, and it writes the config and the connections file \
                           together.",
             tag: Tag::Connections,
+            access: Access::Admin,
             params: vec![],
             request: Some(RequestDoc {
                 body: Body::Json("CreateConnectionRequest"),
@@ -650,6 +751,7 @@ pub fn endpoints() -> Vec<ApiDoc> {
                           back as a 409 listing the pipelines, so the answer says what \
                           to do about it.",
             tag: Tag::Connections,
+            access: Access::Admin,
             params: vec![ParamDoc {
                 name: "connection_id",
                 description: "The name the connection is filed under.",
@@ -681,6 +783,7 @@ pub fn endpoints() -> Vec<ApiDoc> {
                           The absence of a config file doesn't mean edits can't be \
                           saved: it means there is no file *yet*, and a save creates one.",
             tag: Tag::Config,
+            access: Access::Read,
             params: vec![],
             request: None,
             responses: vec![ResponseDoc {
@@ -709,6 +812,7 @@ pub fn endpoints() -> Vec<ApiDoc> {
                           `--config` this is how a config file comes into existence at \
                           all, and from that save on it is the file `revert` reloads.",
             tag: Tag::Config,
+            access: Access::Admin,
             params: vec![],
             request: Some(RequestDoc {
                 body: Body::Json("SaveConfigRequest"),
@@ -743,6 +847,7 @@ pub fn endpoints() -> Vec<ApiDoc> {
                           rebuilding, so the response landing means the new graph is the \
                           only one running.",
             tag: Tag::Config,
+            access: Access::Admin,
             params: vec![],
             request: None,
             responses: vec![
@@ -772,6 +877,7 @@ pub fn endpoints() -> Vec<ApiDoc> {
                           the point.\n\n\
                           Only pipelines someone has actually moved appear.",
             tag: Tag::Layout,
+            access: Access::Read,
             params: vec![],
             request: None,
             responses: vec![ResponseDoc {
@@ -796,6 +902,7 @@ pub fn endpoints() -> Vec<ApiDoc> {
                           there is nowhere to write, and the arrangement is kept in \
                           memory until a save creates one.",
             tag: Tag::Layout,
+            access: Access::Admin,
             params: vec![],
             request: Some(RequestDoc {
                 body: Body::Json("LayoutFile"),
@@ -826,12 +933,95 @@ pub fn endpoints() -> Vec<ApiDoc> {
                           The stream is explicitly a dev-tooling affordance rather than \
                           a durable feed, and is marked temporary in the source.",
             tag: Tag::Events,
+            access: Access::Read,
             params: vec![],
             request: None,
             responses: vec![ResponseDoc {
                 status: 200,
                 description: "An event stream that stays open.",
                 body: Body::EventStream("UiEvent"),
+            }],
+        },
+        ApiDoc {
+            path: "/api/auth/me",
+            method: Method::Get,
+            operation: Operation::WhoAmI,
+            summary: "Who the caller is, and whether this server asks",
+            description: "`authentication_required` says whether this server checks \
+                          credentials at all — a server started without a \
+                          `--server-config`, or with one declaring `auth: {type: none}`, \
+                          answers `false` and lets everybody do everything.\n\n\
+                          `username` and `role` describe the caller, and are both null \
+                          for one who presented nothing. Note that a null `role` is not \
+                          the same as `read`: a reader may see the graph, a signed-out \
+                          caller may not.\n\n\
+                          Callable without credentials, necessarily — it is the endpoint \
+                          that answers 'do I need to show a login page'.",
+            tag: Tag::Auth,
+            access: Access::Public,
+            params: vec![],
+            request: None,
+            responses: vec![ResponseDoc {
+                status: 200,
+                description: "Who you are. Not an error even when the answer is nobody.",
+                body: Body::Json("AuthDto"),
+            }],
+        },
+        ApiDoc {
+            path: "/api/auth/login",
+            method: Method::Post,
+            operation: Operation::Login,
+            summary: "Exchange credentials for a session",
+            description: "Checks a username and password against the accounts in the \
+                          server's settings file and, on success, sets an `HttpOnly` \
+                          session cookie.\n\n\
+                          This is for browsers. Everything else should send \
+                          `Authorization: Basic` on each request instead and never come \
+                          here — the cookie exists because `EventSource`, which the UI \
+                          consumes `/events` with, cannot send headers.\n\n\
+                          A wrong password and an unknown username are the same 401, \
+                          deliberately: the endpoint is not a way to find out who has an \
+                          account. On a server with no accounts configured this is not an \
+                          error either — it answers 200 with `authentication_required` \
+                          false, because there is nothing to sign into.",
+            tag: Tag::Auth,
+            access: Access::Public,
+            params: vec![],
+            request: Some(RequestDoc {
+                body: Body::Json("LoginRequest"),
+                description: "The credentials to check.",
+            }),
+            responses: vec![
+                ResponseDoc {
+                    status: 200,
+                    description: "Signed in. The session cookie is in `Set-Cookie`.",
+                    body: Body::Json("AuthDto"),
+                },
+                ResponseDoc {
+                    status: 401,
+                    description: "Wrong username or password — the body does not say which.",
+                    body: Body::Json("ApiError"),
+                },
+                server_error(),
+            ],
+        },
+        ApiDoc {
+            path: "/api/auth/logout",
+            method: Method::Post,
+            operation: Operation::Logout,
+            summary: "End the session this request carries",
+            description: "Clears the cookie in the browser and drops the session on the \
+                          server, so a copy of the cookie taken from somewhere else stops \
+                          working too.\n\n\
+                          Idempotent: 204 whether or not there was a session to end.",
+            tag: Tag::Auth,
+            access: Access::Read,
+            params: vec![],
+            request: None,
+            responses: vec![ResponseDoc {
+                status: 204,
+                description: "Signed out.",
+                body: Body::None,
             }],
         },
         ApiDoc {
@@ -849,6 +1039,7 @@ pub fn endpoints() -> Vec<ApiDoc> {
                           that aren't a browser: a config linter, editor completion, a \
                           test.",
             tag: Tag::Reference,
+            access: Access::Public,
             params: vec![],
             request: None,
             responses: vec![ResponseDoc {
@@ -869,6 +1060,7 @@ pub fn endpoints() -> Vec<ApiDoc> {
                           Point a renderer, a client generator or a contract test at it. \
                           `GET /api/reference` is one such renderer, served alongside.",
             tag: Tag::Reference,
+            access: Access::Public,
             params: vec![],
             request: None,
             responses: vec![ResponseDoc {
@@ -888,6 +1080,7 @@ pub fn endpoints() -> Vec<ApiDoc> {
                           kayak's own furniture; this is the full reference, schemas and \
                           all.",
             tag: Tag::Reference,
+            access: Access::Public,
             params: vec![],
             request: None,
             responses: vec![ResponseDoc {
@@ -931,6 +1124,8 @@ pub fn schemas() -> BTreeMap<&'static str, Value> {
     schemas.insert("ComponentDoc", of(schema_for!(ComponentDoc)));
     schemas.insert("UiEvent", of(schema_for!(UiEvent)));
     schemas.insert("ApiError", of(schema_for!(ApiError)));
+    schemas.insert("LoginRequest", of(schema_for!(LoginRequest)));
+    schemas.insert("AuthDto", of(schema_for!(AuthDto)));
     schemas.insert("OpenApiDocument", openapi_document_schema());
     schemas
 }
@@ -1048,13 +1243,11 @@ mod tests {
                         .map(ToString::to_string)
                 })
                 .collect();
-            let documented: Vec<String> = endpoint
-                .params
-                .iter()
-                .map(|p| p.name.to_string())
-                .collect();
+            let documented: Vec<String> =
+                endpoint.params.iter().map(|p| p.name.to_string()).collect();
             assert_eq!(
-                placeholders, documented,
+                placeholders,
+                documented,
                 "{} {} documents {documented:?} but its path has {placeholders:?}",
                 endpoint.method.label(),
                 endpoint.path
@@ -1120,6 +1313,103 @@ mod tests {
         }
     }
 
+    /// The access level of every endpoint, written out.
+    ///
+    /// A list rather than a rule, and deliberately: the rules you would write
+    /// instead ("a GET is a read", "a write is admin") are both wrong here, and
+    /// wrong in the direction that hands an anonymous caller a delete button.
+    /// So the whole assignment is spelled out, and a new endpoint fails this
+    /// test until someone has looked at it and added a line — which is the
+    /// point at which the question gets asked.
+    #[test]
+    fn every_endpoint_is_pinned_to_the_access_it_was_reviewed_at() {
+        let actual: Vec<(&str, &str)> = endpoints()
+            .iter()
+            .map(|e| (e.operation_id(), e.access.label()))
+            .collect();
+        assert_eq!(
+            actual,
+            [
+                ("listPipelines", "read"),
+                ("createPipeline", "admin"),
+                ("deletePipeline", "admin"),
+                // the data plane, not the control plane: a device posting
+                // readings is not an operator, and this endpoint gets its own
+                // mechanism rather than the operators' credentials
+                ("ingestMessages", "public"),
+                ("listConnections", "read"),
+                ("listStateBuckets", "read"),
+                ("getStateBucket", "read"),
+                ("createConnection", "admin"),
+                ("deleteConnection", "admin"),
+                ("getSettings", "read"),
+                ("saveConfig", "admin"),
+                ("revertConfig", "admin"),
+                ("getLayout", "read"),
+                // a write to a file that gets committed, so admin — a reader
+                // can look at the canvas, they just can't rearrange it
+                ("replaceLayout", "admin"),
+                ("streamEvents", "read"),
+                // the endpoints you need in order to log in, so they cannot
+                // themselves need you to be logged in
+                ("whoAmI", "public"),
+                ("login", "public"),
+                // ...but signing out is something only a signed-in caller can
+                // meaningfully do
+                ("logout", "read"),
+                // these three describe kayak rather than this deployment
+                ("listComponents", "public"),
+                ("getOpenApi", "public"),
+                ("apiReference", "public"),
+            ]
+        );
+    }
+
+    /// Anything that changes what the server is running, or writes to disk, is
+    /// an administrative act. The converse isn't a rule — `ingestMessages` is a
+    /// POST that is neither — which is why this only checks one direction.
+    #[test]
+    fn nothing_that_changes_the_graph_is_reachable_by_a_reader() {
+        for endpoint in endpoints() {
+            let changes_the_graph = matches!(
+                endpoint.operation,
+                Operation::CreatePipeline
+                    | Operation::DeletePipeline
+                    | Operation::CreateConnection
+                    | Operation::DeleteConnection
+                    | Operation::SaveConfig
+                    | Operation::RevertConfig
+                    | Operation::ReplaceLayout
+            );
+            if changes_the_graph {
+                assert!(
+                    !endpoint.access.permits(Some(Role::Read)),
+                    "{} {} lets a reader change the server",
+                    endpoint.method.label(),
+                    endpoint.path
+                );
+            }
+        }
+    }
+
+    /// The three answers, in one place. An admin may do anything; a reader may
+    /// do anything that doesn't change the server; someone who presented no
+    /// credentials may only reach what is public.
+    #[test]
+    fn a_role_permits_its_own_level_and_below() {
+        assert!(Access::Public.permits(None));
+        assert!(Access::Public.permits(Some(Role::Read)));
+        assert!(Access::Public.permits(Some(Role::Admin)));
+
+        assert!(!Access::Read.permits(None));
+        assert!(Access::Read.permits(Some(Role::Read)));
+        assert!(Access::Read.permits(Some(Role::Admin)));
+
+        assert!(!Access::Admin.permits(None));
+        assert!(!Access::Admin.permits(Some(Role::Read)));
+        assert!(Access::Admin.permits(Some(Role::Admin)));
+    }
+
     /// The descriptions are searched too, so an endpoint that *mentions* the
     /// term is a hit — `saveConfig`'s prose talks about what `revert` reloads.
     /// That's the search working rather than a false positive: someone typing
@@ -1158,7 +1448,10 @@ mod tests {
             .filter(|e| e.matches("409"))
             .map(ApiDoc::operation_id)
             .collect();
-        assert_eq!(matching, ["createPipeline", "createConnection", "deleteConnection"]);
+        assert_eq!(
+            matching,
+            ["createPipeline", "createConnection", "deleteConnection"]
+        );
     }
 
     #[test]

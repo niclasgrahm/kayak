@@ -1,3 +1,4 @@
+pub mod auth;
 pub mod connection;
 pub mod docs;
 pub mod layout;

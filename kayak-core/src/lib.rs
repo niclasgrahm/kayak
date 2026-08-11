@@ -13,13 +13,14 @@ pub mod format;
 pub mod layout;
 pub mod mapping;
 pub mod metadata;
+pub mod server_config;
 pub mod state;
 
 pub use columns::{ColumnMapping, ColumnType, ExtraFieldPolicy, MissingColumnPolicy, TableIndex};
 pub use connections::{ConnectionId, ConnectionKind, Connections};
 pub use format::ConfigFormat;
-pub use state::{PipelineState, StateBucketConfig, StateBuckets};
 pub use layout::{EdgeEnd, LayoutFile, PipelineLayout, PortLayout, Side};
+pub use state::{PipelineState, StateBucketConfig, StateBuckets};
 
 /// One pipeline as the API reports it: the id it is running under, and the
 /// config it was built from.
@@ -109,6 +110,71 @@ pub struct SaveConfigRequest {
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq, JsonSchema)]
 pub struct SaveConfigResponse {
     pub path: String,
+}
+
+/// What `POST /api/auth/login` takes.
+///
+/// The password is a plain `String` and not a
+/// [`Secret`](crate::config::Secret), which is the opposite of every other
+/// password field in kayak and deliberately so: a `Secret` holds a `${NAME}`
+/// *reference* to a credential, and this is the credential itself, typed into a
+/// login box a moment ago. It exists for the length of one request and is never
+/// stored, serialized back or logged.
+#[derive(Serialize, Deserialize, Clone, Debug, JsonSchema)]
+pub struct LoginRequest {
+    pub username: String,
+    pub password: String,
+}
+
+/// Who the caller is, and whether this server cares.
+///
+/// The frontend asks for this before it draws anything: it decides between the
+/// login page and the canvas, and between a canvas that can be edited and one
+/// that can only be read.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq, JsonSchema)]
+pub struct AuthDto {
+    /// Whether this server checks credentials at all. `false` is a server
+    /// started without a `--server-config`, or with one that sets
+    /// `auth: {type: none}` — see [`crate::server_config`] for why that is the
+    /// default.
+    pub authentication_required: bool,
+    /// The signed-in user, or `None` for a caller who presented nothing.
+    pub username: Option<String>,
+    /// What the caller may do. `None` means signed out — which is a different
+    /// thing from [`Role::Read`], and worth keeping different: a reader may see
+    /// the graph, and a signed-out caller may not.
+    pub role: Option<crate::server_config::Role>,
+}
+
+impl AuthDto {
+    /// What a server that authenticates nobody says about every caller.
+    #[must_use]
+    pub fn open() -> Self {
+        Self {
+            authentication_required: false,
+            username: None,
+            role: None,
+        }
+    }
+
+    /// Whether the caller may change the graph.
+    ///
+    /// The one place the "authentication is off" case and the "signed in as an
+    /// admin" case are folded together, so that neither the navbar nor the
+    /// canvas has to know there are two ways to be allowed. A server with no
+    /// accounts hands everyone the edit button, which is what it did before
+    /// roles existed.
+    #[must_use]
+    pub fn may_edit(&self) -> bool {
+        !self.authentication_required
+            || matches!(self.role, Some(crate::server_config::Role::Admin))
+    }
+
+    /// Whether the UI has to ask for credentials before it can show anything.
+    #[must_use]
+    pub fn needs_login(&self) -> bool {
+        self.authentication_required && self.role.is_none()
+    }
 }
 
 pub type PipelineId = String;
@@ -348,7 +414,8 @@ impl UiEvent {
 #[cfg(test)]
 mod tests {
     use super::{
-        BatchPreview, EventPayload, MAX_MESSAGE_BYTES, MESSAGES_PER_BATCH, Stage, UiEvent, truncate,
+        AuthDto, BatchPreview, EventPayload, MAX_MESSAGE_BYTES, MESSAGES_PER_BATCH, Stage, UiEvent,
+        truncate,
     };
     use serde_json::json;
     use std::sync::Arc;
@@ -483,5 +550,50 @@ mod tests {
         assert_eq!(event.ts, 0);
         assert_eq!(event.stage, Stage::Input);
         assert!(matches!(event.payload, EventPayload::Error(_)));
+    }
+
+    /// A server with no accounts hands everyone the edit button, which is what
+    /// it did before roles existed. The one place the "authentication is off"
+    /// case and the "signed in as an admin" case are folded together.
+    #[test]
+    fn an_open_server_lets_everybody_edit_and_asks_nobody_to_log_in() {
+        let open = AuthDto::open();
+        assert!(open.may_edit());
+        assert!(!open.needs_login());
+    }
+
+    #[test]
+    fn a_reader_may_look_but_not_edit() {
+        let reader = AuthDto {
+            authentication_required: true,
+            username: Some("watcher".to_string()),
+            role: Some(crate::server_config::Role::Read),
+        };
+        assert!(!reader.may_edit());
+        assert!(!reader.needs_login(), "a reader is signed in");
+    }
+
+    #[test]
+    fn an_admin_may_edit() {
+        let admin = AuthDto {
+            authentication_required: true,
+            username: Some("root".to_string()),
+            role: Some(crate::server_config::Role::Admin),
+        };
+        assert!(admin.may_edit());
+        assert!(!admin.needs_login());
+    }
+
+    /// The state the login page exists for: this server asks, and nobody has
+    /// answered yet.
+    #[test]
+    fn a_guarded_server_with_no_session_needs_a_login() {
+        let anonymous = AuthDto {
+            authentication_required: true,
+            username: None,
+            role: None,
+        };
+        assert!(anonymous.needs_login());
+        assert!(!anonymous.may_edit());
     }
 }

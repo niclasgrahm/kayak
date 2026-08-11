@@ -81,6 +81,8 @@ rdkafka = { version = "0.39.0", features = ["tokio"] }
 serde_norway = "0.9.42"
 rand = "0.10"
 object_store = { version = "0.14.1", default-features = false, features = ["aws"] }
+base64 = "0.22"
+subtle = "2"
 
 [dev-dependencies]
 # lets the integration tests call the axum router in-process, with no socket

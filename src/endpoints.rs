@@ -13,12 +13,15 @@
 
 use std::sync::Arc;
 
+use axum::extract::Request;
+use axum::middleware::Next;
 use axum::routing::{MethodRouter, delete, get, post, put};
 use axum::{Router, handler::Handler};
 use kayak_core::api_docs::{ApiDoc, Method, Operation, endpoints};
 
 use crate::handlers::{
     rest::{
+        auth::{login, logout, whoami},
         connection::{create_connection, delete_connection, get_connections},
         docs::get_docs,
         layout::{get_layout, put_layout},
@@ -42,9 +45,31 @@ pub fn api_router(state: Arc<AppState>) -> Router {
     endpoints()
         .iter()
         .fold(Router::new(), |router, doc| {
-            router.route(doc.path, handler_for(doc))
+            router.route(doc.path, guarded(doc, &state))
         })
         .with_state(state)
+}
+
+/// One endpoint's handler, behind the access check its table entry declares.
+///
+/// `route_layer` rather than `layer`, and the difference is the point: a
+/// `route_layer` runs only for requests that **matched this route**, so an
+/// unknown path comes back as the router's own empty 404 and never as a 401.
+/// "This endpoint does not exist" and "you may not have this endpoint" staying
+/// different answers is what keeps `every_documented_endpoint_is_routed_at_its_documented_method`
+/// meaningful — and a 401 on every typo would be a poor way to learn the API.
+///
+/// The access comes off `doc`, so this is the *same fact* the reference page
+/// and the `OpenAPI` spec render. There is no second table to fall out of step.
+fn guarded(doc: &ApiDoc, state: &Arc<AppState>) -> MethodRouter<Arc<AppState>> {
+    let access = doc.access;
+    let state = Arc::clone(state);
+    handler_for(doc).route_layer(axum::middleware::from_fn(
+        move |request: Request, next: Next| {
+            let state = Arc::clone(&state);
+            async move { crate::auth::authorize(access, state.auth(), request, next).await }
+        },
+    ))
 }
 
 /// The handler serving one documented operation.
@@ -72,6 +97,9 @@ fn handler_for(doc: &ApiDoc) -> MethodRouter<Arc<AppState>> {
         Operation::ListComponents => route_of(method, get_docs),
         Operation::GetOpenApi => route_of(method, get_openapi),
         Operation::ApiReference => route_of(method, api_reference),
+        Operation::Login => route_of(method, login),
+        Operation::Logout => route_of(method, logout),
+        Operation::WhoAmI => route_of(method, whoami),
     }
 }
 

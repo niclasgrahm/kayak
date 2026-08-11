@@ -8,6 +8,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::broadcast;
 
+pub mod auth;
 pub mod buckets;
 pub mod config;
 pub mod connections;
@@ -22,12 +23,13 @@ pub mod outputs;
 pub mod persist;
 pub mod pipeline;
 pub mod secrets;
+pub mod server_config;
 pub mod state;
 pub mod testing;
 pub mod transforms;
 
-pub use crate::endpoints::api_router;
 use crate::buckets::Buckets;
+pub use crate::endpoints::api_router;
 use crate::inputs::envelope::{Envelope, Meta};
 use crate::inputs::http::Inboxes;
 use crate::secrets::{EnvStore, Resolved, SecretStore};

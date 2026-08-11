@@ -3,8 +3,9 @@ use serde::Serialize;
 use tokio::sync::broadcast;
 
 use crate::BuildCtx;
+use crate::auth::Auth;
 use crate::buckets::Buckets;
-use crate::inputs::http::{IngestError, Inboxes, PostMeta};
+use crate::inputs::http::{Inboxes, IngestError, PostMeta};
 use crate::pipeline::Pipeline;
 use crate::secrets::{EnvStore, SecretStore};
 use kayak_core::config::Config;
@@ -194,6 +195,14 @@ pub struct AppState {
     /// What the config file declared, kept so a revert can tell an unchanged
     /// bucket from one whose bounds moved.
     declared_buckets: Mutex<StateBuckets>,
+    /// The accounts, and who is currently signed in.
+    ///
+    /// Fixed at startup like the secret store and for the same reason: who may
+    /// reach the server is a property of how it was started, and nothing served
+    /// over HTTP may change it. [`Auth::disabled`] — the default — is a server
+    /// that asks nobody for anything, which is what a `--server-config`-less
+    /// process runs.
+    auth: Arc<Auth>,
 }
 
 impl Default for AppState {
@@ -244,7 +253,26 @@ impl AppState {
             layout: Mutex::new(LayoutFile::default()),
             buckets: Mutex::new(Arc::new(Buckets::new())),
             declared_buckets: Mutex::new(StateBuckets::new()),
+            auth: Arc::new(Auth::disabled()),
         }
+    }
+
+    /// Require credentials, per the settings file the server was started with.
+    ///
+    /// A builder rather than a constructor argument because the default is the
+    /// interesting case: every existing call site — and every test that isn't
+    /// about authentication — wants a server that asks nobody for anything,
+    /// and gets one by not calling this.
+    #[must_use]
+    pub fn with_auth(mut self, auth: Arc<Auth>) -> Self {
+        self.auth = auth;
+        self
+    }
+
+    /// The accounts and sessions, for the middleware and the auth handlers.
+    #[must_use]
+    pub fn auth(&self) -> &Arc<Auth> {
+        &self.auth
     }
 
     /// Confine file outputs to `data_dir`, or — with `None` — leave them turned
@@ -851,7 +879,7 @@ impl AppState {
             ConfigFile::new(self.declared_buckets(), configs),
             format,
         )
-            .with_context(|| format!("failed to save the config to {}", target.display()))?;
+        .with_context(|| format!("failed to save the config to {}", target.display()))?;
         self.mark_saved(&app);
         drop(app);
         self.adopt(&target);

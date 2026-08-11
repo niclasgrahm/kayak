@@ -1,31 +1,4 @@
 {
   "version": 1,
-  "pipelines": {
-    "everything": {
-      "x": 260.0,
-      "y": 1240.0,
-      "width": 360.0
-    },
-    "heartbeat_pairs": {
-      "x": 680.0,
-      "y": 1240.0,
-      "width": 360.0
-    },
-    "heartbeat_peaks": {
-      "x": -1960.0,
-      "y": -160.0,
-      "width": 1140.0,
-      "height": 660.0
-    },
-    "heartbeat_to_disk": {
-      "x": 1100.0,
-      "y": 1220.0,
-      "width": 360.0
-    },
-    "slow_requests": {
-      "x": 1700.0,
-      "y": 1460.0,
-      "width": 360.0
-    }
-  }
+  "pipelines": {}
 }

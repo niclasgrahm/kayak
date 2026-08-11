@@ -1,8 +1,8 @@
 use gloo_net::http::Request;
 use kayak_core::state::{BucketContents, BucketSummary};
 use kayak_core::{
-    ConfigFormat, Connections, LayoutFile, PipelineDto, SaveConfigRequest, SaveConfigResponse,
-    SettingsDto,
+    AuthDto, ConfigFormat, Connections, LayoutFile, LoginRequest, PipelineDto, SaveConfigRequest,
+    SaveConfigResponse, SettingsDto,
 };
 use serde_json::Value;
 
@@ -147,6 +147,54 @@ impl ApiClient {
     }
 
     /// Throw away the running graph and reload the config file.
+    /// Who the caller is, and whether this server asks at all.
+    ///
+    /// Public on the server, so this is the one call that works before signing
+    /// in — which is what makes it the call that decides whether to show a
+    /// login page.
+    pub async fn whoami(&self) -> Result<AuthDto, ApiError> {
+        let resp = Request::get(&format!("{}/api/auth/me", self.base))
+            .send()
+            .await?;
+        if resp.ok() {
+            Ok(resp.json::<AuthDto>().await?)
+        } else {
+            Err(rejection(resp).await)
+        }
+    }
+
+    /// Exchange credentials for a session cookie.
+    ///
+    /// The cookie is `HttpOnly`, so nothing here ever sees it — the browser
+    /// stores it and attaches it to everything afterwards, including the
+    /// `EventSource` connection that no header could have authenticated.
+    pub async fn login(&self, username: &str, password: &str) -> Result<AuthDto, ApiError> {
+        let body = LoginRequest {
+            username: username.to_string(),
+            password: password.to_string(),
+        };
+        let resp = Request::post(&format!("{}/api/auth/login", self.base))
+            .json(&body)?
+            .send()
+            .await?;
+        if resp.ok() {
+            Ok(resp.json::<AuthDto>().await?)
+        } else {
+            Err(rejection(resp).await)
+        }
+    }
+
+    pub async fn logout(&self) -> Result<(), ApiError> {
+        let resp = Request::post(&format!("{}/api/auth/logout", self.base))
+            .send()
+            .await?;
+        if resp.ok() {
+            Ok(())
+        } else {
+            Err(rejection(resp).await)
+        }
+    }
+
     pub async fn revert_config(&self) -> Result<(), ApiError> {
         let resp = Request::post(&format!("{}/api/config/revert", self.base))
             .send()
@@ -173,7 +221,15 @@ async fn rejection(resp: gloo_net::http::Response) -> ApiError {
         .and_then(|v| v["error"].as_str().map(ToString::to_string))
         .or_else(|| (!body.trim().is_empty()).then(|| body.clone()))
         .unwrap_or_else(|| format!("request failed with status {status}"));
-    ApiError::Rejected(message)
+    // 401 is the one status the caller acts on rather than displays: a session
+    // that has expired, or a server that was restarted out from under this tab,
+    // means the page has to go back to the login form. Every other failure is
+    // something to show and carry on from.
+    if status == 401 {
+        ApiError::Unauthorized(message)
+    } else {
+        ApiError::Rejected(message)
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -181,6 +237,10 @@ pub enum ApiError {
     Network(String),
     /// The server understood the request and said no. The message is its own.
     Rejected(String),
+    /// Nobody is signed in — the session expired, or the server restarted and
+    /// forgot it. Distinct from [`ApiError::Rejected`] because the UI *reacts*
+    /// to it rather than printing it: the page drops back to the login form.
+    Unauthorized(String),
 }
 
 impl From<gloo_net::Error> for ApiError {
@@ -193,7 +253,7 @@ impl std::fmt::Display for ApiError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             ApiError::Network(msg) => write!(f, "Network error: {msg}"),
-            ApiError::Rejected(msg) => write!(f, "{msg}"),
+            ApiError::Rejected(msg) | ApiError::Unauthorized(msg) => write!(f, "{msg}"),
         }
     }
 }
