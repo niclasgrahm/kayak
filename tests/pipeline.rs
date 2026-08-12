@@ -15,7 +15,8 @@ use kayak::outputs::OutputDestination;
 use kayak::pipeline::{Pipeline, PipelineRuntime};
 use kayak::state::UiEvent;
 use kayak::testing::{
-    CollectingOutput, Emitted, FailOnNth, ScriptedInput, Ticking, WhenExhausted, batch, stub_config,
+    AckingInput, CollectingOutput, CountingAck, DropEverything, Emitted, FailOnNth, ScriptedInput,
+    Ticking, WhenExhausted, batch, stub_config,
 };
 use kayak::transforms::Transform;
 use kayak_core::{EventPayload, Stage};
@@ -971,6 +972,81 @@ async fn a_failing_output_does_not_stop_its_siblings() {
     let _ = runtime.run().await;
 
     assert_eq!(seen.values(), vec![vec![json!({"n": 1})]]);
+}
+
+/// The whole point of the ack machinery: a delivery is acknowledged exactly
+/// once, and only after it has reached every output *and* every downstream
+/// pipeline this one feeds — not before, and not per output.
+#[tokio::test]
+async fn a_delivery_is_acknowledged_once_it_has_reached_every_output_and_downstream() {
+    let shared = pipeline("acked");
+    let (tx_downstream, mut rx_downstream) = mpsc::channel(8);
+    shared.subscribe(tx_downstream);
+
+    let ack = CountingAck::new();
+    let (events, _events_rx) = broadcast::channel(16);
+    let runtime = runtime(
+        vec![Box::new(AckingInput::new(
+            batch(vec![json!({"n": 1})]),
+            ack.clone(),
+        ))],
+        vec![],
+        vec![Box::new(CollectingOutput::new()), Box::new(CollectingOutput::new())],
+        Arc::clone(&shared),
+        events,
+    );
+    let _ = runtime.run().await;
+
+    assert!(rx_downstream.try_recv().is_ok(), "downstream got nothing");
+    assert_eq!(ack.count(), 1, "acknowledged {} times, want exactly 1", ack.count());
+}
+
+/// A durability guarantee stronger than "this pipeline attempted every send"
+/// is a deliberate non-goal for now (see the `ack` module docs) — so a
+/// failing output does not hold up the acknowledgement of a delivery that
+/// reached it.
+#[tokio::test]
+async fn a_failing_output_does_not_withhold_the_acknowledgement() {
+    let ack = CountingAck::new();
+    let (events, _events_rx) = broadcast::channel(16);
+    let runtime = runtime(
+        vec![Box::new(AckingInput::new(
+            batch(vec![json!({"n": 1})]),
+            ack.clone(),
+        ))],
+        vec![],
+        vec![Box::new(CollectingOutput::failing())],
+        pipeline("acked-despite-failure"),
+        events,
+    );
+    let _ = runtime.run().await;
+
+    assert_eq!(ack.count(), 1);
+}
+
+/// A message a `filter` or a reducer's `group_by` legitimately drops was
+/// still correctly processed — there is nothing left to wait for, so the
+/// delivery it arrived in is acknowledged even though no output ever saw it.
+#[tokio::test]
+async fn a_delivery_whose_batch_is_filtered_away_entirely_is_still_acknowledged() {
+    let ack = CountingAck::new();
+    let output = CollectingOutput::new();
+    let seen = output.emitted();
+    let (events, _events_rx) = broadcast::channel(16);
+    let runtime = runtime(
+        vec![Box::new(AckingInput::new(
+            batch(vec![json!({"n": 1})]),
+            ack.clone(),
+        ))],
+        vec![Box::new(DropEverything)],
+        vec![Box::new(output)],
+        pipeline("acked-despite-drop"),
+        events,
+    );
+    let _ = runtime.run().await;
+
+    assert!(seen.values().is_empty(), "the output should never have been called");
+    assert_eq!(ack.count(), 1);
 }
 
 /// A pipeline with no inputs can never produce anything, so it's a config

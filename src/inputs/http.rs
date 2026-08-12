@@ -24,6 +24,7 @@ use subtle::ConstantTimeEq;
 use tokio::sync::mpsc;
 
 use crate::BuildCtx;
+use crate::inputs::ack::{self, Delivery};
 use crate::inputs::envelope::{Envelope, Meta};
 use crate::inputs::{BuildInput, InputSource, MessageBatch};
 use crate::secrets::Resolved;
@@ -466,6 +467,11 @@ impl Inboxes {
 
 impl BuildInput for HttpInputConfig {
     fn build(self, ctx: &mut BuildCtx) -> Result<Box<dyn InputSource>> {
+        // the endpoint's own response code is the closest thing this input has
+        // to an ack today, and that isn't wired into `AckMode` yet — see the
+        // module docs on `ack` for why this is a deliberate gap, not an
+        // oversight
+        ack::require_receipt_only(ctx.ack_mode(), "http")?;
         let capacity = self.capacity.unwrap_or(DEFAULT_CAPACITY);
         anyhow::ensure!(capacity > 0, "an http input's `capacity` must be at least 1");
         let auth = self
@@ -500,7 +506,7 @@ impl Drop for HttpInput {
 
 #[async_trait::async_trait]
 impl InputSource for HttpInput {
-    async fn next(&mut self) -> Result<Arc<MessageBatch>> {
+    async fn next(&mut self) -> Result<Delivery> {
         // The only sender is the one in the registry, which this input owns
         // through its `Drop` — so `None` means we have been dropped, which
         // can't be observed from inside `next`. Reported rather than
@@ -510,7 +516,7 @@ impl InputSource for HttpInput {
         })?;
 
         if !self.envelope.is_enabled() {
-            return Ok(posted.batch);
+            return Ok(Delivery::new(posted.batch));
         }
         // one request is one batch, so every message in it shares its metadata
         let meta = posted.meta.as_meta();
@@ -529,16 +535,17 @@ impl InputSource for HttpInput {
                 out.map(Arc::new)
             })
             .collect();
-        Ok(Arc::new(enveloped))
+        Ok(Delivery::new(Arc::new(enveloped)))
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{Credentials, HttpAuthConfig, IngestError, Inboxes, PostMeta, Requirement};
+    use super::{Credentials, HttpAuthConfig, HttpInputConfig, IngestError, Inboxes, PostMeta, Requirement};
+    use kayak_core::config::AckMode;
     use crate::BuildCtx;
     use crate::inputs::envelope::Envelope;
-    use crate::inputs::{InputSource, MessageBatch};
+    use crate::inputs::{BuildInput, InputSource, MessageBatch};
     use crate::testing::MapSecretStore;
     use kayak_core::config::EnvelopeConfig;
     use serde_json::json;
@@ -980,5 +987,25 @@ mod tests {
         let printed = format!("{credentials:?}");
         assert!(!printed.contains("hunter2"), "{printed}");
         assert!(printed.contains("authorization"), "{printed}");
+    }
+
+    /// The endpoint's own response code (202/503/401) is the closest thing
+    /// this input has to an ack today, and it isn't wired into `AckMode` yet
+    /// — a deliberate gap, not an oversight, so `on_delivery` is refused
+    /// rather than silently doing nothing.
+    #[test]
+    fn on_delivery_is_refused() {
+        let mut pipelines = HashMap::new();
+        let (events, _rx) = tokio::sync::broadcast::channel(4);
+        let mut ctx = BuildCtx::new(&mut pipelines, "p1".to_string(), events);
+        ctx.ack_mode = Some(AckMode::OnDelivery);
+        let Err(err) = (HttpInputConfig {
+            capacity: None,
+            auth: None,
+        })
+        .build(&mut ctx) else {
+            panic!("an http input built with `ack: on_delivery`, which it cannot honour");
+        };
+        assert!(format!("{err:#}").contains("http"), "{err:#}");
     }
 }

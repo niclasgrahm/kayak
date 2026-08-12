@@ -55,6 +55,28 @@
           "group": "kayak-sample",
           "start_at": "latest",
           "max_batch": 500,
+          "ack": "on_delivery",
+          "envelope": {
+            "type": "merge"
+          }
+        }
+      ],
+      "transforms": [],
+      "outputs": [
+        {
+          "type": "stdout"
+        }
+      ]
+    },
+    {
+      "id": "mqtt_events",
+      "inputs": [
+        {
+          "type": "mqtt",
+          "connection": "local-mqtt",
+          "topic": "test.mqtt",
+          "qos": "at_least_once",
+          "ack": "on_delivery",
           "envelope": {
             "type": "merge"
           }

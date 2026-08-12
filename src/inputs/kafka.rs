@@ -2,6 +2,7 @@ use crate::{
     BuildCtx,
     inputs::{
         BuildInput, InputSource, MessageBatch,
+        ack::{Ack, Delivery},
         envelope::{Envelope, Meta},
     },
     secrets::Resolved,
@@ -9,7 +10,7 @@ use crate::{
 use serde_json::Value;
 use anyhow::{Context, Result};
 use futures_util::FutureExt;
-use kayak_core::config::{KafkaConfig, KafkaStartAt};
+use kayak_core::config::{AckMode, KafkaConfig, KafkaStartAt};
 use rdkafka::{
     ClientConfig, Message,
     consumer::{Consumer, StreamConsumer},
@@ -36,6 +37,7 @@ impl BuildInput for KafkaConfig {
             // wants its messages one at a time
             max_batch: crate::inputs::batch_cap(self.max_batch),
             envelope: ctx.envelope("kafka", Some(&self.connection)),
+            ack_mode: ctx.ack_mode(),
             consumer: None,
         }))
     }
@@ -52,14 +54,24 @@ pub struct KafkaInput {
     max_batch: usize,
     /// What this input attaches to each message, if the config asked for any.
     envelope: Envelope,
+    /// `on_receipt` (the default) or `on_delivery` — decides both the client
+    /// config `connect` builds and what `next` hands back as an [`Ack`]. See
+    /// the `ack` module docs for what the two modes mean and their scope.
+    ack_mode: AckMode,
     /// Built on the first read, like the nats input: `build()` must not block
-    /// on a broker that isn't up yet.
-    consumer: Option<StreamConsumer>,
+    /// on a broker that isn't up yet. Shared with any [`KafkaAck`] this input
+    /// hands out, since acknowledging one has to reach back into the same
+    /// consumer to store an offset.
+    consumer: Option<Arc<StreamConsumer>>,
 }
 
 impl KafkaInput {
-    fn connect(&self) -> Result<StreamConsumer> {
-        let consumer: StreamConsumer = ClientConfig::new()
+    /// The client config `connect` builds against, pulled apart from the
+    /// actual connection so the `ack_mode` → settings mapping is testable
+    /// without a broker to create a consumer against.
+    fn client_config(&self) -> ClientConfig {
+        let mut config = ClientConfig::new();
+        config
             .set("bootstrap.servers", self.brokers.expose())
             .set("group.id", &self.group)
             .set(
@@ -69,9 +81,23 @@ impl KafkaInput {
                     KafkaStartAt::Latest => "latest",
                 },
             )
-            // offsets are committed on a timer by the client; at-least-once
-            // delivery, which is all the rest of the runtime promises anyway
-            .set("enable.auto.commit", "true")
+            // offsets are always committed on a timer by the client; what
+            // `ack_mode` decides is *which* offset that timer sees. On
+            // receipt the client stores (and so commits) whatever it just
+            // handed us, before this pipeline has done anything with it. On
+            // delivery, storing is turned off here and done explicitly by
+            // `KafkaAck::ack` once the batch has cleared this pipeline — see
+            // the `ack` module docs.
+            .set("enable.auto.commit", "true");
+        if self.ack_mode == AckMode::OnDelivery {
+            config.set("enable.auto.offset.store", "false");
+        }
+        config
+    }
+
+    fn connect(&self) -> Result<StreamConsumer> {
+        let consumer: StreamConsumer = self
+            .client_config()
             .create()
             .with_context(|| format!("failed to create a kafka consumer for {}", self.brokers))?;
         consumer
@@ -150,6 +176,40 @@ impl KafkaInput {
     }
 }
 
+/// [`Ack`] for `AckMode::OnDelivery`: stores every record's offset once the
+/// run loop says the batch has cleared this pipeline, so the client's
+/// background commit picks it up on its next tick.
+///
+/// Every record this delivery carried gets an entry — including ones
+/// `decode` skipped as unparseable, since those are handled too, just not
+/// forwarded — otherwise a malformed record would be re-read and re-skipped
+/// forever rather than being passed over exactly once. Storing an offset
+/// lower than one already stored is harmless (librdkafka keeps the highest),
+/// so there's no need to collapse this to one entry per partition.
+struct KafkaAck {
+    consumer: Arc<StreamConsumer>,
+    topic: String,
+    /// (partition, next offset to read) pairs — one past the record actually
+    /// read, which is the convention `store_offset`/`commit` both expect.
+    offsets: Vec<(i32, i64)>,
+}
+
+impl Ack for KafkaAck {
+    fn ack(&self) {
+        for &(partition, offset) in &self.offsets {
+            if let Err(e) = self.consumer.store_offset(&self.topic, partition, offset) {
+                tracing::warn!(
+                    "failed to store kafka offset for '{}'/{}@{}: {}",
+                    self.topic,
+                    partition,
+                    offset,
+                    e
+                );
+            }
+        }
+    }
+}
+
 #[async_trait::async_trait]
 impl InputSource for KafkaInput {
     /// Wait for one record, then take whatever else is *already* waiting, up to
@@ -161,16 +221,17 @@ impl InputSource for KafkaInput {
     /// one whatever `max_batch` says, so raising it costs an idle pipeline
     /// nothing in latency. It only bites during a catch-up, which is the case it
     /// exists for — and with the default of 1 the drain loop doesn't run at all.
-    async fn next(&mut self) -> Result<Arc<MessageBatch>> {
+    async fn next(&mut self) -> Result<Delivery> {
         if self.consumer.is_none() {
-            self.consumer = Some(self.connect()?);
+            self.consumer = Some(Arc::new(self.connect()?));
         }
         let consumer = self
             .consumer
-            .as_ref()
+            .clone()
             .ok_or_else(|| anyhow::anyhow!("kafka consumer not initialized"))?;
 
         let mut batch: MessageBatch = Vec::new();
+        let mut offsets: Vec<(i32, i64)> = Vec::new();
         while batch.is_empty() {
             // recv() is cancel-safe, which matters: the run loop drops this
             // future every time it checks for cancellation
@@ -178,6 +239,7 @@ impl InputSource for KafkaInput {
                 .recv()
                 .await
                 .with_context(|| format!("kafka consumer on '{}' failed", self.topic))?;
+            offsets.push((msg.partition(), msg.offset() + 1));
             if let Some(value) = self.decode(&msg) {
                 batch.push(Arc::new(value));
             }
@@ -190,11 +252,68 @@ impl InputSource for KafkaInput {
                 break;
             };
             let msg = ready.with_context(|| format!("kafka consumer on '{}' failed", self.topic))?;
+            offsets.push((msg.partition(), msg.offset() + 1));
             if let Some(value) = self.decode(&msg) {
                 batch.push(Arc::new(value));
             }
         }
 
-        Ok(Arc::new(batch))
+        let batch = Arc::new(batch);
+        Ok(match self.ack_mode {
+            AckMode::OnReceipt => Delivery::new(batch),
+            AckMode::OnDelivery => Delivery::with_ack(
+                batch,
+                Box::new(KafkaAck {
+                    consumer,
+                    topic: self.topic.clone(),
+                    offsets,
+                }) as Box<dyn Ack>,
+            ),
+        })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::inputs::envelope::Envelope;
+    use crate::testing::MapSecretStore;
+
+    fn input(ack_mode: AckMode) -> KafkaInput {
+        let brokers = match crate::secrets::resolve(&"localhost:9092".into(), &MapSecretStore::empty())
+        {
+            Ok(brokers) => brokers,
+            Err(e) => panic!("resolving a secret-free broker string should not fail: {e:#}"),
+        };
+        KafkaInput {
+            brokers,
+            topic: "test.events".to_string(),
+            group: "kayak".to_string(),
+            start_at: KafkaStartAt::Latest,
+            max_batch: 1,
+            envelope: Envelope::none(),
+            ack_mode,
+            consumer: None,
+        }
+    }
+
+    /// `on_receipt` is what this input has always done: the client stores and
+    /// commits an offset the moment it hands the record over, with no help
+    /// from `KafkaAck` needed.
+    #[test]
+    fn on_receipt_leaves_offset_storing_to_the_client() {
+        let config = input(AckMode::OnReceipt).client_config();
+        assert_eq!(config.get("enable.auto.commit"), Some("true"));
+        assert_eq!(config.get("enable.auto.offset.store"), None);
+    }
+
+    /// `on_delivery` turns automatic offset storing off, which is what makes
+    /// `KafkaAck::ack`'s explicit `store_offset` the only thing that advances
+    /// the committed offset.
+    #[test]
+    fn on_delivery_turns_off_automatic_offset_storing() {
+        let config = input(AckMode::OnDelivery).client_config();
+        assert_eq!(config.get("enable.auto.commit"), Some("true"));
+        assert_eq!(config.get("enable.auto.offset.store"), Some("false"));
     }
 }

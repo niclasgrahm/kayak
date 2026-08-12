@@ -36,14 +36,14 @@ use crate::inputs::envelope::{Envelope, Meta};
 use crate::inputs::http::Inboxes;
 use crate::secrets::{EnvStore, Resolved, SecretStore};
 use crate::state::{PipelineHandle, PipelineId, UiEvent};
-use kayak_core::config::{EnvelopeConfig, Secret};
+use kayak_core::config::{AckMode, EnvelopeConfig, Secret};
 use kayak_core::state::PipelineState;
 use serde_json::Value;
 use std::path::PathBuf;
 
 use kayak_core::connections::{
-    ClickhouseConnection, Connections, FileConnection, KafkaConnection, NatsConnection,
-    PostgresConnection, S3Connection,
+    ClickhouseConnection, Connections, FileConnection, KafkaConnection, MqttConnection,
+    NatsConnection, PostgresConnection, S3Connection,
 };
 
 /// Threaded through every `build()` call. It carries the pipeline map — needed
@@ -91,6 +91,10 @@ pub struct BuildCtx<'a> {
     /// metadata. `BuildInputConfig for InputConfig` sets it around the kind's
     /// build; nothing else should write it.
     pub envelope: Option<EnvelopeConfig>,
+    /// The ack mode the input currently being built should honour, from the
+    /// `ack` on its [`kayak_core::config::InputConfig`]. Rides here for the
+    /// same reason `envelope` does — see [`BuildCtx::ack_mode`].
+    pub ack_mode: Option<AckMode>,
     /// The live state buckets, as they stand at the moment this pipeline is
     /// built — the same kind of snapshot the connections are, and held by
     /// [`crate::state::AppState`] for the same reason.
@@ -136,6 +140,7 @@ impl<'a> BuildCtx<'a> {
             data_dir: None,
             inboxes: Arc::new(Inboxes::new()),
             envelope: None,
+            ack_mode: None,
             buckets: Arc::new(Buckets::new()),
             state: None,
         }
@@ -200,6 +205,10 @@ impl<'a> BuildCtx<'a> {
         Ok(self.connections.s3(id)?)
     }
 
+    pub fn mqtt_connection(&self, id: &str) -> anyhow::Result<&MqttConnection> {
+        Ok(self.connections.mqtt(id)?)
+    }
+
     /// The same, with the live state buckets a pipeline's `state` names.
     #[must_use]
     pub fn with_buckets(mut self, buckets: Arc<Buckets>) -> Self {
@@ -231,5 +240,13 @@ impl<'a> BuildCtx<'a> {
             statics.push(("connection", Value::String(connection.to_string())));
         }
         Envelope::new(self.envelope.as_ref(), statics)
+    }
+
+    /// The ack mode the input currently being built was configured with,
+    /// defaulting to [`AckMode::OnReceipt`] — the same default the config's
+    /// own `ack` field has.
+    #[must_use]
+    pub fn ack_mode(&self) -> AckMode {
+        self.ack_mode.unwrap_or(AckMode::OnReceipt)
     }
 }

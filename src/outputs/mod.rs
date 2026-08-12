@@ -7,6 +7,7 @@ pub mod clickhouse;
 pub mod columns;
 pub mod file;
 pub mod kafka;
+pub mod mqtt;
 pub mod nats;
 pub mod postgres;
 pub mod rotate;

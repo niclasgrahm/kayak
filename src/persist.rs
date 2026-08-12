@@ -256,6 +256,7 @@ mod tests {
                 }),
                 buffer: None,
                 envelope: None,
+                ack: None,
             })
             .collect();
         if inputs.is_empty() {
@@ -263,6 +264,7 @@ mod tests {
                 kind: InputKind::Dummy(DummyConfig { duration: 1, payload: None, amplitude: None, period: None }),
                 buffer: None,
                 envelope: None,
+                ack: None,
             });
         }
         Config {

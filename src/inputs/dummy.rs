@@ -1,7 +1,7 @@
 use crate::BuildCtx;
 use crate::inputs::BuildInput;
 use crate::inputs::InputSource;
-use crate::inputs::MessageBatch;
+use crate::inputs::ack::{self, Delivery};
 use crate::inputs::envelope::Envelope;
 use anyhow::Result;
 use chrono::Utc;
@@ -23,6 +23,8 @@ const DEFAULT_PERIOD: f64 = 60.0;
 
 impl BuildInput for DummyConfig {
     fn build(self, ctx: &mut BuildCtx) -> Result<Box<dyn InputSource>> {
+        // a dummy has nothing to acknowledge — it isn't reading from anywhere
+        ack::require_receipt_only(ctx.ack_mode(), "dummy")?;
         Ok(Box::new(DummyInput {
             interval: Duration::from_secs(self.duration),
             payload: self.payload.unwrap_or_default(),
@@ -49,7 +51,7 @@ pub struct DummyInput {
 
 #[async_trait::async_trait]
 impl InputSource for DummyInput {
-    async fn next(&mut self) -> Result<Arc<MessageBatch>> {
+    async fn next(&mut self) -> Result<Delivery> {
         tokio::time::sleep(self.interval).await;
         tracing::debug!("Emitting dummy message inside dummy input");
         let value = match self.payload {
@@ -66,7 +68,7 @@ impl InputSource for DummyInput {
         // a dummy message is always an object, so neither envelope shape can
         // fail to attach to it
         let message = self.envelope.apply(message, Vec::new()).unwrap_or(Value::Null);
-        Ok(Arc::new(vec![Arc::new(message)]))
+        Ok(Delivery::new(Arc::new(vec![Arc::new(message)])))
     }
 }
 
@@ -126,6 +128,38 @@ fn sentence<R: Rng + RngExt + ?Sized>(rng: &mut R) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use kayak_core::config::AckMode;
+    use std::collections::HashMap;
+
+    fn build(ack_mode: Option<AckMode>) -> Result<Box<dyn InputSource>> {
+        let mut pipelines = HashMap::new();
+        let (events, _rx) = tokio::sync::broadcast::channel(4);
+        let mut ctx = BuildCtx::new(&mut pipelines, "p".to_string(), events);
+        ctx.ack_mode = ack_mode;
+        DummyConfig {
+            duration: 1,
+            payload: None,
+            amplitude: None,
+            period: None,
+        }
+        .build(&mut ctx)
+    }
+
+    /// A dummy has nothing to read from at all, so it has nothing to
+    /// acknowledge either — but the default mode must still build.
+    #[test]
+    fn absent_and_on_receipt_both_build() {
+        assert!(build(None).is_ok());
+        assert!(build(Some(AckMode::OnReceipt)).is_ok());
+    }
+
+    #[test]
+    fn on_delivery_is_refused() {
+        let Err(err) = build(Some(AckMode::OnDelivery)) else {
+            panic!("a dummy input built with `ack: on_delivery`, which it cannot honour");
+        };
+        assert!(format!("{err:#}").contains("dummy"), "{err:#}");
+    }
 
     #[test]
     fn the_wave_starts_at_zero_and_peaks_a_quarter_period_in() {

@@ -216,6 +216,7 @@ mod tests {
             kind: InputKind::Dummy(DummyConfig { duration: 5, payload: None, amplitude: None, period: None }),
             buffer: None,
             envelope: None,
+            ack: None,
         }
     }
 
@@ -243,6 +244,7 @@ mod tests {
                     kind: InputKind::Dummy(DummyConfig { duration: 9, payload: None, amplitude: None, period: None }),
                     buffer: None,
                     envelope: None,
+                    ack: None,
                 },
             ],
             transforms: vec![],

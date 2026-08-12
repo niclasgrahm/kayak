@@ -7,12 +7,16 @@ use crate::events::publish;
 use crate::state::{PipelineId, UiEvent};
 use kayak_core::Stage;
 
+pub mod ack;
 pub mod dummy;
 pub mod envelope;
 pub mod http;
 pub mod kafka;
+pub mod mqtt;
 pub mod nats;
 pub mod pipeline;
+
+pub use ack::{Ack, Delivery};
 
 pub trait BuildInput {
     fn build(self, ctx: &mut BuildCtx) -> anyhow::Result<Box<dyn InputSource>>;
@@ -41,7 +45,7 @@ pub use kayak_core::MessageBatch;
 
 #[async_trait::async_trait]
 pub trait InputSource: Send + 'static {
-    async fn next(&mut self) -> anyhow::Result<Arc<MessageBatch>>;
+    async fn next(&mut self) -> anyhow::Result<Delivery>;
 }
 
 /// Reads from several inputs at once, handing on whichever produces first.
@@ -55,7 +59,7 @@ pub trait InputSource: Send + 'static {
 /// The channel holds one batch per input, so a slow consumer still pushes back
 /// on every input — the merge adds no unbounded buffering.
 pub struct Merged {
-    rx: tokio::sync::mpsc::Receiver<anyhow::Result<Arc<MessageBatch>>>,
+    rx: tokio::sync::mpsc::Receiver<anyhow::Result<Delivery>>,
     /// Inputs that haven't reported a failure yet. Each one reports exactly
     /// once, so this reaches zero exactly when the last input is gone.
     alive: usize,
@@ -111,7 +115,7 @@ impl Drop for Merged {
 
 #[async_trait::async_trait]
 impl InputSource for Merged {
-    async fn next(&mut self) -> Result<Arc<MessageBatch>> {
+    async fn next(&mut self) -> Result<Delivery> {
         loop {
             // None means every pump has stopped without us noticing, which the
             // counting below should have caught first
@@ -216,7 +220,7 @@ impl From<kayak_core::config::BufferConfig> for BufferKind {
 }
 
 pub struct Buffered {
-    rx: tokio::sync::mpsc::Receiver<anyhow::Result<Arc<MessageBatch>>>,
+    rx: tokio::sync::mpsc::Receiver<anyhow::Result<Delivery>>,
     kind: BufferKind,
 }
 
@@ -249,16 +253,25 @@ impl InputSource for Buffered {
     /// window to emit nothing. The cost — deliberate — is that windows are no
     /// longer aligned to a wall clock; the promise a buffer makes is a bound on
     /// how long a message waits, not a cadence.
-    async fn next(&mut self) -> Result<Arc<MessageBatch>> {
+    ///
+    /// One outer [`Delivery`] comes out of several inner ones going in, so its
+    /// ack is a [`ack::CombinedAck`] of everything folded into it — the run loop
+    /// only ever sees the one outer `Ack`, and acknowledging it acknowledges
+    /// every inner delivery this batch was gathered from.
+    async fn next(&mut self) -> Result<Delivery> {
         let (size, window) = self.kind.limits();
         let mut out: MessageBatch = Vec::new();
+        let mut acks: Vec<Box<dyn Ack>> = Vec::new();
         // only exists once the batch has something in it, so it also *is* the
         // "have we started" flag
         let mut window_closed: Option<std::pin::Pin<Box<tokio::time::Sleep>>> = None;
 
         loop {
             if size.is_some_and(|size| out.len() >= size) {
-                return Ok(Arc::new(out));
+                return Ok(Delivery::with_ack(
+                    Arc::new(out),
+                    Box::new(ack::CombinedAck(acks)),
+                ));
             }
 
             let received = match &mut window_closed {
@@ -266,17 +279,25 @@ impl InputSource for Buffered {
                 // saturated input, preferring the receive would starve the timer
                 Some(closed) => tokio::select! {
                     maybe = self.rx.recv() => maybe,
-                    () = closed.as_mut() => return Ok(Arc::new(out)),
+                    () = closed.as_mut() => return Ok(Delivery::with_ack(
+                        Arc::new(out),
+                        Box::new(ack::CombinedAck(acks)),
+                    )),
                 },
                 None => self.rx.recv().await,
             };
 
             match received {
                 // an empty batch upstream neither fills this one nor starts its
-                // clock — it is not a message
-                Some(Ok(batch)) if batch.is_empty() => {}
-                Some(Ok(batch)) => {
-                    out.extend(batch.iter().cloned());
+                // clock — it is not a message. Its own ack is not folded into
+                // the eventual outer one: nothing of it will ever reach an
+                // output, so there is nothing left to wait for.
+                Some(Ok(delivery)) if delivery.batch.is_empty() => {
+                    delivery.ack.ack();
+                }
+                Some(Ok(delivery)) => {
+                    out.extend(delivery.batch.iter().cloned());
+                    acks.push(delivery.ack);
                     if window_closed.is_none() {
                         window_closed = window.map(|w| Box::pin(tokio::time::sleep(w)));
                     }
@@ -289,7 +310,12 @@ impl InputSource for Buffered {
                 None if out.is_empty() => {
                     return Err(anyhow::anyhow!("the buffered input has stopped"));
                 }
-                None => return Ok(Arc::new(out)),
+                None => {
+                    return Ok(Delivery::with_ack(
+                        Arc::new(out),
+                        Box::new(ack::CombinedAck(acks)),
+                    ));
+                }
             }
         }
     }

@@ -133,15 +133,35 @@ picking up."
       boundary down explicitly (readme + guide), or decide it's worth chasing
       and scope what a distributed mode would need, starting at the input as
       the durability argument under "state" already says.
-- [ ] **the connector list is thin.** nats, kafka, http and two dummies in;
-      postgres, clickhouse, file, s3 and stdout out — against Benthos/Redpanda
-      Connect's 300+. The five-touchpoint recipe for adding a component (config
-      enum, `build()` arm, impl module, wire-format sample, doc comment) is
-      cheap by design, but "cheap to add" isn't "already there" for someone
-      evaluating whether kayak fits their stack today. Candidates worth
-      prioritising: MQTT and webhook-shaped inputs, a generic HTTP/webhook
-      output, and mysql — which, like clickhouse, is a `ColumnPlan` plus a DDL
-      renderer and nothing else.
+- [ ] **the connector list is thin.** nats, kafka, mqtt, http and two dummies
+      in; postgres, clickhouse, file, s3, mqtt and stdout out — against
+      Benthos/Redpanda Connect's 300+. The five-touchpoint recipe for adding a
+      component (config enum, `build()` arm, impl module, wire-format sample,
+      doc comment) is cheap by design, but "cheap to add" isn't "already
+      there" for someone evaluating whether kayak fits their stack today.
+      Candidates worth prioritising next, roughly in order of how common they
+      are: AMQP 0-9-1 (RabbitMQ — a **separate** connection kind from AMQP
+      1.0, which is a different protocol and client library and not yet worth
+      building against without a concrete target like Azure Service Bus or
+      Artemis), Redis, a generic HTTP/webhook output, and mysql — which, like
+      clickhouse, is a `ColumnPlan` plus a DDL renderer and nothing else.
+- [ ] **the mqtt connection has no TLS field.** Plaintext only — a real gap
+      for anything beyond a local broker, and deliberately not bolted on
+      without answering where a CA certificate lives first (a `Secret`? a path
+      resolved against `--data-dir`, the way the `file` connection's root is?
+      that's the `file` output's sandbox question again, one level up). See
+      the doc comment on `kayak_core::connections::MqttConnection`.
+- [ ] **`AckMode::OnDelivery` only reaches this pipeline's own outputs.** See
+      `src/inputs/ack.rs`'s module docs for the full reasoning — the short
+      version is that following an acknowledgement transitively through the
+      `pipeline`-input graph would couple an input's redelivery behaviour to
+      the liveness of pipelines several hops away, which nothing else in
+      kayak does. Worth a real design pass now that mqtt (and, later, AMQP)
+      have genuine redelivery semantics their client libraries hold the ack
+      open for, unlike kafka's timer-based commit: candidates are a second
+      `AckMode` for "wait for at least one output" (today it's
+      implicitly "all of them"), and a considered answer — not an accident —
+      to whether "delivered" should ever mean more than this pipeline.
 - [ ] **no license file.** Can't be adopted by anyone else without one,
       whatever the code quality. Pick one before calling anything past this
       point "released."

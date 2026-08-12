@@ -48,6 +48,35 @@ services:
           sleep 1
         done | /opt/kafka/bin/kafka-console-producer.sh --bootstrap-server kafka:29092 --topic test.events
 
+  # the mqtt broker the `mqtt_events` pipeline in example_config/config.json
+  # subscribes to. Anonymous access, plaintext only — the sample connection
+  # carries no credentials and kayak's mqtt connection has no TLS field yet
+  # (see docs/roadmap.md).
+  mqtt:
+    image: eclipse-mosquitto:2
+    ports:
+      - "1883:1883"
+    entrypoint: ["sh", "-c"]
+    command:
+      - |
+        printf 'listener 1883\nallow_anonymous true\n' > /mosquitto/config/mosquitto.conf
+        exec /docker-entrypoint.sh mosquitto -c /mosquitto/config/mosquitto.conf
+
+  # the mqtt equivalent of the nats and kafka publishers: one json log line a
+  # second on test.mqtt, which `mqtt_events` consumes at qos 1 with
+  # `ack: on_delivery` — see "acknowledgement modes" in the guide.
+  mqtt-publisher:
+    image: eclipse-mosquitto:2
+    depends_on:
+      - mqtt
+    entrypoint: ["sh", "-c"]
+    command:
+      - |
+        while true; do
+          mosquitto_pub -h mqtt -p 1883 -q 1 -t test.mqtt -m "{\"ts\":\"$(date -Iseconds)\",\"device\":\"sensor-1\",\"battery_pct\":$((RANDOM % 101))}"
+          sleep 1
+        done
+
   # the postgres output in example_config/config.json writes here. the password
   # is what ${POSTGRES_PASSWORD} has to resolve to — see
   # example_config/secrets.example.json

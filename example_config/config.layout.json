@@ -1,11 +1,4 @@
 {
   "version": 1,
-  "pipelines": {
-    "heartbeat": {
-      "x": 2640.0,
-      "y": 0.0,
-      "width": 400.0,
-      "height": 440.0
-    }
-  }
+  "pipelines": {}
 }

@@ -11,6 +11,10 @@ local-files:
 local-kafka:
   type: kafka
   brokers: localhost:9092
+local-mqtt:
+  type: mqtt
+  host: localhost
+  port: 1883
 local-nats:
   type: nats
   urls: nats://localhost:4222

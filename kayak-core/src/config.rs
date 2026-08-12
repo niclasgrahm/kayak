@@ -243,6 +243,58 @@ pub struct PipelineConfig {
     pub upstream: PipelineId,
 }
 
+/// The delivery guarantee to ask for on an mqtt subscribe or publish, spelled
+/// the way mqtt itself names them rather than as the bare numbers `0`/`1`/`2`.
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, JsonSchema, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum MqttQos {
+    /// fire and forget — the broker never resends and there is no ack of any
+    /// kind. The default.
+    AtMostOnce,
+    /// the broker resends until acknowledged, so a message may arrive more
+    /// than once. Required for an input's `ack: on_delivery` to mean anything
+    /// — see "acknowledgement modes" in the guide.
+    AtLeastOnce,
+    /// the broker's four-part handshake that guarantees exactly one delivery.
+    /// The most expensive of the three; reach for `at_least_once` unless a
+    /// duplicate would actually be wrong.
+    ExactlyOnce,
+}
+
+/// Subscribes to an mqtt topic — or a topic *filter*, since mqtt's `+` and `#`
+/// wildcards are valid here. Each message is parsed as JSON and emitted as a
+/// batch of one; a payload that isn't JSON is skipped with a warning rather
+/// than taking the pipeline down, the same rule every other input follows.
+///
+/// The connection is opened on the first read, and a stable client id is
+/// derived from the pipeline's id and this topic — not configurable, since
+/// nothing about it is a choice this pipeline needs to make and getting it
+/// wrong (two inputs sharing one id) silently drops one of them.
+#[derive(Clone, Debug, Deserialize, Serialize, JsonSchema)]
+#[schemars(title = "mqtt")]
+pub struct MqttConfig {
+    /// name of the mqtt connection to subscribe on — see "connections" in the
+    /// readme. The broker it points at is declared once, in the connections
+    /// file, rather than repeated in every pipeline that uses it.
+    #[schemars(extend("x-connection" = "mqtt"))]
+    pub connection: ConnectionId,
+    /// the topic, or topic filter, to subscribe to
+    pub topic: String,
+    /// the quality of service to subscribe with. Defaults to `at_most_once`.
+    /// `ack: on_delivery` needs at least `at_least_once` here — a QoS-0
+    /// subscription has nothing for it to acknowledge.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub qos: Option<MqttQos>,
+    /// most messages to put in one batch. Defaults to 1 — one message per
+    /// batch, which is what this input has always done.
+    ///
+    /// Raising it only ever coalesces messages that had *already arrived*: the
+    /// input still returns as soon as it has one, so a quiet topic is no
+    /// slower than it was.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_batch: Option<usize>,
+}
+
 /// How the messages in a file are laid out.
 ///
 /// Both are JSON — the difference is whether the file is one document or one
@@ -351,6 +403,29 @@ pub struct NatsOutputConfig {
     pub connection: ConnectionId,
     /// the subject to publish to
     pub subject: String,
+}
+
+/// Publishes every message in the batch to an mqtt topic, one message per
+/// publish.
+///
+/// A stable client id is derived from the pipeline's id and this topic, the
+/// same as the mqtt input — not configurable, for the same reason.
+#[derive(Clone, Debug, Deserialize, Serialize, JsonSchema)]
+#[schemars(title = "mqtt")]
+pub struct MqttOutputConfig {
+    /// name of the mqtt connection to publish on — see "connections" in the
+    /// readme.
+    #[schemars(extend("x-connection" = "mqtt"))]
+    pub connection: ConnectionId,
+    /// the topic to publish to
+    pub topic: String,
+    /// the quality of service to publish with. Defaults to `at_most_once`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub qos: Option<MqttQos>,
+    /// ask the broker to keep this as the topic's *retained* message, handed
+    /// to every future subscriber immediately on subscribe. Defaults to false.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub retain: Option<bool>,
 }
 
 /// Inserts every message in the batch into a postgres table, one row per
@@ -785,6 +860,7 @@ pub enum InputKind {
     Kafka(KafkaConfig),
     Nats(NatsConfig),
     Pipeline(PipelineConfig),
+    Mqtt(MqttConfig),
 }
 /// How an input's messages are gathered into batches before the transforms see
 /// them.
@@ -924,6 +1000,35 @@ pub struct InputConfig {
     /// input kind. Omit it and messages are passed on exactly as they arrive.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub envelope: Option<EnvelopeConfig>,
+
+    /// when this input tells its broker a message is done with. Available on
+    /// every input kind in the schema, but only honoured by ones with a
+    /// broker-side notion of "received" vs "delivered" of their own (`kafka`,
+    /// for now) — an input with nothing to acknowledge refuses to build rather
+    /// than silently treating this as `on_receipt`. Defaults to `on_receipt`,
+    /// which is what every input has always done. See "acknowledgement modes"
+    /// in the guide.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ack: Option<AckMode>,
+}
+
+/// When an input acknowledges a message to its broker — see "acknowledgement
+/// modes" in the guide for the reasoning and, importantly, its current scope.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize, Serialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum AckMode {
+    /// Acknowledge as soon as the message arrives, before any transform or
+    /// output has touched it. The default, and the behaviour every input has
+    /// always had — a crash between receipt and output can lose the message.
+    OnReceipt,
+    /// Acknowledge once the message has left *this* pipeline: every output
+    /// this pipeline owns has returned, successfully or not, and every
+    /// downstream pipeline fed from here has accepted it into its inbox. A
+    /// failing output does not hold up the acknowledgement — see the
+    /// architecture notes on why that is the current line, not a permanent
+    /// one. Not yet propagated any further than this pipeline: a downstream
+    /// pipeline's own outputs are not waited on.
+    OnDelivery,
 }
 /////// TRANSFORM
 #[derive(Clone, Debug, Deserialize, Serialize, JsonSchema)]
@@ -955,6 +1060,7 @@ pub enum OutputKind {
     Nats(NatsOutputConfig),
     Postgres(PostgresOutputConfig),
     Clickhouse(ClickhouseOutputConfig),
+    Mqtt(MqttOutputConfig),
 }
 #[derive(Clone, Debug, Deserialize, Serialize, JsonSchema)]
 pub struct OutputConfig {
@@ -1002,7 +1108,8 @@ impl Config {
                 InputKind::Dummy(_)
                 | InputKind::Http(_)
                 | InputKind::Kafka(_)
-                | InputKind::Nats(_) => None,
+                | InputKind::Nats(_)
+                | InputKind::Mqtt(_) => None,
             })
             .collect()
     }
@@ -1022,6 +1129,7 @@ impl Config {
         let inputs = self.inputs.iter().filter_map(|input| match &input.kind {
             InputKind::Kafka(c) => Some(&c.connection),
             InputKind::Nats(c) => Some(&c.connection),
+            InputKind::Mqtt(c) => Some(&c.connection),
             InputKind::Dummy(_) | InputKind::Http(_) | InputKind::Pipeline(_) => None,
         });
         let outputs = self.outputs.iter().filter_map(|output| match &output.kind {
@@ -1031,6 +1139,7 @@ impl Config {
             OutputKind::Clickhouse(c) => Some(&c.connection),
             OutputKind::File(c) => Some(&c.connection),
             OutputKind::S3(c) => Some(&c.connection),
+            OutputKind::Mqtt(c) => Some(&c.connection),
             OutputKind::Stdout(_) => None,
         });
         inputs.chain(outputs).collect()

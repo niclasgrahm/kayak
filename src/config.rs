@@ -28,19 +28,22 @@ impl BuildInputConfig for InputKind {
             InputKind::Kafka(c) => c.build(ctx),
             InputKind::Nats(c) => c.build(ctx),
             InputKind::Pipeline(c) => c.build(ctx),
+            InputKind::Mqtt(c) => c.build(ctx),
         }
     }
 }
 
 impl BuildInputConfig for InputConfig {
     fn build(self, ctx: &mut BuildCtx) -> Result<Box<dyn InputSource>> {
-        // `envelope` is the wrapper's field, but only the input kind knows what
-        // there is to attach — so it goes onto the context for the length of
-        // that build and comes straight back off, rather than leaking into the
-        // next input of the same pipeline.
-        let previous = std::mem::replace(&mut ctx.envelope, self.envelope);
+        // `envelope` and `ack` are the wrapper's fields, but only the input
+        // kind knows what to do with either — so both go onto the context for
+        // the length of that build and come straight back off, rather than
+        // leaking into the next input of the same pipeline.
+        let previous_envelope = std::mem::replace(&mut ctx.envelope, self.envelope);
+        let previous_ack_mode = std::mem::replace(&mut ctx.ack_mode, self.ack);
         let built = self.kind.build(ctx);
-        ctx.envelope = previous;
+        ctx.envelope = previous_envelope;
+        ctx.ack_mode = previous_ack_mode;
         let inner = built?;
         Ok(match self.buffer {
             Some(buffer) => Box::new(Buffered::new(inner, BufferKind::from(buffer))),
@@ -82,6 +85,7 @@ impl BuildOutputConfig for OutputConfig {
             OutputKind::Nats(c) => c.build(ctx),
             OutputKind::Postgres(c) => c.build(ctx),
             OutputKind::Clickhouse(c) => c.build(ctx),
+            OutputKind::Mqtt(c) => c.build(ctx),
         }
     }
 }

@@ -63,6 +63,15 @@ fn input_samples() -> Vec<(&'static str, Value)> {
                 "start_at": "latest"
             }),
         ),
+        (
+            "mqtt",
+            json!({
+                "type": "mqtt",
+                "connection": "local-mqtt",
+                "topic": "sensors/+/temperature",
+                "qos": "at_least_once"
+            }),
+        ),
     ]
 }
 
@@ -215,6 +224,16 @@ fn output_samples() -> Vec<(&'static str, Value)> {
                 "on_extra_fields": "error"
             }),
         ),
+        (
+            "mqtt",
+            json!({
+                "type": "mqtt",
+                "connection": "local-mqtt",
+                "topic": "out.events",
+                "qos": "at_least_once",
+                "retain": false
+            }),
+        ),
     ]
 }
 
@@ -264,6 +283,16 @@ fn connection_samples() -> Vec<(&'static str, Value)> {
                 "endpoint": "http://localhost:9000",
                 "region": "us-east-1",
                 "allow_http": true
+            }),
+        ),
+        (
+            "mqtt",
+            json!({
+                "type": "mqtt",
+                "host": "localhost",
+                "port": 1883,
+                "username": "kayak",
+                "password": "${MQTT_PASSWORD}"
             }),
         ),
     ]

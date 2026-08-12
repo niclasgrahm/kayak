@@ -2955,6 +2955,7 @@ mod tests {
             }),
             buffer: None,
             envelope: None,
+            ack: None,
         }
     }
 
@@ -2964,6 +2965,7 @@ mod tests {
             kind: InputKind::Dummy(DummyConfig { duration: 1, payload: None, amplitude: None, period: None }),
             buffer: None,
             envelope: None,
+            ack: None,
         }
     }
 

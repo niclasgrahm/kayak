@@ -2,7 +2,11 @@ use std::sync::Arc;
 
 use crate::{
     BuildCtx,
-    inputs::{BuildInput, InputSource, MessageBatch, envelope::Envelope},
+    inputs::{
+        BuildInput, InputSource, MessageBatch,
+        ack::{self, Delivery},
+        envelope::Envelope,
+    },
 };
 use anyhow::Result;
 use anyhow::anyhow;
@@ -12,6 +16,11 @@ use tokio::sync::mpsc;
 
 impl BuildInput for PipelineConfig {
     fn build(self, ctx: &mut BuildCtx) -> Result<Box<dyn InputSource>> {
+        // the upstream pipeline already decided this batch was "delivered" the
+        // moment its `tx.send` into this input's channel returned `Ok` — see
+        // the `ack` module docs — so there is nothing further for *this* hop
+        // to acknowledge
+        ack::require_receipt_only(ctx.ack_mode(), "pipeline")?;
         let upstream_handle = ctx
             .pipelines
             .get(&self.upstream)
@@ -40,7 +49,7 @@ pub struct PipelineInput {
 
 #[async_trait::async_trait]
 impl InputSource for PipelineInput {
-    async fn next(&mut self) -> Result<Arc<MessageBatch>> {
+    async fn next(&mut self) -> Result<Delivery> {
         // recv() only returns None once every sender is gone, i.e. the upstream
         // pipeline was deleted or died. Nothing more will ever arrive.
         let batch = self
@@ -50,7 +59,7 @@ impl InputSource for PipelineInput {
             .ok_or_else(|| anyhow!("upstream pipeline '{}' is gone", self.upstream))?;
 
         if !self.envelope.is_enabled() {
-            return Ok(batch);
+            return Ok(Delivery::new(batch));
         }
         let upstream = Value::String(self.upstream.clone());
         let enveloped = batch
@@ -69,6 +78,54 @@ impl InputSource for PipelineInput {
                 out.map(Arc::new)
             })
             .collect();
-        Ok(Arc::new(enveloped))
+        Ok(Delivery::new(Arc::new(enveloped)))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::pipeline::Pipeline;
+    use crate::state::PipelineHandle;
+    use kayak_core::config::AckMode;
+    use std::collections::HashMap;
+
+    fn build(ack_mode: Option<AckMode>) -> Result<Box<dyn InputSource>> {
+        let mut pipelines = HashMap::new();
+        let (events, _rx) = tokio::sync::broadcast::channel(4);
+        let upstream = match Pipeline::new(crate::testing::stub_config("upstream")) {
+            Ok(p) => Arc::new(p),
+            Err(e) => panic!("building the stub upstream pipeline: {e:#}"),
+        };
+        pipelines.insert(
+            "upstream".to_string(),
+            PipelineHandle {
+                join_handle: tokio::spawn(async {}),
+                shared: upstream,
+            },
+        );
+        let mut ctx = BuildCtx::new(&mut pipelines, "p".to_string(), events);
+        ctx.ack_mode = ack_mode;
+        PipelineConfig {
+            upstream: "upstream".to_string(),
+        }
+        .build(&mut ctx)
+    }
+
+    /// The upstream already decided this batch was delivered the moment its
+    /// own `tx.send` succeeded, so this hop has nothing further to
+    /// acknowledge — but the default mode must still build.
+    #[tokio::test]
+    async fn absent_and_on_receipt_both_build() {
+        assert!(build(None).is_ok());
+        assert!(build(Some(AckMode::OnReceipt)).is_ok());
+    }
+
+    #[tokio::test]
+    async fn on_delivery_is_refused() {
+        let Err(err) = build(Some(AckMode::OnDelivery)) else {
+            panic!("a pipeline input built with `ack: on_delivery`, which it cannot honour");
+        };
+        assert!(format!("{err:#}").contains("pipeline"), "{err:#}");
     }
 }

@@ -56,6 +56,31 @@ pub struct NatsConnection {
     pub urls: Secret,
 }
 
+/// An mqtt broker.
+///
+/// Plaintext TCP only for now — there is no TLS field here yet, and that is a
+/// deliberate gap (see `docs/roadmap.md`) rather than an oversight: a CA
+/// certificate needs somewhere to live (a `Secret`? a file path resolved
+/// against `--data-dir`?) and that question deserves its own pass rather than
+/// a field bolted on to get this connection working.
+#[derive(Clone, Debug, Deserialize, Serialize, JsonSchema, PartialEq, Eq)]
+#[schemars(title = "mqtt")]
+pub struct MqttConnection {
+    /// broker hostname, e.g. `localhost`
+    pub host: String,
+    /// broker port. Defaults to 1883, mqtt's conventional plaintext port.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub port: Option<u16>,
+    /// username to connect with, if the broker requires one. Must be set
+    /// together with `password` or not at all.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub username: Option<Secret>,
+    /// that username's password. May reference secrets as `${NAME}` — see
+    /// "secrets" in the readme, and prefer a reference to a literal here.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub password: Option<Secret>,
+}
+
 /// A postgres database, as one role connects to it.
 ///
 /// The database and the role are part of the connection; the *table* is not —
@@ -201,6 +226,7 @@ pub enum ConnectionKind {
     Clickhouse(ClickhouseConnection),
     File(FileConnection),
     S3(S3Connection),
+    Mqtt(MqttConnection),
 }
 
 impl ConnectionKind {
@@ -215,6 +241,7 @@ impl ConnectionKind {
             Self::Clickhouse(_) => CLICKHOUSE,
             Self::File(_) => FILE,
             Self::S3(_) => S3,
+            Self::Mqtt(_) => MQTT,
         }
     }
 }
@@ -225,6 +252,7 @@ pub const POSTGRES: &str = "postgres";
 pub const CLICKHOUSE: &str = "clickhouse";
 pub const FILE: &str = "file";
 pub const S3: &str = "s3";
+pub const MQTT: &str = "mqtt";
 
 /// What `POST /api/connections` takes: a name, and the connection itself
 /// flattened alongside it.
@@ -339,6 +367,13 @@ impl Connections {
         match self.lookup(id, S3)? {
             ConnectionKind::S3(c) => Ok(c),
             other => Err(ConnectionError::wrong_kind(id, S3, other)),
+        }
+    }
+
+    pub fn mqtt(&self, id: &str) -> Result<&MqttConnection, ConnectionError> {
+        match self.lookup(id, MQTT)? {
+            ConnectionKind::Mqtt(c) => Ok(c),
+            other => Err(ConnectionError::wrong_kind(id, MQTT, other)),
         }
     }
 

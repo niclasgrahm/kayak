@@ -108,6 +108,20 @@ pub fn for_input(kind: &str) -> Option<Vec<MetaFieldDoc>> {
             ),
             MetaFieldDoc::new("headers", "nats headers, as an object of arrays"),
         ],
+        "mqtt" => vec![
+            MetaFieldDoc::new("connection", "name of the connection it was received on"),
+            MetaFieldDoc::new(
+                "topic",
+                "the concrete topic this message arrived on — useful when the \
+                 input subscribes to a filter containing `+` or `#` wildcards",
+            ),
+            MetaFieldDoc::new("qos", "the quality of service it was delivered at"),
+            MetaFieldDoc::new(
+                "retain",
+                "whether the broker sent this as a topic's retained message \
+                 rather than a live publish",
+            ),
+        ],
         "pipeline" => vec![MetaFieldDoc::new(
             "upstream",
             "id of the pipeline this batch came from. Note that metadata \

@@ -829,9 +829,9 @@ mod tests {
     fn required_fields_come_first_in_declaration_order() {
         assert_eq!(
             field_names(&component("nats")),
-            // `buffer` and `envelope` are `InputConfig`'s rather than the nats
-            // input's, and are appended after the kind's own fields
-            ["connection", "subject", "max_batch", "buffer", "envelope"]
+            // `buffer`, `envelope` and `ack` are `InputConfig`'s rather than
+            // the nats input's, and are appended after the kind's own fields
+            ["connection", "subject", "max_batch", "ack", "buffer", "envelope"]
         );
     }
 
@@ -1103,7 +1103,7 @@ mod tests {
             .collect();
         assert_eq!(
             kinds,
-            ["kafka", "nats", "postgres", "clickhouse", "file", "s3"]
+            ["kafka", "nats", "postgres", "clickhouse", "file", "s3", "mqtt"]
         );
 
         // a file connection is the odd one out — a directory rather than a

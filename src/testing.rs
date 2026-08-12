@@ -16,6 +16,7 @@ use kayak_core::config::{
 };
 use serde_json::Value;
 
+use crate::inputs::ack::Delivery;
 use crate::inputs::{InputSource, MessageBatch};
 use crate::outputs::OutputDestination;
 use crate::secrets::SecretStore;
@@ -100,9 +101,9 @@ impl ScriptedInput {
 
 #[async_trait::async_trait]
 impl InputSource for ScriptedInput {
-    async fn next(&mut self) -> Result<Arc<MessageBatch>> {
+    async fn next(&mut self) -> Result<Delivery> {
         match self.batches.next() {
-            Some(b) => Ok(b),
+            Some(b) => Ok(Delivery::new(b)),
             None => match self.when_exhausted {
                 WhenExhausted::Pend => std::future::pending().await,
                 WhenExhausted::Fail => Err(anyhow!("scripted input exhausted")),
@@ -130,9 +131,60 @@ impl Ticking {
 
 #[async_trait::async_trait]
 impl InputSource for Ticking {
-    async fn next(&mut self) -> Result<Arc<MessageBatch>> {
+    async fn next(&mut self) -> Result<Delivery> {
         tokio::time::sleep(self.interval).await;
-        Ok(Arc::new(vec![Arc::new(self.message.clone())]))
+        Ok(Delivery::new(Arc::new(vec![Arc::new(self.message.clone())])))
+    }
+}
+
+/// An [`Ack`] that counts how many times it fired, shared with the test that
+/// built it — for tests about *whether* and *how many times* the run loop
+/// acknowledges a delivery, not about what acknowledging it does.
+#[derive(Clone, Default)]
+pub struct CountingAck(Arc<std::sync::atomic::AtomicUsize>);
+
+impl CountingAck {
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    #[must_use]
+    pub fn count(&self) -> usize {
+        self.0.load(std::sync::atomic::Ordering::SeqCst)
+    }
+}
+
+impl crate::inputs::Ack for CountingAck {
+    fn ack(&self) {
+        self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    }
+}
+
+/// An input that yields one batch carrying a given [`Ack`], then fails — the
+/// same "one batch, then done" shape [`ScriptedInput`] with
+/// [`WhenExhausted::Fail`] gives, but able to carry a real acknowledgement
+/// rather than [`Delivery::new`]'s [`crate::inputs::ack::NoAck`].
+pub struct AckingInput {
+    delivery: Option<(Arc<MessageBatch>, CountingAck)>,
+}
+
+impl AckingInput {
+    #[must_use]
+    pub fn new(batch: Arc<MessageBatch>, ack: CountingAck) -> Self {
+        Self {
+            delivery: Some((batch, ack)),
+        }
+    }
+}
+
+#[async_trait::async_trait]
+impl InputSource for AckingInput {
+    async fn next(&mut self) -> Result<Delivery> {
+        match self.delivery.take() {
+            Some((batch, ack)) => Ok(Delivery::with_ack(batch, Box::new(ack))),
+            None => Err(anyhow!("acking input exhausted")),
+        }
     }
 }
 
@@ -283,6 +335,18 @@ impl Transform for FailOnNth {
     }
 }
 
+/// A transform that drops every batch it sees — the test-double equivalent of
+/// a `filter` or a reducer's `group_by` finding nothing to keep, for tests
+/// about what happens to a delivery whose batch never reaches an output.
+pub struct DropEverything;
+
+#[async_trait::async_trait]
+impl Transform for DropEverything {
+    async fn apply(&mut self, _message_batch: Arc<MessageBatch>) -> Result<Vec<Arc<MessageBatch>>> {
+        Ok(vec![])
+    }
+}
+
 /// A minimal valid `Config`. `Pipeline` only reads the config for its id and for
 /// `/api/pipelines` output, so tests that drive a runtime directly can use this
 /// regardless of which components they actually wire up.
@@ -294,6 +358,7 @@ pub fn stub_config(id: &str) -> Config {
             kind: InputKind::Dummy(DummyConfig { duration: 3600, payload: None, amplitude: None, period: None }),
             buffer: None,
             envelope: None,
+            ack: None,
         }],
         transforms: Vec::<TransformConfig>::new(),
         outputs: vec![OutputConfig {

@@ -7,10 +7,10 @@ flows between them, and a log and throughput chart on each one.
 
 ![the state tab, showing a running graph and a bucket inspector](state-tab.png)
 
-Pipelines are configured, not coded: nats, kafka, http and a couple of dummy
-inputs; transforms for filtering, reducing/aggregating, reshaping fields,
-buffering, splitting and remembering state across messages; outputs to
-postgres, ClickHouse, files, S3-compatible object storage and stdout. Messages
+Pipelines are configured, not coded: nats, kafka, mqtt, http and a couple of
+dummy inputs; transforms for filtering, reducing/aggregating, reshaping
+fields, buffering, splitting and remembering state across messages; outputs to
+postgres, ClickHouse, files, S3-compatible object storage, mqtt and stdout. Messages
 are plain JSON the whole way through — no schema to define up front. A pipeline can feed
 another pipeline, so the graph is a DAG, not just a list of independent jobs.
 
@@ -34,7 +34,7 @@ happening, not just trust that it is.
 You'll need [Rust](https://rustup.rs), [`just`](https://github.com/casey/just),
 and [`cargo-leptos`](https://github.com/leptos-rs/cargo-leptos)
 (`cargo install cargo-leptos`). Docker is optional — needed only for the nats,
-kafka, database and S3 pipelines in the sample graph.
+kafka, mqtt, database and S3 pipelines in the sample graph.
 
 ```bash
 just dev
@@ -46,8 +46,8 @@ first run. Sign in as `niclas` / `hunter2` (admin) or `viewer` / `hunter2`
 (read-only) — the sample runs with authentication on by default, so both
 sides of the login are there to look at.
 
-To see every pipeline in the sample actually flowing (nats, kafka, postgres,
-ClickHouse, S3), bring up the systems it talks to first:
+To see every pipeline in the sample actually flowing (nats, kafka, mqtt,
+postgres, ClickHouse, S3), bring up the systems it talks to first:
 
 ```bash
 docker compose up

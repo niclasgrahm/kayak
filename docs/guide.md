@@ -598,6 +598,50 @@ and nats inputs never *waits*: it takes one message and drains whatever has
 already arrived, so a quiet topic still yields batches of one. And the `buffer`
 *transform* is a different component in a different place.
 
+### acknowledging an input
+
+`ack` sits beside `buffer` and `envelope` on any input and decides when it
+tells its broker a message is done with:
+
+```jsonc
+{"ack": "on_receipt"}   // the default — before any transform or output sees it
+{"ack": "on_delivery"}  // after this pipeline has finished with it
+```
+
+`on_receipt` is what every input has always done, and it is what you get by
+leaving `ack` out. It's cheap and it's what a broker with no other option
+gives you anyway — but a crash between receipt and output can lose the
+message, because the broker was told to forget it before this pipeline had
+done anything at all.
+
+`on_delivery` acknowledges once the batch has cleared **this pipeline**:
+every output it owns has been sent the batch (whether or not that send
+succeeded — see below), and every downstream pipeline fed from it has
+accepted the handoff into its inbox. It does **not** follow the message any
+further than that. If pipeline A feeds pipeline B and B's own output fails,
+A has already acknowledged — "delivered" means "this pipeline is done with
+it," not "the whole graph is done with it." Chasing a message through the
+graph would tie one input's redelivery to the health of pipelines several
+hops away that can be edited or deleted independently of it, which is a
+guarantee kayak doesn't make.
+
+A failing output does not withhold the acknowledgement either way. `on_delivery`
+answers "did this pipeline attempt every send," not "did every sink succeed" —
+a stronger per-output guarantee is a real idea for later, not something this
+mode already gives you.
+
+Only inputs with a broker-side notion of "received" vs "delivered" can honour
+`on_delivery` — today that's **kafka** (it turns off the client's automatic
+offset store and stores the offset itself once the batch clears the pipeline)
+and **mqtt at qos `at_least_once` or `exactly_once`** (the client is told to
+leave acking to us, and the broker holds the message open for redelivery until
+it hears back). An mqtt subscription at qos `at_most_once` has no redelivery
+at all, so `on_delivery` is refused there too — the same rule mqtt's own qos
+already draws. Every other input — `nats`, `dummy`, `http`, `pipeline` —
+refuses to build if you ask it for `on_delivery`, rather than silently
+behaving like `on_receipt`. The full reasoning, including why the scope stops
+at this pipeline's own outputs, lives in `src/inputs/ack.rs`'s module docs.
+
 ## message metadata
 
 An input knows things about a message that the message doesn't say: the nats

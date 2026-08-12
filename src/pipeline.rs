@@ -5,6 +5,7 @@ use crate::config::BuildOutputConfig;
 use crate::config::BuildTransformConfig;
 use crate::inputs::InputSource;
 use crate::inputs::MessageBatch;
+use crate::inputs::ack::Delivery;
 use crate::outputs::OutputDestination;
 use crate::state::PipelineId;
 use crate::state::UiEvent;
@@ -48,7 +49,7 @@ pub struct PipelineView<'a> {
     config: &'a Config,
 }
 
-async fn next_input_message(input: &mut Box<dyn InputSource>) -> Result<Arc<MessageBatch>> {
+async fn next_input_message(input: &mut Box<dyn InputSource>) -> Result<Delivery> {
     input.next().await
 }
 
@@ -287,7 +288,7 @@ impl PipelineRuntime {
         let mut pass = 0u64;
         let mut throttle = UiThrottle::new(self.pass_interval);
         loop {
-            let next_msg = match select! {
+            let delivery = match select! {
                 // `biased` so cancellation always wins a tie. Tearing the graph
                 // down cancels every pipeline and *then* drops the upstreams,
                 // so a downstream is woken with both its cancellation and an
@@ -343,13 +344,19 @@ impl PipelineRuntime {
             if reported {
                 let skipped = throttle.take_skipped(Stage::Input);
                 publish(&self.events, || {
-                    UiEvent::batch(self.shared.id.clone(), Stage::Input, &next_msg, skipped)
+                    UiEvent::batch(self.shared.id.clone(), Stage::Input, &delivery, skipped)
                         .seq(pass)
                 });
             } else if watching {
-                throttle.skip(Stage::Input, next_msg.len());
+                throttle.skip(Stage::Input, delivery.len());
             }
-            let batches = self.apply_transforms(next_msg, pass, &mut throttle).await;
+            // Taken apart here rather than carried whole: the transforms and
+            // outputs below only ever want the messages, and holding onto
+            // `ack` by name is what lets it be acknowledged once, after all of
+            // them, regardless of how this pass turns out — see the `ack`
+            // module docs for what "delivered" means and its current scope.
+            let Delivery { batch, ack } = delivery;
+            let batches = self.apply_transforms(batch, pass, &mut throttle).await;
 
             // What the transforms produced, reported before the outputs are
             // given it: the log is a record of what passed through this
@@ -391,6 +398,19 @@ impl PipelineRuntime {
                     }
                 }
             }
+            // Every output and every downstream handoff for this pass has now
+            // been *attempted* — not necessarily succeeded, and that's the
+            // deliberate line: a failing output does not withhold the
+            // acknowledgement, because "delivered" here means "this pipeline
+            // finished handling the batch", not "every sink has it". See the
+            // `ack` module docs for the reasoning and the current scope.
+            //
+            // Firing unconditionally (a filtered-out message produces zero
+            // `batches`, so the loop above never ran) is deliberate too: a
+            // message a `filter` or a reducer's `group_by` legitimately
+            // dropped was still correctly processed, and there is nothing left
+            // to wait for.
+            ack.ack();
         }
         // However we got out of the loop — cancelled, or an input that died —
         // an output holding an unfinished part gets its one chance to land it.
