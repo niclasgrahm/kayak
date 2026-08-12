@@ -25,6 +25,9 @@ local-postgres:
   user: kayak
   password: ${POSTGRES_PASSWORD}
   port: 5432
+local-redis:
+  type: redis
+  url: redis://localhost:6379
 local-s3:
   type: s3
   bucket: events

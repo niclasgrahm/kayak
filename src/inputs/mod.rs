@@ -15,6 +15,7 @@ pub mod kafka;
 pub mod mqtt;
 pub mod nats;
 pub mod pipeline;
+pub mod redis;
 
 pub use ack::{Ack, Delivery};
 

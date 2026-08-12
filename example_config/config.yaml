@@ -50,6 +50,16 @@ pipelines:
   transforms: []
   outputs:
   - type: stdout
+- id: redis_events
+  inputs:
+  - type: redis
+    connection: local-redis
+    channel: test.redis
+    envelope:
+      type: merge
+  transforms: []
+  outputs:
+  - type: stdout
 - id: sensors
   inputs:
   - type: nats
@@ -113,6 +123,15 @@ pipelines:
   - type: stdout
   state:
     bucket: heartbeat_peaks
+- id: heartbeat_to_redis
+  inputs:
+  - type: pipeline
+    upstream: heartbeat
+  transforms: []
+  outputs:
+  - type: redis
+    connection: local-redis
+    channel: heartbeat
 - id: heartbeat_shaped
   inputs:
   - type: pipeline

@@ -72,6 +72,10 @@ fn input_samples() -> Vec<(&'static str, Value)> {
                 "qos": "at_least_once"
             }),
         ),
+        (
+            "redis",
+            json!({"type": "redis", "connection": "local-redis", "channel": "test.channel"}),
+        ),
     ]
 }
 
@@ -234,6 +238,10 @@ fn output_samples() -> Vec<(&'static str, Value)> {
                 "retain": false
             }),
         ),
+        (
+            "redis",
+            json!({"type": "redis", "connection": "local-redis", "channel": "out.channel"}),
+        ),
     ]
 }
 
@@ -294,6 +302,10 @@ fn connection_samples() -> Vec<(&'static str, Value)> {
                 "username": "kayak",
                 "password": "${MQTT_PASSWORD}"
             }),
+        ),
+        (
+            "redis",
+            json!({"type": "redis", "url": "redis://localhost:6379"}),
         ),
     ]
 }

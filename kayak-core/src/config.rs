@@ -85,6 +85,37 @@ pub struct NatsConfig {
     pub max_batch: Option<usize>,
 }
 
+/// Subscribes to a redis channel. Each message is parsed as JSON and emitted
+/// as a batch of one; a payload that isn't JSON is skipped with a warning
+/// rather than taking the pipeline down. The connection is opened on the
+/// first read.
+///
+/// Plain `SUBSCRIBE`, not `PSUBSCRIBE` — a channel name is exact, the same
+/// choice the nats input makes for a subject with no wildcard. Redis pub/sub
+/// has no broker-side redelivery of any kind: an unsubscribed client simply
+/// misses whatever was published while it was gone, and there is nothing an
+/// ack could hold open — the same limitation `NatsConfig` has, for the same
+/// reason.
+#[derive(Clone, Debug, Deserialize, Serialize, JsonSchema)]
+#[schemars(title = "redis")]
+pub struct RedisConfig {
+    /// name of the redis connection to subscribe on — see "connections" in
+    /// the readme. The server it points at is declared once, in the
+    /// connections file, rather than repeated in every pipeline that uses it.
+    #[schemars(extend("x-connection" = "redis"))]
+    pub connection: ConnectionId,
+    /// the channel to subscribe to
+    pub channel: String,
+    /// most messages to put in one batch. Defaults to 1 — one message per
+    /// batch, which is what this input has always done.
+    ///
+    /// Raising it only ever coalesces messages that had *already arrived*: the
+    /// input still returns as soon as it has one, so a quiet channel is no
+    /// slower than it was.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_batch: Option<usize>,
+}
+
 /// Consumes JSON messages from a kafka topic, each emitted as a batch of one.
 ///
 /// A payload that isn't JSON is skipped with a warning rather than taking the
@@ -403,6 +434,19 @@ pub struct NatsOutputConfig {
     pub connection: ConnectionId,
     /// the subject to publish to
     pub subject: String,
+}
+
+/// Publishes every message in the batch to a redis channel, one message per
+/// publish.
+#[derive(Clone, Debug, Deserialize, Serialize, JsonSchema)]
+#[schemars(title = "redis")]
+pub struct RedisOutputConfig {
+    /// name of the redis connection to publish on — see "connections" in the
+    /// readme.
+    #[schemars(extend("x-connection" = "redis"))]
+    pub connection: ConnectionId,
+    /// the channel to publish to
+    pub channel: String,
 }
 
 /// Publishes every message in the batch to an mqtt topic, one message per
@@ -861,6 +905,7 @@ pub enum InputKind {
     Nats(NatsConfig),
     Pipeline(PipelineConfig),
     Mqtt(MqttConfig),
+    Redis(RedisConfig),
 }
 /// How an input's messages are gathered into batches before the transforms see
 /// them.
@@ -1061,6 +1106,7 @@ pub enum OutputKind {
     Postgres(PostgresOutputConfig),
     Clickhouse(ClickhouseOutputConfig),
     Mqtt(MqttOutputConfig),
+    Redis(RedisOutputConfig),
 }
 #[derive(Clone, Debug, Deserialize, Serialize, JsonSchema)]
 pub struct OutputConfig {
@@ -1109,7 +1155,8 @@ impl Config {
                 | InputKind::Http(_)
                 | InputKind::Kafka(_)
                 | InputKind::Nats(_)
-                | InputKind::Mqtt(_) => None,
+                | InputKind::Mqtt(_)
+                | InputKind::Redis(_) => None,
             })
             .collect()
     }
@@ -1130,6 +1177,7 @@ impl Config {
             InputKind::Kafka(c) => Some(&c.connection),
             InputKind::Nats(c) => Some(&c.connection),
             InputKind::Mqtt(c) => Some(&c.connection),
+            InputKind::Redis(c) => Some(&c.connection),
             InputKind::Dummy(_) | InputKind::Http(_) | InputKind::Pipeline(_) => None,
         });
         let outputs = self.outputs.iter().filter_map(|output| match &output.kind {
@@ -1140,6 +1188,7 @@ impl Config {
             OutputKind::File(c) => Some(&c.connection),
             OutputKind::S3(c) => Some(&c.connection),
             OutputKind::Mqtt(c) => Some(&c.connection),
+            OutputKind::Redis(c) => Some(&c.connection),
             OutputKind::Stdout(_) => None,
         });
         inputs.chain(outputs).collect()

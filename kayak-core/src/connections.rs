@@ -56,6 +56,22 @@ pub struct NatsConnection {
     pub urls: Secret,
 }
 
+/// A redis server, or a cluster front-end that speaks the same protocol.
+///
+/// Used through its pub/sub commands (`SUBSCRIBE`/`PUBLISH`), the same shape
+/// [`NatsConnection`] is — one url, which may already carry a password —
+/// rather than the key-value store: there is no queue to consume from here,
+/// so a redis input has exactly the delivery guarantees a nats one does (see
+/// `RedisConfig`'s doc comment).
+#[derive(Clone, Debug, Deserialize, Serialize, JsonSchema, PartialEq, Eq)]
+#[schemars(title = "redis")]
+pub struct RedisConnection {
+    /// connection url, e.g. `redis://localhost:6379` or
+    /// `redis://:${REDIS_PASSWORD}@localhost:6379/0`. May reference secrets as
+    /// `${NAME}` — see "secrets" in the readme.
+    pub url: Secret,
+}
+
 /// An mqtt broker.
 ///
 /// Plaintext TCP only for now — there is no TLS field here yet, and that is a
@@ -227,6 +243,7 @@ pub enum ConnectionKind {
     File(FileConnection),
     S3(S3Connection),
     Mqtt(MqttConnection),
+    Redis(RedisConnection),
 }
 
 impl ConnectionKind {
@@ -242,6 +259,7 @@ impl ConnectionKind {
             Self::File(_) => FILE,
             Self::S3(_) => S3,
             Self::Mqtt(_) => MQTT,
+            Self::Redis(_) => REDIS,
         }
     }
 }
@@ -253,6 +271,7 @@ pub const CLICKHOUSE: &str = "clickhouse";
 pub const FILE: &str = "file";
 pub const S3: &str = "s3";
 pub const MQTT: &str = "mqtt";
+pub const REDIS: &str = "redis";
 
 /// What `POST /api/connections` takes: a name, and the connection itself
 /// flattened alongside it.
@@ -374,6 +393,13 @@ impl Connections {
         match self.lookup(id, MQTT)? {
             ConnectionKind::Mqtt(c) => Ok(c),
             other => Err(ConnectionError::wrong_kind(id, MQTT, other)),
+        }
+    }
+
+    pub fn redis(&self, id: &str) -> Result<&RedisConnection, ConnectionError> {
+        match self.lookup(id, REDIS)? {
+            ConnectionKind::Redis(c) => Ok(c),
+            other => Err(ConnectionError::wrong_kind(id, REDIS, other)),
         }
     }
 

@@ -44,7 +44,7 @@ use std::path::PathBuf;
 
 use kayak_core::connections::{
     ClickhouseConnection, Connections, FileConnection, KafkaConnection, MqttConnection,
-    NatsConnection, PostgresConnection, S3Connection,
+    NatsConnection, PostgresConnection, RedisConnection, S3Connection,
 };
 
 /// Threaded through every `build()` call. It carries the pipeline map — needed
@@ -208,6 +208,10 @@ impl<'a> BuildCtx<'a> {
 
     pub fn mqtt_connection(&self, id: &str) -> anyhow::Result<&MqttConnection> {
         Ok(self.connections.mqtt(id)?)
+    }
+
+    pub fn redis_connection(&self, id: &str) -> anyhow::Result<&RedisConnection> {
+        Ok(self.connections.redis(id)?)
     }
 
     /// The same, with the live state buckets a pipeline's `state` names.

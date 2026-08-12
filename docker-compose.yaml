@@ -77,6 +77,33 @@ services:
           sleep 1
         done
 
+  # the broker the `redis_events` pipeline in example_config/config.json
+  # subscribes to, and `heartbeat_to_redis` publishes to.
+  redis:
+    image: redis:7
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  # the redis equivalent of the nats and mqtt publishers: one json log line a
+  # second on test.redis, which `redis_events` consumes.
+  redis-publisher:
+    image: redis:7
+    depends_on:
+      redis:
+        condition: service_healthy
+    entrypoint: ["sh", "-c"]
+    command:
+      - |
+        while true; do
+          redis-cli -h redis publish test.redis "{\"ts\":\"$(date -Iseconds)\",\"device\":\"sensor-2\",\"battery_pct\":$((RANDOM % 101))}"
+          sleep 1
+        done
+
   # the postgres output in example_config/config.json writes here. the password
   # is what ${POSTGRES_PASSWORD} has to resolve to — see
   # example_config/secrets.example.json

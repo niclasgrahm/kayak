@@ -90,6 +90,25 @@
       ]
     },
     {
+      "id": "redis_events",
+      "inputs": [
+        {
+          "type": "redis",
+          "connection": "local-redis",
+          "channel": "test.redis",
+          "envelope": {
+            "type": "merge"
+          }
+        }
+      ],
+      "transforms": [],
+      "outputs": [
+        {
+          "type": "stdout"
+        }
+      ]
+    },
+    {
       "id": "sensors",
       "inputs": [
         {
@@ -204,6 +223,23 @@
             "max_rows": 20,
             "interval_secs": 60
           }
+        }
+      ]
+    },
+    {
+      "id": "heartbeat_to_redis",
+      "inputs": [
+        {
+          "type": "pipeline",
+          "upstream": "heartbeat"
+        }
+      ],
+      "transforms": [],
+      "outputs": [
+        {
+          "type": "redis",
+          "connection": "local-redis",
+          "channel": "heartbeat"
         }
       ]
     },

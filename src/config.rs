@@ -29,6 +29,7 @@ impl BuildInputConfig for InputKind {
             InputKind::Nats(c) => c.build(ctx),
             InputKind::Pipeline(c) => c.build(ctx),
             InputKind::Mqtt(c) => c.build(ctx),
+            InputKind::Redis(c) => c.build(ctx),
         }
     }
 }
@@ -86,6 +87,7 @@ impl BuildOutputConfig for OutputConfig {
             OutputKind::Postgres(c) => c.build(ctx),
             OutputKind::Clickhouse(c) => c.build(ctx),
             OutputKind::Mqtt(c) => c.build(ctx),
+            OutputKind::Redis(c) => c.build(ctx),
         }
     }
 }

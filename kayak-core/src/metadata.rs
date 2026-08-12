@@ -122,6 +122,10 @@ pub fn for_input(kind: &str) -> Option<Vec<MetaFieldDoc>> {
                  rather than a live publish",
             ),
         ],
+        "redis" => vec![
+            MetaFieldDoc::new("connection", "name of the connection it was received on"),
+            MetaFieldDoc::new("channel", "the channel this message was published to"),
+        ],
         "pipeline" => vec![MetaFieldDoc::new(
             "upstream",
             "id of the pipeline this batch came from. Note that metadata \
