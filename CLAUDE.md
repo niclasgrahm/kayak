@@ -740,6 +740,37 @@ which is what lets every card redraw once a second. Keep it that way; a rect per
 bar is the version that doesn't scale. The `aria-label` on the `<svg>` is not a
 `<title>` child for the reason the edge grips give: `leptos_meta` owns `<title>`.
 
+### Expanding a log row
+
+A row is a batch collapsed to one line; the arrow on its left edge opens it into
+a box of every message the feed carried, pretty-printed and coloured, and
+**opening one pauses the log** — a row that scrolls away while it is being read
+is the thing the box exists to fix. Collapsing leaves it paused: pause is a
+state someone asked for, and the bar's button is where it is given back.
+
+Three things are load-bearing:
+
+- **The layout happens in `<Show>`'s children, never in `LogRow`.** `LogRow` is
+  built for every visible row on every update, so pretty-printing there would
+  put per-message work back on exactly the path the sampled feed exists to keep
+  clear. The row holds its `EntryKind` in a `StoredValue` and does nothing with
+  it until the box opens.
+- **`frontend/src/pretty.rs` re-indents the text; it does not parse to a `Value`
+  and print that back.** `serde_json::Map` is a `BTreeMap` here (`preserve_order`
+  is off, and turning it on is a workspace-wide feature change that would reach
+  the config renderer), so a round trip would sort the keys of every payload on
+  screen, and re-serializing would restyle its numbers. A payload is shown to be
+  *read*. Scanning also hands the highlighter its token kinds and degrades
+  gracefully: a message the feed cut at `MAX_MESSAGE_BYTES` isn't valid JSON, so
+  it comes back as `Rendered::Plain` and is shown as it stands. Errors take that
+  same arm — a row truncates an error's text and there is nowhere else to read
+  it.
+- **Which rows are open lives on `MessageLog`, not on the row**, in a set
+  *separate* from the open-passes set: the rows are rebuilt wholesale on every
+  update and on the flat/grouped switch, and closing a pass over a row someone
+  was reading shouldn't throw it away. `clear` empties it, since the ids it
+  holds are about entries that are gone.
+
 The frontend has two routes behind `leptos_router` (`frontend/src/app.rs`): `/` is the pannable/zoomable canvas of pipeline "cards" fed by `ApiClient::list_pipelines()` plus the live event signal, and `/docs` is the generated reference — two tabs, components and HTTP API. `Navbar` is shared and reads `AppState` through `use_context` rather than `expect_context`, because only the canvas provides it.
 
 Of the older Askama templates, only `templates/index.html` and the dead `/ui` `index_handler` are left; both are slated for removal, and Askama goes with them.
@@ -847,6 +878,71 @@ reference to another pipeline becomes the one this seeds, with no edit here.
 The same applies to the edge handles: `ChannelGrip` and `PortGrip` are each two `<line>`s, a fat transparent one that catches the pointer (`.edges` sets `pointer-events: none`, so the hit line turns it back on for itself) and a visible grip. Note the label is an `aria-label` and not an SVG `<title>` child — `leptos_meta` claims `<title>` for the document's, and the browser tab ends up named after whichever edge rendered last. Their `.vertical` classes mean *opposite* things (a channel's is the route's direction, a port's is the face's), which is why the cursor rules are per-class rather than shared.
 
 Drags are tracked with window-level listeners rather than on the card (a fast pointer leaves the card behind, and a `mouseup` outside it would never arrive). The delta is divided by the zoom, applied to the geometry captured at press time rather than accumulated, and written into `arrangement` live so the edges follow; the `PUT` happens once, on release. It's a browser-tab property — the API accepts writes either way, which is fine for a dev tool but shouldn't be mistaken for enforcement. Edits apply to the runtime immediately, so `revert` (reload the file) is the only undo, and `unsaved changes` in the navbar is the only thing between a session's work and a restart.
+
+### Selecting cards
+
+`CanvasState.selected` is a **set** (`frontend/src/selection.rs`), not an
+`Option<PipelineId>`, because arranging a graph happens in handfuls: dragging
+twenty cards into place one at a time is what this exists to stop. `Selection`
+is the pure half — `only`/`toggle`/`add_all`/`covers`, plus `descendants`, which
+walks the same `(id, upstreams)` pairs `pipelines_from` produces so "select
+children" and the canvas agree about what feeds what. Unit-tested there;
+`app.rs` holds it in a signal and does the clicking.
+
+Growing a selection is **edit mode only**. Read-only names one pipeline to look
+at it, and a set there would be a state with nothing to do — so `shift_key` is
+always read together with `state.editing()`.
+
+Four rules on the click side, and the middle one is what makes a group draggable
+at all:
+
+- **Shift toggles**, on a card and on a sidebar row alike. A shift-click on a
+  row moves no camera: it is about building a set, and gliding to whichever row
+  was clicked last would fight that.
+- **A press on a card that is already selected leaves the selection alone**, so
+  a group can be grabbed by any of its members. Collapsing to the card pressed —
+  which is what a plain click does to an *unselected* card — would make it
+  impossible to drag the rest. The cost is that a plain click never *reduces* a
+  selection; empty canvas is the way out.
+- **A shift-press that deselected a card does not then drag it.** `grab` returns
+  when the card it just took out of the selection isn't in it any more,
+  otherwise the gesture would undo itself in one movement.
+- **Clicking empty canvas clears.** The only gesture that scales past a couple
+  of cards. The edge handles stop propagation before the canvas hears them, so
+  dragging a line never counts as a click into nothing.
+
+`Dragging` therefore carries a `Vec<DragCard>` rather than one id and one
+geometry, and `graph::dragged_all` applies the one delta to all of them — the
+cards keep their positions relative to each other and only the group travels,
+while each still snaps to the grid on its own. A **resize is always one card**:
+there is no reading of resizing six of them from one corner, so only the move
+arm builds the list.
+
+**Text selection is off by default and opted back into.** `body` sets
+`user-select: none`, and a short list in `main.scss` — the card's `.property`
+rows, `.log-body`, the connection and state cards, `.docs-content`, `.modal`,
+`input`/`textarea` — turns it back on. The canvas is a set of controls that are
+almost all dragged, every one of those gestures sweeps a pointer across labels,
+and shift-click is the browser's "extend the selection to here" as well as ours;
+the result was a blue smear that was never what anyone meant. The test for
+adding to the opt-in list is "would someone reasonably want this in their
+clipboard" — a button, a sidebar row and a card's title bar are all no.
+
+Two consequences worth knowing. `.pipelines.panning` has to name its
+*descendants* (`&, *`) because an explicit `text` on a descendant beats an
+inherited `none`, so a pan sweeping across a card would otherwise highlight
+everything it passed over. And `press_selects` calls `prevent_default` on a
+shift-press: inside a card the config and log are deliberately selectable, so
+without it the shift-click that adds a card to the selection also paints half of
+it blue.
+
+The row's `⋯` menu (`RowMenu`) is positioned like `ConnectionCard` and for the
+same reason — the sidebar scrolls, so it is `position: fixed` at the button's
+viewport position and closes on a scroll above it. It isn't drawn on a `repeat`
+row, for the reason the delete isn't: the open menu is keyed by id, and two rows
+for one pipeline would open together. "select children" **adds** to the
+selection rather than replacing it, which is what makes two branches of a
+fan-out reachable in two clicks, and it moves no camera.
 
 The sidebar has three tabs (`SidebarTab`): pipelines and connections, each with its own `+` and armed delete, and **state**, which has neither — buckets are part of the graph's logic and live in the config file, so that tab is a window rather than an editor. It polls `GET /api/state` once a second *while mounted* (a bucket changes per message, so pushing it would be the `/events` firehose again for a readout nobody watches per-message) and a click opens a card pinned to the row's viewport y, the same trick `ConnectionList` uses.
 

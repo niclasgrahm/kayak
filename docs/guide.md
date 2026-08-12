@@ -88,21 +88,46 @@ which input carried it.
 | gesture | does |
 | --- | --- |
 | wheel / trackpad scroll | zoom about the cursor, 20%–250% (shown in the navbar) |
-| drag empty canvas | pan (dragging *on* a card selects its text instead) |
+| drag empty canvas | pan |
 | click a name in the sidebar | glide the camera to centre that pipeline |
 | `flat` / `tree` in the sidebar header | switch between the pipelines in id order and the same set nested under the upstreams that feed them |
 | type in the sidebar's search box | narrow the list; in tree mode a match keeps the chain above it |
 | click a card's `config` / `stats` / `logs` heading | fold that part away, or bring it back — a shut part stops being fed |
+| `▸` at the left of a log row (on hover) | open that row's payload, pretty-printed — the log pauses so it can be read |
 | `5s` / `1m` / `5m` on a card's chart | change the bar width, and so how far back the chart reaches |
 | `edit` in the navbar | switch out of read-only, revealing the controls below |
 | `+` in the sidebar header | open the "add pipeline" modal |
 | `×` on a sidebar row | delete that pipeline (click twice — the first click arms it) |
-| drag a card's title bar (edit mode) | move it; it snaps to the grid |
+| shift-click a card or a sidebar row (edit mode) | add that pipeline to the selection, or take it out again |
+| `⋯` on a sidebar row (edit mode) | `select children` — add that pipeline and everything downstream of it to the selection |
+| click empty canvas | clear the selection |
+| drag a card's title bar (edit mode) | move it — and every other selected card with it; they snap to the grid |
 | drag a card's bottom-right corner (edit mode) | resize it; also snapped |
 | double-click a card's title bar (edit mode) | put it back under the automatic layout |
 | drag the middle of a line (edit mode) | move that line's channel closer to one card or the other |
 | drag the end of a line (edit mode) | slide where it connects along the card's face |
 | double-click either (edit mode) | put that part of the line back to automatic |
+
+**Selecting more than one card** is an edit-mode thing, and it exists because a
+graph of any size is arranged in handfuls rather than card by card. Shift-click
+builds the set — on the cards or on the sidebar rows, whichever is closer to
+hand — and dragging any card in it moves all of them together, keeping their
+positions relative to each other. A row's `⋯` menu offers `select children`,
+which adds that pipeline and its whole subtree; it *adds* rather than replacing,
+so two branches of a fan-out take two clicks. A plain click on a card that isn't
+selected selects just that one, and a plain click on one that already is leaves
+the set alone — which is what lets a group be grabbed by any of its members. The
+way out is a click on empty canvas.
+
+**Text is only selectable where it is there to be read.** A card's settings and
+its log rows can be swept over and copied — a broker url or a failing message is
+exactly the kind of thing that wants pasting somewhere else — and so can the
+documentation pages, the connection and bucket cards, and anything typed into.
+Everything else on the canvas is a control: dragging a card, a line or the view
+itself sweeps the pointer across labels, and shift-click is the browser's
+"extend the selection to here" as well as the one that adds a card to the
+selection. Both used to leave a blue smear across the ui that was never what
+anyone meant.
 
 The sidebar's pipeline list has the same two views of the graph the canvas has,
 behind the `flat` / `tree` button in its header. Flat is every pipeline once, in
@@ -181,6 +206,26 @@ chips filter it, `flat` / `grouped` swaps between an event per row and a batch's
 whole journey per row, and three buttons do what they say: **pause** stops
 keeping new events so a moving log can be read, **copy** puts the rows on the
 clipboard as tab-separated `time · stage · text`, and **clear** empties it.
+
+A row is one **batch**, summarised to a single line — and the arrow that appears
+at its left edge on hover opens that batch out: every message the feed carried,
+laid out and coloured, with a copy button of its own on the box and another on
+each message. A row that is being read must not scroll away, so **opening one
+pauses the log**; collapsing it leaves the log paused, since the pause button is
+where a stopped log is resumed. What the box can show is bounded by what the
+feed carries (`kayak_core::MESSAGES_PER_BATCH`, and each message cut to
+`MAX_MESSAGE_BYTES`), and it says so at the bottom when the batch was wider than
+that. A message the cut left as invalid JSON — or an error's text, which gets
+the same treatment, since a row truncates it and there is nowhere else to read
+it — is shown as it stands rather than not at all.
+
+`frontend/src/pretty.rs` is the pure half, unit tested like `log.rs`. It
+**re-indents the text rather than parsing it into a `Value` and printing that
+back**, which is worth knowing before touching it: `serde_json::Map` is a
+`BTreeMap` here, so a round trip would silently sort every payload's keys, and
+re-serializing a number loses the digits the source wrote. The laying out
+happens when a box opens and never on the path of an ordinary log update — the
+same rule the rest of the feed follows.
 
 Two details there are deliberate. Pausing stops the *log*, not the pipeline, so
 the throughput readout and the error badge go on counting while it is paused —

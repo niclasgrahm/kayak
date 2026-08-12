@@ -22,6 +22,14 @@
   --stat-in: #699ce8;
   --stat-out: #d8a657;
   --error-bg: #3a2226; // just enough tint to find one in a scrolling log
+  // The expanded payload's syntax colours. Muted rather than a rainbow: the
+  // box sits inside a card on a dark canvas, and the job is to tell a key from
+  // a value at a glance, not to decorate. Keys are the brightest of the four
+  // because they are what a payload is scanned down.
+  --json-key: #7fbbb3;
+  --json-str: #a7c080;
+  --json-num: #d8a657;
+  --json-literal: #d699b6;
   --text: #cdced2;
   --text-dim: #85878c;
   --radius: 4px;
@@ -39,6 +47,33 @@ body {
   display: flex;
   flex-direction: column;
   overscroll-behavior-x: none;
+
+  // The canvas is a set of controls, not a document, and almost everything on
+  // it is dragged: a card by its title bar, a line by its middle, the view
+  // itself by the background. Every one of those gestures sweeps a pointer
+  // across labels, and a shift-click — which is how a second card joins the
+  // selection — is also the browser's "extend the selection to here". The
+  // result is a blue smear across the ui that was never what anyone meant, so
+  // selecting is off by default and the parts that exist to be *read* turn it
+  // back on below.
+  user-select: none;
+}
+
+// Text that is there to be read, copied and pasted somewhere else: a broker
+// url out of a card's config, a line out of a log, a component's documentation.
+// This is the exception list to the rule above, and the test for adding to it
+// is "would someone reasonably want this in their clipboard" — a button's
+// label, a sidebar row and a card's title bar are all no.
+.card .property,
+.property-list,
+.log-body,
+.connection-card,
+.state-card,
+.docs-content,
+.modal,
+input,
+textarea {
+  user-select: text;
 }
 .navbar {
   background: var(--bg-titlebar);
@@ -87,8 +122,15 @@ body {
 
   &.panning {
     cursor: grabbing;
-    // text selection while dragging the canvas looks broken
-    user-select: none;
+    // Text selection while dragging the canvas looks broken. The descendants
+    // are named as well as the canvas itself because a card's config and log
+    // opt selection back *on*, and an explicit `text` on a descendant beats an
+    // inherited `none` — a pan that sweeps across a card would otherwise
+    // highlight everything it passed over.
+    &,
+    * {
+      user-select: none;
+    }
   }
 }
 
@@ -872,7 +914,13 @@ body {
   // The newest line pops — but only in the flat view. Scoped to direct
   // children because in the grouped view every open pass would otherwise end
   // in a bright row, which reads as four "newest" messages at once.
-  > .log-row:last-child {
+  //
+  // The second selector is the expanded box's doing: an open row is followed by
+  // its payload, so the newest row stops being the last child exactly when it
+  // is the one being read. Dimming it at that moment reads as the log having
+  // moved on.
+  > .log-row:last-child,
+  > .log-row:nth-last-child(2):has(+ .log-expanded) {
     color: var(--text);
   }
 
@@ -882,6 +930,34 @@ body {
     padding: 0 6px;
     line-height: 1.6;
     color: var(--text-dim);
+
+    // The expand affordance. Always in the DOM and only its opacity changes —
+    // a control that appears on hover would take its column with it and shift
+    // every payload sideways as the pointer crossed the log.
+    .log-expand {
+      appearance: none;
+      background: none;
+      border: none;
+      padding: 0;
+      margin: 0;
+      font: inherit;
+      line-height: inherit;
+      width: 1em;
+      flex: none;
+      color: var(--text-dim);
+      cursor: pointer;
+      opacity: 0;
+      user-select: none;
+    }
+
+    &:hover .log-expand,
+    &.open .log-expand {
+      opacity: 1;
+    }
+
+    &.open .log-expand {
+      color: var(--accent);
+    }
 
     // a failure has to stay legible after it has scrolled up and dimmed, so it
     // keeps its colour rather than following the dim/newest rule above
@@ -923,6 +999,124 @@ body {
       text-overflow: ellipsis;
       white-space: nowrap;
     }
+  }
+
+  // One row opened out. Inset — darker than the log, with a border — because it
+  // is a pane of its own inside the list rather than a taller row: the rows
+  // above and below have to stay findable while it is open.
+  //
+  // It scrolls itself rather than growing the log without limit: a batch can
+  // carry a hundred messages, and a box that pushed the rest of the tail off
+  // the card would make collapsing it the only way back.
+  .log-expanded {
+    margin: 2px 6px 4px;
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    background: var(--bg-canvas);
+    max-height: 260px;
+    overflow: auto;
+    // the log's own rule, one level in: reaching the end of a payload must not
+    // scroll the log behind it and then the canvas behind that
+    overscroll-behavior: contain;
+
+    // Sticky so the copy button is reachable from anywhere in a long payload —
+    // scrolling to the top to copy what is on screen is the kind of small
+    // annoyance this whole box exists to remove.
+    .log-expanded-bar {
+      position: sticky;
+      top: 0;
+      z-index: 1;
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      padding: 2px 6px;
+      background: var(--bg-titlebar);
+      border-bottom: 1px solid var(--border);
+    }
+
+    .log-expanded-count {
+      color: var(--text-dim);
+      margin-right: auto;
+    }
+
+    // What the feed left out, said quietly and at the bottom, where it is read
+    // after the messages rather than instead of them.
+    .log-expanded-note {
+      color: var(--text-dim);
+      font-style: italic;
+      padding: 2px 8px 4px;
+      opacity: 0.7;
+    }
+
+    .log-message + .log-message {
+      border-top: 1px solid var(--border);
+    }
+
+    .log-message-bar {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      padding: 2px 6px 0;
+
+      .log-message-index {
+        color: var(--text-dim);
+        font-variant-numeric: tabular-nums;
+      }
+
+      // the per-message copy only shows itself when the message is under the
+      // pointer: one of these on every row of a hundred-message batch is a
+      // column of buttons, and the box is there to be read
+      .clear {
+        margin-left: auto;
+        opacity: 0;
+      }
+    }
+
+    .log-message:hover .log-message-bar .clear {
+      opacity: 1;
+    }
+
+    // `pre-wrap`, not `pre`: a card is 18 grid cells wide and a payload with a
+    // long string in it would otherwise scroll sideways to be read at all. The
+    // indent is its own span so a wrapped line still starts under its key.
+    .log-json {
+      margin: 0;
+      padding: 2px 8px 4px;
+      font: inherit;
+      white-space: pre-wrap;
+      word-break: break-word;
+      color: var(--text);
+
+      // not JSON — a truncated payload, or an error's text. Dimmed, because
+      // there is no structure in it to look at.
+      &.plain {
+        color: var(--text-dim);
+      }
+    }
+
+    .json-indent {
+      white-space: pre;
+    }
+    .json-punct {
+      color: var(--text-dim);
+    }
+    .json-key {
+      color: var(--json-key);
+    }
+    .json-str {
+      color: var(--json-str);
+    }
+    .json-num {
+      color: var(--json-num);
+    }
+    .json-literal {
+      color: var(--json-literal);
+    }
+  }
+
+  // Inside an open pass, the box lines up with the rows it belongs to.
+  .log-pass-entries .log-expanded {
+    margin-left: 18px;
   }
 }
 
@@ -1541,14 +1735,63 @@ body {
     font-style: italic;
   }
 
-  // the delete only appears on the row you are pointing at; it stays visible
-  // once armed, or the second click would have nothing to land on
+  // the delete and the menu only appear on the row you are pointing at; they
+  // stay visible once armed or open, or the second click would have nothing to
+  // land on
   .icon-button {
     visibility: hidden;
   }
   &:hover .icon-button,
-  .icon-button.armed {
+  .icon-button.armed,
+  .icon-button.open {
     visibility: visible;
+  }
+
+  // Deliberately quiet: it sits at the edge of every row and is not what the
+  // row is for. The dots are a glyph rather than a word because there is no one
+  // word for what is behind them.
+  .row-menu-button {
+    letter-spacing: 0.08em;
+    padding: 2px 4px;
+
+    &.open {
+      background: var(--bg-hover);
+      color: var(--text);
+    }
+  }
+}
+
+// The row menu, hanging off the button that opened it. `fixed` for the reason
+// `.connection-card` is: the sidebar scrolls, and a menu laid out inside it
+// would be clipped at its edge rather than reaching over the canvas.
+.row-menu {
+  position: fixed;
+  left: 120px;
+  z-index: 10;
+  min-width: 130px;
+  background: var(--bg-panel);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  box-shadow: 0 4px 14px rgba(0, 0, 0, 0.45);
+  padding: 2px;
+
+  .row-menu-item {
+    appearance: none;
+    display: block;
+    width: 100%;
+    text-align: left;
+    background: transparent;
+    border: none;
+    border-radius: 2px;
+    color: var(--text);
+    font: inherit;
+    font-size: 12px;
+    padding: 5px 8px;
+    cursor: pointer;
+
+    &:hover {
+      background: var(--bg-hover);
+    }
   }
 }
 

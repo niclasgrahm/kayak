@@ -12,6 +12,8 @@ pub mod form;
 pub mod graph;
 pub mod inspector;
 pub mod log;
+pub mod pretty;
+pub mod selection;
 pub mod sidebar;
 pub mod stats;
 

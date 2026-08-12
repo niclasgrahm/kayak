@@ -100,6 +100,11 @@ re-derive. See the [guide](guide.md) for how the finished parts behave, and
       for the things that pass turned up but didn't change)
 - [x] show config in the "cards" in the web ui
       (done 2026-08-04: tabbed property list, see "the canvas" above)
+- [x] select several cards and drag them together
+      (done 2026-08-12: shift-click a card or a sidebar row adds it to the
+      selection, dragging any member moves the whole set by one delta, and a
+      row's `⋯` menu selects a pipeline with everything downstream of it. Empty
+      canvas clears. Edit mode only. See "selecting cards" in CLAUDE.md.)
 - [x] give pipeline ability to have multiple inputs
       (done 2026-08-04: and multiple outputs. `inputs` and `outputs` are arrays
       in the config now — a breaking wire-format change, the singular `input`

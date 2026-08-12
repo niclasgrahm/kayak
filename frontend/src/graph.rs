@@ -390,6 +390,40 @@ pub fn dragged(geom: CardGeom, dx: f64, dy: f64, pinned_height: Option<f64>) -> 
     }
 }
 
+/// One card taking part in a move: which it is, and where it was when the
+/// gesture started.
+///
+/// The start geometry is carried per card for the reason [`dragged`] snaps the
+/// result rather than the delta — every mousemove computes each card's answer
+/// from the same origin, so a group can't drift apart over a long drag.
+#[derive(Clone, PartialEq, Debug)]
+pub struct DragCard {
+    pub id: PipelineId,
+    pub start: CardGeom,
+    /// The height it was pinned to before the drag, if any, so a move leaves it
+    /// alone.
+    pub pinned_height: Option<f64>,
+}
+
+/// Where every card of a move lands after being dragged by `(dx, dy)`.
+///
+/// One delta for all of them: a multi-card drag moves the *selection*, so the
+/// cards keep their positions relative to each other and only the group travels.
+/// Each still snaps to the grid on its own, which is why a group that started
+/// off-grid comes back onto it without collapsing together.
+#[must_use]
+pub fn dragged_all(cards: &[DragCard], dx: f64, dy: f64) -> Vec<(PipelineId, PipelineLayout)> {
+    cards
+        .iter()
+        .map(|card| {
+            (
+                card.id.clone(),
+                dragged(card.start, dx, dy, card.pinned_height),
+            )
+        })
+        .collect()
+}
+
 /// Where a card's bottom-right corner lands after being dragged by `(dx, dy)`.
 ///
 /// Resizing always pins the height, including when the card was previously
@@ -1690,6 +1724,38 @@ mod tests {
     fn dragging_keeps_a_height_that_was_already_pinned() {
         let moved = dragged(card(0.0, 0.0, CARD_WIDTH, 300.0), 20.0, 20.0, Some(300.0));
         assert_eq!(moved.height, Some(300.0));
+    }
+
+    /// Dragging one card of a selection drags all of them, by the one delta:
+    /// the gap between two cards is the same after the drag as before it, and
+    /// each is on the grid.
+    #[test]
+    fn dragging_a_group_moves_every_card_by_the_same_delta() {
+        let cards = vec![
+            DragCard {
+                id: "a".to_string(),
+                start: card(100.0, 100.0, CARD_WIDTH, 200.0),
+                pinned_height: None,
+            },
+            DragCard {
+                id: "b".to_string(),
+                start: card(100.0, 400.0, CARD_WIDTH, 300.0),
+                pinned_height: Some(300.0),
+            },
+        ];
+        let moved = dragged_all(&cards, 63.0, -21.0);
+        let by_id: HashMap<_, _> = moved.into_iter().collect();
+        assert_eq!((by_id["a"].x, by_id["a"].y), (160.0, 80.0));
+        assert_eq!((by_id["b"].x, by_id["b"].y), (160.0, 380.0));
+        assert_eq!(
+            by_id["b"].y - by_id["a"].y,
+            300.0,
+            "the cards keep their positions relative to each other"
+        );
+        // per-card properties still hold: a pinned height stays pinned, an
+        // unpinned one stays unpinned
+        assert_eq!(by_id["a"].height, None);
+        assert_eq!(by_id["b"].height, Some(300.0));
     }
 
     /// Resizing pins the height even when the card had been sized by its

@@ -24,13 +24,15 @@ use crate::api_docs;
 use crate::docs;
 use crate::form;
 use crate::graph::{
-    Camera, CardGeom, Channel, Edge, FALLBACK_CARD_HEIGHT, GRID, PULSE_TICK_MS, PULSE_TICKS,
-    PortHandle, approach, bounds, dragged, dragged_channel, dragged_port, edge_paths, focus_camera,
-    focus_zoom, layout, pipelines_from, pulsed_edges, resized, tick_pulses, wheel_delta_pixels,
-    zoom_at,
+    Camera, CardGeom, Channel, DragCard, Edge, FALLBACK_CARD_HEIGHT, GRID, PULSE_TICK_MS,
+    PULSE_TICKS, PortHandle, approach, bounds, dragged_all, dragged_channel, dragged_port,
+    edge_paths, focus_camera, focus_zoom, layout, pipelines_from, pulsed_edges, resized,
+    tick_pulses, wheel_delta_pixels, zoom_at,
 };
 use crate::inspector;
 use crate::log;
+use crate::pretty;
+use crate::selection::{self, Selection};
 use crate::sidebar;
 use crate::sidebar::{Row, SidebarMode};
 use crate::stats;
@@ -447,17 +449,24 @@ pub enum Grab {
 
 #[derive(Clone, PartialEq)]
 pub struct Dragging {
-    pub id: PipelineId,
     pub grab: Grab,
     /// Pointer position when the press landed, in client (screen) pixels.
     pub origin: (f64, f64),
-    /// The card's geometry when the press landed. The gesture is applied to
-    /// *this* rather than to the current geometry, so a drag can't accumulate
-    /// rounding: every mousemove computes the same answer from the same start.
-    pub start: CardGeom,
-    /// Whether the card had a pinned height before the drag, so a move can
-    /// leave it alone.
-    pub pinned_height: Option<f64>,
+    /// Every card the gesture moves, with the geometry it had when the press
+    /// landed — the gesture is applied to *that* rather than to the current
+    /// geometry, so a drag can't accumulate rounding: every mousemove computes
+    /// the same answer from the same start.
+    ///
+    /// More than one only for [`Grab::Move`], and only when the card grabbed was
+    /// part of a selection: a resize is one card's height and width, and there
+    /// is no sensible reading of resizing six cards from one corner.
+    pub cards: Vec<DragCard>,
+}
+
+impl Dragging {
+    fn moves(&self, id: &str) -> bool {
+        self.cards.iter().any(|card| card.id == id)
+    }
 }
 
 /// A channel drag in progress: which edge's middle segment is being moved, and
@@ -519,11 +528,13 @@ pub struct CanvasState {
     pub camera: RwSignal<Camera>,
     /// Size of the canvas viewport in css pixels; needed to centre a pipeline.
     pub viewport: RwSignal<(f64, f64)>,
-    /// The pipeline the user is currently working with — set by a click on a
-    /// card or on a sidebar row, and read by both so that the two lists agree
-    /// about which one is meant. Like `maximized` it is a way of *looking* at
+    /// The pipelines the user is currently working with — set by clicks on
+    /// cards and on sidebar rows, and read by both so that the two lists agree
+    /// about which ones are meant. Like `maximized` it is a way of *looking* at
     /// the graph: it never reaches the layout file and doesn't survive a reload.
-    pub selected: RwSignal<Option<PipelineId>>,
+    ///
+    /// More than one only in edit mode, where a drag moves the whole set.
+    pub selected: RwSignal<Selection>,
     /// Set by the sidebar; consumed by the animation loop.
     pub focus_request: RwSignal<Option<PipelineId>>,
     /// Where the camera is gliding to, if anywhere.
@@ -542,7 +553,7 @@ impl CanvasState {
             maximized: RwSignal::new(None),
             camera: RwSignal::new(Camera::default()),
             viewport: RwSignal::new((0.0, 0.0)),
-            selected: RwSignal::new(None),
+            selected: RwSignal::new(Selection::default()),
             focus_request: RwSignal::new(None),
             focus_target: RwSignal::new(None),
         }
@@ -552,19 +563,76 @@ impl CanvasState {
         self.placements.with(|p| p.get(id).copied())
     }
 
-    /// Mark a pipeline as the selected one.
+    /// Make a pipeline the whole selection, dropping whatever else was in it.
     ///
     /// Guarded rather than a plain `set` because it is called from a mousedown
     /// on a card: `update`-style writes mark a signal dirty whether or not the
     /// value moved, so an unguarded write would re-run every card's selection
     /// memo on every click, including the ones that change nothing.
-    fn select(&self, id: &PipelineId) {
-        if self
-            .selected
-            .with_untracked(|s| s.as_deref() != Some(id.as_str()))
-        {
-            self.selected.set(Some(id.clone()));
+    fn select_only(&self, id: &PipelineId) {
+        if !self.selected.with_untracked(|s| s.is_only(id.as_str())) {
+            self.selected.set(Selection::only(id));
         }
+    }
+
+    /// Add a pipeline to the selection, or take it out again — shift-clicking a
+    /// card or a sidebar row.
+    fn toggle_selected(&self, id: &PipelineId) {
+        self.selected.update(|s| s.toggle(id));
+    }
+
+    /// Add a whole set to the selection, keeping what was already there.
+    fn select_also(&self, more: &Selection) {
+        if self.selected.with_untracked(|s| s.covers(more)) {
+            return;
+        }
+        self.selected.update(|s| s.add_all(more.ids().cloned()));
+    }
+
+    /// Whether a pipeline is selected, read untracked — the click handlers'
+    /// question, not the cards'.
+    fn is_selected(&self, id: &PipelineId) -> bool {
+        self.selected.with_untracked(|s| s.contains(id.as_str()))
+    }
+
+    /// Drop the selection entirely. Clicking the canvas away from any card.
+    fn clear_selection(&self) {
+        if !self.selected.with_untracked(Selection::is_empty) {
+            self.selected.set(Selection::default());
+        }
+    }
+
+    /// The cards a press on `id` moves: the whole selection when the card
+    /// grabbed is part of one, and otherwise just that card.
+    ///
+    /// A card with no placement yet — one that arrived since the last layout
+    /// pass — is left out rather than dragged from a guessed position.
+    fn moving_cards(&self, id: &PipelineId, start: CardGeom, pinned: Option<f64>) -> Vec<DragCard> {
+        let grabbed = DragCard {
+            id: id.clone(),
+            start,
+            pinned_height: pinned,
+        };
+        if !self.is_selected(id) {
+            return vec![grabbed];
+        }
+        let others = self.selected.with_untracked(|s| {
+            s.ids()
+                .filter(|other| *other != id)
+                .cloned()
+                .collect::<Vec<_>>()
+        });
+        std::iter::once(grabbed)
+            .chain(others.into_iter().filter_map(|other| {
+                let start = self.geom_of(&other)?;
+                let pinned_height = self.arrangement.with_untracked(|a| a.get(&other)?.height);
+                Some(DragCard {
+                    id: other,
+                    start,
+                    pinned_height,
+                })
+            }))
+            .collect()
     }
 
     /// Any direct camera control abandons an in-flight glide — otherwise the
@@ -582,16 +650,26 @@ impl CanvasState {
     /// to it at the end. The pointer delta is in screen pixels and the layout
     /// is in surface pixels, so it is divided by the zoom — at 50% a card has
     /// to keep up with a pointer moving twice as far.
+    ///
+    /// A move can carry several cards and a resize is always one, which is why
+    /// only the move arm reads the whole list.
     fn drag_to(&self, drag: &Dragging, client: (f64, f64)) {
         let zoom = self.camera.get_untracked().zoom;
         let dx = (client.0 - drag.origin.0) / zoom;
         let dy = (client.1 - drag.origin.1) / zoom;
-        let pipeline = match drag.grab {
-            Grab::Move => dragged(drag.start, dx, dy, drag.pinned_height),
-            Grab::Resize => resized(drag.start, dx, dy),
+        let moved = match drag.grab {
+            Grab::Move => dragged_all(&drag.cards, dx, dy),
+            Grab::Resize => drag
+                .cards
+                .first()
+                .map(|card| (card.id.clone(), resized(card.start, dx, dy)))
+                .into_iter()
+                .collect(),
         };
         self.arrangement.update(|a| {
-            a.pipelines.insert(drag.id.clone(), pipeline);
+            for (id, pipeline) in moved {
+                a.pipelines.insert(id, pipeline);
+            }
         });
     }
 
@@ -1220,7 +1298,7 @@ pub fn CanvasPage() -> impl IntoView {
         // it for the same reason: whatever the camera is being pointed at is
         // what the user means.
         canvas_state.maximized.set(None);
-        canvas_state.select(&id);
+        canvas_state.select_only(&id);
         let Some(geom) = canvas_state.geom_of(&id) else {
             return;
         };
@@ -1295,6 +1373,12 @@ pub fn CanvasPage() -> impl IntoView {
                         if ev.button() != 0 || started_on_a_card(&ev) {
                             return;
                         }
+                        // Empty canvas is the way out of a selection, and the
+                        // only one that scales: with a dozen cards selected,
+                        // shift-clicking each of them back off is not a gesture.
+                        // The edge handles stop propagation before this, so
+                        // dragging a line never counts as a click into nothing.
+                        canvas_state.clear_selection();
                         canvas_state.interrupt_focus();
                         dragging.set(Some((f64::from(ev.client_x()), f64::from(ev.client_y()))));
                     }
@@ -2060,6 +2144,11 @@ fn PipelineList() -> impl IntoView {
     // to a list still narrowed by a word you typed earlier reads as a bug.
     let query = RwSignal::new(String::new());
     let mode = state.sidebar_mode;
+    // The row menu that is open, if any. One at a time, like the armed delete,
+    // and pinned to the row it belongs to for the reason `ConnectionCard` is:
+    // the sidebar scrolls its own content, so a menu laid out inside the list
+    // would be clipped at its edge.
+    let menu = RwSignal::new(Option::<RowMenu>::None);
 
     // The list as rows: the graph shape, the mode and the search box, all of
     // which are somebody else's pure function.
@@ -2098,8 +2187,44 @@ fn PipelineList() -> impl IntoView {
         });
     };
 
+    // Add a pipeline and everything downstream of it to the selection.
+    //
+    // Added rather than replacing what was selected, which is what makes two
+    // branches of a fan-out reachable in two clicks; the way back is the same
+    // as from any selection, a click on empty canvas. The camera is left where
+    // it is on purpose — this is a gesture about a set of cards, and gliding to
+    // one of them says the wrong thing about which.
+    let select_children = move |id: &PipelineId| {
+        menu.set(None);
+        let Some(Ok(list)) = state.pipelines.get_untracked() else {
+            return;
+        };
+        let pairs: Vec<(PipelineId, Config)> = list
+            .iter()
+            .map(|s| (s.id.clone(), s.config.clone()))
+            .collect();
+        state
+            .canvas_state
+            .select_also(&selection::descendants(&pipelines_from(&pairs), id));
+    };
+
+    // The menu is pinned to a row's position at the moment it opened, so a
+    // scroll would strand it beside the wrong name — the same reason, and the
+    // same document-level capture, as the connections card.
+    let list = NodeRef::<leptos::html::Div>::new();
+    let _ = use_event_listener_with_options(
+        document(),
+        leptos::ev::scroll,
+        move |ev| {
+            if scrolled_above(&ev, list) {
+                menu.set(None);
+            }
+        },
+        UseEventListenerOptions::default().capture(true),
+    );
+
     view! {
-        <div class="sidebar-list">
+        <div class="sidebar-list" node_ref=list>
             <div class="sidebar-header">
                 <span class="sidebar-title">"pipelines"</span>
                 // available read-only too: how a list is arranged is a way of
@@ -2148,6 +2273,7 @@ fn PipelineList() -> impl IntoView {
                             id.clone(),
                             id.clone(),
                         );
+                        let menu_id = StoredValue::new(id.clone());
                         let armed_here = Memo::new(move |_| {
                             armed.get().as_deref() == Some(is_armed.as_str())
                         });
@@ -2159,7 +2285,13 @@ fn PipelineList() -> impl IntoView {
                             state
                                 .canvas_state
                                 .selected
-                                .with(|s| s.as_deref() == Some(is_selected.as_str()))
+                                .with(|s| s.contains(is_selected.as_str()))
+                        });
+                        let menu_here = Memo::new(move |_| {
+                            menu.with(|m| {
+                                m.as_ref()
+                                    .is_some_and(|m| menu_id.with_value(|id| m.id == *id))
+                            })
                         });
                         view! {
                             <div
@@ -2171,12 +2303,61 @@ fn PipelineList() -> impl IntoView {
                                 // same rule in both modes
                                 style:padding-left=format!("{}px", 8 + depth * 12)
                                 title=repeat.then_some("also fed by this — shown in full elsewhere")
-                                on:click=move |_| {
+                                // Shift is the same gesture here as on a card
+                                // and does the same thing: add this pipeline to
+                                // the selection, or take it out. It moves no
+                                // camera — a shift-click is about building a
+                                // set, and gliding to whichever row was clicked
+                                // last would fight that.
+                                on:click=move |ev| {
                                     armed.set(None);
-                                    state.canvas_state.focus_request.set(Some(focus_id.clone()));
+                                    menu.set(None);
+                                    if ev.shift_key() && state.editing() {
+                                        state.canvas_state.toggle_selected(&focus_id);
+                                    } else {
+                                        state
+                                            .canvas_state
+                                            .focus_request
+                                            .set(Some(focus_id.clone()));
+                                    }
                                 }
                             >
                                 <span class="tree-label">{id.clone()}</span>
+                                // Not on a repeat row, for the reason the delete
+                                // isn't: the open menu is keyed by id, so two
+                                // rows for one pipeline would open together and
+                                // read as two menus.
+                                {(!repeat)
+                                    .then(|| {
+                                        view! {
+                                            // Edit mode only, like the delete
+                                            // beside it: what it offers is about
+                                            // arranging the canvas, which
+                                            // read-only doesn't do.
+                                            <Show when=move || state.editing()>
+                                                <button
+                                                    class="icon-button row-menu-button"
+                                                    class:open=move || menu_here.get()
+                                                    title="more"
+                                                    aria-label="more"
+                                                    on:click=move |ev| {
+                                                        // the row itself moves the camera
+                                                        ev.stop_propagation();
+                                                        armed.set(None);
+                                                        if menu_here.get() {
+                                                            menu.set(None);
+                                                        } else {
+                                                            menu.set(
+                                                                Some(RowMenu::at(menu_id.get_value(), &ev)),
+                                                            );
+                                                        }
+                                                    }
+                                                >
+                                                    "⋯"
+                                                </button>
+                                            </Show>
+                                        }
+                                    })}
                                 // A repeat is a pointer to a row that is on
                                 // screen in full somewhere else, so it gets no
                                 // delete: two buttons for one pipeline, arming
@@ -2232,7 +2413,56 @@ fn PipelineList() -> impl IntoView {
                         }
                     })
             }}
+            // One menu for the whole list rather than one per row: only one can
+            // be open, and a row that renders its own would be clipped by the
+            // sidebar it sits in.
+            {move || {
+                menu.get()
+                    .map(|open| {
+                        let id = open.id.clone();
+                        view! {
+                            <div class="row-menu" style:top=format!("{}px", open.top)>
+                                <button
+                                    class="row-menu-item"
+                                    title="add this pipeline and everything downstream of it to the selection"
+                                    on:click=move |ev| {
+                                        ev.stop_propagation();
+                                        select_children(&id);
+                                    }
+                                >
+                                    "select children"
+                                </button>
+                            </div>
+                        }
+                    })
+            }}
         </div>
+    }
+}
+
+/// The pipeline whose row menu is open, and where to put it.
+///
+/// Positioned like [`OpenConnection`] and for the same reason — the sidebar
+/// scrolls, so the menu is `position: fixed` and takes the row's viewport
+/// position at the moment it was asked for.
+#[derive(Clone, Debug, PartialEq)]
+struct RowMenu {
+    id: PipelineId,
+    /// viewport y of the button that opened it
+    top: f64,
+}
+
+impl RowMenu {
+    /// Placed against the button rather than the row: `current_target` is the
+    /// button this is wired to, and hanging the menu off it is what makes the
+    /// two read as one control.
+    fn at(id: PipelineId, ev: &leptos::ev::MouseEvent) -> Self {
+        use wasm_bindgen::JsCast;
+        let top = ev
+            .current_target()
+            .and_then(|t| t.dyn_into::<leptos::web_sys::Element>().ok())
+            .map_or(0.0, |el| el.get_bounding_client_rect().bottom());
+        Self { id, top }
     }
 }
 
@@ -4790,26 +5020,196 @@ fn SectionView(
 /// span holding one wraps to a second line — which turned every row of this log
 /// double height, with the stage badge stranded under the timestamp.
 #[component]
-fn LogRow(entry: log::Entry, names: StoredValue<log::ComponentNames>) -> impl IntoView {
+fn LogRow(
+    entry: log::Entry,
+    names: StoredValue<log::ComponentNames>,
+    /// Which rows are showing their payload, by entry id. Held by the log
+    /// rather than the row so it survives the flat/grouped switch and the
+    /// wholesale rebuild an update causes — the same reason the open passes
+    /// are kept there.
+    expanded: RwSignal<HashSet<u64>>,
+    /// Stop the log. Expanding is reading, and a row that scrolls away while
+    /// being read is the thing this feature exists to fix, so opening one
+    /// pauses. Handed down as a callback because pausing is also what the
+    /// bar's button does, counter reset included.
+    pause: Callback<()>,
+) -> impl IntoView {
     let state = expect_context::<AppState>();
-    let ts = entry.ts;
+    let (id, ts, stage) = (entry.id, entry.ts, entry.stage);
+    let is_error = entry.is_error();
     let text =
         names.with_value(|names| log::summary(&entry, names.name(entry.stage, entry.component)));
+    let is_open = move || expanded.with(|open| open.contains(&id));
+
+    // The payload is *not* laid out here: this component is built for every
+    // visible row on every update, and pretty-printing two hundred batches to
+    // show none of them is exactly the kind of per-row work the feed's whole
+    // design is about avoiding. `<Show>` builds its children when it opens, so
+    // the box below is where the work happens and it happens once.
+    let kind = StoredValue::new(entry.kind);
 
     view! {
         // Every class here is prefixed, and that is not just tidiness: the
         // "add pipeline" modal has a `.stage` of its own — a group of
         // components, nothing to do with this — and a badge that borrowed the
         // name silently picked up its 12px top margin.
-        <div class="log-row" class:error=entry.is_error()>
+        <div class="log-row" class:error=is_error class:open=is_open>
+            // Always in the DOM and only ever changing opacity: a strip that
+            // appeared on hover would have to be laid out on hover too, and a
+            // column that comes and goes moves every payload sideways as the
+            // pointer crosses the log.
+            <button
+                class="log-expand"
+                title=move || if is_open() { "collapse" } else { "expand this message" }
+                on:click=move |ev| {
+                    ev.stop_propagation();
+                    let opening = !is_open();
+                    expanded.update(|open| { if !open.remove(&id) { open.insert(id); } });
+                    if opening {
+                        pause.run(());
+                    }
+                }
+            >
+                {move || if is_open() { "▾" } else { "▸" }}
+            </button>
             <span class="log-time">{move || log::format_time(ts, state.tz_offset.get())}</span>
-            <span class="log-stage" title=entry.stage.as_str()>
-                {log::stage_label(entry.stage)}
-            </span>
+            <span class="log-stage" title=stage.as_str()>{log::stage_label(stage)}</span>
             // the full payload on hover: a card is 18 cells wide and a batch is
             // not
             <span class="log-text" title=text.clone()>{text.clone()}</span>
         </div>
+        <Show when=is_open>
+            <ExpandedEntry kind />
+        </Show>
+    }
+}
+
+/// What one row holds, opened out: every message of the batch, laid out and
+/// coloured, each of them copyable on its own.
+///
+/// Every message rather than the first, because the row above already shows the
+/// first — a batch of five hundred is summarised as `500 msgs · {first}`, and
+/// an expansion that showed the same message again would answer a question
+/// nobody had. What it can show is bounded by what the feed carries
+/// (`kayak_core::MESSAGES_PER_BATCH`), and it says so when the batch was wider.
+///
+/// Built only while it is open: `<Show>` unmounts it on collapse, which is what
+/// keeps [`crate::pretty`] off the path of an ordinary log update.
+#[component]
+fn ExpandedEntry(kind: StoredValue<log::EntryKind>) -> impl IntoView {
+    let UseClipboardReturn { copy, copied, .. } = use_clipboard();
+    let copy_all = copy.clone();
+
+    let (messages, dropped) = kind.with_value(|kind| match kind {
+        log::EntryKind::Batch { messages, dropped } => (pretty::render_all(messages), *dropped),
+        // an error has no batch, and its text is the one thing a row truncates
+        // that there is nowhere else to read
+        log::EntryKind::Error(message) => (vec![pretty::Rendered::Plain(message.clone())], 0),
+    });
+    let shown = messages.len();
+    let all_text = pretty::all_to_text(&messages);
+
+    view! {
+        // A press here must not reach the canvas behind the card: the box is
+        // several rows tall and is dragged across while text in it is selected.
+        <div class="log-expanded" on:mousedown=move |ev: leptos::ev::MouseEvent| ev.stop_propagation()>
+            <div class="log-expanded-bar">
+                <span class="log-expanded-count">
+                    {if dropped > 0 {
+                        format!("{shown} of {} messages", shown + dropped)
+                    } else if shown == 1 {
+                        "1 message".to_string()
+                    } else {
+                        format!("{shown} messages")
+                    }}
+                </span>
+                <button
+                    class="clear"
+                    title="copy this message to the clipboard"
+                    on:click=move |ev| {
+                        ev.stop_propagation();
+                        copy_all(&all_text);
+                    }
+                >
+                    {move || if copied.get() { "copied" } else { "copy" }}
+                </button>
+            </div>
+            {messages
+                .into_iter()
+                .enumerate()
+                .map(|(i, message)| {
+                    let copy_one = copy.clone();
+                    let text = message.to_text();
+                    view! {
+                        <div class="log-message">
+                            // Only numbered when there is more than one: an
+                            // ordinal on a batch of one is a column of noise.
+                            <Show when=move || { shown > 1 }>
+                                <div class="log-message-bar">
+                                    <span class="log-message-index">{format!("{}", i + 1)}</span>
+                                    <button
+                                        class="clear"
+                                        title="copy this one message"
+                                        on:click={
+                                            let copy_one = copy_one.clone();
+                                            let text = text.clone();
+                                            move |ev: leptos::ev::MouseEvent| {
+                                                ev.stop_propagation();
+                                                copy_one(&text);
+                                            }
+                                        }
+                                    >
+                                        "copy"
+                                    </button>
+                                </div>
+                            </Show>
+                            <MessageBody message />
+                        </div>
+                    }
+                })
+                .collect_view()}
+            // What the feed left behind, said where it is noticed: the box
+            // showing twenty of a five-hundred message batch without saying so
+            // would read as a pipeline that moved twenty.
+            <Show when=move || { dropped > 0 }>
+                <div class="log-expanded-note">
+                    {format!("{dropped} more not carried by the event feed")}
+                </div>
+            </Show>
+        </div>
+    }
+}
+
+/// One message: laid-out JSON, or the text as it stands when it isn't JSON.
+#[component]
+fn MessageBody(message: pretty::Rendered) -> impl IntoView {
+    match message {
+        pretty::Rendered::Json(lines) => view! {
+            <pre class="log-json">
+                {lines
+                    .into_iter()
+                    .map(|line| {
+                        let indent = line.indent();
+                        view! {
+                            <div class="json-line">
+                                <span class="json-indent">{indent}</span>
+                                {line
+                                    .spans
+                                    .into_iter()
+                                    .map(|span| view! { <span class=span.kind.class()>{span.text}</span> })
+                                    .collect_view()}
+                            </div>
+                        }
+                    })
+                    .collect_view()}
+            </pre>
+        }
+        .into_any(),
+        // `pre` on both arms: a truncated payload is still a payload, and
+        // reflowing it as prose loses whatever structure survived the cut.
+        pretty::Rendered::Plain(text) => {
+            view! { <pre class="log-json plain">{text}</pre> }.into_any()
+        }
     }
 }
 
@@ -4823,7 +5223,14 @@ fn LogRow(entry: log::Entry, names: StoredValue<log::ComponentNames>) -> impl In
 fn PassView(
     pass: log::Pass,
     names: StoredValue<log::ComponentNames>,
+    /// Which passes are open, by [`log::Pass::key`].
     expanded: RwSignal<HashSet<u64>>,
+    /// Which *rows* are showing their payload, by entry id. A different set
+    /// from `expanded` and deliberately so: opening a pass is navigating the
+    /// log, opening a row is reading one message, and closing the pass over a
+    /// row that was being read shouldn't throw that away.
+    rows: RwSignal<HashSet<u64>>,
+    pause: Callback<()>,
 ) -> impl IntoView {
     let state = expect_context::<AppState>();
     let key = pass.key();
@@ -4873,7 +5280,7 @@ fn PassView(
                     entries
                         .get_value()
                         .into_iter()
-                        .map(|entry| view! { <LogRow entry names /> })
+                        .map(|entry| view! { <LogRow entry names expanded=rows pause /> })
                         .collect_view()
                 }}
             </div>
@@ -4907,6 +5314,11 @@ fn MessageLog(
     // is what one batch did rather than what just happened.
     let grouped = RwSignal::new(false);
     let expanded = RwSignal::new(HashSet::<u64>::new());
+    // Which rows are showing their payload. Kept here rather than on the row so
+    // it outlives the rebuild every update causes, and so it is one set across
+    // both views — a row opened in the flat view is still open when the log is
+    // switched to grouped.
+    let expanded_rows = RwSignal::new(HashSet::<u64>::new());
 
     // Whether the tail is pinned to the bottom. The log used to scroll down on
     // every event, which on a busy pipeline means no line can be read at all:
@@ -4983,6 +5395,16 @@ fn MessageLog(
         #[allow(clippy::cast_sign_loss, clippy::cast_possible_truncation)]
         let now = state.now.get().max(0.0) as u64;
         messages.with(|log| log.per_second(now))
+    });
+
+    // Stopping the log, however it was asked for: the bar's button, or a row
+    // being opened to read it. Idempotent, because expanding a second row on an
+    // already-paused log must not reset the counter of what has gone past.
+    let pause_log = Callback::new(move |()| {
+        if !paused.get_untracked() {
+            paused.set(true);
+            skipped.set(0);
+        }
     });
 
     let chip = move |label: &'static str,
@@ -5083,6 +5505,10 @@ fn MessageLog(
                     title="clear this log"
                     on:click=move |_| {
                         messages.update(log::Log::clear);
+                        // the rows those ids belonged to are gone; a set that
+                        // outlived them would re-open whichever entries happen
+                        // to be handed the same ids next
+                        expanded_rows.update(HashSet::clear);
                         following.set(true);
                     }
                 >
@@ -5136,12 +5562,12 @@ fn MessageLog(
                         key=log::Pass::render_key
                         let:pass
                     >
-                        <PassView pass names expanded />
+                        <PassView pass names expanded rows=expanded_rows pause=pause_log />
                     </For>
                 </Show>
                 <Show when=move || !grouped.get()>
                     <For each=move || visible_entries.get() key=|entry| entry.id let:entry>
-                        <LogRow entry names />
+                        <LogRow entry names expanded=expanded_rows pause=pause_log />
                     </For>
                 </Show>
             </div>
@@ -5438,6 +5864,33 @@ pub fn Card(pipeline_id: PipelineId, config: Config) -> impl IntoView {
     // the resize handle lives inside a `<Show>`, whose children are rebuilt
     // whenever the mode changes and so can't consume what they capture.
     let stored_id = StoredValue::new(pipeline_id.clone());
+
+    // What a press on the card does to the selection, wherever on the card it
+    // lands. Three cases, and the middle one is the one that makes dragging a
+    // group possible at all:
+    //
+    // - shift adds this card to the selection, or takes it back out;
+    // - a press on a card that is *already* selected leaves the selection
+    //   alone, so a group can be grabbed by any of its members — collapsing to
+    //   the one pressed would make it impossible to drag the rest;
+    // - anything else means this card and nothing else.
+    //
+    // Shift is edit-mode only. Read-only selects to look at one pipeline, and a
+    // set of them there would be a state with nothing to do.
+    let press_selects = move |ev: &leptos::ev::MouseEvent| {
+        let id = stored_id.get_value();
+        if ev.shift_key() && state.editing() {
+            // A card's config and log are selectable text — that is deliberate,
+            // it is where a broker url gets copied out of. Shift-click there is
+            // the browser's "extend the selection to here" as well as ours, and
+            // the two happening at once paints half the card blue. Ours wins.
+            ev.prevent_default();
+            canvas.toggle_selected(&id);
+        } else if !canvas.is_selected(&id) {
+            canvas.select_only(&id);
+        }
+    };
+
     let grab = move |ev: leptos::ev::MouseEvent, grab: Grab| {
         if ev.button() != 0 {
             return;
@@ -5447,29 +5900,41 @@ pub fn Card(pipeline_id: PipelineId, config: Config) -> impl IntoView {
         // canvas behind it; selecting is done here instead, so grabbing a card
         // selects it exactly as clicking into it does
         ev.stop_propagation();
-        canvas.select(&stored_id.get_value());
+        press_selects(&ev);
+        // A shift-press that took this card *out* of the selection has said
+        // what it meant; dragging the card it just deselected would undo the
+        // gesture in the same movement.
+        if !canvas.is_selected(&stored_id.get_value()) {
+            return;
+        }
         canvas.interrupt_focus();
+        let start = position.get_untracked();
+        let pinned = pinned_height.get_untracked();
+        let cards = match grab {
+            // A resize is one card's own height and width: there is no reading
+            // of dragging six of them from one corner.
+            Grab::Resize => vec![DragCard {
+                id: stored_id.get_value(),
+                start,
+                pinned_height: pinned,
+            }],
+            Grab::Move => canvas.moving_cards(&stored_id.get_value(), start, pinned),
+        };
         canvas.dragging.set(Some(Dragging {
-            id: stored_id.get_value(),
             grab,
             origin: (f64::from(ev.client_x()), f64::from(ev.client_y())),
-            start: position.get_untracked(),
-            pinned_height: pinned_height.get_untracked(),
+            cards,
         }));
     };
 
     let selected_id = pipeline_id.clone();
-    let is_selected = Memo::new(move |_| {
-        canvas
-            .selected
-            .with(|s| s.as_deref() == Some(selected_id.as_str()))
-    });
+    let is_selected = Memo::new(move |_| canvas.selected.with(|s| s.contains(selected_id.as_str())));
 
     let dragging_id = pipeline_id.clone();
     let is_dragging = Memo::new(move |_| {
         canvas
             .dragging
-            .with(|d| d.as_ref().is_some_and(|d| d.id == dragging_id))
+            .with(|d| d.as_ref().is_some_and(|d| d.moves(&dragging_id)))
     });
 
     let reset_id = pipeline_id.clone();
@@ -5497,7 +5962,7 @@ pub fn Card(pipeline_id: PipelineId, config: Config) -> impl IntoView {
             // gliding it to the middle under the pointer would be a fight.
             on:mousedown=move |ev| {
                 if ev.button() == 0 {
-                    canvas.select(&stored_id.get_value());
+                    press_selects(&ev);
                 }
             }
             style:left=move || format!("{}px", position.get().x)
