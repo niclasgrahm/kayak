@@ -16,6 +16,7 @@ use tracing::Level;
 use clap::Parser;
 use kayak::api_router;
 use kayak::auth::Auth;
+use kayak::banner;
 use kayak::listen;
 use kayak::secrets::{ChainStore, EnvStore, FileStore, SecretStore};
 use kayak::state::AppState;
@@ -108,6 +109,9 @@ fn warn_if_open_to_the_network(config: &ServerConfig, addr: SocketAddr) {
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     let args = Args::parse();
+    // before the subscriber is built, so no line of it is prefixed with a
+    // timestamp and a level — see `kayak::banner`.
+    println!("{}", banner::banner(banner::version()));
     let level = if args.debug {
         Level::DEBUG
     } else {

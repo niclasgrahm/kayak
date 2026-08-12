@@ -143,6 +143,21 @@ picking up."
 - [ ] **no release/packaging story beyond the Dockerfile.** No crates.io
       publish, no versioned releases, no CHANGELOG. Fine for a project in
       active development; blocking for "someone else can depend on this."
+- [ ] **a published, versioned docs site (VitePress off the same reflection).**
+      The in-app `/docs` tab only ever shows the schema of whatever binary is
+      running, and only exists once a server is up — no good for evaluating
+      kayak before installing it, and no way to browse an older release's
+      reference after a newer one ships. `GET /api/docs` and
+      `/api/openapi.json` are already the clean boundary (same JSON the
+      Leptos page and Scalar render from), so this is a generator script —
+      JSON in, markdown + frontmatter out — run in CI on tag, not a new
+      reflection layer. `vitepress-openapi` can consume `/api/openapi.json`
+      directly, so the HTTP-API half is close to free. Do this *after* fixing
+      the flat-table gap noted under "the component reference" in
+      `CLAUDE.md` (list/nested-object fields don't render) — that's a minor
+      omission in-app, but reads as broken docs once it's public. Supplements
+      the in-app page rather than replacing it; they answer different
+      questions.
 
 ## the machine-cycle scenario
 
