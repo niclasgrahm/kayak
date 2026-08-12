@@ -251,13 +251,20 @@ impl PipelineRuntime {
                 match t.apply(b).await {
                     Ok(b) => next.extend(b),
                     Err(e) => {
-                        error!("[{}]\t transform error: {:?}", self.shared.id, e);
+                        // Logged only when the throttle also lets it through
+                        // the UI: a transform failing on every message of a
+                        // fast pipeline would otherwise write a line to the
+                        // log for each one, same reasoning as the output
+                        // error below.
                         if throttle.report_error(Stage::Transform, Some(index), Instant::now()) {
+                            error!("[{}]\t transform error: {:?}", self.shared.id, e);
                             publish(&self.events, || {
                                 UiEvent::error(self.shared.id.clone(), Stage::Transform, &e)
                                     .seq(pass)
                                     .component(index)
                             });
+                        } else {
+                            debug!("[{}]\t transform error (suppressed): {:?}", self.shared.id, e);
                         }
                     }
                 }
@@ -378,13 +385,23 @@ impl PipelineRuntime {
                 // are still fed, same as we do for transform errors
                 for (index, output) in self.outputs.iter_mut().enumerate() {
                     if let Err(e) = output.emit(b.clone()).await {
-                        error!("[{}]\t output error: {:?}", self.shared.id, e);
+                        // Logged only when the throttle also lets it through
+                        // the UI. An output whose broker is down now fails
+                        // fast on its own backoff gate (see `outputs::*`),
+                        // but that still leaves one failed `emit` per batch —
+                        // without this, a fast pipeline against a downed
+                        // broker writes a log line for every one of them,
+                        // which is the "went crazy" a reconnect storm looks
+                        // like even after the reconnect itself is tamed.
                         if throttle.report_error(Stage::Output, Some(index), Instant::now()) {
+                            error!("[{}]\t output error: {:?}", self.shared.id, e);
                             publish(&self.events, || {
                                 UiEvent::error(self.shared.id.clone(), Stage::Output, &e)
                                     .seq(pass)
                                     .component(index)
                             });
+                        } else {
+                            debug!("[{}]\t output error (suppressed): {:?}", self.shared.id, e);
                         }
                     }
                 }

@@ -2,12 +2,14 @@ use anyhow::{Context, Result, anyhow, bail};
 use kayak_core::columns::ColumnType;
 use kayak_core::config::PostgresOutputConfig;
 use std::sync::Arc;
+use std::time::Instant;
 use tokio_postgres::NoTls;
 use tokio_postgres::types::ToSql;
 use tracing::{error, warn};
 
 use crate::{
     BuildCtx,
+    backoff::Gate,
     inputs::MessageBatch,
     outputs::{
         BuildOutput, OutputDestination,
@@ -53,6 +55,7 @@ impl BuildOutput for PostgresOutputConfig {
             table,
             layout,
             client: None,
+            gate: Gate::new(),
         }))
     }
 }
@@ -340,6 +343,10 @@ pub struct PostgresOutput {
     layout: Layout,
     create_table: bool,
     client: Option<tokio_postgres::Client>,
+    /// Paces reconnect attempts after the connection is lost — see `emit`.
+    /// `init` never consults it: a pipeline that can't reach its database at
+    /// startup still fails to build, same as always.
+    gate: Gate,
 }
 
 impl PostgresOutput {
@@ -368,57 +375,12 @@ impl PostgresOutput {
             database = self.database
         )
     }
-}
 
-#[async_trait::async_trait]
-impl OutputDestination for PostgresOutput {
-    async fn emit(&mut self, message_batch: Arc<MessageBatch>) -> Result<()> {
-        // as in the nats output: doing nothing here would look like the rows
-        // were written
-        let client = self
-            .client
-            .as_ref()
-            .ok_or_else(|| anyhow!("postgres output is not connected; init() was not called"))?;
-
-        let statement = client
-            .prepare(&self.layout.insert_sql(&self.table))
-            .await
-            .with_context(|| format!("failed to prepare the insert for {}", self.describe()))?;
-
-        for msg in message_batch.iter() {
-            match &self.layout {
-                Layout::Payload => {
-                    client
-                        .execute(&statement, &[&**msg])
-                        .await
-                        .with_context(|| {
-                            format!("failed to insert a row into {}", self.describe())
-                        })?;
-                }
-                Layout::Mapped(mapped) => {
-                    let Row::Values(values) = mapped.plan.row(msg).with_context(|| {
-                        format!("failed to map a message onto {}", self.table.quoted())
-                    })?
-                    else {
-                        continue;
-                    };
-                    let params: Vec<&(dyn ToSql + Sync)> = values
-                        .iter()
-                        .map(|value| value as &(dyn ToSql + Sync))
-                        .collect();
-                    client
-                        .execute(&statement, &params)
-                        .await
-                        .with_context(|| {
-                            format!("failed to insert a row into {}", self.describe())
-                        })?;
-                }
-            }
-        }
-        Ok(())
-    }
-
-    async fn init(&mut self) -> Result<()> {
+    /// Connects and spawns the background task that drives the socket.
+    /// Shared by `init` and by `emit`'s reconnect — DDL only runs from
+    /// `init`, since a reconnect mid-run is "the same table again", not a
+    /// fresh pipeline start.
+    async fn connect_client(&self) -> Result<tokio_postgres::Client> {
         let (client, connection) = self
             .connection_config()
             .connect(NoTls)
@@ -434,6 +396,82 @@ impl OutputDestination for PostgresOutput {
                 error!("postgres connection to {described} closed: {e:?}");
             }
         });
+        Ok(client)
+    }
+}
+
+#[async_trait::async_trait]
+impl OutputDestination for PostgresOutput {
+    async fn emit(&mut self, message_batch: Arc<MessageBatch>) -> Result<()> {
+        if self.client.is_none() {
+            // Gated the same way the nats and kafka outputs are: a reconnect
+            // is only attempted once the backoff window has passed, so a
+            // downed database gets one attempt every few seconds rather than
+            // one dial per batch.
+            let now = Instant::now();
+            if !self.gate.ready(now) {
+                bail!(
+                    "postgres output at {} is still unreachable; not retrying yet",
+                    self.describe()
+                );
+            }
+            match self.connect_client().await {
+                Ok(client) => {
+                    self.gate.record_success();
+                    self.client = Some(client);
+                }
+                Err(e) => {
+                    self.gate.record_failure(now);
+                    return Err(e);
+                }
+            }
+        }
+        // as in the nats output: doing nothing here would look like the rows
+        // were written
+        let client = self
+            .client
+            .as_ref()
+            .ok_or_else(|| anyhow!("postgres output is not connected; init() was not called"))?;
+
+        let statement = match client.prepare(&self.layout.insert_sql(&self.table)).await {
+            Ok(statement) => statement,
+            Err(e) => {
+                self.client = None;
+                self.gate.record_failure(Instant::now());
+                return Err(e)
+                    .with_context(|| format!("failed to prepare the insert for {}", self.describe()));
+            }
+        };
+
+        for msg in message_batch.iter() {
+            let result = match &self.layout {
+                Layout::Payload => client.execute(&statement, &[&**msg]).await,
+                Layout::Mapped(mapped) => {
+                    let Row::Values(values) = mapped.plan.row(msg).with_context(|| {
+                        format!("failed to map a message onto {}", self.table.quoted())
+                    })?
+                    else {
+                        continue;
+                    };
+                    let params: Vec<&(dyn ToSql + Sync)> = values
+                        .iter()
+                        .map(|value| value as &(dyn ToSql + Sync))
+                        .collect();
+                    client.execute(&statement, &params).await
+                }
+            };
+            if let Err(e) = result {
+                self.client = None;
+                self.gate.record_failure(Instant::now());
+                return Err(e).with_context(|| format!("failed to insert a row into {}", self.describe()));
+            }
+        }
+        self.gate.record_success();
+        Ok(())
+    }
+
+    async fn init(&mut self) -> Result<()> {
+        let client = self.connect_client().await?;
 
         // creation never *alters*: a table whose shape has moved on fails the
         // insert with the server's own error rather than being migrated from a

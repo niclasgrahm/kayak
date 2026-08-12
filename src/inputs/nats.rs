@@ -1,11 +1,14 @@
 use crate::{
     BuildCtx,
+    backoff::Backoff,
+    events::publish,
     inputs::{
         BuildInput, InputSource, MessageBatch,
         ack::{self, Delivery},
         envelope::{Envelope, Meta},
     },
     secrets::Resolved,
+    state::{PipelineId, UiEvent},
 };
 use serde_json::Value;
 use anyhow::{Context, Result};
@@ -13,8 +16,9 @@ use futures_util::FutureExt;
 use tokio_stream::StreamExt;
 
 use std::sync::Arc;
+use tokio::sync::broadcast;
 
-use kayak_core::config::NatsConfig;
+use kayak_core::{Stage, config::NatsConfig};
 
 impl BuildInput for NatsConfig {
     fn build(self, ctx: &mut BuildCtx) -> Result<Box<dyn InputSource>> {
@@ -39,6 +43,9 @@ impl BuildInput for NatsConfig {
             max_batch: crate::inputs::batch_cap(self.max_batch),
             envelope: ctx.envelope("nats", Some(&self.connection)),
             sub: None,
+            pipeline_id: ctx.pipeline_id.clone(),
+            events: ctx.events.clone(),
+            backoff: Backoff::new(),
         }))
     }
 }
@@ -51,6 +58,13 @@ pub struct NatsInput {
     /// What this input attaches to each message, if the config asked for any.
     pub envelope: Envelope,
     pub sub: Option<async_nats::Subscriber>,
+    pub pipeline_id: PipelineId,
+    pub events: broadcast::Sender<UiEvent>,
+    /// How long to wait before the next reconnect attempt once the broker
+    /// drops — see [`NatsInput::next`] for where it's consulted. Reset on
+    /// every successful connect, so a second outage starts the schedule
+    /// over rather than picking up where a much earlier one left off.
+    backoff: Backoff,
 }
 
 /// A nats message's headers as JSON: an object of arrays, because a header may
@@ -91,83 +105,145 @@ fn meta_of(message: &async_nats::Message) -> Meta {
     ]
 }
 
+impl NatsInput {
+    /// Connects and subscribes, or reports why it couldn't and waits before
+    /// trying again — never gives up, since a broker coming back after
+    /// `docker compose down` is exactly the case this exists for. Reconnect
+    /// attempts are paced by [`Backoff`] rather than firing at whatever rate
+    /// `next` is being called, which is what keeps a downed nats server from
+    /// being hammered on every pass of a fast pipeline.
+    ///
+    /// One [`UiEvent::error`] per outage, on the attempt that starts it —
+    /// not one per retry, the same "warn once, not per message" rule the
+    /// state buckets follow — and a log line on the attempt that ends it.
+    async fn reconnect(&mut self) -> async_nats::Subscriber {
+        loop {
+            match self.try_connect().await {
+                Ok(sub) => {
+                    if self.backoff.is_failing() {
+                        tracing::info!(
+                            "nats input reconnected to subject '{}' at {}",
+                            self.subject,
+                            self.urls
+                        );
+                    }
+                    self.backoff.succeeded();
+                    return sub;
+                }
+                Err(e) => {
+                    if !self.backoff.is_failing() {
+                        tracing::error!(
+                            "nats input on subject '{}' lost its connection, retrying: {e:?}",
+                            self.subject
+                        );
+                        publish(&self.events, || {
+                            UiEvent::error(self.pipeline_id.clone(), Stage::Input, &e)
+                        });
+                    }
+                    tokio::time::sleep(self.backoff.failed()).await;
+                }
+            }
+        }
+    }
+
+    async fn try_connect(&self) -> Result<async_nats::Subscriber> {
+        let client = async_nats::connect(self.urls.expose())
+            .await
+            .with_context(|| format!("failed to connect to nats at {}", self.urls))?;
+        client
+            .subscribe(self.subject.clone())
+            .await
+            .with_context(|| format!("failed to subscribe to nats subject '{}'", self.subject))
+    }
+}
+
 #[async_trait::async_trait]
 impl InputSource for NatsInput {
     async fn next(&mut self) -> Result<Delivery> {
-        if self.sub.is_none() {
-            let client = async_nats::connect(self.urls.expose())
-                .await
-                .with_context(|| format!("failed to connect to nats at {}", self.urls))?;
-            let subscriber = client
-                .subscribe(self.subject.clone())
-                .await
-                .with_context(|| {
-                    format!("failed to subscribe to nats subject '{}'", self.subject)
-                })?;
-            self.sub = Some(subscriber);
-        }
-        let subscriber = self
-            .sub
-            .as_mut()
-            .ok_or_else(|| anyhow::anyhow!("nats subscriber not initialized"))?;
+        // The outer loop is the reconnect path: a subscription ending mid-read
+        // clears `self.sub` and goes round again rather than returning an
+        // error, so a broker outage costs this input a wait, not its life.
+        loop {
+            if self.sub.is_none() {
+                self.sub = Some(self.reconnect().await);
+            }
+            let subscriber = self
+                .sub
+                .as_mut()
+                .ok_or_else(|| anyhow::anyhow!("nats subscriber not initialized"))?;
 
-        // a single malformed payload shouldn't kill the pipeline; skip it and
-        // wait for the next message. The envelope skips for the same reason and
-        // is reported the same way — a `merge` envelope over a bare number has
-        // nowhere to put its field, which is a message this pipeline cannot
-        // read rather than a pipeline that is misconfigured.
-        let subject = &self.subject;
-        let envelope = &self.envelope;
-        let decode = move |message: &async_nats::Message| {
-            let value = match serde_json::from_slice::<Value>(&message.payload) {
-                Ok(value) => value,
-                Err(e) => {
-                    tracing::warn!("skipping non-json message on nats subject '{subject}': {e}");
-                    return None;
+            // a single malformed payload shouldn't kill the pipeline; skip it and
+            // wait for the next message. The envelope skips for the same reason and
+            // is reported the same way — a `merge` envelope over a bare number has
+            // nowhere to put its field, which is a message this pipeline cannot
+            // read rather than a pipeline that is misconfigured.
+            let subject = &self.subject;
+            let envelope = &self.envelope;
+            let decode = move |message: &async_nats::Message| {
+                let value = match serde_json::from_slice::<Value>(&message.payload) {
+                    Ok(value) => value,
+                    Err(e) => {
+                        tracing::warn!(
+                            "skipping non-json message on nats subject '{subject}': {e}"
+                        );
+                        return None;
+                    }
+                };
+                let own = if envelope.is_enabled() {
+                    meta_of(message)
+                } else {
+                    Vec::new()
+                };
+                let enveloped = envelope.apply(value, own);
+                if enveloped.is_none() {
+                    tracing::warn!(
+                        "skipping a message on nats subject '{subject}': its payload is not a \
+                         json object, so a `merge` envelope has nowhere to attach metadata — \
+                         use a `wrap` envelope for a subject carrying bare values"
+                    );
                 }
+                enveloped
             };
-            let own = if envelope.is_enabled() {
-                meta_of(message)
-            } else {
-                Vec::new()
-            };
-            let enveloped = envelope.apply(value, own);
-            if enveloped.is_none() {
-                tracing::warn!(
-                    "skipping a message on nats subject '{subject}': its payload is not a \
-                     json object, so a `merge` envelope has nowhere to attach metadata — \
-                     use a `wrap` envelope for a subject carrying bare values"
-                );
-            }
-            enveloped
-        };
 
-        let mut batch: MessageBatch = Vec::new();
-        while batch.is_empty() {
-            let msg = subscriber
-                .next()
-                .await
-                .ok_or_else(|| anyhow::anyhow!("nats subscription on '{}' ended", self.subject))?;
-            if let Some(value) = decode(&msg) {
-                batch.push(Arc::new(value));
+            let mut batch: MessageBatch = Vec::new();
+            let mut subscription_ended = false;
+            while batch.is_empty() {
+                if let Some(msg) = subscriber.next().await {
+                    if let Some(value) = decode(&msg) {
+                        batch.push(Arc::new(value));
+                    }
+                } else {
+                    subscription_ended = true;
+                    break;
+                }
             }
+            if subscription_ended {
+                self.sub = None;
+                continue;
+            }
+
+            // Whatever else has *already* arrived, up to the cap — never a wait
+            // for one to fill, so a quiet subject still yields batches of one
+            // however high `max_batch` is. With the default of 1 this loop
+            // never runs. A subscription ending here doesn't cost the batch
+            // already collected — it's returned now, and the reconnect happens
+            // on the next call.
+            while batch.len() < self.max_batch {
+                let Some(ready) = subscriber.next().now_or_never() else {
+                    break;
+                };
+                if let Some(msg) = ready {
+                    if let Some(value) = decode(&msg) {
+                        batch.push(Arc::new(value));
+                    }
+                } else {
+                    self.sub = None;
+                    break;
+                }
+            }
+
+            return Ok(Delivery::new(Arc::new(batch)));
         }
-
-        // Whatever else has *already* arrived, up to the cap — never a wait for
-        // one to fill, so a quiet subject still yields batches of one however
-        // high `max_batch` is. With the default of 1 this loop never runs.
-        while batch.len() < self.max_batch {
-            let Some(ready) = subscriber.next().now_or_never() else {
-                break;
-            };
-            let msg = ready
-                .ok_or_else(|| anyhow::anyhow!("nats subscription on '{}' ended", self.subject))?;
-            if let Some(value) = decode(&msg) {
-                batch.push(Arc::new(value));
-            }
-        }
-
-        Ok(Delivery::new(Arc::new(batch)))
     }
 }
 

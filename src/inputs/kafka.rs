@@ -1,21 +1,28 @@
 use crate::{
     BuildCtx,
+    backoff::Backoff,
+    events::publish,
     inputs::{
         BuildInput, InputSource, MessageBatch,
         ack::{Ack, Delivery},
         envelope::{Envelope, Meta},
     },
     secrets::Resolved,
+    state::{PipelineId, UiEvent},
 };
 use serde_json::Value;
 use anyhow::{Context, Result};
 use futures_util::FutureExt;
-use kayak_core::config::{AckMode, KafkaConfig, KafkaStartAt};
+use kayak_core::{
+    Stage,
+    config::{AckMode, KafkaConfig, KafkaStartAt},
+};
 use rdkafka::{
     ClientConfig, Message,
     consumer::{Consumer, StreamConsumer},
 };
 use std::sync::Arc;
+use tokio::sync::broadcast;
 
 impl BuildInput for KafkaConfig {
     fn build(self, ctx: &mut BuildCtx) -> Result<Box<dyn InputSource>> {
@@ -39,6 +46,9 @@ impl BuildInput for KafkaConfig {
             envelope: ctx.envelope("kafka", Some(&self.connection)),
             ack_mode: ctx.ack_mode(),
             consumer: None,
+            pipeline_id: ctx.pipeline_id.clone(),
+            events: ctx.events.clone(),
+            backoff: Backoff::new(),
         }))
     }
 }
@@ -63,6 +73,10 @@ pub struct KafkaInput {
     /// hands out, since acknowledging one has to reach back into the same
     /// consumer to store an offset.
     consumer: Option<Arc<StreamConsumer>>,
+    pipeline_id: PipelineId,
+    events: broadcast::Sender<UiEvent>,
+    /// Paces reconnect attempts after `recv` fails — see [`KafkaInput::next`].
+    backoff: Backoff,
 }
 
 impl KafkaInput {
@@ -104,6 +118,45 @@ impl KafkaInput {
             .subscribe(&[self.topic.as_str()])
             .with_context(|| format!("failed to subscribe to kafka topic '{}'", self.topic))?;
         Ok(consumer)
+    }
+
+    /// Creates a consumer, retrying on failure — never gives up.
+    ///
+    /// This alone does **not** prove the cluster is reachable: `create` spins
+    /// up librdkafka's background threads and `subscribe` only registers the
+    /// desired topic, neither of which waits on a broker. The real signal is
+    /// `recv` failing in `next`, which is why that path calls
+    /// [`KafkaInput::report_failure`] itself rather than trusting this one to
+    /// have already paced things — the same split
+    /// [`crate::inputs::mqtt::MqttInput::reconnect`] makes and for the same
+    /// reason. This still retries a `create`/`subscribe` that fails outright.
+    async fn reconnect(&mut self) -> Arc<StreamConsumer> {
+        loop {
+            match self.connect() {
+                Ok(consumer) => return Arc::new(consumer),
+                Err(e) => {
+                    let delay = self.report_failure(&e);
+                    tokio::time::sleep(delay).await;
+                }
+            }
+        }
+    }
+
+    /// Records a failure — logging and publishing a [`UiEvent::error`] once
+    /// per outage, on the attempt that starts it, not on every retry — and
+    /// returns how long to wait before trying again. Doesn't sleep itself:
+    /// see [`crate::inputs::mqtt::MqttInput::report_failure`] for why.
+    fn report_failure(&mut self, e: &anyhow::Error) -> std::time::Duration {
+        if !self.backoff.is_failing() {
+            tracing::error!(
+                "kafka input on topic '{}' lost its connection, retrying: {e:?}",
+                self.topic
+            );
+            publish(&self.events, || {
+                UiEvent::error(self.pipeline_id.clone(), Stage::Input, e)
+            });
+        }
+        self.backoff.failed()
     }
 }
 
@@ -222,54 +275,100 @@ impl InputSource for KafkaInput {
     /// nothing in latency. It only bites during a catch-up, which is the case it
     /// exists for — and with the default of 1 the drain loop doesn't run at all.
     async fn next(&mut self) -> Result<Delivery> {
-        if self.consumer.is_none() {
-            self.consumer = Some(Arc::new(self.connect()?));
-        }
-        let consumer = self
-            .consumer
-            .clone()
-            .ok_or_else(|| anyhow::anyhow!("kafka consumer not initialized"))?;
-
-        let mut batch: MessageBatch = Vec::new();
-        let mut offsets: Vec<(i32, i64)> = Vec::new();
-        while batch.is_empty() {
-            // recv() is cancel-safe, which matters: the run loop drops this
-            // future every time it checks for cancellation
-            let msg = consumer
-                .recv()
-                .await
-                .with_context(|| format!("kafka consumer on '{}' failed", self.topic))?;
-            offsets.push((msg.partition(), msg.offset() + 1));
-            if let Some(value) = self.decode(&msg) {
-                batch.push(Arc::new(value));
+        // The outer loop is the reconnect path: a `recv` failure drops the
+        // consumer and goes round again instead of returning an error, so a
+        // broker outage costs this input a wait, not its life — see
+        // `reconnect`.
+        loop {
+            if self.consumer.is_none() {
+                self.consumer = Some(self.reconnect().await);
             }
-        }
+            let consumer = self
+                .consumer
+                .clone()
+                .ok_or_else(|| anyhow::anyhow!("kafka consumer not initialized"))?;
 
-        while batch.len() < self.max_batch {
-            // already-buffered records only; the moment the broker has nothing
-            // more for us this resolves to None and the batch goes as it is
-            let Some(ready) = consumer.recv().now_or_never() else {
-                break;
-            };
-            let msg = ready.with_context(|| format!("kafka consumer on '{}' failed", self.topic))?;
-            offsets.push((msg.partition(), msg.offset() + 1));
-            if let Some(value) = self.decode(&msg) {
-                batch.push(Arc::new(value));
+            let mut batch: MessageBatch = Vec::new();
+            let mut offsets: Vec<(i32, i64)> = Vec::new();
+            // `create`/`subscribe` don't prove the cluster is reachable — see
+            // `reconnect` — so `recv` failing here is the signal this input
+            // mostly retries on.
+            let mut lost: Option<anyhow::Error> = None;
+            while batch.is_empty() {
+                // recv() is cancel-safe, which matters: the run loop drops this
+                // future every time it checks for cancellation
+                match consumer.recv().await {
+                    Ok(msg) => {
+                        offsets.push((msg.partition(), msg.offset() + 1));
+                        if let Some(value) = self.decode(&msg) {
+                            batch.push(Arc::new(value));
+                        }
+                    }
+                    Err(e) => {
+                        lost = Some(
+                            anyhow::Error::new(e)
+                                .context(format!("kafka consumer on '{}' failed", self.topic)),
+                        );
+                        break;
+                    }
+                }
             }
-        }
+            if let Some(e) = lost {
+                self.consumer = None;
+                let delay = self.report_failure(&e);
+                tokio::time::sleep(delay).await;
+                continue;
+            }
+            // At least one record got through, which is the cluster proving
+            // itself reachable — same rule the nats and mqtt inputs follow.
+            self.backoff.succeeded();
 
-        let batch = Arc::new(batch);
-        Ok(match self.ack_mode {
-            AckMode::OnReceipt => Delivery::new(batch),
-            AckMode::OnDelivery => Delivery::with_ack(
-                batch,
-                Box::new(KafkaAck {
-                    consumer,
-                    topic: self.topic.clone(),
-                    offsets,
-                }) as Box<dyn Ack>,
-            ),
-        })
+            let mut lost_after_batch: Option<anyhow::Error> = None;
+            while batch.len() < self.max_batch {
+                // already-buffered records only; the moment the broker has
+                // nothing more for us this resolves to None and the batch
+                // goes as it is
+                let Some(ready) = consumer.recv().now_or_never() else {
+                    break;
+                };
+                match ready {
+                    Ok(msg) => {
+                        offsets.push((msg.partition(), msg.offset() + 1));
+                        if let Some(value) = self.decode(&msg) {
+                            batch.push(Arc::new(value));
+                        }
+                    }
+                    Err(e) => {
+                        lost_after_batch = Some(
+                            anyhow::Error::new(e)
+                                .context(format!("kafka consumer on '{}' failed", self.topic)),
+                        );
+                        break;
+                    }
+                }
+            }
+            // A failure here doesn't cost the batch already collected — it's
+            // returned now, and the reconnect happens on the next call, same
+            // as the nats input's opportunistic loop. Still recorded, so the
+            // next call's backoff continues this outage's schedule.
+            if let Some(e) = lost_after_batch {
+                self.consumer = None;
+                self.report_failure(&e);
+            }
+
+            let batch = Arc::new(batch);
+            return Ok(match self.ack_mode {
+                AckMode::OnReceipt => Delivery::new(batch),
+                AckMode::OnDelivery => Delivery::with_ack(
+                    batch,
+                    Box::new(KafkaAck {
+                        consumer,
+                        topic: self.topic.clone(),
+                        offsets,
+                    }) as Box<dyn Ack>,
+                ),
+            });
+        }
     }
 }
 
@@ -294,6 +393,9 @@ mod tests {
             envelope: Envelope::none(),
             ack_mode,
             consumer: None,
+            pipeline_id: "test".to_string(),
+            events: broadcast::channel(4).0,
+            backoff: Backoff::new(),
         }
     }
 

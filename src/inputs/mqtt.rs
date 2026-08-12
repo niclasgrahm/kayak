@@ -1,18 +1,25 @@
 use crate::{
     BuildCtx,
+    backoff::Backoff,
+    events::publish,
     inputs::{
         BuildInput, InputSource, MessageBatch,
         ack::{Ack, Delivery},
         envelope::{Envelope, Meta},
     },
     secrets::Resolved,
+    state::{PipelineId, UiEvent},
 };
 use anyhow::{Context, Result};
 use futures_util::FutureExt;
-use kayak_core::config::{AckMode, MqttConfig, MqttQos};
+use kayak_core::{
+    Stage,
+    config::{AckMode, MqttConfig, MqttQos},
+};
 use rumqttc::{AsyncClient, Event, EventLoop, MqttOptions, Packet, Publish, QoS};
 use serde_json::Value;
 use std::sync::Arc;
+use tokio::sync::broadcast;
 
 fn to_rumqttc_qos(qos: MqttQos) -> QoS {
     match qos {
@@ -82,6 +89,9 @@ impl BuildInput for MqttConfig {
             ack_mode,
             connection_name: self.connection,
             client_eventloop: None,
+            pipeline_id: ctx.pipeline_id.clone(),
+            events: ctx.events.clone(),
+            backoff: Backoff::new(),
         }))
     }
 }
@@ -107,6 +117,11 @@ pub struct MqttInput {
     /// Built on the first read, like the nats and kafka inputs: `build()` must
     /// not block on a broker that isn't up yet.
     client_eventloop: Option<(AsyncClient, EventLoop)>,
+    pipeline_id: PipelineId,
+    events: broadcast::Sender<UiEvent>,
+    /// Paces reconnect attempts after the eventloop fails — see
+    /// [`MqttInput::next`].
+    backoff: Backoff,
 }
 
 impl MqttInput {
@@ -125,6 +140,52 @@ impl MqttInput {
         AsyncClient::new(options, 100)
     }
 
+    /// Connects and subscribes, retrying on failure — never gives up.
+    ///
+    /// This alone does **not** prove the broker is reachable: `AsyncClient`
+    /// only ever queues requests onto a channel the eventloop drains, so
+    /// `connect`/`subscribe` succeed at once whether or not anything is
+    /// listening on the other end. The real handshake happens the first time
+    /// the eventloop is polled, in `next` — which is why that path has its
+    /// own call into [`MqttInput::report_failure`] rather than trusting this
+    /// one to have already paced things. This still retries a subscribe that
+    /// fails outright (the channel itself gone, say), for whatever reason
+    /// that can happen.
+    async fn reconnect(&mut self) -> (AsyncClient, EventLoop) {
+        loop {
+            let (client, eventloop) = self.connect();
+            match client.subscribe(self.topic.clone(), self.qos).await {
+                Ok(()) => return (client, eventloop),
+                Err(e) => {
+                    let e = anyhow::Error::new(e).context(format!(
+                        "failed to subscribe to mqtt topic '{}'",
+                        self.topic
+                    ));
+                    let delay = self.report_failure(&e);
+                    tokio::time::sleep(delay).await;
+                }
+            }
+        }
+    }
+
+    /// Records a failure — logging and publishing a [`UiEvent::error`] once
+    /// per outage, on the attempt that starts it, not on every retry — and
+    /// returns how long to wait before trying again. Doesn't sleep itself: a
+    /// caller that already has a batch in hand (the opportunistic second
+    /// loop in `next`) wants the failure recorded without delaying what it's
+    /// about to return; the blocking first loop awaits the delay directly.
+    fn report_failure(&mut self, e: &anyhow::Error) -> std::time::Duration {
+        if !self.backoff.is_failing() {
+            tracing::error!(
+                "mqtt input on topic '{}' lost its connection, retrying: {e:?}",
+                self.topic
+            );
+            publish(&self.events, || {
+                UiEvent::error(self.pipeline_id.clone(), Stage::Input, e)
+            });
+        }
+        self.backoff.failed()
+    }
 }
 
 /// What this input knows about one message: the concrete topic it arrived
@@ -232,71 +293,116 @@ impl InputSource for MqttInput {
     /// reports every one of those alongside the messages this input actually
     /// wants.
     async fn next(&mut self) -> Result<Delivery> {
-        if self.client_eventloop.is_none() {
-            let (client, eventloop) = self.connect();
-            client
-                .subscribe(self.topic.clone(), self.qos)
-                .await
-                .with_context(|| format!("failed to subscribe to mqtt topic '{}'", self.topic))?;
-            self.client_eventloop = Some((client, eventloop));
-        }
-        // Captured before the mutable borrow of `client_eventloop` below —
-        // disjoint fields, so the borrow checker is fine with both being
-        // alive at once, same ordering `NatsInput::next` uses.
-        let envelope = &self.envelope;
-        let connection_name = &self.connection_name;
-        let ack_mode = self.ack_mode;
-        let max_batch = self.max_batch;
-        let host = &self.host;
-        let (client, eventloop) = self
-            .client_eventloop
-            .as_mut()
-            .ok_or_else(|| anyhow::anyhow!("mqtt client not initialized"))?;
+        // The outer loop is the reconnect path: an eventloop failure drops
+        // the client and goes round again instead of returning an error, so
+        // a broker outage costs this input a wait, not its life — see
+        // `reconnect`.
+        loop {
+            if self.client_eventloop.is_none() {
+                self.client_eventloop = Some(self.reconnect().await);
+            }
+            // Captured before the mutable borrow of `client_eventloop` below —
+            // disjoint fields, so the borrow checker is fine with both being
+            // alive at once, same ordering `NatsInput::next` uses.
+            let envelope = &self.envelope;
+            let connection_name = &self.connection_name;
+            let ack_mode = self.ack_mode;
+            let max_batch = self.max_batch;
+            let host = &self.host;
+            let (client, eventloop) = self
+                .client_eventloop
+                .as_mut()
+                .ok_or_else(|| anyhow::anyhow!("mqtt client not initialized"))?;
 
-        let mut batch: MessageBatch = Vec::new();
-        let mut publishes: Vec<Publish> = Vec::new();
-        while batch.is_empty() {
-            let event = eventloop
-                .poll()
-                .await
-                .with_context(|| format!("mqtt connection to '{host}' failed"))?;
-            if let Event::Incoming(Packet::Publish(publish)) = event {
-                if ack_mode == AckMode::OnDelivery {
-                    publishes.push(publish.clone());
-                }
-                if let Some(value) = decode(envelope, connection_name, &publish) {
-                    batch.push(Arc::new(value));
+            let mut batch: MessageBatch = Vec::new();
+            let mut publishes: Vec<Publish> = Vec::new();
+            // `rumqttc`'s `connect`/`subscribe` only ever queue a request —
+            // see `reconnect` — so this first `poll()` is the actual
+            // handshake, and its failure is the one this input mostly
+            // retries on. Carried out of the loop as a value rather than
+            // handled inline: reporting it needs `&mut self`, which the
+            // borrow of `client_eventloop` below doesn't allow while it's
+            // still in scope.
+            let mut lost: Option<anyhow::Error> = None;
+            while batch.is_empty() {
+                match eventloop.poll().await {
+                    Ok(Event::Incoming(Packet::Publish(publish))) => {
+                        if ack_mode == AckMode::OnDelivery {
+                            publishes.push(publish.clone());
+                        }
+                        if let Some(value) = decode(envelope, connection_name, &publish) {
+                            batch.push(Arc::new(value));
+                        }
+                    }
+                    Ok(_) => {}
+                    Err(e) => {
+                        lost = Some(
+                            anyhow::Error::new(e)
+                                .context(format!("mqtt connection to '{host}' failed")),
+                        );
+                        break;
+                    }
                 }
             }
-        }
+            if let Some(e) = lost {
+                self.client_eventloop = None;
+                let delay = self.report_failure(&e);
+                tokio::time::sleep(delay).await;
+                continue;
+            }
+            // At least one message got through, which is the connection
+            // proving itself alive — same rule `NatsInput`/`KafkaInput`
+            // follow for their own first loop.
+            self.backoff.succeeded();
 
-        // whatever else has *already* arrived, up to the cap
-        while batch.len() < max_batch {
-            let Some(ready) = eventloop.poll().now_or_never() else {
-                break;
+            // Whatever else has *already* arrived, up to the cap. A failure
+            // here doesn't cost the batch already collected — it's returned
+            // now, and the reconnect happens on the next call, same as the
+            // opportunistic loops in the nats and kafka inputs. The failure
+            // is still recorded, so the next call's backoff continues this
+            // outage's schedule rather than announcing a fresh one.
+            let mut lost_after_batch: Option<anyhow::Error> = None;
+            while batch.len() < max_batch {
+                let Some(ready) = eventloop.poll().now_or_never() else {
+                    break;
+                };
+                match ready {
+                    Ok(Event::Incoming(Packet::Publish(publish))) => {
+                        if ack_mode == AckMode::OnDelivery {
+                            publishes.push(publish.clone());
+                        }
+                        if let Some(value) = decode(envelope, connection_name, &publish) {
+                            batch.push(Arc::new(value));
+                        }
+                    }
+                    Ok(_) => {}
+                    Err(e) => {
+                        lost_after_batch = Some(
+                            anyhow::Error::new(e)
+                                .context(format!("mqtt connection to '{host}' failed")),
+                        );
+                        break;
+                    }
+                }
+            }
+
+            let batch = Arc::new(batch);
+            let delivery = match ack_mode {
+                AckMode::OnReceipt => Delivery::new(batch),
+                AckMode::OnDelivery => Delivery::with_ack(
+                    batch,
+                    Box::new(MqttAck {
+                        client: client.clone(),
+                        publishes,
+                    }) as Box<dyn Ack>,
+                ),
             };
-            let event = ready.with_context(|| format!("mqtt connection to '{host}' failed"))?;
-            if let Event::Incoming(Packet::Publish(publish)) = event {
-                if ack_mode == AckMode::OnDelivery {
-                    publishes.push(publish.clone());
-                }
-                if let Some(value) = decode(envelope, connection_name, &publish) {
-                    batch.push(Arc::new(value));
-                }
+            if let Some(e) = lost_after_batch {
+                self.client_eventloop = None;
+                self.report_failure(&e);
             }
+            return Ok(delivery);
         }
-
-        let batch = Arc::new(batch);
-        Ok(match ack_mode {
-            AckMode::OnReceipt => Delivery::new(batch),
-            AckMode::OnDelivery => Delivery::with_ack(
-                batch,
-                Box::new(MqttAck {
-                    client: client.clone(),
-                    publishes,
-                }) as Box<dyn Ack>,
-            ),
-        })
     }
 }
 
@@ -305,6 +411,7 @@ mod tests {
     use super::*;
     use kayak_core::connections::{ConnectionKind, Connections, MqttConnection};
     use std::collections::HashMap;
+    use std::time::Duration;
 
     fn build(qos: Option<MqttQos>, ack_mode: Option<AckMode>) -> Result<Box<dyn InputSource>> {
         let mut pipelines = HashMap::new();
@@ -385,5 +492,71 @@ mod tests {
             panic!("a username with no password built");
         };
         assert!(format!("{err:#}").contains("together"), "{err:#}");
+    }
+
+    /// The bug that shipped first: `connect`/`subscribe` queue a request
+    /// without ever touching the network (see `MqttInput::reconnect`'s
+    /// docs), so a naive read of "did reconnecting succeed?" says yes on
+    /// every attempt and the backoff guarding it never engages — `next`
+    /// spins as fast as the refused connection can be re-dialed. This pins
+    /// that the *eventloop* failure, not the queue-only connect, is what
+    /// paces the retry.
+    ///
+    /// Needs a real refused socket — a fake `EventLoop` isn't reachable
+    /// through `rumqttc`'s types — so this is the network test the project's
+    /// "genuinely can't be tested offline" carve-out covers; everything else
+    /// about the pacing (the schedule itself) is covered by `backoff::tests`.
+    ///
+    /// Deliberately **not** `start_paused`: the bound has to be real wall
+    /// time. A paused clock only auto-advances once the runtime is fully
+    /// idle, and a regression to a tight loop never is — it would hang this
+    /// test rather than fail it. Each iteration's real `connect` still
+    /// yields at its `.await`, so a one-second real timeout fires whether
+    /// the loop inside is paced or not.
+    #[tokio::test]
+    async fn a_refused_connection_is_retried_on_a_backoff_not_a_tight_loop() {
+        // bound to port 0 to get one nothing else is using, then closed
+        // immediately: connecting to it afterwards is refused deterministically
+        // and fast, without depending on any particular port being free
+        let listener = std::net::TcpListener::bind("127.0.0.1:0")
+            .unwrap_or_else(|e| panic!("binding a throwaway listener: {e}"));
+        let port = listener
+            .local_addr()
+            .unwrap_or_else(|e| panic!("reading the throwaway listener's port: {e}"))
+            .port();
+        drop(listener);
+
+        let (events, _rx) = tokio::sync::broadcast::channel(4);
+        let mut input = MqttInput {
+            host: "127.0.0.1".to_string(),
+            port,
+            username: None,
+            password: None,
+            client_id: "kayak-test".to_string(),
+            topic: "test".to_string(),
+            qos: QoS::AtMostOnce,
+            max_batch: 1,
+            envelope: Envelope::none(),
+            ack_mode: AckMode::OnReceipt,
+            connection_name: "broker".to_string(),
+            client_eventloop: None,
+            pipeline_id: "test".to_string(),
+            events,
+            backoff: Backoff::new(),
+        };
+
+        // give it a bounded stretch of real time to retry in — it never
+        // succeeds, since nothing is listening, so this always times out
+        let _ = tokio::time::timeout(Duration::from_secs(1), input.next()).await;
+
+        // a tight loop would have run this thousands of times over in one
+        // second; the first backoff step alone is 250ms, so a paced retry
+        // manages only a handful
+        assert!(
+            input.backoff.attempts() <= 10,
+            "expected a handful of paced attempts in one second, got {} — the retry is not \
+             backing off",
+            input.backoff.attempts()
+        );
     }
 }

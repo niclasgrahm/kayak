@@ -2,9 +2,12 @@ use anyhow::Context;
 use kayak_core::config::{MqttOutputConfig, MqttQos};
 use rumqttc::{AsyncClient, MqttOptions, QoS};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::Instant;
 
 use crate::{
     BuildCtx,
+    backoff::Gate,
     inputs::MessageBatch,
     outputs::{BuildOutput, OutputDestination},
     secrets::Resolved,
@@ -64,6 +67,8 @@ impl BuildOutput for MqttOutputConfig {
             retain: self.retain.unwrap_or(false),
             client: None,
             poller: None,
+            alive: None,
+            gate: Gate::new(),
         }))
     }
 }
@@ -91,6 +96,15 @@ pub struct MqttOutput {
     client: Option<AsyncClient>,
     /// Kept so the poller dies with this output rather than outliving it.
     poller: Option<tokio::task::JoinHandle<()>>,
+    /// Flipped to `false` by the poller when its eventloop ends — the only
+    /// way `emit` can find out the connection died, since `publish` itself
+    /// just queues onto a channel the (now-dead) poller would have drained
+    /// and won't fail on its own. `None` before the first connect.
+    alive: Option<Arc<AtomicBool>>,
+    /// Paces reconnect attempts once `alive` says the connection is gone —
+    /// see `emit`. `init` never consults it: a pipeline that can't reach its
+    /// broker at startup still fails to build, same as always.
+    gate: Gate,
 }
 
 impl Drop for MqttOutput {
@@ -101,35 +115,95 @@ impl Drop for MqttOutput {
     }
 }
 
-#[async_trait::async_trait]
-impl OutputDestination for MqttOutput {
-    async fn init(&mut self) -> anyhow::Result<()> {
+impl MqttOutput {
+    /// Connects, subscribes the eventloop to a background poller, and hands
+    /// back the pieces `init` and `emit`'s reconnect both need. See the
+    /// struct docs: the initial `poll()` here is what makes a down broker
+    /// fail outright rather than being discovered on the first `emit`.
+    async fn connect(
+        &self,
+    ) -> anyhow::Result<(AsyncClient, tokio::task::JoinHandle<()>, Arc<AtomicBool>)> {
         let mut options = MqttOptions::new(self.client_id.clone(), self.host.clone(), self.port);
         if let (Some(username), Some(password)) = (&self.username, &self.password) {
             options.set_credentials(username.expose(), password.expose());
         }
         let (client, mut eventloop) = AsyncClient::new(options, 100);
-        // see the struct docs: this is what makes a down broker fail `init`
         eventloop.poll().await.with_context(|| {
             format!(
                 "failed to connect to mqtt broker at {}:{}",
                 self.host, self.port
             )
         })?;
+        let alive = Arc::new(AtomicBool::new(true));
+        let poller_alive = Arc::clone(&alive);
         let host = self.host.clone();
-        self.poller = Some(tokio::spawn(async move {
+        let poller = tokio::spawn(async move {
             loop {
                 if let Err(e) = eventloop.poll().await {
                     tracing::warn!("mqtt output connection to '{host}' ended: {e}");
                     break;
                 }
             }
-        }));
+            poller_alive.store(false, Ordering::Relaxed);
+        });
+        Ok((client, poller, alive))
+    }
+}
+
+#[async_trait::async_trait]
+impl OutputDestination for MqttOutput {
+    async fn init(&mut self) -> anyhow::Result<()> {
+        let (client, poller, alive) = self.connect().await?;
         self.client = Some(client);
+        self.poller = Some(poller);
+        self.alive = Some(alive);
         Ok(())
     }
 
     async fn emit(&mut self, message_batch: Arc<MessageBatch>) -> anyhow::Result<()> {
+        // The poller died (broker gone) since the last `emit` — the client
+        // handle is still technically there, but nothing is driving its
+        // eventloop any more, so treat it the same as never having connected.
+        let dead = self
+            .alive
+            .as_ref()
+            .is_some_and(|alive| !alive.load(Ordering::Relaxed));
+        if dead {
+            if let Some(poller) = self.poller.take() {
+                poller.abort();
+            }
+            self.client = None;
+            self.alive = None;
+        }
+
+        if self.client.is_none() {
+            // Gated the same way the nats and postgres outputs are: a
+            // reconnect is only attempted once the backoff window has
+            // passed, so a downed broker gets one attempt every few seconds
+            // rather than one on every batch.
+            let now = Instant::now();
+            if !self.gate.ready(now) {
+                anyhow::bail!(
+                    "mqtt output for topic '{}' at {}:{} is still unreachable; not retrying yet",
+                    self.topic,
+                    self.host,
+                    self.port
+                );
+            }
+            match self.connect().await {
+                Ok((client, poller, alive)) => {
+                    self.gate.record_success();
+                    self.client = Some(client);
+                    self.poller = Some(poller);
+                    self.alive = Some(alive);
+                }
+                Err(e) => {
+                    self.gate.record_failure(now);
+                    return Err(e);
+                }
+            }
+        }
+
         // silently doing nothing when init() never ran would look like the
         // messages were published, so make it an error instead
         let client = self.client.as_ref().ok_or_else(|| {

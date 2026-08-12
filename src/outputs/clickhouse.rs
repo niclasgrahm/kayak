@@ -30,10 +30,12 @@ use kayak_core::columns::ColumnType;
 use kayak_core::config::ClickhouseOutputConfig;
 use reqwest::Client;
 use std::sync::Arc;
+use std::time::Instant;
 use tracing::warn;
 
 use crate::{
     BuildCtx,
+    backoff::Gate,
     inputs::MessageBatch,
     outputs::{
         BuildOutput, OutputDestination,
@@ -108,6 +110,7 @@ impl BuildOutput for ClickhouseOutputConfig {
             table,
             layout,
             client: None,
+            gate: Gate::new(),
         }))
     }
 }
@@ -382,6 +385,14 @@ pub struct ClickhouseOutput {
     layout: Layout,
     create_table: bool,
     client: Option<Client>,
+    /// Paces retries after an insert fails.
+    ///
+    /// Unlike postgres there is no connection object to drop and rebuild
+    /// here: `reqwest::Client` is a stateless pool, so it's never the thing
+    /// that's stale. What the gate guards is the *request* — `execute` still
+    /// does a real HTTP round trip against a server it believes is down,
+    /// same reasoning as the kafka output's producer.
+    gate: Gate,
 }
 
 impl ClickhouseOutput {
@@ -486,9 +497,28 @@ impl OutputDestination for ClickhouseOutput {
             return Ok(());
         }
 
-        self.execute(&client, &self.layout.insert_sql(&self.table), body)
+        // Gated the same way the other outputs are: a downed server gets one
+        // attempt every few seconds, not one HTTP round trip per batch.
+        let now = Instant::now();
+        if !self.gate.ready(now) {
+            bail!(
+                "clickhouse output at {} is still unreachable; not retrying yet",
+                self.describe()
+            );
+        }
+        match self
+            .execute(&client, &self.layout.insert_sql(&self.table), body)
             .await
-            .with_context(|| format!("failed to insert a batch into {}", self.describe()))
+        {
+            Ok(()) => {
+                self.gate.record_success();
+                Ok(())
+            }
+            Err(e) => {
+                self.gate.record_failure(now);
+                Err(e).with_context(|| format!("failed to insert a batch into {}", self.describe()))
+            }
+        }
     }
 }
 

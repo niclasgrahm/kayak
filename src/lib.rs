@@ -9,6 +9,7 @@ use std::sync::Arc;
 use tokio::sync::broadcast;
 
 pub mod auth;
+pub mod backoff;
 pub mod banner;
 pub mod buckets;
 pub mod config;
