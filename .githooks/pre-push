@@ -1,0 +1,46 @@
+#!/usr/bin/env sh
+#
+# Stands in for the branch protection GitHub won't give a private repo on this
+# plan: `main` is only ever moved by merging a pull request, so a direct push to
+# it is a mistake rather than a decision. Refuse it here, where the mistake is
+# still local and costs a `git reset` rather than a force-push over published
+# history.
+#
+# Install with `just hooks` (it sets core.hooksPath — hooks live in the repo so
+# the rule travels with a checkout instead of living in one clone's .git).
+#
+# The escape hatch is deliberate and deliberately noisy: KAYAK_PUSH_MAIN=1.
+# There is no way to make this a real gate without the server enforcing it, so
+# what it is for is catching the push you didn't mean to make.
+
+remote_ref_prefix='refs/heads/'
+
+while read -r _local_ref _local_sha remote_ref _remote_sha; do
+  case "$remote_ref" in
+    "${remote_ref_prefix}main")
+      if [ "$KAYAK_PUSH_MAIN" = "1" ]; then
+        echo "pre-push: pushing straight to main (KAYAK_PUSH_MAIN=1)" >&2
+        continue
+      fi
+      cat >&2 <<'MSG'
+
+  pre-push: refusing to push straight to main.
+
+  main moves by merging a pull request:
+
+      git switch -c <branch>       # if you committed on main by accident,
+      git switch main              # then reset main back to origin:
+      git reset --hard origin/main
+
+      git push -u origin <branch>
+      gh pr create --fill
+
+  If you really mean it: KAYAK_PUSH_MAIN=1 git push
+
+MSG
+      exit 1
+      ;;
+  esac
+done
+
+exit 0

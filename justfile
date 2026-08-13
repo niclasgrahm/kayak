@@ -90,6 +90,25 @@ test:
 # what CI runs — run this before pushing
 ci: lint test
 
+# `main` is only moved by merging a pull request. GitHub won't enforce that on a
+# private repo on this plan, so the rule lives in a hook instead — see
+# `.githooks/pre-push`. The hooks are committed rather than left in one clone's
+# `.git`, which is what `core.hooksPath` is for; run this once per checkout.
+
+# install the repo's git hooks (once per checkout)
+hooks:
+  git config core.hooksPath .githooks
+  @echo "hooks installed: $(git config core.hooksPath)"
+
+# start a branch for a change — `just branch feat/http-hmac`
+branch NAME:
+  git switch -c {{NAME}}
+
+# push the current branch and open its pull request
+pr *ARGS:
+  git push -u origin HEAD
+  gh pr create --fill {{ARGS}}
+
 # smoke test against a server that is already running on :6767
 test-http:
   hurl --test hurl/tests/*.hurl
