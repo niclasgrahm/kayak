@@ -27,3 +27,10 @@ auth:
     viewer:
       password: ${KAYAK_VIEWER_PASSWORD}
       role: read
+
+# What the server keeps about what the pipelines did, so a card can show last
+# night as well as this second — see "history" in the guide. A day is the
+# default and this line only spells it out; `0` would turn it off. The buffer
+# sizes are derived from it, so this is the only number there is.
+history:
+  retention_secs: 86400

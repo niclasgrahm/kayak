@@ -20,6 +20,7 @@ use kayak::banner;
 use kayak::listen;
 use kayak::secrets::{ChainStore, EnvStore, FileStore, SecretStore};
 use kayak::state::AppState;
+use kayak::history::History;
 use kayak_core::server_config::ServerConfig;
 use std::net::SocketAddr;
 
@@ -138,13 +139,20 @@ async fn main() -> anyhow::Result<()> {
     };
     let connections = args.connections.as_deref();
     let data_dir = args.data_dir.clone();
+    // Built before the state because loading a config *starts* its pipelines,
+    // and each one captures the store as it builds — see
+    // `AppState::from_config_with`.
+    let history = Arc::new(History::new(server_config.history.clone()));
     let state = match &args.config {
-        Some(path) => AppState::from_config_with(path, secrets, connections, data_dir)
-            .context("failed to initialize app state from config")?,
+        Some(path) => {
+            AppState::from_config_with(path, secrets, connections, data_dir, Arc::clone(&history))
+                .context("failed to initialize app state from config")?
+        }
         None => AppState::with_secrets_and_connections(secrets, connections)
             .context("failed to load connections")?
             .with_data_dir(data_dir)
-            .context("failed to prepare the data directory")?,
+            .context("failed to prepare the data directory")?
+            .with_history(Arc::clone(&history)),
     };
 
     let auth = Arc::new(
@@ -157,7 +165,12 @@ async fn main() -> anyhow::Result<()> {
     let leptos_options = conf.leptos_options;
     let routes = generate_route_list(App);
 
-    let api = api_router(Arc::new(state));
+    let state = Arc::new(state);
+    // One wake-up every five seconds for the life of the process, and nothing
+    // at all when history is turned off. See `kayak::history::sampler`.
+    tokio::spawn(kayak::history::sampler(Arc::clone(&state)));
+
+    let api = api_router(state);
 
     let leptos = Router::new()
         .leptos_routes(&leptos_options, routes, {

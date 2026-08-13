@@ -1,6 +1,7 @@
 pub mod auth;
 pub mod connection;
 pub mod docs;
+pub mod history;
 pub mod layout;
 pub mod openapi;
 pub mod pipeline;

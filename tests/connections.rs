@@ -438,6 +438,7 @@ async fn a_named_connections_file_is_used_instead_of_the_derived_one() -> anyhow
             Arc::new(kayak::secrets::EnvStore),
             Some(&shared),
             None,
+            Arc::new(kayak::history::History::disabled()),
         )?;
         assert_eq!(state.get_pipeline_ids(), ["sensors"], "{name}");
         assert!(
@@ -465,6 +466,7 @@ async fn a_named_connections_file_that_is_missing_fails_to_start() -> anyhow::Re
         Arc::new(kayak::secrets::EnvStore),
         Some(&missing),
         None,
+        Arc::new(kayak::history::History::disabled()),
     );
     assert!(result.is_err(), "a missing --connections file was accepted");
     Ok(())

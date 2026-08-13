@@ -18,6 +18,7 @@ pub mod endpoints;
 pub mod events;
 pub mod fields;
 pub mod handlers;
+pub mod history;
 pub mod inputs;
 pub mod layout;
 pub mod listen;
@@ -32,6 +33,7 @@ pub mod testing;
 pub mod transforms;
 
 use crate::buckets::Buckets;
+use crate::history::History;
 pub use crate::endpoints::api_router;
 use crate::inputs::envelope::{Envelope, Meta};
 use crate::inputs::http::Inboxes;
@@ -111,6 +113,15 @@ pub struct BuildCtx<'a> {
     /// It rides here for the reason `envelope` does: the block belongs to the
     /// pipeline, and the transforms that need it are built one level down.
     pub state: Option<PipelineState>,
+    /// Where the run loop this pipeline is being built for records what it did,
+    /// for the UI to show after the fact. Held by [`crate::state::AppState`]
+    /// and passed in here like the buckets and the inboxes are.
+    ///
+    /// Defaults to [`History::disabled`] rather than to an `Option`, so a
+    /// component that never asks about it — which is all of them — needs no
+    /// arm for its absence, and a test driving a run loop directly keeps no
+    /// history without saying so.
+    pub history: Arc<History>,
 }
 
 impl<'a> BuildCtx<'a> {
@@ -144,7 +155,15 @@ impl<'a> BuildCtx<'a> {
             ack_mode: None,
             buckets: Arc::new(Buckets::new()),
             state: None,
+            history: Arc::new(History::disabled()),
         }
+    }
+
+    /// The same, with the server's history store rather than a disabled one.
+    #[must_use]
+    pub fn with_history(mut self, history: Arc<History>) -> Self {
+        self.history = history;
+        self
     }
 
     /// The same, with the connections a component's `connection` field can name.

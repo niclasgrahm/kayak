@@ -447,3 +447,56 @@ pipelines:
     verb: POST
   outputs:
   - type: stdout
+- id: broken_cast
+  inputs:
+  - type: pipeline
+    upstream: heartbeat
+  transforms:
+  - type: map
+    mappings:
+    - type: cast
+      from: current_time
+      to: float
+      as: current_time_number
+  outputs:
+  - type: stdout
+- id: broken_aggregate
+  inputs:
+  - type: pipeline
+    upstream: heartbeat
+  transforms:
+  - type: reducer
+    aggregations:
+    - function: sum
+      field: temperature
+      as: total_temperature
+  outputs:
+  - type: stdout
+- id: broken_webhook
+  inputs:
+  - type: pipeline
+    upstream: heartbeat
+  transforms:
+  - type: http
+    url: http://127.0.0.1:59999/alerts
+    verb: POST
+  outputs:
+  - type: stdout
+- id: broken_intermittently
+  inputs:
+  - type: pipeline
+    upstream: heartbeat
+  transforms:
+  - type: filter
+    Numeric:
+      field: value
+      operator: GreaterThan
+      value: 8.0
+  - type: map
+    mappings:
+    - type: cast
+      from: current_time
+      to: integer
+      as: tick
+  outputs:
+  - type: stdout

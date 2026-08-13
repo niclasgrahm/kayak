@@ -182,6 +182,7 @@ async fn the_repository_config_file_starts_a_working_graph() -> anyhow::Result<(
         )),
         None,
         Some(std::path::PathBuf::from("dev_data")),
+        std::sync::Arc::new(kayak::history::History::disabled()),
     )?;
 
     let mut expected: Vec<String> = declared

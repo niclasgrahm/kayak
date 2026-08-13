@@ -1,4 +1,5 @@
 use gloo_net::http::Request;
+use kayak_core::history::{PipelineHistory, Resolution};
 use kayak_core::state::{BucketContents, BucketSummary};
 use kayak_core::{
     AuthDto, ConfigFormat, Connections, LayoutFile, LoginRequest, PipelineDto, SaveConfigRequest,
@@ -102,6 +103,31 @@ impl ApiClient {
             .send()
             .await?;
         Ok(resp.json::<BucketContents>().await?)
+    }
+
+    /// What a pipeline has been doing, from the server's in-memory record.
+    ///
+    /// The counterpart to the `/events` stream, not a replay of it: this is
+    /// counts and aggregated failures, kept whether or not a browser was
+    /// attached, and it carries no message payloads at all. `Fine` is the
+    /// half-hour of five-second buckets a card backfills its live chart from;
+    /// `Coarse` is the overnight record.
+    pub async fn pipeline_history(
+        &self,
+        id: &str,
+        resolution: Resolution,
+    ) -> Result<PipelineHistory, ApiError> {
+        let resolution = match resolution {
+            Resolution::Fine => "fine",
+            Resolution::Coarse => "coarse",
+        };
+        let resp = Request::get(&format!(
+            "{}/api/pipelines/{id}/history?resolution={resolution}",
+            self.base
+        ))
+        .send()
+        .await?;
+        Ok(resp.json::<PipelineHistory>().await?)
     }
 
     pub async fn create_connection(&self, connection: &Value) -> Result<(), ApiError> {

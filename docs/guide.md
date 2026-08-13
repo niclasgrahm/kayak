@@ -1101,6 +1101,38 @@ the way past the login when the login is not what is being worked on.
 root pipeline with no source, waiting to be posted to (see "posting into a
 pipeline" above).
 
+### the four broken ones
+
+`broken_cast`, `broken_aggregate`, `broken_webhook` and `broken_intermittently`
+fail on purpose, and **they are meant to be red**. There is nowhere else to see
+what a failing pipeline looks like: everything worth looking at in a card's
+history — a failure signature with a tally climbing, throughput arriving and
+nothing leaving, a chart with holes in it — only exists once something is
+actually broken, and an example graph where everything works is an example of
+exactly half the UI.
+
+All four hang off `heartbeat`, which is a `dummy` ticking once a second, so they
+fail at that rate whether or not `docker compose` is up, and they need no
+service to be down in order to do it. Each breaks somewhere different on
+purpose:
+
+| | how it breaks |
+| --- | --- |
+| `broken_cast` | casts a timestamp to a number. A present value that will not convert is an error whatever `on_missing` says — see "casting" |
+| `broken_aggregate` | sums a field the heartbeat does not carry, with the reducer's default `on_missing: error` |
+| `broken_webhook` | posts to a port nothing listens on. A long, ugly, real network error — the one that tests what a card does with a message too wide for it |
+| `broken_intermittently` | the same bad cast behind a `value > 8` filter, so it only fails at the top of the heartbeat's sine wave: a burst of about twelve seconds in every sixty, and quiet in between |
+
+The last one is the one to look at. A pipeline that fails *constantly* is a
+solid block of red and tells you nothing about the shape of an outage; a chart
+that goes wrong for twelve seconds a minute is what an intermittent fault
+actually looks like, and it is the case the history feature exists to make
+legible.
+
+They are noisy by design: four error lines a second in the `just dev` console.
+Deleting them from the config file is a fine thing to do while working on
+something else — nothing else in the sample depends on them.
+
 **Three of the roots attach metadata, and the choice of shape is the point.**
 `sensors` and `kafka_events` use `merge`, so their downstream pipelines — which
 filter and group on `value`, `sensor`, `ts` and `latency_ms` — carry on reading
@@ -1520,6 +1552,83 @@ and `Debug`, so a connection error logs
 the value takes an explicit `.expose()`, which is the thing to grep for in
 review. Writing a password inline instead of referencing it defeats all of
 this — that's the habit the syntax exists to replace.
+
+## history
+
+A card's log and chart are fed by `/events`, which is a **live sample**: the
+server only produces it while a browser is attached, and it drops passes under
+load on purpose. That is right for watching a pipeline and useless for the
+question that actually gets asked — *it broke at 02:14 and I got here at 08:00,
+what happened?* Nobody was watching at 02:14, so there was no feed.
+
+So the server also keeps a record, in memory, whether or not anyone is looking:
+
+- **throughput**, as counts per time bucket — messages in, messages out,
+  failures;
+- **failures**, aggregated to one entry per distinct message, with when it was
+  first seen, when it was last seen and how many times it has happened.
+
+A broker that was down for six hours is *one* line saying so with a tally,
+which is both cheaper to keep and easier to read at 08:00 than the six hours of
+log it replaces.
+
+**No message payloads are kept.** History is counts and error texts and nothing
+else. That is a deliberate limit rather than a gap: payloads would tie the
+storage to the throughput, and a day of message bodies sitting beside the server
+is a data-retention decision, not a UI feature.
+
+### the knob
+
+One duration, in the `--server-config` file:
+
+```yaml
+history:
+  retention_secs: 86400   # a day. the default; `0` turns it off entirely
+```
+
+A day is what a server with no settings file runs, because the person this is
+for is the one who doesn't know to go looking for it. The buffers are **ring
+buffers whose size is derived from the retention** — fixed capacity, oldest
+bucket dropped off the end — so memory is flat in uptime *and* in throughput: a
+pipeline doing eight million messages a second costs the same as an idle one,
+because a bucket holds counts and never messages. Reckon on about 58 kB per
+pipeline for a day. `0` allocates nothing and records nothing.
+
+There are two resolutions. A five-second one covering the last half hour, which
+is what a card's chart is backfilled from so it starts full instead of drawing
+itself over the following two minutes; and a one-minute one covering the whole
+retention, which is the overnight record. Only the second is configurable — the
+first is sized by what a card can display.
+
+### reading it
+
+Open a card's **stats** section: the chart arrives already filled, and anything
+the pipeline has failed at is listed underneath it with a time, how long ago and
+a count. Nothing is listed when there is nothing to list.
+
+Or ask directly:
+
+```bash
+curl localhost:6767/api/pipelines/my-pipeline/history
+curl 'localhost:6767/api/pipelines/my-pipeline/history?resolution=fine'
+```
+
+An unknown pipeline answers with an empty history rather than a 404 — the record
+deliberately outlives the pipeline, so that deleting one, or reverting a config
+(which rebuilds every pipeline in it), does not throw away the evidence of what
+went wrong.
+
+### what it does not do
+
+**It does not survive a restart.** This is a ring buffer in the process, so a
+deploy loses the record. That covers the case it was built for — the pipeline
+died, the server didn't — and not the one where the server itself was restarted.
+Making it durable means a database, which is tracked in the roadmap.
+
+**Two pipelines' histories are independent and nothing correlates them.** It is
+a per-pipeline readout, not a metrics system. At the point where you want a week
+of retention, alerting, or one dashboard across a fleet, the honest answer is a
+real metrics store rather than a bigger number in `retention_secs`.
 
 ## authentication
 

@@ -49,6 +49,7 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 use crate::config::Secret;
+use crate::history::{DEFAULT_RETENTION_SECS, MAX_RETENTION_SECS};
 
 /// Everything the server is told about itself, as opposed to about its
 /// pipelines.
@@ -61,6 +62,8 @@ use crate::config::Secret;
 pub struct ServerConfig {
     /// Who is allowed to reach the server. Absent means nobody is asked.
     pub auth: AuthConfig,
+    /// How much of what the pipelines did is kept for the UI to show later.
+    pub history: HistoryConfig,
 }
 
 impl ServerConfig {
@@ -78,6 +81,7 @@ impl ServerConfig {
     /// into a login box. Failing here costs a restart; failing at the first
     /// request costs whoever is locked out working out why.
     pub fn validate(&self) -> Result<(), ServerConfigError> {
+        self.history.validate()?;
         let AuthConfig::Basic { users } = &self.auth else {
             return Ok(());
         };
@@ -178,6 +182,10 @@ impl Role {
 pub enum ServerConfigError {
     NoUsers,
     BlankUsername,
+    /// A retention past [`MAX_RETENTION_SECS`]. Refused rather than clamped:
+    /// the store is in memory, so this is an allocation, and silently keeping
+    /// a tenth of what a config asked for is worse than saying no.
+    RetentionTooLong(u64),
 }
 
 impl std::fmt::Display for ServerConfigError {
@@ -189,6 +197,12 @@ impl std::fmt::Display for ServerConfigError {
                  add a user or set auth type to 'none'"
             ),
             Self::BlankUsername => write!(f, "a username is blank"),
+            Self::RetentionTooLong(secs) => write!(
+                f,
+                "history.retention_secs is {secs}, which is longer than the {MAX_RETENTION_SECS} \
+                 second maximum; history is kept in memory, so this is an allocation rather \
+                 than a disk budget"
+            ),
         }
     }
 }
@@ -289,5 +303,81 @@ mod tests {
             .is_err()
         );
         assert!(serde_json::from_str::<ServerConfig>(r#"{"users": {}}"#).is_err());
+    }
+}
+
+/// How much of what the pipelines did the server keeps for the UI to show
+/// later — the knob on [`crate::history`].
+///
+/// **One duration, and the buffer sizes are derived from it.** Retention is
+/// what an operator actually has an opinion about; "how many buckets" is an
+/// implementation detail they would have to multiply out to reason about, and
+/// exposing it would let the two rings be configured into disagreement. The
+/// fine ring is not configurable at all — it is sized by what a card can
+/// display, which is not a deployment's business.
+///
+/// This is the one section whose default is *not* what the server did before it
+/// existed, and the deviation is deliberate. Off by default would mean the
+/// feature is missing for everyone who doesn't know to look for it, which is
+/// precisely the person it is for — someone finding out at 08:00 that something
+/// broke at 02:14. What makes that affordable is the bound: a pipeline costs
+/// one `HistoryBucket` per minute of retention plus half an hour of fine ones,
+/// which is about 58 kB a day, flat in throughput.
+#[derive(Clone, Debug, Deserialize, Serialize, JsonSchema, PartialEq, Eq)]
+#[serde(default, deny_unknown_fields)]
+pub struct HistoryConfig {
+    /// How far back the coarse ring reaches, in seconds. A day by default,
+    /// capped at [`MAX_RETENTION_SECS`].
+    ///
+    /// **Zero turns history off** — the rings are never allocated and the
+    /// counters are never sampled. That is the off switch rather than an
+    /// `enabled` flag beside a duration, for the reason [`AuthConfig`] is an
+    /// enum rather than a bool beside a map: `enabled: false` above
+    /// `retention_secs: 86400` is a contradiction someone would write and then
+    /// misread, and here there is nowhere to write it.
+    pub retention_secs: u64,
+}
+
+impl Default for HistoryConfig {
+    fn default() -> Self {
+        Self {
+            retention_secs: DEFAULT_RETENTION_SECS,
+        }
+    }
+}
+
+impl HistoryConfig {
+    /// Whether anything is kept at all.
+    #[must_use]
+    pub fn enabled(&self) -> bool {
+        self.retention_secs > 0
+    }
+
+    /// How many coarse buckets the ring holds — the retention divided by the
+    /// bucket width, which is the derivation this type exists to keep in one
+    /// place.
+    #[must_use]
+    pub fn coarse_capacity(&self) -> usize {
+        let width = crate::history::COARSE_BUCKET_SECS.max(1);
+        usize::try_from(self.retention_secs.div_ceil(width)).unwrap_or(usize::MAX)
+    }
+
+    /// How many fine buckets the ring holds. Fixed — see the type's docs.
+    ///
+    /// Never more than the retention asks for: a server told to keep five
+    /// minutes should not hold half an hour of fine buckets just because that
+    /// ring's window is a constant.
+    #[must_use]
+    pub fn fine_capacity(&self) -> usize {
+        let width = crate::history::FINE_BUCKET_SECS.max(1);
+        let window = crate::history::FINE_WINDOW_SECS.min(self.retention_secs);
+        usize::try_from(window.div_ceil(width)).unwrap_or(usize::MAX)
+    }
+
+    fn validate(&self) -> Result<(), ServerConfigError> {
+        if self.retention_secs > MAX_RETENTION_SECS {
+            return Err(ServerConfigError::RetentionTooLong(self.retention_secs));
+        }
+        Ok(())
     }
 }

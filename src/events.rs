@@ -1,7 +1,7 @@
 //! Publishing to the UI feed.
 //!
-//! One function, because it is the one place in the server that reads a clock.
-//! `UiEvent` compiles for wasm — where `SystemTime::now` panics — so the type
+//! Two functions, and the clock is the reason: this is where the server reads
+//! it. `UiEvent` compiles for wasm — where `SystemTime::now` panics — so the type
 //! can't stamp itself, and a second publisher that forgot to would put an event
 //! on the feed with no time on it.
 
@@ -25,7 +25,12 @@ pub fn publish(events: &broadcast::Sender<UiEvent>, event: impl FnOnce() -> UiEv
 
 /// Milliseconds since the epoch, or zero if the clock is before it — which the
 /// log reads as "no time" rather than as a date in 1970.
-fn now_millis() -> u64 {
+///
+/// Public because [`crate::history`] stamps its error signatures with the same
+/// clock, and two spellings of "now" in one server is how a UI ends up
+/// disagreeing with itself about when something happened.
+#[must_use]
+pub fn now_millis() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map_or(0, |d| u64::try_from(d.as_millis()).unwrap_or(u64::MAX))

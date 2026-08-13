@@ -62,6 +62,36 @@ re-derive. See the [guide](guide.md) for how the finished parts behave, and
       password. A per-address backoff on `POST /api/auth/login` is the cheap
       version; it needs somewhere to keep the counters that isn't a memory leak.
 
+- [x] **keep logs and stats so a card can show what happened overnight**
+      (done 2026-08-12, in memory: unconditional counters in the run loop,
+      sampled on a five-second tick into two ring buffers, plus failures
+      aggregated to one signature per distinct message. `history.retention_secs`
+      in the server config is the only knob and a day is the default; the buffer
+      sizes are derived from it. Deliberately *not* fed from `/events` — a
+      persistent subscriber would hold the `receiver_count()` gate open and make
+      every headless server pay the browser-attached cost. See "history" in
+      CLAUDE.md.)
+- [ ] **history does not survive a restart.** It is a ring buffer in the
+      process, which covers the case it was built for — the pipeline died, the
+      server didn't — but a deploy loses the record. SQLite behind
+      `History::get` is the shape of the fix and the trait seam is already
+      there; it costs a dependency, a schema-migration story for a file that
+      outlives an upgrade, a third directory boundary after `save_dir` and
+      `--data-dir`, and a degrade-to-nothing path when the disk is full. Worth
+      doing once the in-memory shape has proven itself against real usage.
+- [ ] **no message payloads are kept, on purpose.** History carries counts and
+      failure texts and nothing else: payloads re-couple storage to throughput,
+      and a day of message bodies in a file beside the server is the argument
+      `inputs::http::ALLOWED_HEADERS` already makes about credentials outliving
+      the request by years. If it happens it is opt-in per pipeline, with its
+      own much shorter retention, and it is a data-retention decision rather
+      than a UI toggle.
+- [ ] **the diagnostic stream as an input kind.** A fleet wants central
+      observability, not a ring buffer per host. Exposing what the run loop
+      counts as something a pipeline can consume would let operators route it
+      into their own postgres or object store with the machinery that already
+      exists — and it is the honest answer at the point where someone asks for a
+      week of retention.
 - [ ] make sure to clean up old template based UI stuff
       (2026-08-04: `/docs` and `templates/docs.html` are gone — Askama is now
       only used by the dead `/ui` index handler, which is all that's left)

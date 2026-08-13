@@ -100,6 +100,7 @@ mod tests {
             },
         );
         ServerConfig {
+            history: kayak_core::server_config::HistoryConfig::default(),
             auth: AuthConfig::Basic { users },
         }
     }

@@ -1,6 +1,7 @@
 use crate::BuildCtx;
 use crate::config::BuildInputConfig;
 use crate::events::publish;
+use crate::history::History;
 use crate::config::BuildOutputConfig;
 use crate::config::BuildTransformConfig;
 use crate::inputs::InputSource;
@@ -32,6 +33,13 @@ pub struct Pipeline {
     pub cancellation_token: tokio_util::sync::CancellationToken,
     #[serde(skip)]
     downstream_senders: Mutex<Vec<mpsc::Sender<Arc<MessageBatch>>>>,
+    /// What this pipeline has done since it started, for
+    /// [`crate::history`]. Three atomics the run loop adds to unconditionally
+    /// — deliberately *not* behind the `receiver_count()` gate the UI feed
+    /// uses, because the whole point of history is to have an answer for the
+    /// hours when nobody was watching.
+    #[serde(skip)]
+    pub counters: crate::history::Counters,
 }
 
 // impl Pipeline {
@@ -51,6 +59,36 @@ pub struct PipelineView<'a> {
 
 async fn next_input_message(input: &mut Box<dyn InputSource>) -> Result<Delivery> {
     input.next().await
+}
+
+/// Record a failure in the history store, as `count` occurrences of it.
+///
+/// A function rather than five call sites of `record_error` because the
+/// *rendering* has to be identical at each of them: `{:#}` puts the whole
+/// context chain on one line, and the store keys a signature by that text, so a
+/// call site that spelled it `{}` would file the same failure under a second
+/// entry.
+///
+/// Free rather than a method on [`PipelineRuntime`] for the borrow checker's
+/// sake: two of the call sites are inside a loop already holding `&mut
+/// self.transforms` or `&mut self.outputs`, and taking the two fields it needs
+/// by reference is what keeps those borrows disjoint.
+fn remember_failure(
+    history: &History,
+    id: &PipelineId,
+    stage: Stage,
+    component: Option<usize>,
+    err: &anyhow::Error,
+    count: u64,
+) {
+    history.record_error(
+        id,
+        stage,
+        component,
+        &format!("{err:#}"),
+        count,
+        crate::events::now_millis(),
+    );
 }
 
 /// The shortest gap between two reported passes on one pipeline. Ten a second
@@ -95,6 +133,13 @@ pub struct UiThrottle {
     /// Per stage *and component*, because two different outputs failing on one
     /// batch are two facts, not a repeat — see [`UiThrottle::report_error`].
     last_error: HashMap<(Stage, Option<usize>), Instant>,
+    /// Failures suppressed since the last reported one, by the same key.
+    ///
+    /// The UI only ever shows the reported ones, but [`crate::history`] keeps a
+    /// *count* per distinct failure, and a count that omitted the suppressed
+    /// repeats would say "failed 4 times" about a pipeline that failed four
+    /// thousand. Same accounting `skipped_in`/`skipped_out` do for messages.
+    suppressed_errors: HashMap<(Stage, Option<usize>), u64>,
     /// Messages that passed the input stage in passes that were not reported.
     skipped_in: u64,
     /// The same for what left the transforms.
@@ -109,6 +154,7 @@ impl UiThrottle {
             last_pass: None,
             passes_since_report: 0,
             last_error: HashMap::new(),
+            suppressed_errors: HashMap::new(),
             skipped_in: 0,
             skipped_out: 0,
         }
@@ -155,15 +201,27 @@ impl UiThrottle {
     /// batch is a different component with a different cause, and a shared timer
     /// would silently swallow it. The frontend coalesces what does get through,
     /// so a suppressed repeat costs nothing a reader would have seen.
-    fn report_error(&mut self, stage: Stage, component: Option<usize>, now: Instant) -> bool {
+    /// `Some(count)` when it is reported, where `count` is this failure plus
+    /// everything suppressed since the last reported one — what
+    /// [`crate::history`] adds to the signature's tally. `None` when it is
+    /// suppressed, in which case the occurrence has been counted for next time.
+    fn report_error(
+        &mut self,
+        stage: Stage,
+        component: Option<usize>,
+        now: Instant,
+    ) -> Option<u64> {
+        let key = (stage, component);
         let due = self
             .last_error
-            .get(&(stage, component))
+            .get(&key)
             .is_none_or(|last| now.duration_since(*last) >= UI_ERROR_INTERVAL);
-        if due {
-            self.last_error.insert((stage, component), now);
+        if !due {
+            *self.suppressed_errors.entry(key).or_default() += 1;
+            return None;
         }
-        due
+        self.last_error.insert(key, now);
+        Some(self.suppressed_errors.remove(&key).unwrap_or(0) + 1)
     }
 
     /// Take the skipped count for a stage, resetting it — what the next
@@ -195,6 +253,11 @@ pub struct PipelineRuntime {
     events: broadcast::Sender<UiEvent>,
     /// How much of the feed this run loop may produce. See [`UiThrottle`].
     pass_interval: Duration,
+    /// Where failures are recorded for the UI to show after the fact. The
+    /// *counts* go through [`Pipeline::counters`] instead — this is only ever
+    /// touched behind the throttle, so a pipeline failing on every batch takes
+    /// its lock a few times a second rather than a few million.
+    history: Arc<History>,
 }
 
 impl PipelineRuntime {
@@ -216,7 +279,17 @@ impl PipelineRuntime {
             shared,
             events,
             pass_interval: UI_PASS_INTERVAL,
+            history: Arc::new(History::disabled()),
         })
+    }
+
+    /// Record what this run loop does into the server's history store. Without
+    /// it a runtime keeps none, which is what every test that isn't about
+    /// history wants.
+    #[must_use]
+    pub fn with_history(mut self, history: Arc<History>) -> Self {
+        self.history = history;
+        self
     }
 
     /// Report **every** pass rather than sampling the feed.
@@ -231,6 +304,47 @@ impl PipelineRuntime {
     pub fn reporting_every_pass(mut self) -> Self {
         self.pass_interval = Duration::ZERO;
         self
+    }
+
+    /// Initialise every output, or fail the run.
+    ///
+    /// An output that can't be initialised is fatal: it would never accept a
+    /// batch, and a pipeline half-writing its outputs is worse than one that
+    /// says why it didn't start.
+    async fn init_outputs(&mut self) -> anyhow::Result<()> {
+        for index in 0..self.outputs.len() {
+            let Err(e) = self.outputs[index].init().await else {
+                continue;
+            };
+            self.shared.counters.add_error();
+            remember_failure(&self.history, &self.shared.id, Stage::Output, Some(index), &e, 1);
+            // no `seq`: this is before the first pass, not part of one
+            publish(&self.events, || {
+                UiEvent::error(self.shared.id.clone(), Stage::Output, &e).component(index)
+            });
+            return Err(e);
+        }
+        Ok(())
+    }
+
+    /// Give every output its one chance to land an unfinished part.
+    ///
+    /// Called after the loop ends, however it ended. Errors are reported like
+    /// an `emit` error rather than returned: the pipeline has already stopped,
+    /// and failing the run *now* would report the shutdown itself as the
+    /// pipeline's failure.
+    async fn finish_outputs(&mut self) {
+        for index in 0..self.outputs.len() {
+            let Err(e) = self.outputs[index].finish().await else {
+                continue;
+            };
+            error!("[{}]\t output failed to finish: {:?}", self.shared.id, e);
+            self.shared.counters.add_error();
+            remember_failure(&self.history, &self.shared.id, Stage::Output, Some(index), &e, 1);
+            publish(&self.events, || {
+                UiEvent::error(self.shared.id.clone(), Stage::Output, &e).component(index)
+            });
+        }
     }
 
     /// Put one batch through the transform chain, in order, and return whatever
@@ -251,13 +365,27 @@ impl PipelineRuntime {
                 match t.apply(b).await {
                     Ok(b) => next.extend(b),
                     Err(e) => {
+                        // Counted before anything decides whether to *say* it:
+                        // the throttle governs the feed and the log, never the
+                        // tally history keeps.
+                        self.shared.counters.add_error();
                         // Logged only when the throttle also lets it through
                         // the UI: a transform failing on every message of a
                         // fast pipeline would otherwise write a line to the
                         // log for each one, same reasoning as the output
                         // error below.
-                        if throttle.report_error(Stage::Transform, Some(index), Instant::now()) {
+                        if let Some(count) =
+                            throttle.report_error(Stage::Transform, Some(index), Instant::now())
+                        {
                             error!("[{}]\t transform error: {:?}", self.shared.id, e);
+                            remember_failure(
+                                &self.history,
+                                &self.shared.id,
+                                Stage::Transform,
+                                Some(index),
+                                &e,
+                                count,
+                            );
                             publish(&self.events, || {
                                 UiEvent::error(self.shared.id.clone(), Stage::Transform, &e)
                                     .seq(pass)
@@ -276,18 +404,7 @@ impl PipelineRuntime {
 
     /// Run until the input errors or the pipeline is cancelled.
     pub async fn run(mut self) -> anyhow::Result<()> {
-        // an output that can't be initialised is fatal: it would never accept a
-        // batch, and a pipeline half-writing its outputs is worse than one that
-        // says why it didn't start
-        for (index, output) in self.outputs.iter_mut().enumerate() {
-            if let Err(e) = output.init().await {
-                // no `seq`: this is before the first pass, not part of one
-                publish(&self.events, || {
-                    UiEvent::error(self.shared.id.clone(), Stage::Output, &e).component(index)
-                });
-                return Err(e);
-            }
-        }
+        self.init_outputs().await?;
         // Which pass through the loop we are on. Every event a pass produces
         // carries it, which is what lets the UI show one batch's journey — in,
         // transforms, out — as one thing rather than as unrelated lines that
@@ -324,6 +441,8 @@ impl PipelineRuntime {
                         "[{}]\t input error, stopping pipeline: {:?}",
                         self.shared.id, e
                     );
+                    self.shared.counters.add_error();
+                    remember_failure(&self.history, &self.shared.id, Stage::Input, None, &e, 1);
                     publish(&self.events, || {
                         UiEvent::error(self.shared.id.clone(), Stage::Input, &e)
                     });
@@ -331,6 +450,12 @@ impl PipelineRuntime {
                 }
             };
             pass += 1;
+            // Counted before the `watching` gate below and deliberately outside
+            // it: the feed is a sample of what is happening now and costs
+            // nothing when nobody is attached, while this is the record of what
+            // happened, which is worth exactly as much at 3am. Three relaxed
+            // atomic adds a pass is what that costs.
+            self.shared.counters.add_inbound(delivery.len());
             // Nobody watching means no clock read and no accounting: reading
             // the clock once per pass is small but it is not free, and a
             // headless run measured about 12% slower when it did it anyway.
@@ -369,6 +494,7 @@ impl PipelineRuntime {
             // given it: the log is a record of what passed through this
             // pipeline, which is true whether or not an output then took it.
             for b in &batches {
+                self.shared.counters.add_outbound(b.len());
                 if reported {
                     let skipped = throttle.take_skipped(Stage::Output);
                     publish(&self.events, || {
@@ -393,8 +519,19 @@ impl PipelineRuntime {
                         // broker writes a log line for every one of them,
                         // which is the "went crazy" a reconnect storm looks
                         // like even after the reconnect itself is tamed.
-                        if throttle.report_error(Stage::Output, Some(index), Instant::now()) {
+                        self.shared.counters.add_error();
+                        if let Some(count) =
+                            throttle.report_error(Stage::Output, Some(index), Instant::now())
+                        {
                             error!("[{}]\t output error: {:?}", self.shared.id, e);
+                            remember_failure(
+                                &self.history,
+                                &self.shared.id,
+                                Stage::Output,
+                                Some(index),
+                                &e,
+                                count,
+                            );
                             publish(&self.events, || {
                                 UiEvent::error(self.shared.id.clone(), Stage::Output, &e)
                                     .seq(pass)
@@ -429,19 +566,7 @@ impl PipelineRuntime {
             // to wait for.
             ack.ack();
         }
-        // However we got out of the loop — cancelled, or an input that died —
-        // an output holding an unfinished part gets its one chance to land it.
-        // Errors are reported like an `emit` error rather than returned: the
-        // pipeline has already stopped, and failing the run *now* would report
-        // the shutdown itself as the pipeline's failure.
-        for (index, output) in self.outputs.iter_mut().enumerate() {
-            if let Err(e) = output.finish().await {
-                error!("[{}]\t output failed to finish: {:?}", self.shared.id, e);
-                publish(&self.events, || {
-                    UiEvent::error(self.shared.id.clone(), Stage::Output, &e).component(index)
-                });
-            }
-        }
+        self.finish_outputs().await;
         Ok(())
     }
 }
@@ -458,6 +583,7 @@ impl Pipeline {
             cancellation_token,
             config,
             downstream_senders: Mutex::new(Vec::new()),
+            counters: crate::history::Counters::default(),
         })
     }
 
@@ -478,13 +604,15 @@ impl Pipeline {
         for o in self.config.outputs.iter().cloned() {
             outputs.push(o.build(&mut ctx)?);
         }
-        PipelineRuntime::from_parts(
+        let history = Arc::clone(&ctx.history);
+        Ok(PipelineRuntime::from_parts(
             inputs,
             transforms,
             outputs,
             Arc::clone(self),
             ctx.events.clone(),
-        )
+        )?
+        .with_history(history))
     }
     pub fn start(self: &Arc<Self>, ctx: BuildCtx) -> anyhow::Result<tokio::task::JoinHandle<()>> {
         let runtime = self.create_runtime(ctx)?;

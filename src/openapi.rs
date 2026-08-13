@@ -115,7 +115,7 @@ fn operation(endpoint: &ApiDoc) -> Value {
     operation.insert("description".into(), json!(endpoint.description));
     operation.insert("tags".into(), json!([endpoint.tag.label()]));
 
-    if !endpoint.params.is_empty() {
+    if !endpoint.params.is_empty() || !endpoint.query.is_empty() {
         operation.insert(
             "parameters".into(),
             Value::Array(
@@ -133,6 +133,16 @@ fn operation(endpoint: &ApiDoc) -> Value {
                             "schema": { "type": "string" },
                         })
                     })
+                    .chain(endpoint.query.iter().map(|param| {
+                        json!({
+                            "name": param.name,
+                            "in": "query",
+                            // never required — see `ApiDoc::query`
+                            "required": false,
+                            "description": param.description,
+                            "schema": { "type": "string" },
+                        })
+                    }))
                     .collect(),
             ),
         );

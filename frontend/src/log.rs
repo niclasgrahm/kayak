@@ -611,9 +611,34 @@ pub fn format_time(ts_millis: u64, tz_offset_minutes: i32) -> String {
     )
 }
 
+/// How long ago `then` was, as one coarse unit — `"4h ago"`, `"2d ago"`.
+///
+/// The companion to [`format_time`] rather than a replacement for it, and the
+/// reason there are two: a log covers seconds, so it wants a clock, while a
+/// failure history covers a night, and `02:14` on its own doesn't say *which*
+/// night. Shown together, the clock says when and this says how long ago.
+///
+/// Coarse on purpose — nobody reading "something broke overnight" needs the
+/// seconds — and it rounds down, so a thing that happened 119 minutes ago is
+/// "1h ago" rather than "2h ago", which would be a claim about a moment that
+/// hadn't arrived yet.
+#[must_use]
+pub fn format_age(now_millis: u64, then_millis: u64) -> String {
+    if then_millis == 0 || now_millis <= then_millis {
+        return "just now".to_string();
+    }
+    let seconds = (now_millis - then_millis) / 1000;
+    match seconds {
+        0..=59 => "just now".to_string(),
+        60..=3_599 => format!("{}m ago", seconds / 60),
+        3_600..=86_399 => format!("{}h ago", seconds / 3_600),
+        _ => format!("{}d ago", seconds / 86_400),
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{Entry, EntryKind, Filter, LOG_CAPACITY, Log, Rate, format_time};
+    use super::{Entry, EntryKind, Filter, LOG_CAPACITY, Log, Rate, format_age, format_time};
     use kayak_core::{MAX_MESSAGE_BYTES, MESSAGES_PER_BATCH, Stage, UiEvent};
     use serde_json::json;
     use std::sync::Arc;
@@ -1275,5 +1300,27 @@ mod tests {
     fn an_unstamped_event_renders_as_a_placeholder_of_the_same_width() {
         assert_eq!(format_time(0, -120).len(), format_time(1_000, -120).len());
         assert_eq!(format_time(0, -120), "--:--:--.---");
+    }
+
+    /// A failure history covers a night, so it says how long ago as well as
+    /// when. One coarse unit, rounded down.
+    #[test]
+    fn an_age_is_one_coarse_unit_rounded_down() {
+        let now = 1_700_000_000_000_u64;
+        assert_eq!(format_age(now, now), "just now");
+        assert_eq!(format_age(now, now - 30_000), "just now");
+        assert_eq!(format_age(now, now - 90_000), "1m ago");
+        assert_eq!(format_age(now, now - 119 * 60_000), "1h ago");
+        assert_eq!(format_age(now, now - 6 * 3_600_000), "6h ago");
+        assert_eq!(format_age(now, now - 50 * 3_600_000), "2d ago");
+    }
+
+    /// A clock that is behind the timestamp — the stamps are the server's and
+    /// `now` is the browser's — must not underflow into a date in the future.
+    #[test]
+    fn an_age_from_a_browser_clock_behind_the_server_is_just_now() {
+        let now = 1_700_000_000_000_u64;
+        assert_eq!(format_age(now, now + 5_000), "just now");
+        assert_eq!(format_age(now, 0), "just now");
     }
 }

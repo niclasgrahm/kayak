@@ -1,5 +1,6 @@
 use kayak_core::api_docs::{ApiDoc, endpoints};
 use kayak_core::docs::{Family, FieldType, all_components};
+use kayak_core::history::ErrorSignature;
 use kayak_core::state::{BucketContents, BucketSummary};
 use kayak_core::{
     AuthDto, ConfigFormat, Connections, EdgeEnd, LayoutFile, PipelineDto, PipelineId, PortLayout,
@@ -5642,7 +5643,7 @@ fn CardSection(
 /// The `viewBox` is a fixed 100×100 at `preserveAspectRatio: none`, so a
 /// maximized card gets a wider chart rather than a scaled-up one.
 #[component]
-fn ThroughputChart(stats: RwSignal<stats::Stats>) -> impl IntoView {
+fn ThroughputChart(stats: RwSignal<stats::Stats>, reseed: RwSignal<u32>) -> impl IntoView {
     let state = expect_context::<AppState>();
 
     // Redrawn on the clock as well as on the events, which is what makes it
@@ -5655,23 +5656,29 @@ fn ThroughputChart(stats: RwSignal<stats::Stats>) -> impl IntoView {
         stats.with(|stats| stats.bars(now))
     });
     let peak = Memo::new(move |_| stats::Stats::peak(&bars.read()));
-    let paths = Memo::new(move |_| stats::bar_paths(&bars.read(), peak.get()));
+    // Bars are scaled against the rounded ceiling, not the raw peak, so they
+    // agree with the gridlines drawn over them — see `stats::axis_ceiling`.
+    let ceiling = Memo::new(move |_| stats::axis_ceiling(peak.get()));
+    let paths = Memo::new(move |_| stats::bar_paths(&bars.read(), ceiling.get()));
+    // Failures get their own peak and their own ceiling. Sharing the
+    // throughput's would draw three failures next to fifty thousand messages as
+    // nothing at all, which is the one reading the strip exists to prevent.
+    let error_peak = Memo::new(move |_| stats::Stats::error_peak(&bars.read()));
+    let error_ceiling = Memo::new(move |_| stats::axis_ceiling(error_peak.get()));
+    let error_path = Memo::new(move |_| stats::error_path(&bars.read(), error_ceiling.get()));
 
     view! {
         <div class="chart">
             <div class="chart-bar">
                 <span class="series in">"in"</span>
                 <span class="series out">"out"</span>
-                // The one number on the chart, and its whole scale — the bars
-                // are drawn against it. In the bar rather than in the plot
-                // because the bars fill from the right, so a corner label sits
-                // on top of the newest of them exactly when it is tallest.
-                <span class="peak" title="the tallest bar in the window">
-                    {move || {
-                        let peak = peak.get();
-                        (peak > 0).then(|| stats::compact(peak))
-                    }}
-                </span>
+                // Only keyed when there is something to key: a permanent
+                // "err" legend on a healthy pipeline reads as a series that is
+                // sitting at zero, which is a different claim from a pipeline
+                // that has not failed.
+                <Show when=move || { error_peak.get() > 0 }>
+                    <span class="series err">"err"</span>
+                </Show>
                 <span class="units">
                     {stats::Unit::ALL
                         .into_iter()
@@ -5681,7 +5688,14 @@ fn ThroughputChart(stats: RwSignal<stats::Stats>) -> impl IntoView {
                                     class="chip"
                                     class:active=move || stats.with(|s| s.unit() == unit)
                                     title=unit.window_label()
-                                    on:click=move |_| stats.update(|s| s.set_unit(unit))
+                                    on:click=move |_| {
+                                        stats.update(|s| s.set_unit(unit));
+                                        // `set_unit` empties the chart — see
+                                        // its docs on why it can't re-bucket —
+                                        // so this is the other moment there is
+                                        // something for the server to seed.
+                                        reseed.update(|n| *n = n.wrapping_add(1));
+                                    }
                                 >
                                     {unit.label()}
                                 </button>
@@ -5702,11 +5716,147 @@ fn ThroughputChart(stats: RwSignal<stats::Stats>) -> impl IntoView {
                     <path class="in" d=move || paths.get().0 />
                     <path class="out" d=move || paths.get().1 />
                 </svg>
+                // The axis is HTML laid over the plot, not SVG inside it, and
+                // that is forced rather than chosen: the chart is drawn at
+                // `preserveAspectRatio: none`, so an SVG `<text>` would be
+                // stretched horizontally by whatever the card's width happens
+                // to be. The lines could live in the path; the labels cannot,
+                // and splitting them would be two coordinate systems to keep in
+                // step.
+                <div class="chart-axis" aria-hidden="true">
+                    {move || {
+                        let exact = peak.get();
+                        stats::axis_marks(ceiling.get())
+                            .into_iter()
+                            .map(|(percent, label)| {
+                                view! {
+                                    <div
+                                        class="axis-mark"
+                                        style:top=format!("{percent}%")
+                                        // the rounded number is the readable
+                                        // one; the exact peak is still the
+                                        // answer to "how high did it actually
+                                        // get", so it lives on the hover
+                                        title=format!("highest in this window: {exact}")
+                                    >
+                                        <span class="axis-label">{label}</span>
+                                    </div>
+                                }
+                            })
+                            .collect_view()
+                    }}
+                </div>
                 <Show when=move || peak.get() == 0>
                     <div class="empty">"waiting for messages…"</div>
                 </Show>
             </div>
+            // Failures, on a strip of their own beneath the plot. Always
+            // present so that opening a card never shifts the layout under the
+            // pointer, and empty — just its baseline — until something fails.
+            <div class="chart-errors" class:quiet=move || error_peak.get() == 0>
+                <svg
+                    class="chart-svg"
+                    viewBox="0 0 100 100"
+                    preserveAspectRatio="none"
+                    aria-label="failures per time unit"
+                >
+                    <path class="err" d=move || error_path.get() />
+                </svg>
+                <Show when=move || { error_peak.get() > 0 }>
+                    <span
+                        class="error-peak"
+                        title="the most failures in any one unit of this window"
+                    >
+                        {move || stats::compact(error_peak.get())}
+                    </span>
+                </Show>
+            </div>
         </div>
+    }
+}
+
+/// What has failed, from the server's record rather than from the live feed.
+///
+/// This is the half of a card that answers the question the log cannot: the
+/// event stream is only produced while a browser is attached, so a pipeline
+/// that broke at 02:14 and was still broken at 08:00 has nothing in its log and
+/// everything here. Aggregated by the server to one row per distinct failure —
+/// a broker that was down for six hours is one row with a tally, not two
+/// million lines to scroll.
+///
+/// Silent when there is nothing to say: an empty list renders nothing at all
+/// rather than a reassuring "no failures", because history can be turned off
+/// and an empty state that looks the same either way would be a lie in the
+/// direction that matters.
+#[component]
+fn FailureHistory(
+    failures: RwSignal<Vec<ErrorSignature>>,
+    names: StoredValue<log::ComponentNames>,
+) -> impl IntoView {
+    let state = expect_context::<AppState>();
+    view! {
+        <Show when=move || !failures.read().is_empty()>
+            <div class="failures">
+                <div class="failures-head">"failures on record"</div>
+                <ul class="failure-list">
+                    {move || {
+                        #[allow(clippy::cast_sign_loss, clippy::cast_possible_truncation)]
+                        let now = state.now.get().max(0.0) as u64;
+                        let tz = state.tz_offset.get();
+                        failures
+                            .get()
+                            .into_iter()
+                            .map(|failure| {
+                                let component = names
+                                    .with_value(|names| {
+                                        names
+                                            .name(failure.stage, failure.component)
+                                            .map(ToOwned::to_owned)
+                                    })
+                                    .map_or_else(
+                                        || failure.stage.as_str().to_string(),
+                                        |name| format!("{} {name}", failure.stage),
+                                    );
+                                // The whole story on hover: a row shows the
+                                // latest occurrence because that is what says
+                                // "still happening", and the first one is what
+                                // says when it started.
+                                let detail = format!(
+                                    "{} occurrence(s)\nfirst {}\nlast {}",
+                                    failure.count,
+                                    log::format_time(failure.first_seen, tz),
+                                    log::format_time(failure.last_seen, tz),
+                                );
+                                view! {
+                                    <li class="failure" title=detail>
+                                        <span class="failure-when">
+                                            {log::format_time(failure.last_seen, tz)}
+                                        </span>
+                                        <span class="failure-age">
+                                            {log::format_age(now, failure.last_seen)}
+                                        </span>
+                                        <span class="failure-where">{component}</span>
+                                        <span class="failure-text">{failure.message}</span>
+                                        // Only when it happened more than once:
+                                        // a "×1" on every row is noise, and the
+                                        // number is here to make a repeat stand
+                                        // out.
+                                        <Show when={
+                                            let count = failure.count;
+                                            move || count > 1
+                                        }>
+                                            <span class="failure-count">
+                                                {format!("×{}", failure.count)}
+                                            </span>
+                                        </Show>
+                                    </li>
+                                }
+                            })
+                            .collect_view()
+                    }}
+                </ul>
+            </div>
+        </Show>
     }
 }
 
@@ -5768,6 +5918,47 @@ pub fn Card(pipeline_id: PipelineId, config: Config) -> impl IntoView {
         if !stats_open.get() {
             stats.update(stats::Stats::clear);
         }
+    });
+
+    // Bumped whenever the chart has just been emptied and could be seeded from
+    // the server's record: opening it, and changing the unit. A nonce rather
+    // than tracking `stats` itself, which changes on every batch and would turn
+    // one fetch into a request per event.
+    let reseed = RwSignal::new(0_u32);
+    // What has failed, aggregated by the server — one entry per distinct
+    // failure with a first-seen and a tally. This is the half of a card that
+    // survives nobody being here to watch: the log is fed by `/events`, which
+    // is only produced while a browser is attached, so a pipeline that broke at
+    // 02:14 has nothing to show in it at 08:00.
+    let failures = RwSignal::new(Vec::<ErrorSignature>::new());
+    let history_id = StoredValue::new(pipeline_id.clone());
+    Effect::new(move |_| {
+        reseed.track();
+        if !stats_open.get() {
+            return;
+        }
+        // Untracked: the unit is read to *choose a ring*, and subscribing to
+        // the stats here would refetch on every message the card counts.
+        let unit = stats.with_untracked(stats::Stats::unit);
+        let id = history_id.get_value();
+        leptos::task::spawn_local(async move {
+            let Ok(history) = (ApiClient {
+                base: String::new(),
+            })
+            .pipeline_history(&id, unit.resolution())
+            .await
+            else {
+                // A server too old to have the endpoint, or one with history
+                // turned off. Neither is worth a message on the card: the chart
+                // simply fills from the live feed as it always did.
+                return;
+            };
+            // `backfill` refuses a chart that is already counting, so a slow
+            // response arriving after the feed has delivered something is a
+            // no-op rather than a double count.
+            stats.update(|stats| stats.backfill(history.bucket_secs, &history.buckets));
+            failures.set(history.errors);
+        });
     });
 
     // The card doesn't watch the feed; the feed writes to the card. That is the
@@ -6025,7 +6216,8 @@ pub fn Card(pipeline_id: PipelineId, config: Config) -> impl IntoView {
                 <Inspector config=config.get_value() />
             </CardSection>
             <CardSection name="stats" class="section-stats" open=stats_open>
-                <ThroughputChart stats />
+                <ThroughputChart stats reseed />
+                <FailureHistory failures names />
             </CardSection>
             <CardSection name="logs" class="section-logs" open=log_open>
                 <MessageLog messages filter names paused skipped />

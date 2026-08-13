@@ -29,6 +29,7 @@ use serde_json::Value;
 use crate::config::Config;
 use crate::connections::{Connections, CreateConnectionRequest};
 use crate::docs::ComponentDoc;
+use crate::history::PipelineHistory;
 use crate::layout::LayoutFile;
 use crate::server_config::Role;
 use crate::state::{BucketContents, BucketSummary};
@@ -101,6 +102,7 @@ pub enum Operation {
     DeletePipeline,
     IngestMessages,
     ListConnections,
+    GetPipelineHistory,
     ListStateBuckets,
     GetStateBucket,
     CreateConnection,
@@ -129,6 +131,7 @@ impl Operation {
             Self::DeletePipeline => "deletePipeline",
             Self::IngestMessages => "ingestMessages",
             Self::ListConnections => "listConnections",
+            Self::GetPipelineHistory => "getPipelineHistory",
             Self::ListStateBuckets => "listStateBuckets",
             Self::GetStateBucket => "getStateBucket",
             Self::CreateConnection => "createConnection",
@@ -407,7 +410,12 @@ pub struct ApiDoc {
     /// Who may call it. Enforced by the middleware the router applies from this
     /// same entry, so the documentation and the check are one fact.
     pub access: Access,
+    /// Path placeholders, in the order they appear in `path`.
     pub params: Vec<ParamDoc>,
+    /// Query parameters. Always optional — an endpoint that cannot answer
+    /// without one has it in the path instead, which is what makes a bare
+    /// request to any documented path a working request.
+    pub query: Vec<ParamDoc>,
     pub request: Option<RequestDoc>,
     pub responses: Vec<ResponseDoc>,
 }
@@ -510,6 +518,7 @@ pub fn endpoints() -> Vec<ApiDoc> {
             tag: Tag::Pipelines,
             access: Access::Read,
             params: vec![],
+            query: vec![],
             request: None,
             responses: vec![
                 ResponseDoc {
@@ -538,6 +547,7 @@ pub fn endpoints() -> Vec<ApiDoc> {
             tag: Tag::Pipelines,
             access: Access::Admin,
             params: vec![],
+            query: vec![],
             request: Some(RequestDoc {
                 body: Body::Json("Config"),
                 description: "The pipeline to build.",
@@ -578,6 +588,7 @@ pub fn endpoints() -> Vec<ApiDoc> {
                 name: "pipeline_id",
                 description: "The id the pipeline is running under.",
             }],
+            query: vec![],
             request: None,
             responses: vec![
                 ResponseDoc {
@@ -618,6 +629,7 @@ pub fn endpoints() -> Vec<ApiDoc> {
                 name: "pipeline_id",
                 description: "The id of the pipeline to post to.",
             }],
+            query: vec![],
             request: Some(RequestDoc {
                 body: Body::Json("IngestRequest"),
                 description: "One message, or an array of messages to deliver as one batch.",
@@ -650,6 +662,52 @@ pub fn endpoints() -> Vec<ApiDoc> {
             ],
         },
         ApiDoc {
+            path: "/api/pipelines/{pipeline_id}/history",
+            method: Method::Get,
+            operation: Operation::GetPipelineHistory,
+            summary: "What a pipeline has been doing, after the fact",
+            description: "Throughput and failures over time, kept in the server's memory \
+                          so that something which broke overnight can still be read in \
+                          the morning.\n\n\
+                          This is the counterpart to `/events`, not a replay of it. The \
+                          event stream is a live sample: it is only produced while a \
+                          browser is attached and it drops passes under load on \
+                          purpose. History is fed by counters the run loop keeps \
+                          regardless of who is watching, so it is complete in what it \
+                          counts — and correspondingly it carries no message payloads \
+                          at all, only counts, and failures aggregated to one entry per \
+                          distinct message with a first-seen, a last-seen and a tally.\n\n\
+                          Buckets are contiguous and oldest first, including empty ones: \
+                          a run of zeroes is a pipeline that stopped, which is a \
+                          different fact from a gap and is spelled differently.\n\n\
+                          An unknown or newly created pipeline answers with an empty \
+                          history rather than a 404 — a pipeline that has not done \
+                          anything yet is not an error. How much is kept is the \
+                          `history.retention_secs` in the server config; when that is \
+                          zero nothing is recorded and this always answers empty.",
+            tag: Tag::Pipelines,
+            access: Access::Read,
+            params: vec![ParamDoc {
+                name: "pipeline_id",
+                description: "Id of the pipeline.",
+            }],
+            query: vec![ParamDoc {
+                name: "resolution",
+                description: "`coarse` (the default) — a minute a bucket, over the \
+                              configured retention, which is the overnight record. \
+                              `fine` — five seconds a bucket over the last half hour, \
+                              which is what a card's live chart is backfilled from so \
+                              it starts full rather than drawing itself over the next \
+                              two minutes.",
+            }],
+            request: None,
+            responses: vec![ResponseDoc {
+                status: 200,
+                description: "The pipeline's history at the resolution asked for.",
+                body: Body::Json("PipelineHistory"),
+            }],
+        },
+        ApiDoc {
             path: "/api/connections",
             method: Method::Get,
             operation: Operation::ListConnections,
@@ -662,6 +720,7 @@ pub fn endpoints() -> Vec<ApiDoc> {
             tag: Tag::Connections,
             access: Access::Read,
             params: vec![],
+            query: vec![],
             request: None,
             responses: vec![ResponseDoc {
                 status: 200,
@@ -683,6 +742,7 @@ pub fn endpoints() -> Vec<ApiDoc> {
             tag: Tag::State,
             access: Access::Read,
             params: vec![],
+            query: vec![],
             request: None,
             responses: vec![ResponseDoc {
                 status: 200,
@@ -710,6 +770,7 @@ pub fn endpoints() -> Vec<ApiDoc> {
                 name: "bucket",
                 description: "Name of the bucket, as declared in the config.",
             }],
+            query: vec![],
             request: None,
             responses: vec![
                 ResponseDoc {
@@ -739,6 +800,7 @@ pub fn endpoints() -> Vec<ApiDoc> {
             tag: Tag::Connections,
             access: Access::Admin,
             params: vec![],
+            query: vec![],
             request: Some(RequestDoc {
                 body: Body::Json("CreateConnectionRequest"),
                 description: "The connection, and the name to file it under.",
@@ -771,6 +833,7 @@ pub fn endpoints() -> Vec<ApiDoc> {
                 name: "connection_id",
                 description: "The name the connection is filed under.",
             }],
+            query: vec![],
             request: None,
             responses: vec![
                 ResponseDoc {
@@ -800,6 +863,7 @@ pub fn endpoints() -> Vec<ApiDoc> {
             tag: Tag::Config,
             access: Access::Read,
             params: vec![],
+            query: vec![],
             request: None,
             responses: vec![ResponseDoc {
                 status: 200,
@@ -829,6 +893,7 @@ pub fn endpoints() -> Vec<ApiDoc> {
             tag: Tag::Config,
             access: Access::Admin,
             params: vec![],
+            query: vec![],
             request: Some(RequestDoc {
                 body: Body::Json("SaveConfigRequest"),
                 description: "The file name to write, and optionally the format.",
@@ -864,6 +929,7 @@ pub fn endpoints() -> Vec<ApiDoc> {
             tag: Tag::Config,
             access: Access::Admin,
             params: vec![],
+            query: vec![],
             request: None,
             responses: vec![
                 ResponseDoc {
@@ -894,6 +960,7 @@ pub fn endpoints() -> Vec<ApiDoc> {
             tag: Tag::Layout,
             access: Access::Read,
             params: vec![],
+            query: vec![],
             request: None,
             responses: vec![ResponseDoc {
                 status: 200,
@@ -919,6 +986,7 @@ pub fn endpoints() -> Vec<ApiDoc> {
             tag: Tag::Layout,
             access: Access::Admin,
             params: vec![],
+            query: vec![],
             request: Some(RequestDoc {
                 body: Body::Json("LayoutFile"),
                 description: "The complete arrangement.",
@@ -950,6 +1018,7 @@ pub fn endpoints() -> Vec<ApiDoc> {
             tag: Tag::Events,
             access: Access::Read,
             params: vec![],
+            query: vec![],
             request: None,
             responses: vec![ResponseDoc {
                 status: 200,
@@ -975,6 +1044,7 @@ pub fn endpoints() -> Vec<ApiDoc> {
             tag: Tag::Auth,
             access: Access::Public,
             params: vec![],
+            query: vec![],
             request: None,
             responses: vec![ResponseDoc {
                 status: 200,
@@ -1002,6 +1072,7 @@ pub fn endpoints() -> Vec<ApiDoc> {
             tag: Tag::Auth,
             access: Access::Public,
             params: vec![],
+            query: vec![],
             request: Some(RequestDoc {
                 body: Body::Json("LoginRequest"),
                 description: "The credentials to check.",
@@ -1032,6 +1103,7 @@ pub fn endpoints() -> Vec<ApiDoc> {
             tag: Tag::Auth,
             access: Access::Read,
             params: vec![],
+            query: vec![],
             request: None,
             responses: vec![ResponseDoc {
                 status: 204,
@@ -1056,6 +1128,7 @@ pub fn endpoints() -> Vec<ApiDoc> {
             tag: Tag::Reference,
             access: Access::Public,
             params: vec![],
+            query: vec![],
             request: None,
             responses: vec![ResponseDoc {
                 status: 200,
@@ -1077,6 +1150,7 @@ pub fn endpoints() -> Vec<ApiDoc> {
             tag: Tag::Reference,
             access: Access::Public,
             params: vec![],
+            query: vec![],
             request: None,
             responses: vec![ResponseDoc {
                 status: 200,
@@ -1097,6 +1171,7 @@ pub fn endpoints() -> Vec<ApiDoc> {
             tag: Tag::Reference,
             access: Access::Public,
             params: vec![],
+            query: vec![],
             request: None,
             responses: vec![ResponseDoc {
                 status: 200,
@@ -1126,6 +1201,7 @@ pub fn schemas() -> BTreeMap<&'static str, Value> {
     schemas.insert("IngestRequest", of(schema_for!(IngestRequest)));
     schemas.insert("IngestResponse", of(schema_for!(IngestResponse)));
     schemas.insert("Connections", of(schema_for!(Connections)));
+    schemas.insert("PipelineHistory", of(schema_for!(PipelineHistory)));
     schemas.insert("BucketSummary", of(schema_for!(Vec<BucketSummary>)));
     schemas.insert("BucketContents", of(schema_for!(BucketContents)));
     schemas.insert(
@@ -1352,6 +1428,10 @@ mod tests {
                 // readings is not an operator, and this endpoint gets its own
                 // mechanism rather than the operators' credentials
                 ("ingestMessages", "public"),
+                // counts and failure texts, no message payloads — the same
+                // thing a reader can already watch go past on `/events`, only
+                // after the fact
+                ("getPipelineHistory", "read"),
                 ("listConnections", "read"),
                 ("listStateBuckets", "read"),
                 ("getStateBucket", "read"),

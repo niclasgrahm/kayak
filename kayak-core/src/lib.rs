@@ -10,6 +10,7 @@ pub mod config;
 pub mod connections;
 pub mod docs;
 pub mod format;
+pub mod history;
 pub mod layout;
 pub mod mapping;
 pub mod metadata;
@@ -19,6 +20,7 @@ pub mod state;
 pub use columns::{ColumnMapping, ColumnType, ExtraFieldPolicy, MissingColumnPolicy, TableIndex};
 pub use connections::{ConnectionId, ConnectionKind, Connections};
 pub use format::ConfigFormat;
+pub use history::{ErrorSignature, HistoryBucket, PipelineHistory, Resolution};
 pub use layout::{EdgeEnd, LayoutFile, PipelineLayout, PortLayout, Side};
 pub use state::{PipelineState, StateBucketConfig, StateBuckets};
 

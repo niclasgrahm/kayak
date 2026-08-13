@@ -19,7 +19,7 @@ use http_body_util::BodyExt;
 use kayak::api_router;
 use kayak::auth::Auth;
 use kayak::state::AppState;
-use kayak_core::server_config::{AuthConfig, Role, ServerConfig, UserConfig};
+use kayak_core::server_config::{AuthConfig, HistoryConfig, Role, ServerConfig, UserConfig};
 use serde_json::{Value, json};
 use std::collections::BTreeMap;
 use tower::ServiceExt;
@@ -52,6 +52,7 @@ fn guarded_server() -> anyhow::Result<Router> {
     .into_iter()
     .collect();
     let config = ServerConfig {
+        history: HistoryConfig::default(),
         auth: AuthConfig::Basic { users },
     };
     let auth = Arc::new(Auth::from_config(&config, &kayak::secrets::EnvStore)?);

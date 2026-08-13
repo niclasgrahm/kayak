@@ -5,6 +5,7 @@ use tokio::sync::broadcast;
 use crate::BuildCtx;
 use crate::auth::Auth;
 use crate::buckets::Buckets;
+use crate::history::History;
 use crate::inputs::http::{Credentials, Inboxes, IngestError, PostMeta};
 use crate::pipeline::Pipeline;
 use crate::secrets::{EnvStore, SecretStore};
@@ -212,6 +213,19 @@ pub struct AppState {
     /// that asks nobody for anything, which is what a `--server-config`-less
     /// process runs.
     auth: Arc<Auth>,
+    /// What the pipelines have done, kept for the UI to show after the fact.
+    ///
+    /// Beside the graph rather than inside a pipeline because it deliberately
+    /// **outlives** one: a revert rebuilds every pipeline in the file, and
+    /// history that died with its run loop would make an edit to one card cost
+    /// the overnight record of all of them. The same argument
+    /// [`crate::buckets`] makes about state, one step further along — buckets
+    /// survive a rebuild, and these survive a deletion too, until the retention
+    /// runs out.
+    ///
+    /// [`History::disabled`] by default, which is a server that keeps nothing;
+    /// [`AppState::with_history`] is how a `--server-config` turns it on.
+    history: Arc<History>,
 }
 
 impl Default for AppState {
@@ -263,7 +277,49 @@ impl AppState {
             buckets: Mutex::new(Arc::new(Buckets::new())),
             declared_buckets: Mutex::new(StateBuckets::new()),
             auth: Arc::new(Auth::disabled()),
+            history: Arc::new(History::disabled()),
         }
+    }
+
+    /// Keep a record of what the pipelines do, per the settings file's
+    /// `history` section.
+    ///
+    /// A builder for the reason [`AppState::with_auth`] is one — except that
+    /// here the *server's* default is on and this default is off, which is not
+    /// a contradiction: `main` always calls this, and what a bare `AppState`
+    /// wants is the cheap thing, because that is every test that isn't about
+    /// history.
+    #[must_use]
+    pub fn with_history(mut self, history: Arc<History>) -> Self {
+        self.history = history;
+        self
+    }
+
+    /// What the pipelines have done, for the handler that serves it and for
+    /// the sampler that feeds it.
+    #[must_use]
+    pub fn history(&self) -> &Arc<History> {
+        &self.history
+    }
+
+    /// Fold one tick of every running pipeline's counters into the history
+    /// rings. Called by [`crate::history::sampler`]; here rather than on
+    /// `History` because the pipelines map is this type's to lock.
+    ///
+    /// The lock is taken and released around a walk of the map with no `.await`
+    /// inside it, which is the house rule.
+    pub fn sample_history(&self, now_secs: u64) {
+        let live: Vec<(PipelineId, Arc<crate::pipeline::Pipeline>)> = {
+            let pipelines = self.lock_pipelines();
+            pipelines
+                .iter()
+                .map(|(id, handle)| (id.clone(), Arc::clone(&handle.shared)))
+                .collect()
+        };
+        self.history.sample(
+            live.iter().map(|(id, shared)| (id, &shared.counters)),
+            now_secs,
+        );
     }
 
     /// Require credentials, per the settings file the server was started with.
@@ -355,7 +411,7 @@ impl AppState {
         path: &Path,
         secrets: Arc<dyn SecretStore>,
     ) -> anyhow::Result<Self> {
-        Self::from_config_with(path, secrets, None, None)
+        Self::from_config_with(path, secrets, None, None, Arc::new(History::disabled()))
     }
 
     /// As [`AppState::from_config_with_secrets`], with the connections file
@@ -372,11 +428,17 @@ impl AppState {
     /// *starts* its pipelines, so a data dir applied afterwards would arrive
     /// too late for every file output in the file. The builder is for a state
     /// that has no pipelines yet.
+    ///
+    /// `history` is a parameter for exactly the same reason, one step less
+    /// obviously: the pipelines this starts capture it in their `BuildCtx`, so
+    /// a [`AppState::with_history`] afterwards would leave every pipeline in
+    /// the config file recording into a store nobody reads.
     pub fn from_config_with(
         path: &Path,
         secrets: Arc<dyn SecretStore>,
         connections_file: Option<&Path>,
         data_dir: Option<PathBuf>,
+        history: Arc<History>,
     ) -> anyhow::Result<Self> {
         // a bare `config.json` names a file in the working directory, and
         // `parent()` of that is the empty path rather than "."
@@ -385,6 +447,7 @@ impl AppState {
             _ => PathBuf::from("."),
         };
         let mut new_state = AppState::with_secrets_in(dir, secrets);
+        new_state.history = history;
         new_state.data_dir = Self::resolve_data_dir(data_dir)?;
         new_state.connections_file = connections_file.map(Path::to_path_buf);
         *new_state.lock_config_path() = Some(path.to_path_buf());
@@ -1026,7 +1089,8 @@ impl AppState {
         .with_data_dir(self.data_dir.clone())
         .with_inboxes(Arc::clone(&self.inboxes))
         .with_buckets(self.buckets())
-        .with_state(pipeline.config.state.clone());
+        .with_state(pipeline.config.state.clone())
+        .with_history(Arc::clone(&self.history));
         // building the runtime only fails on things the config got wrong
         // (unknown upstream, unbuildable component)
         let join_handle = pipeline.start(ctx).map_err(|e| {

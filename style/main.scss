@@ -67,6 +67,7 @@ body {
 .card .property,
 .property-list,
 .log-body,
+.failure-list,
 .connection-card,
 .state-card,
 .docs-content,
@@ -702,6 +703,9 @@ textarea {
     &.out::before {
       background: var(--stat-out);
     }
+    &.err::before {
+      background: var(--error);
+    }
   }
 
   // The scale of the whole chart, so it reads as a readout rather than as a
@@ -739,12 +743,78 @@ textarea {
   }
 }
 
+// What the server remembers about a card's failures, under its chart. Rendered
+// only when there is something to say — see the `FailureHistory` component.
+.failures {
+  border-top: 1px solid var(--border);
+  padding: 6px 8px 7px;
+}
+
+.failures-head {
+  font-size: 10px;
+  color: var(--text-dim);
+  margin-bottom: 4px;
+}
+
+.failure-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  // A card is a fixed width and a broken pipeline can have a handful of
+  // distinct failures; past that this scrolls rather than pushing the card's
+  // measured height around, which the layout would then have to absorb.
+  max-height: 96px;
+  overflow-y: auto;
+}
+
+.failure {
+  display: grid;
+  // when · age · where · what · how many. The text column is the elastic one;
+  // everything else is the width of its content, so the columns line up down
+  // the list and a long message truncates rather than wrapping.
+  grid-template-columns: auto auto auto 1fr auto;
+  gap: 6px;
+  align-items: baseline;
+  font-size: 10px;
+  line-height: 1.5;
+
+  .failure-when,
+  .failure-age,
+  .failure-count {
+    font-family: var(--font-mono);
+    font-variant-numeric: tabular-nums;
+    color: var(--text-dim);
+    white-space: nowrap;
+  }
+
+  .failure-where {
+    color: var(--text-dim);
+    white-space: nowrap;
+  }
+
+  // The message is the row. Coloured like a log failure so the two read as the
+  // same kind of thing, and clipped to one line — the full text is on the
+  // row's title, along with the first-seen this column has no room for.
+  .failure-text {
+    color: var(--error);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .failure-count {
+    color: var(--error);
+  }
+}
+
 .chart-plot {
   position: relative;
   height: 54px;
-  // the baseline the bars stand on. The only rule on the plot: a grid behind
-  // sixty bar pairs three pixels wide is noise, and the scale is one number in
-  // the corner instead.
+  // The baseline the bars stand on, and it means zero whether or not there is
+  // a scale above it — which is why `axis_marks` never draws a line at zero.
   border-bottom: 1px solid var(--border);
 
   .chart-svg {
@@ -772,6 +842,95 @@ textarea {
     display: flex;
     align-items: center;
     justify-content: center;
+  }
+}
+
+// The y axis: two gridlines with the number they stand for, laid over the plot
+// rather than drawn inside it. See the `ThroughputChart` component on why this
+// cannot be SVG text.
+.chart-axis {
+  position: absolute;
+  inset: 0;
+  // The bars underneath are the content; this is an annotation on top of them,
+  // and a pointer going for a bar must not hit a full-width gridline instead.
+  pointer-events: none;
+
+  .axis-mark {
+    position: absolute;
+    left: 0;
+    right: 0;
+    // A dashed hairline rather than a solid one: it has to read *behind* thirty
+    // bar pairs three pixels wide, and a solid rule at this density competes
+    // with them instead of measuring them.
+    border-top: 1px dashed var(--border);
+    // the line is the mark, so nothing pushes it off the value it names
+    height: 0;
+  }
+
+  .axis-label {
+    position: absolute;
+    right: 0;
+    // Sat just above its own line and against the right-hand edge. Above,
+    // because the bars fill from the right and grow upwards — a label below
+    // the top line would be the first thing a tall newest bar covers.
+    bottom: 1px;
+    padding-left: 3px;
+    font-family: var(--font-mono);
+    font-variant-numeric: tabular-nums;
+    font-size: 9px;
+    line-height: 1;
+    color: var(--text-dim);
+    // The plot has no margin to put an axis in — a card is eighteen grid cells
+    // wide and the bars want all of it — so the label sits over the chart and
+    // carries just enough background to stay readable where it overlaps one.
+    background: var(--bg-panel);
+    opacity: 0.85;
+  }
+}
+
+// Failures per unit, on their own strip under the plot with their own scale.
+// Always present so that a card does not change height the first time
+// something fails — see `Bucket::errors`.
+.chart-errors {
+  position: relative;
+  height: 14px;
+  margin-top: 3px;
+  // The bars grow up from here, so without it they float under the plot with
+  // nothing to stand on and read as marks rather than as a chart.
+  border-bottom: 1px solid var(--border);
+
+  .chart-svg {
+    display: block;
+    width: 100%;
+    height: 100%;
+
+    path {
+      stroke: none;
+      fill: var(--error);
+    }
+  }
+
+  // Nothing has failed in this window: the strip keeps its space but stops
+  // drawing attention to itself.
+  &.quiet {
+    opacity: 0.25;
+  }
+
+  // On the **left**, deliberately, where the plot's axis labels are not. On
+  // the right it lined up under them into one column of right-aligned numbers,
+  // and read as a third gridline on the plot above rather than as this strip's
+  // own separate scale — which is the one thing about it that has to be clear.
+  .error-peak {
+    position: absolute;
+    left: 0;
+    top: 0;
+    padding-right: 3px;
+    font-family: var(--font-mono);
+    font-variant-numeric: tabular-nums;
+    font-size: 9px;
+    line-height: 1;
+    color: var(--error);
+    background: var(--bg-panel);
   }
 }
 

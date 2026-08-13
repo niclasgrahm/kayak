@@ -46,7 +46,7 @@ Three workspace crates:
 
 ### The pipeline model
 
-A **pipeline** is one `inputs → [transforms] → outputs` chain. A pipeline may have several inputs (merged into one stream) and several outputs (each gets every batch); `inputs` and `outputs` are JSON arrays, and there is no singular form. Pipelines are identified by `id` (from config, or a random `petname` if omitted) and form a **graph**: the `pipeline` input kind subscribes to another pipeline's output, so one pipeline can fan out to several downstream ones. `example_config/config.json` (with `config.connections.json` beside it) is the worked example and deliberately covers every component kind and every connection kind: two roots (a NATS source and a dummy ticker), a wide fan-out under the source, one pipeline (`everything`) fed by three inputs — two upstreams and a nats subject another pipeline publishes to — one pipeline with two outputs of different kinds, and one pipeline at depth 3. Keep it that way when adding a component — it's what the UI is inspected against, and `tests/graph.rs` builds the whole file.
+A **pipeline** is one `inputs → [transforms] → outputs` chain. A pipeline may have several inputs (merged into one stream) and several outputs (each gets every batch); `inputs` and `outputs` are JSON arrays, and there is no singular form. Pipelines are identified by `id` (from config, or a random `petname` if omitted) and form a **graph**: the `pipeline` input kind subscribes to another pipeline's output, so one pipeline can fan out to several downstream ones. `example_config/config.json` (with `config.connections.json` beside it) is the worked example and deliberately covers every component kind and every connection kind: two roots (a NATS source and a dummy ticker), a wide fan-out under the source, one pipeline (`everything`) fed by three inputs — two upstreams and a nats subject another pipeline publishes to — one pipeline with two outputs of different kinds, and one pipeline at depth 3. Keep it that way when adding a component — it's what the UI is inspected against, and `tests/graph.rs` builds the whole file. It also carries four deliberately **broken** pipelines (`broken_*`, all fed by `heartbeat` so they fail once a second with nothing running): a card's failure history and a chart with holes in it don't exist until something is actually broken, so a sample where everything works exercises half the UI. `broken_intermittently` is the one that matters — it fails in bursts rather than constantly, which is the shape a real outage has. They must keep failing at *runtime* rather than at build time: `tests/graph.rs` asserts every declared pipeline builds and registers.
 
 Data flowing through is always `Arc<MessageBatch>` — a batch of `Arc<serde_json::Value>`. There is no typed schema; everything is untyped JSON, and transforms address fields by name.
 
@@ -678,6 +678,90 @@ sampled, a pipeline inside its budget is reported in full with no gaps. Tests
 that are about what the feed *says* rather than how often opt out with
 `PipelineRuntime::reporting_every_pass()`, which production never calls.
 
+### History: what a card shows about last night
+
+`/events` answers "what is happening", and it is deliberately bad at answering
+"what happened": it is gated on `receiver_count() > 0`, it drops passes under
+load, and it keeps nothing. So a pipeline that broke at 02:14 has nothing to
+show at 08:00 — nobody was subscribed, so there was no feed. History is the
+second, much cheaper path that answers that question, and the **one rule that
+must not be broken is that it does not ride on the event feed**: a persistent
+subscriber would hold that gate open forever and make every headless server pay
+the browser-attached cost of a UI nobody has opened.
+
+Three pieces, split the way `state` is — declaration in
+`kayak-core/src/history.rs`, live store in `src/history.rs`, knob in
+`server_config`:
+
+- **`Counters`** on `Pipeline` — three `AtomicU64`s the run loop `fetch_add`s
+  **unconditionally**, outside the `watching` gate. That is the whole cost on
+  the hot path, and it is what makes the record complete rather than sampled.
+  Errors are counted here on *every* failure, including the ones the UI throttle
+  suppresses, which is why a bucket's error count is the true one.
+- **`History::sample`** differences the counters on a tick (`sampler`, every
+  `FINE_BUCKET_SECS`) and folds the delta into two rings. Cost is O(pipelines)
+  per five seconds and does not scale with throughput — that is the property the
+  counters buy.
+- **`History::record_error`** keeps one `ErrorSignature` per distinct
+  (stage, component, message), with `first_seen`/`last_seen`/`count`. Called
+  from the run loop's error arms, which are already behind
+  `UiThrottle::report_error`, so it takes its lock a few times a second however
+  fast a pipeline is failing. `report_error` now returns `Some(count)` rather
+  than a bool: the tally has to include the repeats the throttle swallowed, or
+  it would say "failed 4 times" about a pipeline that failed four thousand.
+
+Five properties are load-bearing:
+
+- **Two resolutions, and the capacity of both is *derived from a duration*.**
+  `history.retention_secs` is the only knob (a day by default, `0` is the off
+  switch — no `enabled` bool beside a duration, for the reason `AuthConfig` is
+  an enum rather than a bool beside a map). Fine is 5s buckets over half an hour
+  and is **not** configurable: it is sized by what a card can display, which is
+  not a deployment's business. A day costs about 58 kB per pipeline, flat in
+  throughput, because a bucket holds counts and never messages.
+- **Buckets are stored dense.** A gap and a run of zeroes mean different things
+  — "the server wasn't asked" against "the pipeline stopped" — and the second is
+  the whole point, so it is written down rather than inferred from a missing key
+  at render time. `Ring::advance_to` caps its gap fill at the capacity, so a
+  server asleep for a week doesn't walk a week of empties.
+- **The error map is bounded, and this is the bound that is easy to miss.**
+  Failures look self-limiting — "however many things are broken" — but an error
+  text carrying a message id or an offset makes every failure distinct, so it is
+  an unbounded map fed at the failure rate. `MAX_ERROR_SIGNATURES` with
+  stalest-first eviction, and `dropped_signatures` says when it bit.
+- **Records outlive their pipelines.** A revert rebuilds every pipeline in the
+  graph, so dropping history there would make an edit to one card cost the
+  overnight record of all of them — the same argument `Buckets::rebuilt` makes
+  about state, one step further. `sample` prunes a record once it is both dead
+  and past the retention, and a deleted pipeline's ring is **not** advanced:
+  filling it with zeroes would push what it did off the tail long before the
+  retention was up.
+- **In memory, and that is a decision rather than a stage** — the same one
+  `src/buckets.rs` makes. A durable backend is a later swap behind
+  `History::get`, and is the point at which a real metrics store is the honest
+  answer instead.
+
+`GET /api/pipelines/{id}/history?resolution=fine|coarse` serves it. Two
+deliberate differences from the other pipeline endpoints: an unknown id is an
+empty history and a **200, not a 404** (history outlives its pipeline, so "no
+such pipeline" is not this endpoint's question), and an unreadable `resolution`
+falls back to the default rather than 400ing — it picks between two views of one
+record, and a chart that refuses to draw over a typo is the worse outcome. This
+is also the API's first query parameter, which is why `ApiDoc` grew a `query`
+list; they are always optional, so a bare request to any documented path is a
+working request.
+
+On the frontend, `Stats::backfill` seeds the chart so an opened card starts full
+instead of drawing itself over the next two minutes. Two rules: it refuses a
+chart that is **already counting** (the server's counters and the browser's
+events count the same messages, so merging would double them, and finding the
+overlap means trusting two clocks), and it refuses history **coarser than the
+unit** — buckets sum upwards but cannot be cut downwards, the same rule
+`set_unit` follows. `Unit::resolution` is what picks the ring. `FailureHistory`
+renders the signatures under the chart and is **silent when empty**: history can
+be turned off, and a reassuring "no failures" that looks identical either way
+would be a lie in the direction that matters.
+
 ### How the feed reaches the cards (`Feed`, `frontend/src/app.rs`)
 
 The browser half of the same problem, and the backstop for what the server can't
@@ -731,6 +815,28 @@ whichever of the two clocks is further on, since the timestamps are the server's
 and `now` is the browser's. And `outbound` sums every output component, so
 fan-out shows as more leaving than arriving — deliberate, and the thing that
 makes one output dying legible.
+
+**Failures are a third series on a strip of their own, with their own scale**
+(`Bucket::errors`, `Stats::error_peak`, `error_path`), never a third bar beside
+the other two. Two reasons, and the first is the one that matters: it is not the
+same quantity, so on a shared scale three failures beside fifty thousand
+messages is a bar a pixel high — and three failures is precisely what the strip
+is for. The second is that a third bar in each slot is 90 bars in a card
+eighteen cells wide, which is the fan of hairlines `BARS` was cut to 30 to
+avoid. Note the live count is a **floor**, not the truth: `UI_ERROR_INTERVAL`
+suppresses repeats, so the strip says *when* and the `FailureHistory` tally
+underneath (which comes from the counters) says how many. Backfilled buckets
+carry the true count, since those come from the counters too.
+
+**The y axis is HTML laid over the plot, and that is forced rather than
+chosen**: the `<svg>` is `preserveAspectRatio: none`, so an SVG `<text>` would
+be stretched horizontally by whatever width the card happens to be. Bars are
+scaled against `axis_ceiling` — the first of 1, 2 or 5 × 10ⁿ that reaches the
+peak — rather than against the peak itself, which costs a little height at the
+top and is what lets the gridlines land on numbers someone can read. `axis_marks`
+gives two of them, the ceiling and its half, and **never one at zero**: the
+plot's bottom border already means zero and always does, scale or no scale. The
+exact peak is not lost, it moved to the axis label's `title`.
 
 `BARS` is 30 because a card is 18 grid cells wide; 60 turned each pair into a
 fan of hairlines, which loses the one comparison the chart is for. The plot is

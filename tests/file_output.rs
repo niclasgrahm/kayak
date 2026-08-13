@@ -411,6 +411,7 @@ async fn a_server_started_with_a_data_dir_starts_a_file_pipeline_from_its_config
         Arc::new(kayak::secrets::EnvStore),
         None,
         Some(data_dir.clone()),
+        Arc::new(kayak::history::History::disabled()),
     )?;
     assert_eq!(state.get_pipeline_ids(), vec!["to-disk".to_string()]);
     // the build created the directory it will write into
@@ -447,7 +448,13 @@ async fn the_same_config_without_a_data_dir_does_not_start() -> anyhow::Result<(
     )?;
 
     let started =
-        AppState::from_config_with(&config_path, Arc::new(kayak::secrets::EnvStore), None, None);
+        AppState::from_config_with(
+            &config_path,
+            Arc::new(kayak::secrets::EnvStore),
+            None,
+            None,
+            Arc::new(kayak::history::History::disabled()),
+        );
     assert!(
         started.is_err(),
         "a file pipeline started on a server with no --data-dir"
