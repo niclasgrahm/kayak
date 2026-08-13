@@ -1,0 +1,36 @@
+[package]
+name = "kayak-bench"
+version = "0.1.0"
+edition = "2024"
+# Not published and not part of the server. It exists to produce numbers, and
+# it is a member of the workspace so that `cargo check` and `just lint` keep it
+# compiling against the runtime it measures — a bench that has quietly stopped
+# building is a baseline nobody notices has stopped being taken.
+publish = false
+
+# The same set the root crate holds itself to, spelled out rather than
+# inherited: there is no `[workspace.lints]` here, and a bench crate that lints
+# more loosely than the runtime is one that grows the `.unwrap()`s the runtime
+# spent a pass removing.
+[lints.clippy]
+all = { level = "warn", priority = -1 }
+pedantic = { level = "warn", priority = -1 }
+unwrap_used = "warn"
+expect_used = "warn"
+module_name_repetitions = "allow"
+missing_errors_doc = "allow"
+missing_panics_doc = "allow"
+
+[dependencies]
+kayak = { path = ".." }
+kayak-core = { path = "../kayak-core" }
+anyhow = "1.0.102"
+clap = { version = "4.6.1", features = ["derive"] }
+serde = { version = "1.0.228", features = ["derive"] }
+serde_json = "1.0.149"
+# the environment half of a baseline: cpu model, core count, total memory, and
+# this process' resident set. All four are part of what makes two numbers
+# comparable, and none of them are in std.
+sysinfo = { version = "0.38", default-features = false, features = ["system"] }
+tokio = { version = "1.52.3", features = ["full"] }
+tokio-util = "0.7.18"

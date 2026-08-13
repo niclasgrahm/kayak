@@ -96,3 +96,21 @@ test-http:
 
 start-baseline:
   hurl hurl/create_baseline.hurl
+
+# Deliberately *not* part of `ci` — a minute-long sweep in the pre-push loop is
+# a minute-long sweep people learn to skip. It is a release build for the same
+# reason a baseline refuses to save a debug one: a debug number measures the
+# optimiser's absence, and some of the hot paths here inline away entirely
+# under --release.
+#
+#   just bench                      the suite, as a table
+#   just bench --compare            ... and the deltas against this machine's baseline
+#   just bench --save               ... and record this run as that baseline
+#   just bench --filter pipelines   just the multi-pipeline rows
+#   just bench --duration 20        longer windows, less noise
+#
+# See docs/guide.md's "benchmarking" section for what the numbers mean.
+
+# throughput sweep over the run loop — no server, no broker, no filesystem
+bench *ARGS:
+  cargo run --release -p kayak-bench -- {{ARGS}}

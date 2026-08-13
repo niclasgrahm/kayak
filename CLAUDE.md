@@ -38,11 +38,12 @@ Lints are strict by design: clippy `pedantic` plus `unwrap_used`/`expect_used` a
 
 ## Architecture
 
-Three workspace crates:
+Four workspace crates:
 
 - **`kayak-core/`** — shared, dependency-light types. All config structs/enums (`config.rs`), plus `PipelineId`, `MessageBatch = Vec<Arc<serde_json::Value>>`, `UiEvent`, `PipelineDto`, the canvas layout types (`layout.rs`), and the endpoint table the HTTP surface is built and documented from (`api_docs.rs`). Compiles for both native and `wasm32`, which is why it exists: the frontend needs the same config types as the server. It has no async/network deps and no real `main.rs`.
 - **`/` (root `kayak` crate)** — the Axum server and the whole stream-processing runtime. It is a **lib + bin**: everything lives in `src/lib.rs` and its modules so integration tests can import it; `src/main.rs` is only clap args, tracing setup and the Leptos router wiring. `api_router()` — re-exported from `lib.rs`, defined in `src/endpoints.rs` — builds the JSON/SSE routes for both.
 - **`frontend/`** — Leptos 0.8 SSR + hydrate crate. `cdylib`+`rlib` with `ssr`/`hydrate` features; the root binary depends on it with `ssr` and mounts it via `leptos_axum`.
+- **`kayak-bench/`** — the throughput harness. A `bin` that drives the runtime in process and prints what the run loop costs; not part of the server and not part of `just ci`. See "the throughput harness" below.
 
 ### The pipeline model
 
@@ -447,6 +448,52 @@ hold a null from quietly holding a zero.
 `json` is a `String` holding the JSON text (`JSONExtract` reads it) and `date` a
 `Date32`; the connection is the HTTP interface with `allow_http` following the
 s3 connection's rule, since the credentials go with every insert.
+
+### The http output
+
+The pushing half of the http family, and the one output with **no connection
+behind it**. That is the decision worth knowing: a connection holds *what a
+system is* against what one pipeline wants from it, and for a webhook the url
+is the whole of the first half — two pipelines posting to two endpoints on one
+host share nothing worth naming once. So `url` sits on the component, and so
+does `auth`, for the reason the `http` input's does: one shared credential for
+every endpoint is wrong the moment there are two.
+
+`auth` is literally the input's `HttpAuthConfig`, read the other way round —
+the input compares what arrived against it, the output sets it. Only the input
+carries the `ALLOWED_HEADERS` refusal, because only an `envelope` can write a
+header into the messages. The value is marked `sensitive` on the `HeaderValue`,
+and `describe()` strips userinfo out of the url before it reaches an error
+message.
+
+Four properties are load-bearing:
+
+- **Anything but a 2xx fails the batch**, with the endpoint's own body quoted
+  (cut at `MAX_DETAIL_BYTES`, because that text becomes a `history`
+  `ErrorSignature` key as well as a UI line). A webhook rejecting the data has
+  to show up on the card rather than being written off as delivered. The reply
+  is otherwise discarded — a service whose answer the pipeline should carry on
+  with is the `http` *transform*.
+- **`init` does nothing, deliberately.** Every other output that talks to a
+  server connects there so a bad config fails at startup; there is no request
+  to make here that would not itself be a delivery. A wrong url is caught at
+  build time (parsed, and the scheme checked) and an unreachable one at the
+  first batch, through the same `Gate` the clickhouse output uses for the same
+  reason — `reqwest::Client` is a stateless pool, so what is worth skipping is
+  the *request*.
+- **`verb` is honoured and `GET`/`DELETE` are refused at build time.** A
+  request with no body would send none of the messages. Note this is the
+  opposite of the `http` transform, which accepts `verb` and ignores it — a
+  known issue, and this is now the argument for settling it.
+- **`body` picks `batch` (one request, a JSON array) or `message` (one request
+  each).** The receiving API's shape, not a tuning knob. Under `message` the
+  first failure stops the batch, the same all-or-nothing a broker publish loop
+  has. An empty batch sends nothing at all.
+
+`heartbeat_to_webhook` in `example_config/` points at the server's own `ingest`
+endpoint on `127.0.0.1:6767`, so it is the one http output that does real work
+under `just dev` with nothing else running — `heartbeat_to_disk`'s trick. It
+hardcodes the port `Cargo.toml` binds; change one and change the other.
 
 ### The map transform
 
@@ -1059,6 +1106,60 @@ The `+` in the pipelines tab opens `AddPipelineModal` (`frontend/src/app.rs`), w
 The pipelines tab has two arrangements and a search box, and which rows that comes to is `frontend/src/sidebar.rs` — pure, unit-tested, fed by `graph::pipelines_from` so the sidebar and the canvas derive from one description of the graph. `Flat` sorts by id *here* rather than trusting the server, which walks a `HashMap`. `Tree` has to answer the DAG: a pipeline with several upstreams is listed under each, in full under the **deepest** parent (ties by id) — the one the canvas draws the card below — and as a `repeat` row under the rest. A repeat doesn't recurse (it would draw a subtree twice, and would not terminate in a cycle) and gets no delete, since the armed state is keyed by id and two `×`s arming together read as two pipelines. Anything the walk can't reach — a cycle — is appended as a root rather than dropped. Search keeps the *ancestors* of a match and not its descendants; the rows are pre-order, which is what makes that a single backwards pass. The list is rebuilt wholesale rather than `<For>`-keyed because an id isn't unique in tree mode, and the search `<input>` sits outside that closure for the same reason the modal's fields are uncontrolled. The mode lives in `AppState` (the tab strip unmounts the list) and the query doesn't (a filter is transient).
 
 `frontend/src/docs.rs` holds the page's pure logic (search filtering, grouping, anchors, doc-comment rendering) with unit tests, same convention as `graph.rs`/`inspector.rs`. One trap worth remembering: the docs lists are rebuilt with plain closures rather than `<For>`, because keying groups by family leaves stale components on screen when a filter changes a group's contents without changing its key.
+
+### The throughput harness (`kayak-bench`)
+
+`just bench` answers "is this slower than it was?" and "how much can one server
+take?" with numbers rather than memories. Guide section: "benchmarking".
+
+It drives the runtime **in process** — no socket, no broker, no filesystem —
+through the same seams the integration tests use (`PipelineRuntime::from_parts`,
+`BuildCtx`), fed by `testing::LoadInput` and discarding through
+`testing::NullOutput`. Measurement is `Pipeline::counters` and nothing else:
+three relaxed atomics the run loop adds to unconditionally, outside the feed's
+`receiver_count()` gate, so differencing them across a window is a complete
+count and the act of measuring changes nothing. That property is why no
+instrumentation had to be added to the runtime for this to exist — keep it.
+
+Five things are load-bearing:
+
+- **`LoadInput` spends cooperative budget rather than yielding**
+  (`tokio::task::consume_budget`, not `yield_now`). A `next()` that returned
+  `Ready` without ever awaiting would never hand a worker back — tokio's budget
+  is spent by *resources*, and a loop touching none is invisible to it — but
+  `yield_now` reschedules on every call, and with one task on the runtime that
+  round trip costs more than the entire run loop. The first sweep built on it
+  reported one pipeline as slower than each of ten and adding a filter as a 3×
+  speed-up. Both halves of that lesson are in the type's docs; don't undo
+  either.
+- **`LoadInput` is deliberately not an `InputKind`.** Nothing in the config
+  surface can generate load, and an input whose purpose is to saturate a core
+  does not belong in a file people commit. (`dummy` can't stand in — its
+  `duration` is whole seconds. See the roadmap.)
+- **The scenario suite is a fixed list, and its names are the baseline's keys.**
+  Adding one is free (a baseline reads it as `new`); *changing* one silently
+  breaks comparability, so rename at the same time. `LoadInput`'s generated
+  message is part of that contract too — widening it invalidates every recorded
+  number.
+- **Absolutes are per machine, ratios travel.** Baselines are filed under a
+  hardware-derived id in `bench/baselines/`, committed, and carry a manifest
+  (commit + `-dirty`, rustc, profile, cpu, cores, os). `--save` refuses a debug
+  build and a filtered run, both because the file would be compared against
+  wrongly later. `--compare` is print-only on purpose: a threshold needs
+  measured run-to-run noise, not a guess.
+- **A row with no transforms measures passes, not messages.** With an empty
+  chain and a discarding output nothing ever touches an individual message — the
+  batch is an `Arc` cloned rather than walked — so `batch1 → batch1000` is a
+  clean factor of ten each step and the `msgs/s` on `batch1000` is the batch
+  size read back out. That's what the `passes/s` column is for.
+
+**What the first sweep found, and it is a real one**: the run loop calls
+`self.events.receiver_count() > 0` once per pass, and tokio implements that as
+`self.shared.tail.lock()` — one mutex on one shared channel, taken by every
+pipeline on every pass. The whole process is capped at ~6.5M passes/sec
+regardless of cores or pipeline count; a private channel per pipeline was
+**8× faster** as an experiment. The gate itself is right (see "the ui feed is a
+sample"); only reading it is expensive. Tracked in `docs/roadmap.md`.
 
 ## Notes
 

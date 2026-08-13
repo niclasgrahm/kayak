@@ -132,6 +132,15 @@ pipelines:
   - type: redis
     connection: local-redis
     channel: heartbeat
+- id: heartbeat_to_webhook
+  inputs:
+  - type: pipeline
+    upstream: heartbeat
+  transforms: []
+  outputs:
+  - type: http
+    url: http://127.0.0.1:6767/api/pipelines/ingest/messages
+    body: batch
 - id: heartbeat_shaped
   inputs:
   - type: pipeline

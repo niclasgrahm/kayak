@@ -224,7 +224,15 @@ pub struct HttpInputConfig {
     pub auth: Option<HttpAuthConfig>,
 }
 
-/// How a post to a pipeline's endpoint proves it is allowed.
+/// A credential carried in a header — checked by the `http` input on a post to
+/// a pipeline's endpoint, and presented by the `http` output on a request it
+/// sends.
+///
+/// One type for both directions because it is one fact: a fixed string in a
+/// named header. The two halves read it differently — the input compares what
+/// arrived against this, the output sets it — and only the input has the rule
+/// about `ALLOWED_HEADERS`, since only the input can write a header into the
+/// messages.
 ///
 /// This is the **data plane's** own credential and has nothing to do with the
 /// accounts in the settings file: those are people signing in to look at and
@@ -242,19 +250,19 @@ pub struct HttpInputConfig {
 pub enum HttpAuthConfig {
     /// A token in the standard `Authorization` header, as
     /// `Authorization: Bearer <token>`. The one to reach for unless the system
-    /// doing the posting can't set that header.
+    /// on the other end can't use that header.
     Bearer {
-        /// the token a post must carry. A `${NAME}` reference, so the config
-        /// file holds the name and the secret store holds the value.
+        /// the token. A `${NAME}` reference, so the config file holds the name
+        /// and the secret store holds the value.
         token: Secret,
     },
-    /// A fixed value in a header of your choosing — for webhook senders that
-    /// can't set `Authorization` but can add a header of their own, which is
-    /// most of them.
+    /// A fixed value in a header of your choosing — for webhook senders and
+    /// receivers that can't use `Authorization` but can carry a header of their
+    /// own, which is most of them.
     Header {
-        /// the header's name, matched case-insensitively. It may not be one of
-        /// the headers an `envelope` passes through, since that would write the
-        /// credential into the messages.
+        /// the header's name, matched case-insensitively on the way in. On an
+        /// `http` input it may not be one of the headers an `envelope` passes
+        /// through, since that would write the credential into the messages.
         name: String,
         /// the exact value that header must have. A `${NAME}` reference, as
         /// above.
@@ -447,6 +455,61 @@ pub struct RedisOutputConfig {
     pub connection: ConnectionId,
     /// the channel to publish to
     pub channel: String,
+}
+
+/// Sends the batch to an http endpoint — the pipeline pushes its results at a
+/// webhook or an ingest API rather than at a broker.
+///
+/// The counterpart of the `http` *input*, and the sending half of what the
+/// `http` transform does: the transform replaces the batch with the reply, this
+/// one is the end of the chain and the reply's body is discarded. What is not
+/// discarded is its **status** — anything but a 2xx fails the batch, which is
+/// what makes a webhook that is rejecting the data show up on the card rather
+/// than being written off as delivered.
+#[derive(Clone, Debug, Deserialize, Serialize, JsonSchema)]
+#[schemars(title = "http")]
+pub struct HttpOutputConfig {
+    /// endpoint to send to, e.g. `https://example.com/hooks/readings`
+    pub url: String,
+    /// http method. Defaults to `POST`. `GET` and `DELETE` are refused at build
+    /// time — an output exists to send the messages somewhere, and a method
+    /// with no body has nowhere to put them.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub verb: Option<HttpVerb>,
+    /// what one request carries. Defaults to `batch`, which is one request per
+    /// batch.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub body: Option<HttpBodyKind>,
+    /// what this output presents to be allowed to send. Absent — the default —
+    /// sends no credential at all, which is what an open webhook wants.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub auth: Option<HttpAuthConfig>,
+    /// how long one request may take before it is given up on, in seconds.
+    /// Defaults to 30. A batch whose request times out is a failed batch, so
+    /// this is also the longest a slow endpoint can hold the pipeline up.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub timeout_seconds: Option<u64>,
+}
+
+/// What the body of one request from an `http` output holds.
+///
+/// A closed set of two, and the choice is the receiving API's rather than a
+/// tuning knob: an ingest endpoint that takes an array wants `batch`, a webhook
+/// that takes one event per call wants `message`. There is no third spelling
+/// (an envelope with a count, say) because that is the receiver's shape, and
+/// shaping the request is the http transform's outstanding work, not this
+/// component's.
+#[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, JsonSchema, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum HttpBodyKind {
+    /// The whole batch as one JSON array, in one request. One round trip per
+    /// batch however many messages it holds, which is why it is the default.
+    #[default]
+    Batch,
+    /// One request per message, each body the message itself. Requests go out
+    /// in order and the first failure fails the batch, so the messages after it
+    /// are not sent — the same all-or-nothing a broker publish loop has.
+    Message,
 }
 
 /// Publishes every message in the batch to an mqtt topic, one message per
@@ -1107,6 +1170,7 @@ pub enum OutputKind {
     Clickhouse(ClickhouseOutputConfig),
     Mqtt(MqttOutputConfig),
     Redis(RedisOutputConfig),
+    Http(HttpOutputConfig),
 }
 #[derive(Clone, Debug, Deserialize, Serialize, JsonSchema)]
 pub struct OutputConfig {
@@ -1189,7 +1253,7 @@ impl Config {
             OutputKind::S3(c) => Some(&c.connection),
             OutputKind::Mqtt(c) => Some(&c.connection),
             OutputKind::Redis(c) => Some(&c.connection),
-            OutputKind::Stdout(_) => None,
+            OutputKind::Stdout(_) | OutputKind::Http(_) => None,
         });
         inputs.chain(outputs).collect()
     }

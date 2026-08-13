@@ -242,6 +242,19 @@ fn output_samples() -> Vec<(&'static str, Value)> {
             "redis",
             json!({"type": "redis", "connection": "local-redis", "channel": "out.channel"}),
         ),
+        (
+            "http",
+            json!({
+                "type": "http",
+                "url": "https://example.com/hooks/readings",
+                // POST and `batch` are the defaults, so the sample names the
+                // other spellings — a round trip has to carry what was written
+                "verb": "PUT",
+                "body": "message",
+                "auth": {"type": "bearer", "token": "${WEBHOOK_TOKEN}"},
+                "timeout_seconds": 5
+            }),
+        ),
     ]
 }
 

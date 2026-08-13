@@ -1068,6 +1068,62 @@ of the API. The registry the handler finds the input through is
 gives it up when it is dropped, which is why the endpoint's lifetime is exactly
 the run loop's.
 
+## sending over http
+
+The other direction: the `http` **output** is a pipeline pushing its results at
+a webhook or an ingest API.
+
+```json
+{ "type": "http", "url": "https://example.com/hooks/readings" }
+```
+
+That is the whole of the required config — POST, the batch as one JSON array,
+no credential. Four optional fields shape it:
+
+- **`verb`** — `POST` by default, `PUT` and `PATCH` accepted. `GET` and
+  `DELETE` are refused at build time: a request with no body would send none of
+  the messages, so a pipeline configured that way would make a round trip per
+  batch and deliver nothing.
+- **`body`** — `batch` (the default) sends the whole batch as one JSON array in
+  one request; `message` sends one request per message. Which one is the
+  receiving API's business, not a tuning knob. Under `message` the requests go
+  out in order and the first failure fails the batch, so the messages after it
+  are not sent — the same all-or-nothing a broker publish loop has.
+- **`auth`** — the same block the `http` input takes, read the other way round:
+  the input compares what arrived against it, the output presents it. A
+  `bearer` token or a header of your choosing, and the value is a `${NAME}`
+  reference like every other credential. The input's rule about `envelope`
+  headers doesn't apply here, since an output reads no headers at all.
+- **`timeout_seconds`** — 30 by default, and it is also the longest a slow
+  endpoint can hold the pipeline up, since a batch whose request times out is a
+  failed batch.
+
+Three things worth knowing:
+
+- **There is no connection behind it**, unlike every other output that talks to
+  a server. A connection holds *what a system is* against what one pipeline
+  wants from it, and for a webhook the url is the whole of the first half —
+  there is nothing left to name once and share.
+- **Anything but a 2xx fails the batch**, and the endpoint's own response body
+  is quoted in the error (cut at 300 characters). That is what makes a webhook
+  that is *rejecting* the data show up on the card rather than being written off
+  as delivered. The reply is otherwise discarded — a service that answers with
+  something the pipeline should carry on with is the `http` **transform**, not
+  this.
+- **A failing endpoint is not retried per batch.** The same backoff gate the
+  nats, redis and clickhouse outputs use: after a failure the next batches fail
+  immediately without touching the network until the delay has passed, so a
+  webhook that is down gets one attempt every few seconds rather than one per
+  message. Nothing is connected at startup, either — there is no request to
+  make that would not be a delivery, so a url that is wrong is caught at build
+  time and one that is unreachable is heard about on the first batch.
+
+`heartbeat_to_webhook` in `example_config/` is the sample, and it points at the
+server's own `ingest` endpoint on `127.0.0.1:6767` — so it is the one http
+output that works under `just dev` with nothing else running, the same trick
+`heartbeat_to_disk` uses. Change the port the server binds and change that url
+with it.
+
 ## the sample
 
 `example_config/` is what to point the server at while working on it, and what
@@ -1874,6 +1930,14 @@ Two things to know when adding a component:
 Timing-dependent tests use `#[tokio::test(start_paused = true)]` so a 10-second
 window costs no wall time.
 
+The `http` output is the exception to that rule and worth knowing about before
+adding another: `outputs::http::tests` stands a real axum endpoint on a
+loopback port and asserts what went over the wire — the batch/message shapes,
+the verb, the token on every request, a non-2xx failing the batch, and the gate
+letting exactly one of five failing batches reach the network. Nothing outside
+the process is touched, so it runs offline like everything else; the client is
+`reqwest` either way, and there is no equivalent of standing up kafka.
+
 Not covered by `just test`, and deliberately so: the NATS and kafka
 input/outputs, the HTTP transform, the database outputs' round trip and the
 upload half of the s3 output, which are thin wrappers over their clients — they need
@@ -1937,3 +2001,129 @@ otherwise a file created months ago fails the next `just dev` with an unresolved
 may be a real credential. `just dev-yaml` is the same graph in its
 other spelling.
 
+
+## benchmarking
+
+`just bench` sweeps the run loop and prints what it costs. It exists so that
+"is this slower than it was?" has an answer that isn't a memory, and so that
+"how much can one server take?" has a number beside it.
+
+```bash
+just bench                      # the suite, as a table
+just bench --compare            # ... and the deltas against this machine's baseline
+just bench --save               # ... and record this run as that baseline
+just bench --filter pipelines   # just the multi-pipeline rows
+just bench --duration 20        # longer windows, less noise
+```
+
+It is **not** part of `just ci`, deliberately: a minute-long sweep in the
+pre-push loop is a minute-long sweep people learn to skip. Run it when you have
+touched the run loop, the transforms or anything on the per-batch path — and
+before a release, so the baseline keeps up.
+
+### what it measures, and what it doesn't
+
+`kayak-bench` drives the runtime **in process**: no socket, no broker, no
+filesystem. It builds pipelines through the same seams the integration tests
+use (`PipelineRuntime::from_parts`, `BuildCtx`), feeds them with
+`testing::LoadInput` and discards through `testing::NullOutput`, so what a run
+measures is the run loop, the merge, the transform chain and the fan-out —
+and nothing that varies with what else is on the machine.
+
+Measurement is `Pipeline::counters` and nothing else. Those are three relaxed
+atomics the run loop adds to unconditionally, outside the event feed's
+`receiver_count()` gate, so reading them before and after a window is a
+*complete* count — no sampler, no history store, no subscriber, and therefore
+nothing that changes the number by being asked for it. This is why a bench
+needed no instrumentation added to the runtime.
+
+What it does not cover is the whole server: axum, the JSON extractor, TLS, the
+inbox channel and per-request overhead are the `http` input's path and want an
+external driver (`oha`, `vegeta`, `k6`) posting to
+`POST /api/pipelines/{id}/messages` against a real binary — with server-side
+truth read back off `GET /api/pipelines/{id}/history`, which counts the same
+counters. The number to look for there is the rate at which `503`s start, since
+the ingest endpoint `try_send`s and reports backpressure rather than blocking.
+That layer isn't built yet.
+
+### reading the table
+
+```
+scenario          pipes  batch   tf     msgs/s  passes/s   per pipe     rss errors
+batch100              1    100    0    714.17M     7.14M    714.17M      9M      0
+map1                  1    100    1      1.78M     17.8k      1.78M     10M      0
+pipelines100        100    100    0    636.99M     6.37M      6.37M     11M      0
+```
+
+**Look at `passes/s` first on any row with no transforms.** With an empty chain
+and a discarding output, nothing in the run loop ever touches an individual
+message — the batch is an `Arc` that gets cloned rather than walked, and the
+counters take its length — so those rows measure the cost of *a pass* and
+nothing else. Their `msgs/s` is that times the batch size, which is why the
+`batch1 → batch1000` sweep is a clean factor of ten each step and why reading
+7 GB/s off `batch1000` as a data rate is just reading the batch size back out.
+The rows with a transform in them are the ones where `msgs/s` means messages.
+
+`per pipe` is the column to read down the `pipelines*` rows: total throughput
+rising while this falls is what "scales, but not for free" looks like. `rss` is
+the whole process' resident set at the end of that row, so it includes what
+earlier rows left behind — read it as a high-water mark, not as the cost of one
+row.
+
+Any row with a non-zero `errors` measured a broken graph rather than a slow
+one. Those rows are left out of the ratios and the run says so.
+
+### baselines, and why they are per machine
+
+A throughput number on its own is not comparable to anything: the same commit
+on a laptop on battery, in a two-core container and on a workstation differs by
+more than most regressions anyone would care about. So every run carries a
+manifest — commit (with a `-dirty` marker), rustc version, profile, cpu, cores,
+OS — and baselines are filed under a machine id derived from the hardware, in
+`bench/baselines/<machine>.json`, committed.
+
+`--save` refuses two things, both because the file would be compared against
+wrongly later: a **debug build** (it measures the optimiser's absence, and
+several of the hot paths inline away entirely under `--release`) and a
+**filtered run** (it would silently drop every scenario it didn't measure).
+
+`--compare` prints deltas and stops there. There is deliberately no threshold
+and no non-zero exit: a gate needs to know how much run-to-run noise this suite
+actually has on this machine, which is a question a few weeks of recorded runs
+answer and a guess does not.
+
+### ratios are the numbers that travel
+
+The absolute rows only mean something next to another row taken on the same
+box. The **ratios** divide two runs taken seconds apart on one machine, so the
+cpu, the compiler and the background load cancel — those are the ones worth
+quoting in a review, putting a threshold on later, or comparing against a
+number someone recorded on different hardware a year ago.
+
+```
+ratio                value   meaning
+watched              0.96x   throughput with a browser attached to /events, against nobody watching
+map1                 0.00x   throughput with one map, against an empty chain that touches no message
+pipelines100         0.01x   per-pipeline throughput at a hundred, against one
+filter5/filter1      0.21x   throughput at five filters, against one
+```
+
+`watched` is the one to keep an eye on: the run loop's reporting is gated on
+`receiver_count() > 0`, so a browser attaching changes what every pipeline on
+the box costs. That gate was worth 46% of throughput before the feed was
+throttled (see "the ui feed is a sample" in `CLAUDE.md`), and this row is what
+keeps the number honest rather than remembered.
+
+### adding a scenario
+
+`kayak-bench/src/scenario.rs` is a fixed list, and that is the point: a
+baseline is only worth keeping if the run that produced it and the run six
+months later asked the same questions. **Adding** a scenario costs nothing — a
+baseline has no entry for it and the comparison reads it as `new`. **Changing**
+one is what breaks comparability, so change its name at the same time and let
+the old row age out.
+
+The same applies to `LoadInput`'s generated message: its field set is part of
+what every number means, so widening it invalidates every baseline taken before
+the change. Treat it as part of the format rather than as a detail of the
+double.

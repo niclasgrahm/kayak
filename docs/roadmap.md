@@ -92,6 +92,48 @@ re-derive. See the [guide](guide.md) for how the finished parts behave, and
       into their own postgres or object store with the machinery that already
       exists — and it is the honest answer at the point where someone asks for a
       week of retention.
+- [x] **a throughput baseline that can be taken again in six months**
+      (done 2026-08-13: `kayak-bench`, a workspace crate driving the run loop
+      in process through `PipelineRuntime::from_parts` and measuring with the
+      counters the run loop already keeps. Twelve scenarios sweeping batch
+      size, transform chain, pipeline count, graph depth and whether a browser
+      is attached; per-machine baselines committed under `bench/baselines/`;
+      ratios reported separately from absolutes because only the ratios survive
+      leaving the machine. `just bench`, deliberately not part of `just ci`.
+      See "benchmarking" in the guide.)
+- [ ] **`receiver_count()` on the shared event channel serialises every
+      pipeline in the process.** Found by the first real sweep and the reason
+      it was worth building. The run loop calls
+      `self.events.receiver_count() > 0` once per pass to decide whether to
+      report, and tokio implements that as `self.shared.tail.lock()` — one
+      mutex, on one channel, taken by every pipeline on every pass. So the
+      whole server is capped at about 6.5M passes a second no matter how many
+      cores or pipelines it has: measured on an M1 Max, 1 pipeline and 1000
+      pipelines both land there, and giving each pipeline a private channel as
+      an experiment raised total throughput **eight-fold** (661M → 5.23G
+      msgs/s at ten pipelines, 623M → 5.42G at a thousand). The gate itself is
+      right and load-bearing — see "the ui feed is a sample" in `CLAUDE.md` —
+      it is only the *reading* of it that is expensive. The fix is to keep the
+      subscriber count somewhere cheap to read: an `AtomicUsize` on `AppState`
+      that the SSE handler increments and decrements, passed to the run loop,
+      turning a lock into a relaxed load. Worth doing before anyone runs a
+      graph of any size, and `just bench --filter pipelines` is what says
+      whether it worked.
+- [ ] **the http ingest path has no load test.** `kayak-bench` measures the run
+      loop and stops at the axum layer on purpose. What is untested under load
+      is the whole request path — the JSON extractor, the inbox `try_send`, per
+      request overhead — and its most interesting number, the rate at which
+      `Backpressure` starts turning 202s into 503s. It needs an external driver
+      (`oha`/`vegeta`/`k6`) against a real binary rather than an in-process
+      harness, with server-side truth read back off
+      `GET /api/pipelines/{id}/history`. See "benchmarking" in the guide.
+- [ ] **the dummy input cannot go faster than one message a second.**
+      `DummyConfig.duration` is a whole number of seconds, which makes the one
+      input needing no broker useless for trying anything under load by hand.
+      An optional `interval_ms` winning over `duration` when present would be
+      wire-compatible. (The bench does not need it — `testing::LoadInput` is
+      deliberately not a config kind, since an input whose purpose is to
+      saturate a core does not belong in a file people commit.)
 - [ ] make sure to clean up old template based UI stuff
       (2026-08-04: `/docs` and `templates/docs.html` are gone — Askama is now
       only used by the dead `/ui` index handler, which is all that's left)
@@ -163,8 +205,9 @@ picking up."
       boundary down explicitly (readme + guide), or decide it's worth chasing
       and scope what a distributed mode would need, starting at the input as
       the durability argument under "state" already says.
-- [ ] **the connector list is thin.** nats, kafka, mqtt, http and two dummies
-      in; postgres, clickhouse, file, s3, mqtt and stdout out — against
+- [ ] **the connector list is thin.** nats, kafka, mqtt, redis, http and two
+      dummies in; nats, kafka, mqtt, redis, http, postgres, clickhouse, file,
+      s3 and stdout out — against
       Benthos/Redpanda Connect's 300+. The five-touchpoint recipe for adding a
       component (config enum, `build()` arm, impl module, wire-format sample,
       doc comment) is cheap by design, but "cheap to add" isn't "already
@@ -173,8 +216,9 @@ picking up."
       are: AMQP 0-9-1 (RabbitMQ — a **separate** connection kind from AMQP
       1.0, which is a different protocol and client library and not yet worth
       building against without a concrete target like Azure Service Bus or
-      Artemis), Redis, a generic HTTP/webhook output, and mysql — which, like
-      clickhouse, is a `ColumnPlan` plus a DDL renderer and nothing else.
+      Artemis) and mysql — which, like clickhouse, is a `ColumnPlan` plus a
+      DDL renderer and nothing else. (Redis and a generic HTTP/webhook output
+      were the two ahead of them and are both done.)
 - [ ] **the mqtt connection has no TLS field.** Plaintext only — a real gap
       for anything beyond a local broker, and deliberately not bolted on
       without answering where a CA certificate lives first (a `Secret`? a path
@@ -295,7 +339,10 @@ which is why they weren't just fixed.
       build time rather than quietly emitting a batch per message.)
 - [ ] **the http transform ignores `verb`.** Every request is a POST regardless
       of what the config says. Honouring it would change behaviour for existing
-      configs, so it needs a decision first.
+      configs, so it needs a decision first. Note the `http` **output** honours
+      its own `verb` (and refuses the bodyless methods), so the two components
+      now read the same field differently — which is the argument for settling
+      this rather than leaving it.
 - [ ] **dead pipelines stay in the map.** When a run loop exits (e.g. its input
       errored), the `PipelineHandle` stays in `AppState`, so `GET /api/pipelines`
       lists a pipeline that isn't running. `join_handle` is never inspected.

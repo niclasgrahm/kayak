@@ -74,11 +74,38 @@ impl Counters {
         self.errors.fetch_add(1, Ordering::Relaxed);
     }
 
+    /// Messages that have arrived at the inputs since this pipeline started.
+    ///
+    /// Public because the throughput harness reads it directly: the counters
+    /// are unconditional and monotonic, so "run for ten seconds and difference
+    /// them" needs no sampler, no history store and no event feed — which is
+    /// the whole reason a bench can measure the run loop without changing what
+    /// it costs.
+    #[must_use]
+    pub fn inbound(&self) -> u64 {
+        self.inbound.load(Ordering::Relaxed)
+    }
+
+    /// Messages that have come out of the transform chain since it started.
+    /// Summed over the batches of a pass, so a `splitter` makes this exceed
+    /// [`Counters::inbound`] and a `filter` makes it fall short.
+    #[must_use]
+    pub fn outbound(&self) -> u64 {
+        self.outbound.load(Ordering::Relaxed)
+    }
+
+    /// Failures counted since it started — every one of them, including the
+    /// ones the UI throttle suppressed.
+    #[must_use]
+    pub fn errors(&self) -> u64 {
+        self.errors.load(Ordering::Relaxed)
+    }
+
     fn read(&self) -> Counts {
         Counts {
-            inbound: self.inbound.load(Ordering::Relaxed),
-            outbound: self.outbound.load(Ordering::Relaxed),
-            errors: self.errors.load(Ordering::Relaxed),
+            inbound: self.inbound(),
+            outbound: self.outbound(),
+            errors: self.errors(),
         }
     }
 }

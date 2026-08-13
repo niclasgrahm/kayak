@@ -367,3 +367,106 @@ pub fn stub_config(id: &str) -> Config {
         state: None,
     }
 }
+
+/// An input that yields the same pre-built batch as fast as the run loop asks
+/// for one — the load generator the throughput harness (`kayak-bench`) is
+/// built on.
+///
+/// Deliberately **not** an `InputKind`. Nothing in the product's config surface
+/// can produce load, and the reason to keep it that way is that a config file
+/// is a thing people commit and run: an input whose whole purpose is to
+/// saturate a core does not belong in the same list as `nats` and `http`. It
+/// lives here with the other doubles, and the bench crate is its only caller.
+///
+/// Two properties are load-bearing, both about the numbers meaning anything:
+///
+/// - **It spends cooperative budget once per batch.** A `next()` that returned
+///   `Ready` without ever awaiting would never hand a tokio worker back —
+///   tokio's budget is spent by *resources* (channels, timers, sockets) and a
+///   loop that touches none of them is invisible to it. One pipeline would
+///   hold a worker forever, so a sweep over a hundred of them would measure
+///   eight running and ninety-two starved.
+///
+///   [`tokio::task::consume_budget`] rather than `yield_now`, and the
+///   difference is not a micro-optimisation: `yield_now` reschedules on
+///   *every* call, and with a single task on the runtime that round trip goes
+///   through a park and an unpark. Measured, it cost more than the entire run
+///   loop — a sweep built on it reported one pipeline as slower than each of
+///   ten, and reported adding a filter as making the pipeline three times
+///   faster. `consume_budget` decrements the same budget every resource does
+///   and only yields when it runs out, so fairness is kept and what the sweep
+///   measures is the run loop.
+/// - **The message is fixed** ([`LoadInput::MESSAGE_FIELDS`]) and the batch is
+///   built once and handed out by `Arc`. Changing either changes what every
+///   recorded number means, so a committed baseline taken before the change is
+///   no longer comparable to one taken after. Treat this shape as part of the
+///   baseline format rather than as a detail of the double.
+pub struct LoadInput {
+    batch: Arc<MessageBatch>,
+}
+
+impl LoadInput {
+    /// The field names of the generated message, spelled out because they are
+    /// part of what a baseline measures — a wider message is more serialization
+    /// per pass and would move every number in the report.
+    pub const MESSAGE_FIELDS: [&'static str; 5] =
+        ["sensor_id", "value", "recorded_at", "site", "reading"];
+
+    /// A generator of `batch_size` identical messages per batch.
+    ///
+    /// `batch_size` is the knob that separates per-batch cost from per-message
+    /// cost: the run loop does its select, its throttle check and its fan-out
+    /// once per batch whatever the size, so comparing a run at 1 against a run
+    /// at 1000 is what says which of the two a change moved.
+    #[must_use]
+    pub fn new(batch_size: usize) -> Self {
+        let message = Arc::new(serde_json::json!({
+            "sensor_id": "sensor-0042",
+            "value": 21.5,
+            "recorded_at": "2026-01-01T00:00:00Z",
+            "site": "north",
+            "reading": { "unit": "celsius", "quality": "good" },
+        }));
+        Self {
+            batch: Arc::new(std::iter::repeat_n(message, batch_size).collect()),
+        }
+    }
+
+    /// A generator of a batch the caller built, for a bench that needs a
+    /// particular shape — a payload a `map` mapping actually reads, say.
+    #[must_use]
+    pub fn with_batch(batch: Arc<MessageBatch>) -> Self {
+        Self { batch }
+    }
+}
+
+#[async_trait::async_trait]
+impl InputSource for LoadInput {
+    async fn next(&mut self) -> Result<Delivery> {
+        // see the type's docs: this is what keeps a run loop from owning a
+        // worker outright, and it is where a real input would be spending the
+        // same budget on a socket
+        tokio::task::consume_budget().await;
+        Ok(Delivery::new(Arc::clone(&self.batch)))
+    }
+}
+
+/// An output that discards everything, as fast as it is given it.
+///
+/// The counterpart to [`LoadInput`]: between the two, a run of the pipeline
+/// measures the run loop and the transforms in it and nothing else. Unlike
+/// [`CollectingOutput`] it keeps nothing, which matters at a million messages —
+/// a bench that accumulated its own input would be measuring an allocator.
+#[derive(Debug, Default)]
+pub struct NullOutput;
+
+#[async_trait::async_trait]
+impl OutputDestination for NullOutput {
+    async fn init(&mut self) -> Result<()> {
+        Ok(())
+    }
+
+    async fn emit(&mut self, _message_batch: Arc<MessageBatch>) -> Result<()> {
+        Ok(())
+    }
+}
