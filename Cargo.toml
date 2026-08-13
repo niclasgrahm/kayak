@@ -1,5 +1,5 @@
 [workspace]
-members = ["kayak-core", "frontend", "kayak-bench"]
+members = ["kayak-core", "frontend", "kayak-bench", "docsgen"]
 
 [package]
 name = "kayak"

@@ -1,0 +1,355 @@
+/*
+ * kayak's own colours, taken verbatim from `style/main.scss` and the running
+ * UI (see `landing/visual-language.md`). The rules that make it look like the
+ * product rather than like a docs template:
+ *
+ *   - four dark surfaces and no fifth;
+ *   - borders *darker* than the fills on either side, like a seam, never a
+ *     lighter hairline;
+ *   - one accent hue;
+ *   - square corners and no drop shadows;
+ *   - prose in the sans, every value and identifier in the mono;
+ *   - small type, and section labels uppercase and letter-spaced;
+ *   - lowercase everywhere.
+ *
+ * There is no light theme, and that is a product fact rather than an omission,
+ * which is why the site is `force-dark`.
+ */
+
+:root {
+  --kayak-canvas: #1d2129;
+  --kayak-panel: #262b33;
+  --kayak-titlebar: #1b1f26;
+  --kayak-hover: #2f3540;
+  --kayak-border: #14171c;
+  --kayak-text: #cdced2;
+  --kayak-dim: #85878c;
+  --kayak-accent: #699ce8;
+  --kayak-error: #e06c75;
+  --kayak-amber: #d8a657;
+  --kayak-green: #a7c080;
+  --kayak-teal: #7fbbb3;
+
+  --vp-font-family-base: "Noto Sans", "Open Sans", system-ui, -apple-system, sans-serif;
+  --vp-font-family-mono: "JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
+
+  --vp-c-bg: var(--kayak-canvas);
+  --vp-c-bg-alt: var(--kayak-titlebar);
+  --vp-c-bg-elv: var(--kayak-panel);
+  --vp-c-bg-soft: var(--kayak-panel);
+  --vp-c-divider: var(--kayak-border);
+  --vp-c-border: var(--kayak-border);
+  --vp-c-gutter: var(--kayak-border);
+
+  --vp-c-text-1: var(--kayak-text);
+  --vp-c-text-2: var(--kayak-dim);
+  --vp-c-text-3: #6a6d73;
+
+  --vp-c-brand-1: var(--kayak-accent);
+  --vp-c-brand-2: #7fadf0;
+  --vp-c-brand-3: #4a7fcc;
+  --vp-c-brand-soft: rgba(105, 156, 232, 0.14);
+
+  --vp-c-tip-1: var(--kayak-teal);
+  --vp-c-tip-soft: rgba(127, 187, 179, 0.12);
+  --vp-c-warning-1: var(--kayak-amber);
+  --vp-c-warning-soft: rgba(216, 166, 87, 0.12);
+  --vp-c-danger-1: var(--kayak-error);
+  --vp-c-danger-soft: rgba(224, 108, 117, 0.14);
+
+  --vp-nav-height: 48px;
+  --vp-layout-max-width: 1520px;
+  --vp-sidebar-width: 258px;
+
+  --vp-code-block-bg: var(--kayak-titlebar);
+  --vp-code-bg: var(--kayak-hover);
+  --vp-code-color: var(--kayak-teal);
+  --vp-code-line-highlight-color: rgba(105, 156, 232, 0.1);
+
+  --vp-button-brand-bg: var(--kayak-accent);
+  --vp-button-brand-hover-bg: #7fadf0;
+  --vp-button-brand-border: var(--kayak-border);
+  --vp-button-alt-bg: var(--kayak-hover);
+  --vp-button-alt-border: var(--kayak-border);
+  --vp-button-alt-text: var(--kayak-text);
+
+  --vp-custom-block-info-bg: var(--kayak-panel);
+  --vp-custom-block-details-bg: var(--kayak-panel);
+}
+
+/* nothing in kayak is round, and nothing floats. */
+.VPButton,
+.vp-doc a.VPBadge,
+.VPBadge,
+.custom-block,
+.vp-doc div[class*='language-'],
+.vp-doc table,
+.DocSearch-Button,
+.VPLocalSearchBox .search-bar,
+input,
+button {
+  border-radius: 0 !important;
+  box-shadow: none !important;
+}
+
+/* --- chrome ------------------------------------------------------------- */
+
+.VPNav,
+.VPNavBar {
+  background-color: var(--kayak-titlebar);
+}
+
+.VPNavBar .title,
+.VPNavBar .VPNavBarTitle .title {
+  font-size: 14px;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+}
+
+.VPNavBarMenuLink,
+.VPSidebarItem .text {
+  font-size: 13px;
+}
+
+.VPSidebar {
+  background-color: var(--kayak-titlebar);
+  padding-top: 20px;
+}
+
+/* the signature type treatment: section labels are small, uppercase and
+   letter-spaced, exactly as CONFIG / STATS / LOGS are in the app. */
+.VPSidebarItem.level-0 > .item > .text {
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--kayak-dim);
+  font-weight: 600;
+}
+
+.VPSidebarItem.level-1 > .item > .text,
+.VPSidebarItem.level-2 > .item > .text {
+  font-size: 12.5px;
+}
+
+.VPSidebarItem.is-active > .item > .link > .text {
+  color: var(--kayak-accent);
+}
+
+/* a component's own sidebar row is a value the system says, so it is mono. */
+.VPSidebarItem.level-2 .link .text {
+  font-family: var(--vp-font-family-mono);
+  font-size: 11.5px;
+}
+
+/* --- prose -------------------------------------------------------------- */
+
+.vp-doc {
+  font-size: 14px;
+  line-height: 1.65;
+}
+
+.vp-doc h1 {
+  font-size: 26px;
+  letter-spacing: -0.01em;
+  padding-bottom: 6px;
+}
+
+.vp-doc h2 {
+  font-size: 19px;
+  margin-top: 40px;
+  padding-top: 20px;
+  border-top: 1px solid var(--kayak-border);
+}
+
+.vp-doc h3 {
+  font-size: 15px;
+  margin-top: 28px;
+}
+
+.vp-doc h2 code,
+.vp-doc h3 code {
+  font-size: 0.94em;
+  color: var(--kayak-teal);
+}
+
+.vp-doc p,
+.vp-doc li {
+  color: var(--kayak-text);
+}
+
+.vp-doc code {
+  font-size: 12.5px;
+}
+
+.vp-doc div[class*='language-'] {
+  border: 1px solid var(--kayak-border);
+}
+
+.vp-doc div[class*='language-'] code {
+  font-size: 12.5px;
+  line-height: 1.6;
+}
+
+/* --- tables: this is where the generated reference lives ---------------- */
+
+.vp-doc table {
+  display: block;
+  width: max-content;
+  max-width: 100%;
+  font-size: 12.5px;
+  border-collapse: collapse;
+  margin: 14px 0 20px;
+  overflow-x: auto;
+}
+
+.vp-doc tr {
+  background-color: transparent;
+  border-top: 1px solid var(--kayak-border);
+}
+
+.vp-doc th {
+  background-color: var(--kayak-titlebar);
+  color: var(--kayak-dim);
+  font-size: 10px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  text-align: left;
+  padding: 6px 10px;
+  border: 1px solid var(--kayak-border);
+}
+
+.vp-doc td {
+  padding: 7px 10px;
+  border: 1px solid var(--kayak-border);
+  vertical-align: top;
+  background-color: var(--kayak-panel);
+}
+
+/* the first column of every generated table is a field or a status: a value,
+   so it is mono, and it should not wrap mid-name. */
+.vp-doc td:first-child {
+  white-space: nowrap;
+  color: var(--kayak-teal);
+}
+
+.vp-doc td code {
+  background-color: transparent;
+  padding: 0;
+  color: inherit;
+}
+
+.vp-doc td:nth-child(2) code {
+  color: var(--kayak-amber);
+}
+
+.vp-doc tr:hover td {
+  background-color: var(--kayak-hover);
+}
+
+/* --- badges, blocks, misc ---------------------------------------------- */
+
+.VPBadge {
+  font-family: var(--vp-font-family-mono);
+  font-size: 10.5px;
+  font-weight: 400;
+  letter-spacing: 0.02em;
+  border: 1px solid var(--kayak-border);
+  vertical-align: 1px;
+}
+
+.custom-block {
+  border: 1px solid var(--kayak-border);
+  border-left-width: 3px;
+  font-size: 13px;
+}
+
+.vp-doc blockquote {
+  border-left: 3px solid var(--kayak-border);
+  color: var(--kayak-dim);
+}
+
+.vp-doc hr {
+  border-top: 1px solid var(--kayak-border);
+}
+
+/* --- home --------------------------------------------------------------- */
+
+.VPHero .name,
+.VPHero .text {
+  font-size: 40px;
+  letter-spacing: -0.02em;
+}
+
+.VPHero .tagline {
+  font-size: 15px;
+  color: var(--kayak-dim);
+  max-width: 46ch;
+}
+
+.VPFeature {
+  background-color: var(--kayak-panel);
+  border: 1px solid var(--kayak-border);
+  border-radius: 0;
+}
+
+.VPFeature .title {
+  font-size: 13px;
+  font-family: var(--vp-font-family-mono);
+  color: var(--kayak-text);
+}
+
+.VPFeature .details {
+  font-size: 13px;
+  color: var(--kayak-dim);
+}
+
+/* the grid the canvas is drawn on, 20px — `graph::GRID`. */
+.VPHome {
+  background-image:
+    linear-gradient(var(--kayak-titlebar) 1px, transparent 1px),
+    linear-gradient(90deg, var(--kayak-titlebar) 1px, transparent 1px);
+  background-size: 20px 20px;
+  background-position: -1px -1px;
+}
+
+/* --- width -------------------------------------------------------------- */
+
+/* the default 688px column is set for prose; half of this site is four-column
+   reference tables, and they are what the extra room is for. */
+.VPDoc .content-container {
+  max-width: 880px;
+}
+
+.VPDoc.has-aside .content-container {
+  max-width: 880px;
+}
+
+@media (min-width: 1280px) {
+  .VPDoc:not(.has-sidebar) .container {
+    max-width: 1100px;
+  }
+}
+
+/* a type is a value, so it does not wrap unless it is a spelled-out set. */
+.vp-doc td:nth-child(2) {
+  color: var(--kayak-amber);
+  min-width: 13ch;
+}
+
+/* the description is the only column that should take the slack, and it is
+   always the last one — the reference tables are field/type/flag/description
+   and status/body/description. */
+/* the description is prose whatever column it lands in — a two-column
+   metadata table has it second, a three-column response table third — so it
+   takes the body colour back off whichever rule reached it. */
+.vp-doc td:last-child {
+  min-width: 34ch;
+  max-width: 58ch;
+  white-space: normal;
+  color: var(--kayak-text);
+}
+
+.vp-doc td:first-child {
+  max-width: 28ch;
+}

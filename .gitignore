@@ -8,3 +8,10 @@ secrets.json
 # It is output, not a fixture, and a dev run can fill it without limit.
 /dev_data
 .playwright-mcp/
+# the doc site's build output and dependencies. Everything *generated from the
+# Rust source* under website/reference/generated is committed on purpose — it
+# is what lets the site build without a toolchain, and a test compares it
+# against the schemas.
+/website/node_modules
+/website/.vitepress/dist
+/website/.vitepress/cache

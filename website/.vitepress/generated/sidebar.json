@@ -1,0 +1,176 @@
+{
+  "api": [
+    {
+      "link": "/reference/api#tag-pipelines",
+      "text": "pipelines"
+    },
+    {
+      "link": "/reference/api#tag-connections",
+      "text": "connections"
+    },
+    {
+      "link": "/reference/api#tag-state",
+      "text": "state"
+    },
+    {
+      "link": "/reference/api#tag-config",
+      "text": "config"
+    },
+    {
+      "link": "/reference/api#tag-layout",
+      "text": "layout"
+    },
+    {
+      "link": "/reference/api#tag-events",
+      "text": "events"
+    },
+    {
+      "link": "/reference/api#tag-auth",
+      "text": "auth"
+    },
+    {
+      "link": "/reference/api#tag-reference",
+      "text": "reference"
+    }
+  ],
+  "connections": [
+    {
+      "link": "/reference/connections#connection-kafka",
+      "text": "kafka"
+    },
+    {
+      "link": "/reference/connections#connection-nats",
+      "text": "nats"
+    },
+    {
+      "link": "/reference/connections#connection-postgres",
+      "text": "postgres"
+    },
+    {
+      "link": "/reference/connections#connection-clickhouse",
+      "text": "clickhouse"
+    },
+    {
+      "link": "/reference/connections#connection-file",
+      "text": "file"
+    },
+    {
+      "link": "/reference/connections#connection-s3",
+      "text": "s3"
+    },
+    {
+      "link": "/reference/connections#connection-mqtt",
+      "text": "mqtt"
+    },
+    {
+      "link": "/reference/connections#connection-redis",
+      "text": "redis"
+    }
+  ],
+  "inputs": [
+    {
+      "link": "/reference/inputs#input-dummy",
+      "text": "dummy"
+    },
+    {
+      "link": "/reference/inputs#input-http",
+      "text": "http"
+    },
+    {
+      "link": "/reference/inputs#input-kafka",
+      "text": "kafka"
+    },
+    {
+      "link": "/reference/inputs#input-nats",
+      "text": "nats"
+    },
+    {
+      "link": "/reference/inputs#input-pipeline",
+      "text": "pipeline"
+    },
+    {
+      "link": "/reference/inputs#input-mqtt",
+      "text": "mqtt"
+    },
+    {
+      "link": "/reference/inputs#input-redis",
+      "text": "redis"
+    }
+  ],
+  "outputs": [
+    {
+      "link": "/reference/outputs#output-stdout",
+      "text": "stdout"
+    },
+    {
+      "link": "/reference/outputs#output-file",
+      "text": "file"
+    },
+    {
+      "link": "/reference/outputs#output-s3",
+      "text": "s3"
+    },
+    {
+      "link": "/reference/outputs#output-kafka",
+      "text": "kafka"
+    },
+    {
+      "link": "/reference/outputs#output-nats",
+      "text": "nats"
+    },
+    {
+      "link": "/reference/outputs#output-postgres",
+      "text": "postgres"
+    },
+    {
+      "link": "/reference/outputs#output-clickhouse",
+      "text": "clickhouse"
+    },
+    {
+      "link": "/reference/outputs#output-mqtt",
+      "text": "mqtt"
+    },
+    {
+      "link": "/reference/outputs#output-redis",
+      "text": "redis"
+    },
+    {
+      "link": "/reference/outputs#output-http",
+      "text": "http"
+    }
+  ],
+  "transforms": [
+    {
+      "link": "/reference/transforms#transform-buffer",
+      "text": "buffer"
+    },
+    {
+      "link": "/reference/transforms#transform-http",
+      "text": "http"
+    },
+    {
+      "link": "/reference/transforms#transform-splitter",
+      "text": "splitter"
+    },
+    {
+      "link": "/reference/transforms#transform-reducer",
+      "text": "reducer"
+    },
+    {
+      "link": "/reference/transforms#transform-filter",
+      "text": "filter"
+    },
+    {
+      "link": "/reference/transforms#transform-remember",
+      "text": "remember"
+    },
+    {
+      "link": "/reference/transforms#transform-recall",
+      "text": "recall"
+    },
+    {
+      "link": "/reference/transforms#transform-map",
+      "text": "map"
+    }
+  ]
+}

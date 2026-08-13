@@ -1,0 +1,19 @@
+[package]
+name = "kayak-docsgen"
+version = "0.1.0"
+edition = "2024"
+
+# The doc site's generator. It depends on the server crate for one thing only —
+# `kayak::openapi::document()` — and on core for everything else; both are
+# already built by `just ci`, so this adds a binary rather than a build.
+[dependencies]
+kayak = { path = ".." }
+kayak-core = { path = "../kayak-core" }
+serde_json = "1"
+
+[lints.clippy]
+all = { level = "warn", priority = -1 }
+pedantic = { level = "warn", priority = -1 }
+unwrap_used = "warn"
+expect_used = "warn"
+module_name_repetitions = "allow"

@@ -2,7 +2,7 @@
 
 What's in flight, what's planned, and what's known to be broken — kept here so
 the next piece of work is a list to check rather than a conversation to
-re-derive. See the [guide](guide.md) for how the finished parts behave, and
+re-derive. See the [docs site](../website/) for how the finished parts behave, and
 [`CLAUDE.md`](../CLAUDE.md) for how they're implemented.
 
 ## currently working on

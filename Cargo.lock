@@ -1866,6 +1866,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "kayak-docsgen"
+version = "0.1.0"
+dependencies = [
+ "kayak",
+ "kayak-core",
+ "serde_json",
+]
+
+[[package]]
 name = "konst"
 version = "0.2.20"
 source = "registry+https://github.com/rust-lang/crates.io-index"

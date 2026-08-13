@@ -109,8 +109,31 @@ start-baseline:
 #   just bench --filter pipelines   just the multi-pipeline rows
 #   just bench --duration 20        longer windows, less noise
 #
-# See docs/guide.md's "benchmarking" section for what the numbers mean.
+# See website/contributing/benchmarking.md for what the numbers mean.
 
 # throughput sweep over the run loop — no server, no broker, no filesystem
 bench *ARGS:
   cargo run --release -p kayak-bench -- {{ARGS}}
+
+# The doc site under `website/`: prose written by hand, every reference table
+# generated. `just docs` regenerates the tables — from the config schemas, the
+# metadata declarations and the endpoint table — and is what you run after
+# adding a component, a field or an endpoint. Nothing about the site is edited
+# to make a new component appear; the sidebar comes from the same run.
+#
+# The generated files are committed, so the site builds on a machine with no
+# Rust toolchain, and `kayak-docsgen`'s test suite fails when they have drifted
+# from the source — which is how a stale reference becomes a red `just ci`
+# rather than something someone notices in six months.
+
+# regenerate the doc site's reference tables from the schemas
+docs:
+  cargo run -p kayak-docsgen -- website
+
+# the doc site on :5173, hot reload (needs `npm install` in website/ once)
+docs-dev: docs
+  cd website && npm run dev
+
+# production build of the doc site into website/.vitepress/dist
+docs-build: docs
+  cd website && npm ci && npm run build

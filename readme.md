@@ -77,9 +77,11 @@ docker build -t kayak . && docker run -p 6767:6767 kayak
 
 ## documentation
 
-- **[docs/guide.md](docs/guide.md)** — the full reference: how the canvas and
+- **[the docs site](website/)** — the full documentation: how the canvas and
   editor work, the pipeline and metadata model, every transform and output,
-  connections, secrets, authentication, deployment and testing.
+  connections, secrets, authentication, deployment and testing, plus a
+  generated reference for every component and every endpoint. `just docs-dev`
+  serves it on `localhost:5173`.
 - **`/docs`** on a running server — generated reference for every component
   and the whole HTTP API (also served as OpenAPI at `/api/openapi.json`).
 - **[docs/roadmap.md](docs/roadmap.md)** — what's in flight, planned, or a

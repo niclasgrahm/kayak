@@ -23,3 +23,22 @@ jobs:
         run: cargo clippy --workspace --all-targets -- -D warnings
       - name: test
         run: cargo test --workspace --all-targets
+
+  # The site's reference is committed, and `kayak-docsgen`'s tests are what say
+  # it still matches the schemas — that runs in the job above. This one only
+  # checks that the site itself still builds: a doc comment can be valid Rust
+  # and still break the page it lands on (Vue compiles these files, so a bare
+  # `<name>` is a build error).
+  docs:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: website/package-lock.json
+      - run: npm ci
+        working-directory: website
+      - run: npm run build
+        working-directory: website

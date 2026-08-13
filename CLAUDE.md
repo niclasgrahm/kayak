@@ -32,7 +32,7 @@ These two rules are not negotiable and apply to every change, however small:
 1. **New code ships with tests.** Any new or changed behaviour — a component, a handler, a config field, a bug fix — needs a test that fails without the change. A bug fix without a regression test is not a fix. If something genuinely can't be tested offline (a real NATS connection, say), say so explicitly and explain why rather than skipping quietly.
 2. **`just ci` must be green before a task is called done.** That's `just lint` (clippy `-D warnings`) plus `just test`. Not "compiles", not "the new test passes" — the whole suite. If tests fail, report the failure and the output; never describe a task as complete with a red suite, and never disable, `#[ignore]` or weaken an existing test to get to green. A test that turns out to encode the wrong behaviour is a conversation to have first, not something to edit away.
 
-Testing is documented in `docs/guide.md` under "testing" — read that before adding tests. In short: the runtime lives in `src/lib.rs` (not `main.rs`) so `tests/` can reach it; `src/testing.rs` holds the test doubles; `PipelineRuntime::from_parts` drives a run loop without a config; `api_router()` is called through `tower::oneshot` so HTTP tests need no socket. Adding a component config variant fails `tests/config.rs` until a wire-format sample is added — that's intentional.
+Testing is documented in `website/contributing/testing.md` — read that before adding tests. In short: the runtime lives in `src/lib.rs` (not `main.rs`) so `tests/` can reach it; `src/testing.rs` holds the test doubles; `PipelineRuntime::from_parts` drives a run loop without a config; `api_router()` is called through `tower::oneshot` so HTTP tests need no socket. Adding a component config variant fails `tests/config.rs` until a wire-format sample is added — that's intentional.
 
 Lints are strict by design: clippy `pedantic` plus `unwrap_used`/`expect_used` as warnings, and `clippy.toml` makes those apply in tests too. Removing remaining `.unwrap()`s is active work — flag new ones in review.
 
@@ -44,6 +44,7 @@ Four workspace crates:
 - **`/` (root `kayak` crate)** — the Axum server and the whole stream-processing runtime. It is a **lib + bin**: everything lives in `src/lib.rs` and its modules so integration tests can import it; `src/main.rs` is only clap args, tracing setup and the Leptos router wiring. `api_router()` — re-exported from `lib.rs`, defined in `src/endpoints.rs` — builds the JSON/SSE routes for both.
 - **`frontend/`** — Leptos 0.8 SSR + hydrate crate. `cdylib`+`rlib` with `ssr`/`hydrate` features; the root binary depends on it with `ssr` and mounts it via `leptos_axum`.
 - **`kayak-bench/`** — the throughput harness. A `bin` that drives the runtime in process and prints what the run loop costs; not part of the server and not part of `just ci`. See "the throughput harness" below.
+- **`docsgen/`** (`kayak-docsgen`) — writes the doc site's reference out of the same reflection the UI renders. A lib + bin, and the only crate that depends on *both* core and the server crate — the one thing it needs from the server is `openapi::document()`. See "the doc site" below.
 
 ### The pipeline model
 
@@ -189,7 +190,7 @@ edges that carry nothing else.
 area**: two pipelines sharing a bucket are two run loops with no ordering
 between them, so ordering-sensitive correlation must live in *one* pipeline and
 sharing is only for state that doesn't change on the timescale of a message.
-Documented in `kayak_core::state`'s module docs and `docs/guide.md`; not preventable.
+Documented in `kayak_core::state`'s module docs and `website/pipelines/state.md`; not preventable.
 
 `kayak-core/src/state.rs` holds the declaration (`StateBuckets`,
 `StateBucketConfig`, `PipelineState`) plus the API DTOs, since `api_docs` needs
@@ -358,7 +359,7 @@ longer loads on a server with no `--data-dir` — so `just dev` and
 (`dev_data/events`) is relative, resolving against the working directory in
 both. Change one and change the other. The container image doesn't pass it
 (nothing is baked in there), so running the sample out of the image takes the
-flag on the command line — see `docs/guide.md`'s deployment section. `dev_data` is
+flag on the command line — see `website/operating/deployment.md`. `dev_data` is
 gitignored; the build creates it.
 
 ### Column mapping (the database outputs)
@@ -549,7 +550,7 @@ something legitimate reaches it.
 
 ### Secrets
 
-Config fields that can hold credentials are typed `Secret` (`kayak-core::config`), not `String`. They all live on *connections* now rather than on components. `Secret` only ever holds the *unresolved* `${NAME}` template, which is what makes it safe to serialize back out of `GET /api/pipelines` and to compile for wasm. Resolution happens at build time via `ctx.resolve()` and yields a `secrets::Resolved`, whose `Display`/`Debug` print the template rather than the value — so error contexts can name a connection without leaking it. Reaching the real value takes `.expose()`; flag new call sites in review, and never put a `Resolved` into anything `Serialize`. Stores (`EnvStore`, `FileStore`, `ChainStore`) live in `src/secrets.rs`; `main.rs` chains env ahead of `--secrets <file>`. `src/testing.rs` has `MapSecretStore` for tests. See "secrets" in `docs/guide.md`.
+Config fields that can hold credentials are typed `Secret` (`kayak-core::config`), not `String`. They all live on *connections* now rather than on components. `Secret` only ever holds the *unresolved* `${NAME}` template, which is what makes it safe to serialize back out of `GET /api/pipelines` and to compile for wasm. Resolution happens at build time via `ctx.resolve()` and yields a `secrets::Resolved`, whose `Display`/`Debug` print the template rather than the value — so error contexts can name a connection without leaking it. Reaching the real value takes `.expose()`; flag new call sites in review, and never put a `Resolved` into anything `Serialize`. Stores (`EnvStore`, `FileStore`, `ChainStore`) live in `src/secrets.rs`; `main.rs` chains env ahead of `--secrets <file>`. `src/testing.rs` has `MapSecretStore` for tests. See `website/io/secrets.md`.
 
 Note that `$defs` in the generated schema now holds non-component types (`Secret`), so anything reflecting over the schema has to distinguish those from components — see the docs section below.
 
@@ -1187,9 +1188,51 @@ passes/sec regardless of cores or pipeline count. Fixed the same day (see
 are what keep that honest, and the two baselines either side of it are in
 `bench/baselines/`' git history.
 
+### The doc site (`website/`, `docsgen/`)
+
+A VitePress site whose **prose is written and whose every reference table is
+generated**, which is the whole design: `docs/guide.md` was split into pages
+under `website/` (canvas / pipelines / io / operating / contributing) and is now
+a pointer, and nothing in those pages restates a field, a type or a status code.
+
+`kayak_docsgen::files()` is pure — it returns what should be on disk — and
+`main.rs` writes it. What it emits is **markdown partials**, not pages: no
+title, no front matter, pulled into a prose page with VitePress'
+`<!--@include: -->`. So `website/reference/inputs.md` is a page of prose about
+what an input *is* that ends by including the generated tables for every input
+there is. Per-component partials are emitted as well as the per-family ones, so
+a page can interleave prose between two components at the cost of naming them.
+
+It knows the name of no component and no endpoint, exactly as `kayak-core/src/
+docs.rs` doesn't. A component added to the config enums gets a partial, a place
+in its family's page and a sidebar entry from one `just docs` run — the sidebar
+too, which is why `.vitepress/generated/sidebar.json` exists and is imported by
+`config.mts` rather than being a list someone maintains.
+
+Four things are load-bearing:
+
+- **The generated files are committed**, so the site builds with no Rust
+  toolchain (the CI job is `npm ci && npm run build` and nothing else). What
+  keeps them honest is `docsgen/tests/site.rs`, which regenerates in memory and
+  compares — a stale reference is a red `just ci` with `just docs` as the fix.
+- **Vue compiles these pages**, so a bare `<name>` in a doc comment or an anchor
+  is a *build error*, not a stray angle bracket. That's what `slug()` is for,
+  and why the site build is its own CI job: the failure is invisible from Rust.
+- **The requirement column is a `<Badge>` rather than a word** because styling
+  it by position would reach the description column of every three-column table
+  on the site. Same reason the description is styled as `td:last-child`: it is
+  second in a metadata table and third in a response table.
+- **Nesting is written out here and not in the app.** `/docs` renders one flat
+  table per component and leaves a `buffer`'s or a `rotate`'s own fields to the
+  doc comment; there is room on a page, so `nested()` recurses the `FieldType`
+  tree the reflection already carries.
+
+The look comes from `landing/visual-language.md` (`.vitepress/theme/kayak.css`)
+and the site is `force-dark` for the reason the product is.
+
 ## Notes
 
 - `docs/roadmap.md` holds the current TODO list — check it for what's in flight before proposing work.
 - Leptos config lives in the root `Cargo.toml` under `[[workspace.metadata.leptos]]`; `site-addr` there (6767) is what the binary binds unless `LEPTOS_SITE_ADDR` or `--listen` says otherwise. `src/listen.rs` holds that precedence rule (`--listen` > env > `Cargo.toml`) and the loopback warning, both pure and tested — the flag is an `Option<SocketAddr>` and **must stay one**, because a clap default would win over the env var and break `cargo leptos watch` and the container image alike.
-- `Dockerfile` is a two-stage cargo-leptos build, documented in `docs/guide.md`'s "deployment" section. The runtime image is the *runtime and nothing else*: binary, site directory, `LEPTOS_SITE_*` env vars, uid 10001, `ENTRYPOINT` = the binary so container args are server flags. **No config is baked in** — bare it serves an empty graph, and a deployment mounts one into `/kayak` (the WORKDIR, owned by the run user because saving writes there). The sample is carried at `/usr/share/kayak/example` for a tour, connections and layout file beside it under the same stem or they stop being found. The builder installs `cmake` for `rdkafka-sys`; nothing else, since TLS is rustls and zlib is vendored.
+- `Dockerfile` is a two-stage cargo-leptos build, documented in `website/operating/deployment.md`. The runtime image is the *runtime and nothing else*: binary, site directory, `LEPTOS_SITE_*` env vars, uid 10001, `ENTRYPOINT` = the binary so container args are server flags. **No config is baked in** — bare it serves an empty graph, and a deployment mounts one into `/kayak` (the WORKDIR, owned by the run user because saving writes there). The sample is carried at `/usr/share/kayak/example` for a tour, connections and layout file beside it under the same stem or they stop being found. The builder installs `cmake` for `rdkafka-sys`; nothing else, since TLS is rustls and zlib is vendored.
 - **`example_config/` is the sample everything is tried against**, and it is one directory because the set travels together: the connections and layout files are *derived* from the config's path, so they only find each other side by side. `tests/config.rs` and `tests/graph.rs` read the files from there by relative path, so moving or renaming them breaks those tests — which is the point, the sample is not allowed to rot. `secrets.json` is gitignored anywhere in the tree; `just dev` creates the sample's from `secrets.example.json`.
