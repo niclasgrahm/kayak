@@ -1,6 +1,6 @@
 use crate::BuildCtx;
 use crate::config::BuildInputConfig;
-use crate::events::publish;
+use crate::events::{Watchers, publish};
 use crate::history::History;
 use crate::config::BuildOutputConfig;
 use crate::config::BuildTransformConfig;
@@ -258,6 +258,12 @@ pub struct PipelineRuntime {
     /// touched behind the throttle, so a pipeline failing on every batch takes
     /// its lock a few times a second rather than a few million.
     history: Arc<History>,
+    /// How the run loop asks whether anyone is attached to `/events`.
+    ///
+    /// Not `self.events.receiver_count()`, which is the obvious way to ask and
+    /// is a mutex on a channel every pipeline in the process shares — see
+    /// [`Watchers`] for what that cost.
+    watchers: Watchers,
 }
 
 impl PipelineRuntime {
@@ -280,7 +286,23 @@ impl PipelineRuntime {
             events,
             pass_interval: UI_PASS_INTERVAL,
             history: Arc::new(History::disabled()),
+            // Attached rather than empty, which is the opposite of `history`'s
+            // "does nothing" default and deliberately so: every caller of this
+            // seam holds a live receiver and expects the feed to work, so this
+            // is what preserves that. See [`Watchers::attached`] for the
+            // general rule. A caller that wants the headless path — the bench
+            // does — says so with [`PipelineRuntime::with_watchers`].
+            watchers: Watchers::attached(),
         })
+    }
+
+    /// Ask this shared count whether anyone is watching, rather than assuming
+    /// somebody is. What [`Pipeline::start`] threads through from
+    /// [`crate::state::AppState`], and the only way to get the headless path.
+    #[must_use]
+    pub fn with_watchers(mut self, watchers: Watchers) -> Self {
+        self.watchers = watchers;
+        self
     }
 
     /// Record what this run loop does into the server's history store. Without
@@ -462,10 +484,15 @@ impl PipelineRuntime {
             // This is the same gate `publish` applies, hoisted to cover the
             // throttle as well.
             //
+            // Asked of [`Watchers`] rather than of the channel. They answer the
+            // same question, but `receiver_count()` answers it by taking a
+            // mutex on a channel every pipeline shares, which capped the whole
+            // process at ~6.5M passes a second however many cores it had.
+            //
             // Nothing is accumulated while unwatched either, so a browser
             // attaching to a pipeline that has been running for a week doesn't
             // get a week's worth of skipped messages on its first event.
-            let watching = self.events.receiver_count() > 0;
+            let watching = self.watchers.any();
             // Decided once, here, and used for every batch event this pass
             // produces: reporting the input of a pass whose output was dropped
             // would draw a pass that never finished. See `UiThrottle`.
@@ -605,6 +632,7 @@ impl Pipeline {
             outputs.push(o.build(&mut ctx)?);
         }
         let history = Arc::clone(&ctx.history);
+        let watchers = ctx.watchers.clone();
         Ok(PipelineRuntime::from_parts(
             inputs,
             transforms,
@@ -612,7 +640,8 @@ impl Pipeline {
             Arc::clone(self),
             ctx.events.clone(),
         )?
-        .with_history(history))
+        .with_history(history)
+        .with_watchers(watchers))
     }
     pub fn start(self: &Arc<Self>, ctx: BuildCtx) -> anyhow::Result<tokio::task::JoinHandle<()>> {
         let runtime = self.create_runtime(ctx)?;

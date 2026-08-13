@@ -39,8 +39,14 @@ pub async fn index_handler(
 pub async fn events_handler(
     State(state): State<Arc<AppState>>,
 ) -> Sse<impl Stream<Item = Result<Event, Infallible>>> {
-    let rx = state.subscribe_events();
-    let stream = BroadcastStream::new(rx).map(|item| {
+    let (watching, rx) = state.subscribe_events();
+    // The guard rides in the closure, so the watcher count falls exactly when
+    // this stream is dropped — which is when the browser goes away. It cannot
+    // live outside the stream: `BroadcastStream` takes the receiver by value,
+    // and a guard dropped at the end of this function would tell every run loop
+    // nobody is watching while the stream is still being served.
+    let stream = BroadcastStream::new(rx).map(move |item| {
+        let _watching = &watching;
         let event = match item {
             // a message that won't serialize is reported to the client as an
             // error event; killing the whole SSE stream over it would be worse

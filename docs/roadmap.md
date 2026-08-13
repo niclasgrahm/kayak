@@ -101,24 +101,22 @@ re-derive. See the [guide](guide.md) for how the finished parts behave, and
       ratios reported separately from absolutes because only the ratios survive
       leaving the machine. `just bench`, deliberately not part of `just ci`.
       See "benchmarking" in the guide.)
-- [ ] **`receiver_count()` on the shared event channel serialises every
-      pipeline in the process.** Found by the first real sweep and the reason
-      it was worth building. The run loop calls
+- [x] **`receiver_count()` on the shared event channel serialised every
+      pipeline in the process**
+      (found 2026-08-13 by the first real sweep — the reason the harness was
+      worth building — and fixed the same day. The run loop asked
       `self.events.receiver_count() > 0` once per pass to decide whether to
-      report, and tokio implements that as `self.shared.tail.lock()` — one
-      mutex, on one channel, taken by every pipeline on every pass. So the
-      whole server is capped at about 6.5M passes a second no matter how many
-      cores or pipelines it has: measured on an M1 Max, 1 pipeline and 1000
-      pipelines both land there, and giving each pipeline a private channel as
-      an experiment raised total throughput **eight-fold** (661M → 5.23G
-      msgs/s at ten pipelines, 623M → 5.42G at a thousand). The gate itself is
-      right and load-bearing — see "the ui feed is a sample" in `CLAUDE.md` —
-      it is only the *reading* of it that is expensive. The fix is to keep the
-      subscriber count somewhere cheap to read: an `AtomicUsize` on `AppState`
-      that the SSE handler increments and decrements, passed to the run loop,
-      turning a lock into a relaxed load. Worth doing before anyone runs a
-      graph of any size, and `just bench --filter pipelines` is what says
-      whether it worked.
+      report, and tokio implements that as `self.shared.tail.lock()`: one
+      mutex, on one channel, taken by every pipeline on every pass. The whole
+      server was capped at ~6.5M passes a second however many cores or
+      pipelines it had. The gate itself was right — see "the ui feed is a
+      sample" in `CLAUDE.md` — only the *reading* of it was expensive, so the
+      count moved to an `AtomicUsize` (`events::Watchers`) that
+      `AppState::subscribe_events` maintains with a guard, turning a lock into
+      a relaxed load. Measured on an M1 Max: **+189% at ten pipelines, +592% at
+      a hundred, +804% at a thousand**, and total throughput now *rises* with
+      pipeline count instead of flatlining. `bench/baselines/` holds both
+      numbers in its git history.)
 - [ ] **the http ingest path has no load test.** `kayak-bench` measures the run
       loop and stops at the axum layer on purpose. What is untested under load
       is the whole request path — the JSON extractor, the inbox `try_send`, per

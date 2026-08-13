@@ -431,3 +431,40 @@ async fn an_empty_post_is_a_no_op_that_still_checks_the_endpoint() -> anyhow::Re
     ));
     Ok(())
 }
+
+/// The watcher count is what every run loop reads to decide whether to report,
+/// so the server's only source of receivers has to keep it right. A count that
+/// drifted up would make every pipeline on the box pay the browser-attached
+/// cost forever; one that drifted down would leave the UI silent.
+#[test]
+fn subscribing_to_the_feed_counts_a_watcher_until_the_subscription_is_dropped() {
+    let state = AppState::new();
+    assert_eq!(state.watcher_count(), 0, "a fresh server has no browsers on it");
+
+    let (first_guard, first_rx) = state.subscribe_events();
+    assert_eq!(state.watcher_count(), 1);
+
+    let (second_guard, second_rx) = state.subscribe_events();
+    assert_eq!(state.watcher_count(), 2);
+
+    drop((first_guard, first_rx));
+    assert_eq!(
+        state.watcher_count(),
+        1,
+        "one browser leaving must not close the gate on the other"
+    );
+
+    drop((second_guard, second_rx));
+    assert_eq!(state.watcher_count(), 0);
+}
+
+/// The guard is what counts, not the receiver — so a receiver that outlives its
+/// guard is not a watcher. This is the shape the SSE handler must avoid, and
+/// pinning it here is what says the pair travels together.
+#[test]
+fn a_receiver_without_its_guard_is_not_counted() {
+    let state = AppState::new();
+    let (guard, _rx) = state.subscribe_events();
+    drop(guard);
+    assert_eq!(state.watcher_count(), 0);
+}

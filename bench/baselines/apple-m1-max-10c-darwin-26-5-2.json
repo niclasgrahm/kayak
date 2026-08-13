@@ -1,13 +1,13 @@
 {
   "manifest": {
-    "commit": "4bea91d-dirty",
+    "commit": "b9ee514-dirty",
     "rustc": "rustc 1.95.0 (59807616e 2026-04-14)",
     "profile": "release",
     "os": "Darwin 26.5.2",
     "cpu": "Apple M1 Max",
     "cores": 10,
     "total_memory_bytes": 68719476736,
-    "taken_at": 1786611751
+    "taken_at": 1786619657
   },
   "measurements": [
     {
@@ -17,13 +17,13 @@
       "transforms": 0,
       "depth": 1,
       "watched": false,
-      "ingested_per_sec": 7002032.27482531,
-      "handled_per_sec": 7002032.27482531,
-      "passes_per_sec": 7002032.27482531,
-      "per_pipeline_per_sec": 7002032.27482531,
+      "ingested_per_sec": 7103841.815033716,
+      "handled_per_sec": 7103841.815033716,
+      "passes_per_sec": 7103841.815033716,
+      "per_pipeline_per_sec": 7103841.815033716,
       "errors": 0,
-      "resident_bytes": 8945664,
-      "seconds": 5.002113333
+      "resident_bytes": 9093120,
+      "seconds": 5.002078583
     },
     {
       "name": "batch10",
@@ -32,13 +32,13 @@
       "transforms": 0,
       "depth": 1,
       "watched": false,
-      "ingested_per_sec": 71146239.97837691,
-      "handled_per_sec": 71146239.97837691,
-      "passes_per_sec": 7114623.997837691,
-      "per_pipeline_per_sec": 71146239.97837691,
+      "ingested_per_sec": 70774581.41713575,
+      "handled_per_sec": 70774581.41713575,
+      "passes_per_sec": 7077458.1417135745,
+      "per_pipeline_per_sec": 70774581.41713575,
       "errors": 0,
-      "resident_bytes": 9060352,
-      "seconds": 5.002059
+      "resident_bytes": 9125888,
+      "seconds": 5.001230709
     },
     {
       "name": "batch100",
@@ -47,13 +47,13 @@
       "transforms": 0,
       "depth": 1,
       "watched": false,
-      "ingested_per_sec": 722345147.4884567,
-      "handled_per_sec": 722345147.4884567,
-      "passes_per_sec": 7223451.474884567,
-      "per_pipeline_per_sec": 722345147.4884567,
+      "ingested_per_sec": 677375337.0467919,
+      "handled_per_sec": 677375317.0536555,
+      "passes_per_sec": 6773753.370467919,
+      "per_pipeline_per_sec": 677375337.0467919,
       "errors": 0,
-      "resident_bytes": 9338880,
-      "seconds": 5.002188791
+      "resident_bytes": 9142272,
+      "seconds": 5.0017165
     },
     {
       "name": "batch1000",
@@ -62,13 +62,13 @@
       "transforms": 0,
       "depth": 1,
       "watched": false,
-      "ingested_per_sec": 7093698078.310679,
-      "handled_per_sec": 7093698078.310679,
-      "passes_per_sec": 7093698.07831068,
-      "per_pipeline_per_sec": 7093698078.310679,
+      "ingested_per_sec": 7001071524.803902,
+      "handled_per_sec": 7001071924.797258,
+      "passes_per_sec": 7001071.524803902,
+      "per_pipeline_per_sec": 7001071524.803902,
       "errors": 0,
-      "resident_bytes": 9338880,
-      "seconds": 5.001857791
+      "resident_bytes": 9420800,
+      "seconds": 5.000083041
     },
     {
       "name": "filter1",
@@ -77,13 +77,13 @@
       "transforms": 1,
       "depth": 1,
       "watched": false,
-      "ingested_per_sec": 32281716.666309096,
-      "handled_per_sec": 32281716.666309096,
-      "passes_per_sec": 322817.16666309093,
-      "per_pipeline_per_sec": 32281716.666309096,
+      "ingested_per_sec": 31382771.95856235,
+      "handled_per_sec": 31382771.95856235,
+      "passes_per_sec": 313827.71958562353,
+      "per_pipeline_per_sec": 31382771.95856235,
       "errors": 0,
-      "resident_bytes": 9699328,
-      "seconds": 5.001431667
+      "resident_bytes": 9732096,
+      "seconds": 5.001056
     },
     {
       "name": "filter5",
@@ -92,13 +92,13 @@
       "transforms": 5,
       "depth": 1,
       "watched": false,
-      "ingested_per_sec": 6711893.316958071,
-      "handled_per_sec": 6711893.316958071,
-      "passes_per_sec": 67118.9331695807,
-      "per_pipeline_per_sec": 6711893.316958071,
+      "ingested_per_sec": 6536308.919766679,
+      "handled_per_sec": 6536308.919766679,
+      "passes_per_sec": 65363.08919766679,
+      "per_pipeline_per_sec": 6536308.919766679,
       "errors": 0,
-      "resident_bytes": 9732096,
-      "seconds": 5.001912041
+      "resident_bytes": 9797632,
+      "seconds": 5.000314459
     },
     {
       "name": "map1",
@@ -107,13 +107,13 @@
       "transforms": 1,
       "depth": 1,
       "watched": false,
-      "ingested_per_sec": 1802842.062103313,
-      "handled_per_sec": 1802842.062103313,
-      "passes_per_sec": 18028.42062103313,
-      "per_pipeline_per_sec": 1802842.062103313,
+      "ingested_per_sec": 1784902.2848924748,
+      "handled_per_sec": 1784902.2848924748,
+      "passes_per_sec": 17849.02284892475,
+      "per_pipeline_per_sec": 1784902.2848924748,
       "errors": 0,
-      "resident_bytes": 10027008,
-      "seconds": 5.002213
+      "resident_bytes": 10108928,
+      "seconds": 5.002066542
     },
     {
       "name": "pipelines10",
@@ -122,13 +122,13 @@
       "transforms": 0,
       "depth": 1,
       "watched": false,
-      "ingested_per_sec": 619740929.2587229,
-      "handled_per_sec": 619740929.2587229,
-      "passes_per_sec": 6197409.292587229,
-      "per_pipeline_per_sec": 61974092.92587229,
+      "ingested_per_sec": 1743475390.38544,
+      "handled_per_sec": 1743475390.38544,
+      "passes_per_sec": 17434753.9038544,
+      "per_pipeline_per_sec": 174347539.038544,
       "errors": 0,
-      "resident_bytes": 10829824,
-      "seconds": 5.001006959
+      "resident_bytes": 10649600,
+      "seconds": 5.000950084
     },
     {
       "name": "pipelines100",
@@ -137,13 +137,13 @@
       "transforms": 0,
       "depth": 1,
       "watched": false,
-      "ingested_per_sec": 614713708.8660908,
-      "handled_per_sec": 614713688.8701149,
-      "passes_per_sec": 6147137.088660908,
-      "per_pipeline_per_sec": 6147137.088660908,
+      "ingested_per_sec": 4299024225.219956,
+      "handled_per_sec": 4299024305.161657,
+      "passes_per_sec": 42990242.25219956,
+      "per_pipeline_per_sec": 42990242.25219956,
       "errors": 0,
-      "resident_bytes": 11534336,
-      "seconds": 5.00100625
+      "resident_bytes": 11059200,
+      "seconds": 5.003646333
     },
     {
       "name": "pipelines1000",
@@ -152,13 +152,13 @@
       "transforms": 0,
       "depth": 1,
       "watched": false,
-      "ingested_per_sec": 616293278.4116236,
-      "handled_per_sec": 616292758.5973532,
-      "passes_per_sec": 6162932.784116236,
-      "per_pipeline_per_sec": 616293.2784116236,
+      "ingested_per_sec": 5612439789.991159,
+      "handled_per_sec": 5612441028.736754,
+      "passes_per_sec": 56124397.8999116,
+      "per_pipeline_per_sec": 5612439.789991159,
       "errors": 0,
-      "resident_bytes": 27312128,
-      "seconds": 5.0017865
+      "resident_bytes": 15499264,
+      "seconds": 5.005063208
     },
     {
       "name": "depth3",
@@ -167,13 +167,13 @@
       "transforms": 0,
       "depth": 3,
       "watched": false,
-      "ingested_per_sec": 180399133.95031533,
-      "handled_per_sec": 541198401.5051324,
-      "passes_per_sec": 1803991.3395031532,
-      "per_pipeline_per_sec": 180399133.95031533,
+      "ingested_per_sec": 175671169.01781008,
+      "handled_per_sec": 527010947.87697315,
+      "passes_per_sec": 1756711.6901781007,
+      "per_pipeline_per_sec": 175671169.01781008,
       "errors": 0,
-      "resident_bytes": 27459584,
-      "seconds": 5.001729666
+      "resident_bytes": 15712256,
+      "seconds": 5.001609
     },
     {
       "name": "watched",
@@ -182,13 +182,13 @@
       "transforms": 0,
       "depth": 1,
       "watched": true,
-      "ingested_per_sec": 702180025.2894673,
-      "handled_per_sec": 702180025.2894673,
-      "passes_per_sec": 7021800.2528946735,
-      "per_pipeline_per_sec": 702180025.2894673,
+      "ingested_per_sec": 677952720.6114612,
+      "handled_per_sec": 677952720.6114612,
+      "passes_per_sec": 6779527.206114612,
+      "per_pipeline_per_sec": 677952720.6114612,
       "errors": 0,
-      "resident_bytes": 27475968,
-      "seconds": 5.001761334
+      "resident_bytes": 15876096,
+      "seconds": 5.001824459
     }
   ]
 }

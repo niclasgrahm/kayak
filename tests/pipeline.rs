@@ -13,6 +13,7 @@ use kayak::config::BuildTransformConfig;
 use kayak::inputs::{BufferKind, Buffered, InputSource, MessageBatch};
 use kayak::outputs::OutputDestination;
 use kayak::pipeline::{Pipeline, PipelineRuntime};
+use kayak::events::Watchers;
 use kayak::state::UiEvent;
 use kayak::testing::{
     AckingInput, CollectingOutput, CountingAck, DropEverything, Emitted, FailOnNth, ScriptedInput,
@@ -313,6 +314,80 @@ async fn ui_events_are_published_for_the_input_and_output_stages() {
             stages.push(ev.stage);
         }
     }
+    assert_eq!(stages, vec![Stage::Input, Stage::Output]);
+}
+
+/// The gate the run loop applies is the **watcher count**, not the channel's
+/// receiver count, and this is the test that says so: a live receiver is on the
+/// channel throughout, and nothing is published anyway, because nobody attached
+/// through `Watchers`.
+///
+/// The distinction is the whole point of `Watchers` existing. Asking the
+/// channel means `receiver_count()`, which takes a mutex on a channel every
+/// pipeline in the process shares — measured, that capped the whole server at
+/// ~6.5M passes a second however many cores it had. This test fails if that
+/// line ever goes back to asking the channel.
+#[tokio::test]
+async fn a_run_loop_asks_the_watcher_count_and_not_the_channel() {
+    let (events, mut rx) = broadcast::channel::<UiEvent>(16);
+    let watchers = Watchers::empty();
+    let runtime = match PipelineRuntime::from_parts(
+        vec![Box::new(ScriptedInput::new(
+            vec![batch(vec![json!({"n": 1})])],
+            WhenExhausted::Fail,
+        ))],
+        vec![],
+        vec![Box::new(CollectingOutput::new())],
+        pipeline("unwatched"),
+        events,
+    ) {
+        Ok(r) => r.reporting_every_pass().with_watchers(watchers),
+        Err(e) => panic!("building the runtime: {e:#}"),
+    };
+    let _ = runtime.run().await;
+
+    // Batch events only: those are the per-pass feed, which is what the gate
+    // covers. A *failure* still reaches the channel through `publish`, which
+    // keeps its own `receiver_count()` check — that path runs a few times a
+    // second at worst, so it was never worth the counter, and an error nobody
+    // is told about is a worse trade than a lock nobody contends on.
+    let batches: Vec<_> = std::iter::from_fn(|| rx.try_recv().ok())
+        .filter(|ev| matches!(ev.payload, EventPayload::Batch(_)))
+        .collect();
+    assert!(
+        batches.is_empty(),
+        "a receiver on the channel is not a watcher — got {} batch events",
+        batches.len()
+    );
+}
+
+/// The other half: a watcher attached through the count *does* open the gate,
+/// so the wiring is a gate rather than an off switch.
+#[tokio::test]
+async fn an_attached_watcher_opens_the_gate() {
+    let (events, mut rx) = broadcast::channel::<UiEvent>(16);
+    let watchers = Watchers::empty();
+    let attached = watchers.attach();
+    let runtime = match PipelineRuntime::from_parts(
+        vec![Box::new(ScriptedInput::new(
+            vec![batch(vec![json!({"n": 1})])],
+            WhenExhausted::Fail,
+        ))],
+        vec![],
+        vec![Box::new(CollectingOutput::new())],
+        pipeline("watched"),
+        events,
+    ) {
+        Ok(r) => r.reporting_every_pass().with_watchers(watchers),
+        Err(e) => panic!("building the runtime: {e:#}"),
+    };
+    let _ = runtime.run().await;
+    drop(attached);
+
+    let stages: Vec<_> = std::iter::from_fn(|| rx.try_recv().ok())
+        .filter(|ev| matches!(ev.payload, EventPayload::Batch(_)))
+        .map(|ev| ev.stage)
+        .collect();
     assert_eq!(stages, vec![Stage::Input, Stage::Output]);
 }
 

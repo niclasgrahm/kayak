@@ -813,8 +813,10 @@ async fn reverting_a_graph_with_upstreams_reports_no_errors() -> anyhow::Result<
         ],
     )?;
     let state = Arc::new(AppState::from_config(&path)?);
-    // subscribed before the revert, so nothing published during it is missed
-    let mut events = state.subscribe_events();
+    // Subscribed before the revert, so nothing published during it is missed —
+    // and the guard is held for the whole test, because it is what tells the
+    // rebuilt run loops there is a browser to report to at all.
+    let (_watching, mut events) = state.subscribe_events();
     let app = api_router(Arc::clone(&state));
 
     // reverted repeatedly because the bug was a `select!` coin toss: one revert

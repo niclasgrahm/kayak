@@ -114,6 +114,12 @@ const TEARDOWN_GRACE: std::time::Duration = std::time::Duration::from_secs(5);
 pub struct AppState {
     pipelines: Mutex<HashMap<PipelineId, PipelineHandle>>,
     events: broadcast::Sender<UiEvent>,
+    /// How many browsers are attached to `events`, kept beside it because
+    /// asking the channel costs a mutex every pipeline in the process contends
+    /// on — see [`crate::events::Watchers`]. Maintained by
+    /// [`AppState::subscribe_events`], which is the only place a receiver is
+    /// handed out, and read by every run loop through [`BuildCtx`].
+    watchers: crate::events::Watchers,
     /// What `${NAME}` references in an incoming config resolve against. Held
     /// here rather than passed per request because it's fixed at startup — a
     /// pipeline posted to `/api/pipelines` gets the same secrets as one loaded
@@ -261,9 +267,11 @@ impl AppState {
     pub fn with_secrets_in(save_dir: PathBuf, secrets: Arc<dyn SecretStore>) -> Self {
         tracing::debug!("Initializing empty server state...");
         let (events, _) = broadcast::channel(1024);
+        let watchers = crate::events::Watchers::empty();
         Self {
             pipelines: Mutex::new(HashMap::new()),
             events,
+            watchers,
             secrets,
             config_path: Mutex::new(None),
             connections_file: None,
@@ -376,8 +384,34 @@ impl AppState {
         Self::with_secrets_in(save_dir, Arc::new(EnvStore))
     }
 
-    pub fn subscribe_events(&self) -> broadcast::Receiver<UiEvent> {
-        self.events.subscribe()
+    /// A receiver on the UI feed, and the guard that counts it.
+    ///
+    /// **The guard has to outlive the receiver's use.** Dropping it is what
+    /// tells every run loop the browser went away; dropping it early makes them
+    /// all go quiet while the stream is still being served, and never dropping
+    /// it makes them all pay the reporting cost forever. Returned as a pair
+    /// rather than hidden inside one type because the receiver goes straight
+    /// into a `BroadcastStream`, which takes it by value — see
+    /// [`crate::handlers::ui::ui::events_handler`] for where the guard then
+    /// lives.
+    ///
+    /// This is the only place a receiver is handed out, which is what makes the
+    /// count trustworthy enough for the run loop to read instead of asking the
+    /// channel.
+    #[must_use]
+    pub fn subscribe_events(
+        &self,
+    ) -> (crate::events::WatchGuard, broadcast::Receiver<UiEvent>) {
+        // in this order: a receiver that existed before it was counted is a
+        // window in which the run loops still believe nobody is watching
+        let guard = self.watchers.attach();
+        (guard, self.events.subscribe())
+    }
+
+    /// How many browsers are attached to the feed right now.
+    #[must_use]
+    pub fn watcher_count(&self) -> usize {
+        self.watchers.count()
     }
 
     /// An empty server whose connections come from a file the operator named.
@@ -1090,7 +1124,8 @@ impl AppState {
         .with_inboxes(Arc::clone(&self.inboxes))
         .with_buckets(self.buckets())
         .with_state(pipeline.config.state.clone())
-        .with_history(Arc::clone(&self.history));
+        .with_history(Arc::clone(&self.history))
+        .with_watchers(self.watchers.clone());
         // building the runtime only fails on things the config got wrong
         // (unknown upstream, unbuildable component)
         let join_handle = pipeline.start(ctx).map_err(|e| {

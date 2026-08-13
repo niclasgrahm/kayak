@@ -717,6 +717,30 @@ Three pieces, and they only work together:
   deliberate, since the alternative is a synthetic batch event at every shutdown,
   and the readout is a ten-second average that a bounded 100 ms tail can't move.
 
+**How the gate is read is as load-bearing as the gate itself.**
+`events::Watchers` is an `AtomicUsize` shared by `AppState` and every run loop,
+and the per-pass question is a relaxed load on it. It is *not*
+`broadcast::Sender::receiver_count()`, which answers the same question by taking
+`shared.tail.lock()` — one mutex on the one channel every pipeline shares, which
+capped the whole process at ~6.5M passes/sec however many cores it had. Don't go
+back to asking the channel; `a_run_loop_asks_the_watcher_count_and_not_the_channel`
+in `tests/pipeline.rs` fails if you do.
+
+Three rules around it. `AppState::subscribe_events` is the **only** place a
+receiver is handed out, which is what makes the count trustworthy enough to read
+instead of the channel — it returns a `(WatchGuard, Receiver)` pair and the guard
+must outlive the receiver's use (the SSE handler carries it *inside* the stream's
+closure, since `BroadcastStream` takes the receiver by value). The guard is
+incremented **before** the receiver exists, because a receiver that isn't yet
+counted is a window where the run loops think nobody is watching. And the default
+where one isn't threaded through — `BuildCtx`, `PipelineRuntime::from_parts` — is
+`Watchers::attached()` rather than empty, because of which mistake it makes: a
+component that assumes nobody is watching goes silently dark (a correctness bug),
+one that assumes somebody is pays for reporting it didn't need (a performance
+one). `publish()` in `src/events.rs` still asks the channel, deliberately: it only
+runs on error paths and on passes the throttle already let through, so it is a few
+times a second rather than millions.
+
 Consequence worth knowing before you "fix" it: a pipeline faster than
 `UI_PASS_INTERVAL` (10 passes a second) **does** lose log lines. The `seq` gaps
 are what say so, and the frontend already draws them as passes not shown.
@@ -1153,13 +1177,15 @@ Five things are load-bearing:
   clean factor of ten each step and the `msgs/s` on `batch1000` is the batch
   size read back out. That's what the `passes/s` column is for.
 
-**What the first sweep found, and it is a real one**: the run loop calls
-`self.events.receiver_count() > 0` once per pass, and tokio implements that as
-`self.shared.tail.lock()` — one mutex on one shared channel, taken by every
-pipeline on every pass. The whole process is capped at ~6.5M passes/sec
-regardless of cores or pipeline count; a private channel per pipeline was
-**8× faster** as an experiment. The gate itself is right (see "the ui feed is a
-sample"); only reading it is expensive. Tracked in `docs/roadmap.md`.
+**What the first sweep found** — the thing that justified building it: the run
+loop asked `self.events.receiver_count() > 0` once per pass, and tokio
+implements that as `self.shared.tail.lock()` — one mutex on one shared channel,
+taken by every pipeline on every pass, capping the whole process at ~6.5M
+passes/sec regardless of cores or pipeline count. Fixed the same day (see
+`events::Watchers` under "the ui feed is a sample"); the sweep measured +189% /
++592% / +804% at ten / a hundred / a thousand pipelines. The `pipelines*` rows
+are what keep that honest, and the two baselines either side of it are in
+`bench/baselines/`' git history.
 
 ## Notes
 

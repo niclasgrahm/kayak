@@ -20,6 +20,7 @@ use std::time::{Duration, Instant};
 use anyhow::{Context, Result};
 use kayak::BuildCtx;
 use kayak::config::BuildTransformConfig;
+use kayak::events::Watchers;
 use kayak::inputs::InputSource;
 use kayak::outputs::OutputDestination;
 use kayak::pipeline::{Pipeline, PipelineRuntime};
@@ -58,6 +59,9 @@ pub struct Counted {
 
 /// One built graph, held so it can be counted and then cancelled.
 struct Graph {
+    /// Kept so the watcher attached for a `watched` scenario is released with
+    /// the rest of the graph rather than at the end of `build`.
+    watching: Option<kayak::events::WatchGuard>,
     roots: Vec<Arc<Pipeline>>,
     all: Vec<Arc<Pipeline>>,
     tasks: JoinSet<()>,
@@ -98,6 +102,10 @@ impl Graph {
         if let Some(w) = self.watcher.take() {
             w.abort();
         }
+        // Explicitly, and before the run loops are waited on: the count has to
+        // come back down between scenarios or the next unwatched row would be
+        // measured as a watched one.
+        drop(self.watching.take());
         while self.tasks.join_next().await.is_some() {}
     }
 }
@@ -145,7 +153,11 @@ fn transforms(chain: Chain) -> Result<Vec<Box<dyn Transform>>> {
 }
 
 /// Build and spawn the whole graph, ready to be counted.
-fn build(scenario: &Scenario, events: &broadcast::Sender<UiEvent>) -> Result<Graph> {
+fn build(
+    scenario: &Scenario,
+    events: &broadcast::Sender<UiEvent>,
+    watchers: &Watchers,
+) -> Result<Graph> {
     let mut tasks = JoinSet::new();
     let mut roots = Vec::with_capacity(scenario.pipelines);
     let mut all = Vec::with_capacity(scenario.total_pipelines());
@@ -190,7 +202,12 @@ fn build(scenario: &Scenario, events: &broadcast::Sender<UiEvent>) -> Result<Gra
                 Arc::clone(&shared),
                 events.clone(),
             )
-            .with_context(|| format!("assembling the runtime of '{id}'"))?;
+            .with_context(|| format!("assembling the runtime of '{id}'"))?
+            // The scenario's own count, not the seam's "assume somebody is
+            // watching" default — the `watched` row exists to measure the
+            // difference between the two, so it has to go down the path
+            // production goes down.
+            .with_watchers(watchers.clone());
             let join = tokio::spawn(async move {
                 // A bench run that fails is reported through the error
                 // counters, which the report already refuses to publish a
@@ -220,6 +237,7 @@ fn build(scenario: &Scenario, events: &broadcast::Sender<UiEvent>) -> Result<Gra
         });
     }
     Ok(Graph {
+        watching: None,
         roots,
         all,
         tasks,
@@ -235,8 +253,13 @@ fn build(scenario: &Scenario, events: &broadcast::Sender<UiEvent>) -> Result<Gra
 /// outside the window rather than being averaged into its throughput.
 pub async fn run(scenario: &Scenario, warmup: Duration, duration: Duration) -> Result<(Counted, Duration)> {
     let (events, rx) = broadcast::channel(EVENT_CHANNEL);
-    let mut graph = build(scenario, &events)?;
+    let watchers = Watchers::empty();
+    let mut graph = build(scenario, &events, &watchers)?;
     if scenario.watched {
+        // Counted the way the SSE handler counts one, since that is what the
+        // run loop now reads. Attached before the window opens so the whole
+        // measurement is of a watched pipeline.
+        graph.watching = Some(watchers.attach());
         // A receiver that keeps up, which is what a browser is: the run loop
         // only pays the reporting cost while `receiver_count() > 0`, and a
         // receiver nobody drains would still hold that gate open but would

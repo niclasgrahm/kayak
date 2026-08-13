@@ -59,6 +59,15 @@ pub struct BuildCtx<'a> {
     pub pipelines: &'a mut HashMap<PipelineId, PipelineHandle>,
     pub pipeline_id: PipelineId,
     pub events: broadcast::Sender<UiEvent>,
+    /// How the run loop this builds will ask whether anyone is attached to
+    /// `/events`.
+    ///
+    /// Threaded through rather than read off `events` because reading it off
+    /// `events` is a mutex on a channel every pipeline shares — see
+    /// [`crate::events::Watchers`]. Defaults to
+    /// [`crate::events::Watchers::attached`]; [`crate::state::AppState`] sets
+    /// the real one.
+    pub watchers: crate::events::Watchers,
     pub secrets: Arc<dyn SecretStore>,
     /// The connections as they stand at the moment this pipeline is built.
     ///
@@ -156,6 +165,7 @@ impl<'a> BuildCtx<'a> {
             buckets: Arc::new(Buckets::new()),
             state: None,
             history: Arc::new(History::disabled()),
+            watchers: crate::events::Watchers::attached(),
         }
     }
 
@@ -163,6 +173,17 @@ impl<'a> BuildCtx<'a> {
     #[must_use]
     pub fn with_history(mut self, history: Arc<History>) -> Self {
         self.history = history;
+        self
+    }
+
+    /// The same, with the server's watcher count rather than the assumption
+    /// that someone is watching. See [`crate::events::Watchers`] for why the
+    /// count is threaded through instead of read off the channel, and
+    /// [`crate::events::Watchers::attached`] for why the default errs the way
+    /// it does.
+    #[must_use]
+    pub fn with_watchers(mut self, watchers: crate::events::Watchers) -> Self {
+        self.watchers = watchers;
         self
     }
 
