@@ -109,6 +109,30 @@ pr *ARGS:
   git push -u origin HEAD
   gh pr create --fill {{ARGS}}
 
+# The production build, and the one place `embed-assets` is spelled outside the
+# Dockerfile. Without that feature the binary is only half a deployment: it
+# reads the WASM bundle, the stylesheet and the vendored reference renderer off
+# `target/site` at runtime, so moving it anywhere leaves a blank canvas and a
+# 404 in the network tab. With it the binary is the whole thing. See
+# `src/site.rs`.
+#
+# One command works because cargo-leptos builds the client before the server;
+# the site directory is complete by the time the server crate compiles.
+
+# release build — the server binary with the frontend compiled into it
+build:
+  cargo leptos build --release --bin-features embed-assets
+  @echo "built target/release/kayak — the frontend is inside it, nothing else to copy"
+
+# The other half of `just ci` for this feature: the tests in `src/site.rs` that
+# assert the *real* site directory is embedded can only run once it has been
+# built, so they are not in `just ci` — everything else about serving those
+# files is tested against an in-memory double and does run there.
+
+# the embed's own tests; needs a `just build` (or any cargo-leptos build) first
+test-embed:
+  cargo test --features embed-assets --lib site::
+
 # smoke test against a server that is already running on :6767
 test-http:
   hurl --test hurl/tests/*.hurl

@@ -1,8 +1,8 @@
 # deployment
 
 The `Dockerfile` builds one image that is the *runtime* and nothing else: the
-server binary, the WASM bundle and the assets beside it. **No config is baked
-in.** Started bare it comes up with an empty graph and serves the UI, which is a
+server binary, with the WASM bundle and the assets compiled *into* it. **No
+config is baked in.** Started bare it comes up with an empty graph and serves the UI, which is a
 container that runs with no arguments and a Kubernetes Deployment that needs no
 volume:
 
@@ -74,8 +74,43 @@ Points worth knowing before it goes anywhere real:
   against the process environment before the `--secrets` file, so a k8s
   `Secret` reaching the container as env vars needs no file mounted at all.
 
-The build stage is `cargo leptos build --release` with the cargo registry and
-`target/` on BuildKit cache mounts, so a rebuild after a code change is
-incremental locally and no build artifacts reach a layer. `librdkafka` is
-compiled from source, which is why the builder installs `cmake`; TLS is rustls
-and zlib is vendored, so nothing else is.
+The build stage is `cargo leptos build --release --bin-features embed-assets`
+with the cargo registry and `target/` on BuildKit cache mounts, so a rebuild
+after a code change is incremental locally and no build artifacts reach a
+layer. `librdkafka` is compiled from source, which is why the builder installs
+`cmake`; TLS is rustls and zlib is vendored, so nothing else is.
+
+## the binary carries the frontend
+
+`embed-assets` is what makes the release artifact **one file**. Without it the
+server reads the WASM bundle, the stylesheet and the vendored API-reference
+renderer off a `target/site` directory at runtime, found through
+`LEPTOS_SITE_ROOT` — so the binary and that directory have to travel together,
+and a binary moved on its own serves a page whose bundle 404s. That failure
+looks like a blank canvas rather than like a missing file, which is the reason
+this is not left to whoever does the copying.
+
+```bash
+just build   # cargo leptos build --release --bin-features embed-assets
+```
+
+The feature is **off in every development build**, and deliberately: the site
+directory is a build output, so embedding it would make `cargo check`,
+`cargo test` and `just ci` all wait on a WASM toolchain. `cargo leptos watch`
+and `just dev` therefore keep serving off disk, which is also what makes hot
+reload work. Nothing else differs — a build without the feature behaves exactly
+as the server did before it existed.
+
+What the embedded server adds on top of a directory read: an `ETag` per file
+and a `304` for a browser that already holds it, and `br`/`gzip` negotiation
+against precompressed variants if there are any. `--precompress` on the build
+produces them, at the cost of carrying three copies of the bundle in the
+binary; the image does not pass it. Responses are `cache-control: no-cache`,
+which means revalidate rather than do not store — asset names are stable across
+releases, so anything longer-lived would serve last release's bundle after a
+deploy.
+
+`LEPTOS_SITE_ROOT` is unset in the image because there is no such directory in
+it. `LEPTOS_SITE_PKG_DIR` stays: that one is the URL prefix the rendered page
+links its bundle under, which is a path in the page rather than a path on
+disk.

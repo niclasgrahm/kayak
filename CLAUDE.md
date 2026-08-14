@@ -9,7 +9,10 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 ```bash
 just dev                            # dev server on :6767 against example_config/ (hot reload; makes secrets.json if absent)
 cargo leptos watch                  # the same without a config — hot reload on 127.0.0.1:6767 (builds WASM + server)
-cargo leptos build --release        # production build (server binary + target/site assets)
+just build                          # production build — `cargo leptos build --release
+                                    # --bin-features embed-assets`, i.e. one binary with the
+                                    # frontend compiled into it. See "the static assets" below.
+just test-embed                     # the embed's own tests; needs a `just build` first
 cargo check                         # fast type check of the whole workspace
 just ci                             # lint + test — what GitHub Actions runs
 just test                           # cargo test --all-targets (offline: no NATS, no server)
@@ -636,6 +639,51 @@ The run loop's `select!` is `biased` on purpose, and the cancellation check in i
 The file can be JSON or YAML (`kayak_core::ConfigFormat`), decided by the extension and nowhere else: `persist::read`/`persist::write` are the only two places a format exists, and everything past the parser has `Config`s that don't remember which it was. `POST /api/config/save` takes an optional `format`; without one the name decides. The `saved` snapshot behind `has_unsaved_changes` is *always* rendered as JSON — it's a fingerprint of the graph, not of the file.
 
 Three things to preserve. `persist::save_path` rejects anything but a bare file name and is a security boundary, not a nicety — the path comes from an HTTP request, so an unconstrained one is an arbitrary write; refuse, never normalise. `has_unsaved_changes` compares `render(current)` against the `saved` snapshot, which is exact *because* `render` is deterministic. And `revert` parses the file before tearing the runtime down, so a file broken by hand doesn't cost you the running graph.
+
+### The static assets (`src/site.rs`)
+
+The frontend's files — the WASM bundle, the stylesheet, the vendored
+API-reference renderer — are compiled **into the binary** in a production
+build, so a release is one artifact rather than a binary plus a `target/site`
+directory that `LEPTOS_SITE_ROOT` points at. A binary moved without that
+directory serves a page whose bundle 404s, which reads as a blank canvas rather
+than as a missing file; that is the failure this removes.
+
+Four things are load-bearing:
+
+- **It is a cargo feature, `embed-assets`, and it is off by default.**
+  `target/site` is a *build output*, so embedding it makes the root crate
+  uncompilable until the frontend has been built — on by default would put a
+  WASM toolchain in front of `cargo check`, `cargo test` and `just ci`. `just
+  build` and the `Dockerfile` pass `--bin-features embed-assets`; nothing in
+  the dev loop does, which is also what keeps `cargo leptos watch`'s hot reload
+  working. That one command is safe because cargo-leptos builds the client
+  before the server.
+- **The fallback is layered, not replaced.** `site::fallback` looks in the
+  embed and hands everything else to `leptos_axum::file_and_error_handler`,
+  which is what renders the shell with a 404 for a path that is neither a route
+  nor a file. Without the feature the fallback *is* leptos', so a dev build
+  behaves exactly as the server did before this existed. Don't reimplement that
+  arm — it would mean owning a copy of leptos' SSR response builder.
+- **The serving half is generic over where the bytes come from.** `Assets` is a
+  trait and `respond` takes `&dyn Assets`, which is what makes content types,
+  `ETag`, `304` and encoding negotiation testable against an in-memory map
+  under a plain `cargo test`. The alternative was a module whose only test
+  needed a WASM build first — i.e. one with no test that ever ran in CI. The
+  handful of tests that need the *real* embed are `#[cfg(feature =
+  "embed-assets")]` and run under `just test-embed`, not `just ci`.
+- **Paths are refused, never normalised** (`key_for`) — the same rule
+  `persist::save_path` follows, and for the same reason. Nothing could escape
+  an exact key map, but the check outlives whatever backs `Assets` next.
+
+`.wasm` must stay `application/wasm` (a browser only streams-compiles a bundle
+served as that), and `cache-control` is `no-cache` because asset names are
+stable across releases — anything longer-lived serves last release's bundle
+after a deploy, and the `ETag` is what makes the revalidation a 304 rather than
+a download. `br`/`gzip` variants are served if a build produced them
+(`--precompress`); no build here does, since it costs three copies of the
+bundle in the binary. Request paths are **not** percent-decoded — nothing
+cargo-leptos or `assets-dir` emits needs it.
 
 ### The canvas layout file
 
