@@ -629,19 +629,79 @@ One pipeline: every input is merged into one stream, that stream runs through th
         }
       ]
     },
-    "BufferTransformConfig": {
-      "description": "Collects messages until it has `size` of them, then emits them as one batch.\n\nDistinct from the `buffer` option on an input: this one sits in the transform\nchain and batches what the earlier transforms produced, and it only counts —\nthe input-level one can also close a batch on a timer.",
+    "BufferGateConfig": {
+      "description": "A condition on a state bucket, as a release trigger for the `buffer`\ntransform.\n\nThe conditions are tested against the bucket entry rendered as an object —\nthe names `remember` wrote under are its fields — so `field` is a dotted\npath exactly as it is everywhere else, and several conditions mean *all of\nthem*, exactly as they do on `remember`'s `when`.\n\nNote what this is not: it is a gate on the whole buffer, not a test applied\nto each held message. When it opens, everything held is handed on.",
       "properties": {
-        "size": {
-          "description": "how many messages make up a batch",
-          "format": "uint",
-          "minimum": 0,
-          "type": "integer"
+        "bucket": {
+          "description": "which bucket to watch. Defaults to the one this pipeline's `state`\nnames; a pipeline with no `state` of its own has to name it here.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "conditions": {
+          "description": "what has to be true of that key for the buffer to be released. All of\nthem, and at least one — a gate with no conditions would be a buffer\nthat releases on every write to the bucket.",
+          "items": {
+            "$ref": "#/$defs/Condition"
+          },
+          "type": "array"
+        },
+        "key": {
+          "description": "which key in that bucket to read. A literal key, not a field path —\nthis is one gate for the whole buffer, so there is no message to take a\nkey from. Leave it out for the bucket-wide value, which is what\n`remember` writes when its pipeline's `state` has no `key`.",
+          "type": [
+            "string",
+            "null"
+          ]
         }
       },
       "required": [
-        "size"
+        "conditions"
       ],
+      "title": "buffer gate",
+      "type": "object"
+    },
+    "BufferTransformConfig": {
+      "description": "Holds messages back and hands them on when a *trigger* says to.\n\nThere are three triggers and they compose: a message count, a length of\ntime, and a condition on a state bucket. Any of them is enough on its own —\nwhichever comes first ends the wait, the same rule the input-level `batch`\nbuffer follows. A buffer with no trigger at all fails to build.\n\n`size` is the one that has always been here and it behaves exactly as it\ndid: messages are handed on in batches of exactly that many, as they fill.\nThe other two release **everything currently held** as a single batch,\nhowever much that is — which is the useful reading of \"the run is finished,\nsend what you have\".\n\nDistinct from the `buffer` option on an input: that one batches what an\ninput produces, before any transform has seen it. This one sits in the\nchain, so it batches what the transforms in front of it produced — after a\n`filter` has thinned the stream, or a `recall` has enriched it.",
+      "properties": {
+        "max_messages": {
+          "description": "never hold more than this many messages: reaching it releases them all,\nwhatever the triggers say, and says so in the log once. Required unless\n`size` is set, because `size` is its own bound — a buffer waiting on a\ncondition that never comes true is otherwise a memory leak that grows\nat the rate of the stream.",
+          "format": "uint",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "seconds": {
+          "description": "release everything held this many seconds after the *first* held\nmessage. The window opens when a message is held rather than when the\nlast batch went out, so this is a bound on how long a message waits and\nnot a cadence — an idle buffer holds nothing and no clock is running.",
+          "format": "uint",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "size": {
+          "description": "hand messages on in batches of exactly this many, as they fill. On its\nown this is a buffer that only ever counts, and is what this transform\nhas always done.",
+          "format": "uint",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "until": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/BufferGateConfig"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "release everything held when a state bucket says so. This is the\ntrigger a *different* pipeline can pull: buckets are global, so one\npipeline can mark a run complete and this one hands on what it gathered\nwhile the run was going."
+        }
+      },
       "title": "buffer",
       "type": "object"
     },
@@ -2111,10 +2171,11 @@ One pipeline: every input is merged into one stream, that stream runs through th
       "type": "object"
     },
     "NumericFilterOperatorKind": {
+      "description": "How a number is compared to the one in the config.",
       "enum": [
-        "GreaterThan",
-        "LessThan",
-        "EqualTo"
+        "greater_than",
+        "less_than",
+        "equal_to"
       ],
       "type": "string"
     },
@@ -2894,9 +2955,10 @@ One pipeline: every input is merged into one stream, that stream runs through th
       "type": "object"
     },
     "StringFilterOperatorKind": {
+      "description": "How a string is compared to the one in the config.",
       "enum": [
-        "EqualTo",
-        "Contains"
+        "equal_to",
+        "contains"
       ],
       "type": "string"
     },
@@ -4564,19 +4626,79 @@ The same wire shape the run loop's `PipelineView` serializes to — this is the 
         }
       ]
     },
-    "BufferTransformConfig": {
-      "description": "Collects messages until it has `size` of them, then emits them as one batch.\n\nDistinct from the `buffer` option on an input: this one sits in the transform\nchain and batches what the earlier transforms produced, and it only counts —\nthe input-level one can also close a batch on a timer.",
+    "BufferGateConfig": {
+      "description": "A condition on a state bucket, as a release trigger for the `buffer`\ntransform.\n\nThe conditions are tested against the bucket entry rendered as an object —\nthe names `remember` wrote under are its fields — so `field` is a dotted\npath exactly as it is everywhere else, and several conditions mean *all of\nthem*, exactly as they do on `remember`'s `when`.\n\nNote what this is not: it is a gate on the whole buffer, not a test applied\nto each held message. When it opens, everything held is handed on.",
       "properties": {
-        "size": {
-          "description": "how many messages make up a batch",
-          "format": "uint",
-          "minimum": 0,
-          "type": "integer"
+        "bucket": {
+          "description": "which bucket to watch. Defaults to the one this pipeline's `state`\nnames; a pipeline with no `state` of its own has to name it here.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "conditions": {
+          "description": "what has to be true of that key for the buffer to be released. All of\nthem, and at least one — a gate with no conditions would be a buffer\nthat releases on every write to the bucket.",
+          "items": {
+            "$ref": "#/$defs/Condition"
+          },
+          "type": "array"
+        },
+        "key": {
+          "description": "which key in that bucket to read. A literal key, not a field path —\nthis is one gate for the whole buffer, so there is no message to take a\nkey from. Leave it out for the bucket-wide value, which is what\n`remember` writes when its pipeline's `state` has no `key`.",
+          "type": [
+            "string",
+            "null"
+          ]
         }
       },
       "required": [
-        "size"
+        "conditions"
       ],
+      "title": "buffer gate",
+      "type": "object"
+    },
+    "BufferTransformConfig": {
+      "description": "Holds messages back and hands them on when a *trigger* says to.\n\nThere are three triggers and they compose: a message count, a length of\ntime, and a condition on a state bucket. Any of them is enough on its own —\nwhichever comes first ends the wait, the same rule the input-level `batch`\nbuffer follows. A buffer with no trigger at all fails to build.\n\n`size` is the one that has always been here and it behaves exactly as it\ndid: messages are handed on in batches of exactly that many, as they fill.\nThe other two release **everything currently held** as a single batch,\nhowever much that is — which is the useful reading of \"the run is finished,\nsend what you have\".\n\nDistinct from the `buffer` option on an input: that one batches what an\ninput produces, before any transform has seen it. This one sits in the\nchain, so it batches what the transforms in front of it produced — after a\n`filter` has thinned the stream, or a `recall` has enriched it.",
+      "properties": {
+        "max_messages": {
+          "description": "never hold more than this many messages: reaching it releases them all,\nwhatever the triggers say, and says so in the log once. Required unless\n`size` is set, because `size` is its own bound — a buffer waiting on a\ncondition that never comes true is otherwise a memory leak that grows\nat the rate of the stream.",
+          "format": "uint",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "seconds": {
+          "description": "release everything held this many seconds after the *first* held\nmessage. The window opens when a message is held rather than when the\nlast batch went out, so this is a bound on how long a message waits and\nnot a cadence — an idle buffer holds nothing and no clock is running.",
+          "format": "uint",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "size": {
+          "description": "hand messages on in batches of exactly this many, as they fill. On its\nown this is a buffer that only ever counts, and is what this transform\nhas always done.",
+          "format": "uint",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "until": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/BufferGateConfig"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "release everything held when a state bucket says so. This is the\ntrigger a *different* pipeline can pull: buckets are global, so one\npipeline can mark a run complete and this one hands on what it gathered\nwhile the run was going."
+        }
+      },
       "title": "buffer",
       "type": "object"
     },
@@ -6094,10 +6216,11 @@ The same wire shape the run loop's `PipelineView` serializes to — this is the 
       "type": "object"
     },
     "NumericFilterOperatorKind": {
+      "description": "How a number is compared to the one in the config.",
       "enum": [
-        "GreaterThan",
-        "LessThan",
-        "EqualTo"
+        "greater_than",
+        "less_than",
+        "equal_to"
       ],
       "type": "string"
     },
@@ -6877,9 +7000,10 @@ The same wire shape the run loop's `PipelineView` serializes to — this is the 
       "type": "object"
     },
     "StringFilterOperatorKind": {
+      "description": "How a string is compared to the one in the config.",
       "enum": [
-        "EqualTo",
-        "Contains"
+        "equal_to",
+        "contains"
       ],
       "type": "string"
     },

@@ -21,10 +21,13 @@ use kayak::testing::{
 };
 use kayak::transforms::Transform;
 use kayak_core::{EventPayload, Stage};
+use kayak::buckets::Buckets;
 use kayak_core::config::{
-    Aggregation, MissingFieldPolicy, ReduceFnKind, ReduceTransformConfig, SplitterTransformConfig,
+    Aggregation, BufferGateConfig, BufferTransformConfig, Condition, MissingFieldPolicy,
+    ReduceFnKind, ReduceTransformConfig, SplitterTransformConfig, StringFilterOperatorKind,
     TransformConfig, TransformKind,
 };
+use kayak_core::state::{StateBucketConfig, StateBuckets};
 use serde_json::json;
 use tokio::sync::{broadcast, mpsc};
 
@@ -1364,4 +1367,228 @@ mod throttling_the_ui_feed {
              {counted} messages, so the readout would report a fraction of the real rate"
         );
     }
+}
+
+// ── waking the run loop without a batch ─────────────────────────────────────
+
+/// The bucket-wide key, which is what `remember` writes under when a pipeline's
+/// `state` has no `key` and what a gate reads when it names none. Spelled out
+/// here rather than imported because it is part of the *wire* contract between
+/// `remember` and the gate, and a test that imported the constant would still
+/// pass if the constant changed.
+const WHOLE_BUCKET_KEY: &str = "";
+
+fn control_bucket() -> Arc<Buckets> {
+    let mut declared = StateBuckets::new();
+    declared.insert("control", StateBucketConfig::default());
+    Arc::new(Buckets::from_config(&declared))
+}
+
+/// A `buffer` held shut by a gate on that bucket.
+fn gated_buffer(buckets: &Arc<Buckets>) -> anyhow::Result<Box<dyn Transform>> {
+    let mut pipelines = HashMap::new();
+    let (events, _rx) = broadcast::channel(16);
+    let mut ctx = BuildCtx::new(&mut pipelines, "test".to_string(), events)
+        .with_buckets(Arc::clone(buckets));
+    TransformConfig {
+        kind: TransformKind::Buffer(BufferTransformConfig {
+            size: None,
+            seconds: None,
+            max_messages: Some(1000),
+            until: Some(BufferGateConfig {
+                bucket: Some("control".to_string()),
+                key: None,
+                conditions: vec![Condition::String {
+                    field: "status".to_string(),
+                    operator: StringFilterOperatorKind::EqualTo,
+                    value: "ready".to_string(),
+                }],
+            }),
+        }),
+    }
+    .build(&mut ctx)
+}
+
+/// Wait for the output to collect something, rather than sleeping for a fixed
+/// time and hoping.
+async fn wait_for_batches(emitted: &Emitted, count: usize) -> Vec<Vec<serde_json::Value>> {
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    loop {
+        let values = emitted.values();
+        if values.len() >= count {
+            return values;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "expected {count} batches, still have {}",
+            values.len()
+        );
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+}
+
+/// The point of the whole `wakeup` seam: a pipeline whose input has gone quiet
+/// still hands its held messages on when *another* pipeline opens the gate.
+///
+/// Without the wakeup arm in the run loop this test hangs until its timeout —
+/// the buffer would be waiting for a batch that is never coming, which is the
+/// exact failure the feature exists to prevent.
+#[tokio::test]
+async fn a_bucket_write_releases_a_held_buffer_with_no_batch_arriving() -> anyhow::Result<()> {
+    let buckets = control_bucket();
+    let shared = pipeline("gated");
+    let (events, _rx) = broadcast::channel(64);
+    let output = CollectingOutput::new();
+    let emitted = output.emitted();
+
+    // One batch, and then the input never produces again — a stream that has
+    // gone quiet with messages still held.
+    let input = ScriptedInput::new(
+        vec![batch(vec![json!({"i": 0}), json!({"i": 1})])],
+        WhenExhausted::Pend,
+    );
+    let runtime = runtime(
+        vec![Box::new(input)],
+        vec![gated_buffer(&buckets)?],
+        vec![Box::new(output)],
+        Arc::clone(&shared),
+        events,
+    );
+    let handle = tokio::spawn(runtime.run());
+
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    assert!(
+        emitted.values().is_empty(),
+        "the gate is shut, so nothing should have left: {:?}",
+        emitted.values()
+    );
+
+    // The other pipeline's half of it, which is all this one ever sees.
+    buckets.remember(
+        "control",
+        WHOLE_BUCKET_KEY,
+        vec![("status".to_string(), json!("ready"))],
+    );
+
+    let values = wait_for_batches(&emitted, 1).await;
+    assert_eq!(values.len(), 1, "one batch, everything held: {values:?}");
+    assert_eq!(
+        values[0],
+        vec![json!({"i": 0}), json!({"i": 1})],
+        "the whole buffer should go, never a subset"
+    );
+
+    shared.cancellation_token.cancel();
+    tokio::time::timeout(Duration::from_secs(5), handle).await???;
+    Ok(())
+}
+
+/// A write that doesn't open the gate wakes the run loop and must then do
+/// nothing at all — a wakeup is "look at me", not a promise, and a flush that
+/// released on any write would make the conditions decorative.
+///
+/// "Nothing at all" includes the feed: a gate is woken by every write to its
+/// bucket and opens on almost none of them, so a flush that came up empty must
+/// not count as a pass. If it did, a busy control bucket would spend this
+/// pipeline's pass budget on passes with nothing in them and the real ones
+/// would be the ones dropped.
+#[tokio::test]
+async fn a_bucket_write_that_does_not_open_the_gate_releases_nothing() -> anyhow::Result<()> {
+    let buckets = control_bucket();
+    let shared = pipeline("gated");
+    let (events, mut rx) = broadcast::channel(64);
+    let output = CollectingOutput::new();
+    let emitted = output.emitted();
+
+    let input = ScriptedInput::new(vec![batch(vec![json!({"i": 0})])], WhenExhausted::Pend);
+    let runtime = runtime(
+        vec![Box::new(input)],
+        vec![gated_buffer(&buckets)?],
+        vec![Box::new(output)],
+        Arc::clone(&shared),
+        events,
+    );
+    let handle = tokio::spawn(runtime.run());
+
+    for _ in 0..5 {
+        buckets.remember(
+            "control",
+            WHOLE_BUCKET_KEY,
+            vec![("status".to_string(), json!("running"))],
+        );
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+
+    assert!(
+        emitted.values().is_empty(),
+        "'running' is not 'ready': {:?}",
+        emitted.values()
+    );
+
+    // The one batch that did arrive is reported; nothing after it is. The
+    // buffer held that batch, so the pass produced an input event and no
+    // output event, and the five wakeups produced neither.
+    let mut seen = Vec::new();
+    while let Ok(event) = rx.try_recv() {
+        seen.push(event.stage);
+    }
+    assert_eq!(
+        seen,
+        vec![Stage::Input],
+        "a flush that released nothing should not reach the feed: {seen:?}"
+    );
+
+    shared.cancellation_token.cancel();
+    tokio::time::timeout(Duration::from_secs(5), handle).await???;
+    Ok(())
+}
+
+/// A transform that holds messages must still be able to hand them on through
+/// the transforms *after* it — a flush re-enters the chain one past the
+/// flushing transform rather than at the start, and getting that index wrong
+/// would either skip the rest of the chain or run the front of it twice.
+#[tokio::test]
+async fn a_flushed_batch_goes_through_the_rest_of_the_chain() -> anyhow::Result<()> {
+    let buckets = control_bucket();
+    let shared = pipeline("gated");
+    let (events, _rx) = broadcast::channel(64);
+    let output = CollectingOutput::new();
+    let emitted = output.emitted();
+
+    let input = ScriptedInput::new(
+        vec![batch(vec![json!({"i": 0}), json!({"i": 1})])],
+        WhenExhausted::Pend,
+    );
+    let runtime = runtime(
+        vec![Box::new(input)],
+        vec![
+            gated_buffer(&buckets)?,
+            // splits the released batch in two, which only happens if the
+            // flushed batch reached it at all
+            transform_from_config(TransformKind::Splitter(SplitterTransformConfig {
+                out_size: 1,
+            }))?,
+        ],
+        vec![Box::new(output)],
+        Arc::clone(&shared),
+        events,
+    );
+    let handle = tokio::spawn(runtime.run());
+
+    buckets.remember(
+        "control",
+        WHOLE_BUCKET_KEY,
+        vec![("status".to_string(), json!("ready"))],
+    );
+
+    let values = wait_for_batches(&emitted, 2).await;
+    assert_eq!(
+        values,
+        vec![vec![json!({"i": 0})], vec![json!({"i": 1})]],
+        "the splitter after the buffer should have seen the flushed batch"
+    );
+
+    shared.cancellation_token.cancel();
+    tokio::time::timeout(Duration::from_secs(5), handle).await???;
+    Ok(())
 }

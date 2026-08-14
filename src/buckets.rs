@@ -30,6 +30,7 @@
 use std::collections::{BTreeMap, HashMap};
 use std::sync::{Mutex, MutexGuard};
 use std::time::Instant;
+use tokio::sync::watch;
 
 use kayak_core::state::{BucketContents, BucketEntry, BucketSummary, StateBucketConfig, StateBuckets};
 use serde_json::Value;
@@ -136,6 +137,35 @@ impl Bucket {
 /// How many entries one read of a bucket returns.
 pub const MAX_ENTRIES_SHOWN: usize = 200;
 
+/// One bucket's lock and the signal that says it changed.
+///
+/// The signal is a `watch` channel carrying a version number, and it is what
+/// lets a `buffer` transform *wait* on a bucket instead of asking about it. A
+/// `watch` rather than a `Notify` because it cannot lose an update: a receiver
+/// remembers the version it last saw, so a write that lands while the waiter's
+/// future is momentarily dropped — which the run loop does on every pass — is
+/// still seen the next time it looks. It also coalesces, so a bucket written a
+/// million times a second wakes a waiter once per poll rather than a million
+/// times.
+///
+/// The version is bumped on every write, not on every *change of value*:
+/// deciding whether a write actually changed anything would mean comparing the
+/// values under the lock on the hot path, to save a wakeup that costs one
+/// condition evaluation.
+struct Slot {
+    bucket: Mutex<Bucket>,
+    changed: watch::Sender<u64>,
+}
+
+impl Slot {
+    fn new(bucket: Bucket) -> Self {
+        Self {
+            bucket: Mutex::new(bucket),
+            changed: watch::Sender::new(0),
+        }
+    }
+}
+
 /// The live buckets, by name.
 ///
 /// The *set* of buckets is fixed at construction — they are declared in the
@@ -143,7 +173,7 @@ pub const MAX_ENTRIES_SHOWN: usize = 200;
 /// its own lock with no map-wide one above it.
 #[derive(Default)]
 pub struct Buckets {
-    inner: HashMap<String, Mutex<Bucket>>,
+    inner: HashMap<String, Slot>,
 }
 
 impl Buckets {
@@ -158,7 +188,7 @@ impl Buckets {
         Self {
             inner: config
                 .iter()
-                .map(|(name, bucket)| (name.clone(), Mutex::new(Bucket::new(bucket.clone()))))
+                .map(|(name, bucket)| (name.clone(), Slot::new(Bucket::new(bucket.clone()))))
                 .collect(),
         }
     }
@@ -180,12 +210,12 @@ impl Buckets {
             let carried = self
                 .inner
                 .get(name)
-                .map(|bucket| Self::lock(bucket, name))
+                .map(|slot| Self::lock(slot, name))
                 .filter(|bucket| &bucket.config == declared)
                 .map(|mut bucket| std::mem::take(&mut bucket.entries));
             inner.insert(
                 name.clone(),
-                Mutex::new(Bucket {
+                Slot::new(Bucket {
                     config: declared.clone(),
                     entries: carried.unwrap_or_default(),
                 }),
@@ -197,8 +227,8 @@ impl Buckets {
     /// A poisoned lock means a thread panicked while holding it. Nothing under
     /// it can leave a bucket half-updated, so recovering the guard is safe —
     /// the same rule `AppState`'s locks follow.
-    fn lock<'a>(bucket: &'a Mutex<Bucket>, name: &str) -> MutexGuard<'a, Bucket> {
-        bucket.lock().unwrap_or_else(|poisoned| {
+    fn lock<'a>(slot: &'a Slot, name: &str) -> MutexGuard<'a, Bucket> {
+        slot.bucket.lock().unwrap_or_else(|poisoned| {
             tracing::warn!("the lock on state bucket '{name}' was poisoned; recovering");
             poisoned.into_inner()
         })
@@ -214,8 +244,8 @@ impl Buckets {
     /// name at build time, so at run time that means the config changed under a
     /// pipeline that is still running.
     fn with<R>(&self, name: &str, f: impl FnOnce(&mut Bucket) -> R) -> Option<R> {
-        let bucket = self.inner.get(name)?;
-        let mut guard = Self::lock(bucket, name);
+        let slot = self.inner.get(name)?;
+        let mut guard = Self::lock(slot, name);
         Some(f(&mut guard))
     }
 
@@ -227,7 +257,43 @@ impl Buckets {
     /// Write values under a key. Silently does nothing for an undeclared
     /// bucket — see [`Buckets::with`].
     pub fn remember(&self, bucket: &str, key: &str, values: Vec<(String, Value)>) {
-        self.with(bucket, |b| b.remember(key, values));
+        if self.with(bucket, |b| b.remember(key, values)).is_none() {
+            return;
+        }
+        // After the write and outside the lock. `send_modify` on a channel
+        // with no receivers is a pair of atomics and nothing else, which is
+        // what a bucket nothing is waiting on pays.
+        if let Some(slot) = self.inner.get(bucket) {
+            slot.changed.send_modify(|version| *version = version.wrapping_add(1));
+        }
+    }
+
+    /// Watch a bucket for writes. `None` for an undeclared bucket.
+    ///
+    /// What comes down the channel is a version number nothing should read: it
+    /// says *that* the bucket was written, never what to. The waiter looks.
+    #[must_use]
+    pub fn watch(&self, bucket: &str) -> Option<watch::Receiver<u64>> {
+        Some(self.inner.get(bucket)?.changed.subscribe())
+    }
+
+    /// One key's whole entry as a JSON object, or `None` when there is nothing
+    /// live under that key.
+    ///
+    /// The object is what a bucket condition is evaluated against, which is
+    /// what lets [`crate::fields::get`] and `Condition` be reused unchanged
+    /// rather than growing bucket-flavoured twins: a remembered name is a
+    /// field of this object, and a dotted path reaches into a remembered value
+    /// exactly as it reaches into a message.
+    #[must_use]
+    pub fn entry(&self, bucket: &str, key: &str) -> Option<Value> {
+        self.with(bucket, |b| {
+            let entry = b.entries.get(key)?;
+            if b.expired(entry, Instant::now()) {
+                return None;
+            }
+            Some(Value::Object(entry.values.iter().map(|(k, v)| (k.clone(), v.clone())).collect()))
+        })?
     }
 
     /// Read several names under one key, in the order asked for. A name with
@@ -268,8 +334,8 @@ impl Buckets {
         let mut out: Vec<BucketSummary> = self
             .inner
             .iter()
-            .map(|(name, bucket)| {
-                let bucket = Self::lock(bucket, name);
+            .map(|(name, slot)| {
+                let bucket = Self::lock(slot, name);
                 BucketSummary {
                     name: name.clone(),
                     keys: bucket.entries.len(),

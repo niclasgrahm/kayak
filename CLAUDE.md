@@ -294,7 +294,9 @@ startup. Both warn **once per transform, not per message** about a key the
 stream doesn't carry — that's a config mistake, not an event, and a line per
 message buries the log.
 
-`Condition` is a new internally-tagged enum rather than reusing `FilterKind`
+`Condition` is also what the `buffer` transform's `until` gate is spelled with
+— see "the buffer transform" below. It is a new internally-tagged enum rather
+than reusing `FilterKind`
 (which is externally tagged): a `Vec<FilterKind>` would reflect as
 `FieldType::Json` and fail `no_component_field_needs_raw_json`. Several
 conditions mean *all of them*; there is no `or` and no nesting, because that is
@@ -687,6 +689,77 @@ however high the cap is and only a catch-up ever fills one. That is what makes i
 safe to raise, and raising it is the cheapest fix there is for a consumer
 replaying a backlog — it divides the run loop's per-batch work, the transforms,
 the fan-out and the feed all at once.
+
+### The buffer transform, and the run loop's only tick
+
+`src/transforms/buffer.rs` is the *transform* — not `inputs::Buffered` above,
+which is the input decorator. It has three triggers and they compose: `size`,
+`seconds`, and `until` (a condition on a **state bucket**). Any one of them
+fires on its own, whichever comes first, the same rule `BufferConfig::Batch`
+follows.
+
+Four properties are load-bearing:
+
+- **`size` is unchanged and still hands on batches of exactly that many, as
+  they fill.** `seconds` and `until` release *everything held*, as one batch.
+  Two shapes rather than one because they answer different questions — "make me
+  batches of 500" against "that's enough waiting" — and a wait that ended with a
+  partial batch left behind would not have ended. An existing
+  `{"type": "buffer", "size": 6}` is byte-for-byte what it was, which is why
+  `size` became `Option<usize>` rather than the config growing a tagged union.
+- **`max_messages` is mandatory unless `size` is set**, and refused at build
+  time otherwise. `size` is its own bound; a gate that never opens is a buffer
+  that grows at the rate of the stream until the process dies. Same rule as
+  "every bucket is bounded and there is no unbounded spelling".
+- **The gate is a gate on the whole buffer, not a test per message.** It reads
+  one bucket entry rendered as a JSON object, so `Condition` and `fields::get`
+  are reused unchanged and a remembered name is addressed exactly as a message
+  field is. There is deliberately no per-key spelling — that is a session
+  window, and it is still on the roadmap.
+- **It is not a synchronisation primitive.** Buckets are global, so the pipeline
+  that opens the gate is usually another one, and two run loops have no ordering
+  between them. This is the unenforced rule in `kayak_core::state`'s docs, one
+  step more tempting to break.
+
+Cost is kept off the hot path two ways, and both matter. The gate is evaluated
+**once per arriving batch**, never per message. And each bucket carries a
+`watch::Sender<u64>` bumped on every write (`buckets::Slot`), so `Gate::open`'s
+fast path is `has_changed()` — an atomic load — rather than the bucket's mutex.
+Don't make that read unconditional: one mutex asked by every pipeline on every
+pass is exactly what `events::Watchers` exists to have stopped doing.
+
+**`Transform::wakeup`/`Transform::flush` are the run loop's second source of
+work, and the first tick anything in the chain has ever had.** `wakeup` resolves
+when a transform wants to hand something on that no arriving batch will prompt;
+`flush` is what it then produces. Both default to "never" / "nothing", so every
+other transform is untouched. `pipeline::next_wakeup` builds a
+`FuturesUnordered` over the chain and the run loop `select!`s it beside the
+input, producing a `Woken::Flush(index)` pass — which `flush_transform` then
+puts through the chain **from `index + 1`**, since what a buffer hands on has
+already been through everything in front of it.
+
+Three rules there:
+
+- **A `wakeup` must be cancel-safe.** The futures are rebuilt and the losers
+  dropped on every pass, so anything consumed before resolving is lost. Keep the
+  state on the transform — a deadline, a `watch` receiver — and build the future
+  from it. This is why the buffer's deadline is a **`tokio::time::Instant`**:
+  the deadline and the `sleep_until` waiting on it have to be the same clock, or
+  a paused-time test passes the sleep and finds the deadline still ahead.
+- **A wakeup is "look at me", not a promise.** `flush` re-checks and may return
+  nothing — a bucket write that didn't open the gate is exactly that, and it is
+  the *common* case, since a gate is woken by every write to its bucket and
+  opens on almost none of them. So an empty flush is **not a pass at all**: it
+  is dealt with before the throttle is asked anything and leaves `pass` alone,
+  because spending the pipeline's UI budget on a pass with nothing to show
+  would drop a real one in its place.
+- **A flush pass has no inbound half**: no `add_inbound`, no input event, and no
+  `ack`. Note what that means for `on_delivery` in front of a buffer — a held
+  message is acknowledged on the pass it *arrived*. That is the buffer's
+  pre-existing behaviour, not something the triggers introduced.
+
+Note this made the run loop long enough that the output/downstream tail moved
+into `PipelineRuntime::deliver`; both kinds of pass end there.
 
 ### Runtime & state
 

@@ -55,7 +55,9 @@ Two rules hold for all three:
 Don't confuse it with the two neighbours it reads like. `max_batch` on the kafka
 and nats inputs never *waits*: it takes one message and drains whatever has
 already arrived, so a quiet topic still yields batches of one. And the `buffer`
-*transform* is a different component in a different place.
+*transform* is a different component in a different place — it batches what the
+transforms in front of it produced, and it is the one that can wait on a
+[state bucket](/pipelines/state#gating-a-buffer-on-a-bucket).
 
 ## acknowledging an input
 

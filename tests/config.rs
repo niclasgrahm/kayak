@@ -119,7 +119,7 @@ fn transform_samples() -> Vec<(&'static str, Value)> {
             "filter",
             json!({
                 "type": "filter",
-                "Numeric": {"field": "value", "operator": "GreaterThan", "value": 10.0}
+                "Numeric": {"field": "value", "operator": "greater_than", "value": 10.0}
             }),
         ),
         (
@@ -127,7 +127,7 @@ fn transform_samples() -> Vec<(&'static str, Value)> {
             json!({
                 "type": "remember",
                 "when": [
-                    {"type": "string", "field": "_meta.signal", "operator": "EqualTo",
+                    {"type": "string", "field": "_meta.signal", "operator": "equal_to",
                      "value": "unit_id"}
                 ],
                 "remember": [{"field": "value", "as": "unit_id"}]
@@ -694,6 +694,84 @@ fn a_batch_buffer_missing_a_limit_is_refused() {
             .is_err(),
         "a batch buffer with no size should not parse"
     );
+}
+
+/// The `buffer` *transform* — a different thing from the input decorator above
+/// — gained three triggers, and the one that matters here is that the shape it
+/// had before them is untouched: a config file saying only `size` has to parse
+/// as it always did and come back out byte for byte.
+#[test]
+fn a_counting_buffer_transform_is_unchanged_on_the_wire() -> anyhow::Result<()> {
+    let wire = json!({"type": "buffer", "size": 10});
+    let parsed: TransformKind = serde_json::from_value(wire.clone())?;
+    let TransformKind::Buffer(buffer) = &parsed else {
+        panic!("parsed as the wrong transform: {parsed:?}");
+    };
+    assert_eq!(buffer.size, Some(10));
+    assert_eq!(buffer.seconds, None);
+    assert!(buffer.until.is_none());
+    assert_eq!(buffer.max_messages, None);
+    assert_eq!(
+        serde_json::to_value(&parsed)?,
+        wire,
+        "an unchanged buffer must not grow fields when it is saved"
+    );
+    Ok(())
+}
+
+/// The whole trigger surface, on the wire. The gate is the part with a shape
+/// of its own — a bucket, a key and a list of conditions — and it has to
+/// survive the round trip like everything else, or saving a config would
+/// rewrite it.
+#[test]
+fn every_buffer_trigger_parses_and_round_trips() -> anyhow::Result<()> {
+    let wire = json!({
+        "type": "buffer",
+        "size": 500,
+        "seconds": 30,
+        "until": {
+            "bucket": "ingest-control",
+            "key": "nightly-load",
+            "conditions": [
+                {"type": "string", "field": "status", "operator": "equal_to", "value": "ready"}
+            ]
+        },
+        "max_messages": 50000
+    });
+    let parsed: TransformKind = serde_json::from_value(wire.clone())?;
+    let TransformKind::Buffer(buffer) = &parsed else {
+        panic!("parsed as the wrong transform: {parsed:?}");
+    };
+    assert_eq!(buffer.size, Some(500));
+    assert_eq!(buffer.seconds, Some(30));
+    assert_eq!(buffer.max_messages, Some(50_000));
+    let Some(gate) = buffer.until.as_ref() else {
+        panic!("the gate was dropped");
+    };
+    assert_eq!(gate.bucket.as_deref(), Some("ingest-control"));
+    assert_eq!(gate.key.as_deref(), Some("nightly-load"));
+    assert_eq!(gate.conditions.len(), 1);
+    assert_eq!(serde_json::to_value(&parsed)?, wire, "{wire} did not survive");
+    Ok(())
+}
+
+/// A gate naming neither bucket nor key is the common shape — this pipeline's
+/// own bucket, the bucket-wide value — and both have to stay absent on the way
+/// back out rather than being filled in with a guess.
+#[test]
+fn a_gate_without_a_bucket_or_key_round_trips_as_written() -> anyhow::Result<()> {
+    let wire = json!({
+        "type": "buffer",
+        "max_messages": 1000,
+        "until": {
+            "conditions": [
+                {"type": "numeric", "field": "pending", "operator": "less_than", "value": 1.0}
+            ]
+        }
+    });
+    let parsed: TransformKind = serde_json::from_value(wire.clone())?;
+    assert_eq!(serde_json::to_value(&parsed)?, wire, "{wire} did not survive");
+    Ok(())
 }
 
 /// `envelope` is the other decorator on `InputConfig`, and shares the flatten

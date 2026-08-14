@@ -779,26 +779,98 @@ pub struct KafkaOutputConfig {
 #[schemars(title = "stdout")]
 pub struct StdoutOutputConfig {}
 
-/// Collects messages until it has `size` of them, then emits them as one batch.
+/// Holds messages back and hands them on when a *trigger* says to.
 ///
-/// Distinct from the `buffer` option on an input: this one sits in the transform
-/// chain and batches what the earlier transforms produced, and it only counts —
-/// the input-level one can also close a batch on a timer.
-#[derive(Clone, Debug, Deserialize, Serialize, JsonSchema)]
+/// There are three triggers and they compose: a message count, a length of
+/// time, and a condition on a state bucket. Any of them is enough on its own —
+/// whichever comes first ends the wait, the same rule the input-level `batch`
+/// buffer follows. A buffer with no trigger at all fails to build.
+///
+/// `size` is the one that has always been here and it behaves exactly as it
+/// did: messages are handed on in batches of exactly that many, as they fill.
+/// The other two release **everything currently held** as a single batch,
+/// however much that is — which is the useful reading of "the run is finished,
+/// send what you have".
+///
+/// Distinct from the `buffer` option on an input: that one batches what an
+/// input produces, before any transform has seen it. This one sits in the
+/// chain, so it batches what the transforms in front of it produced — after a
+/// `filter` has thinned the stream, or a `recall` has enriched it.
+#[derive(Clone, Debug, Deserialize, Serialize, JsonSchema, PartialEq)]
 #[schemars(title = "buffer")]
 pub struct BufferTransformConfig {
-    /// how many messages make up a batch
-    pub size: usize,
+    /// hand messages on in batches of exactly this many, as they fill. On its
+    /// own this is a buffer that only ever counts, and is what this transform
+    /// has always done.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub size: Option<usize>,
+
+    /// release everything held this many seconds after the *first* held
+    /// message. The window opens when a message is held rather than when the
+    /// last batch went out, so this is a bound on how long a message waits and
+    /// not a cadence — an idle buffer holds nothing and no clock is running.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub seconds: Option<usize>,
+
+    /// release everything held when a state bucket says so. This is the
+    /// trigger a *different* pipeline can pull: buckets are global, so one
+    /// pipeline can mark a run complete and this one hands on what it gathered
+    /// while the run was going.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub until: Option<BufferGateConfig>,
+
+    /// never hold more than this many messages: reaching it releases them all,
+    /// whatever the triggers say, and says so in the log once. Required unless
+    /// `size` is set, because `size` is its own bound — a buffer waiting on a
+    /// condition that never comes true is otherwise a memory leak that grows
+    /// at the rate of the stream.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_messages: Option<usize>,
 }
 
+/// A condition on a state bucket, as a release trigger for the `buffer`
+/// transform.
+///
+/// The conditions are tested against the bucket entry rendered as an object —
+/// the names `remember` wrote under are its fields — so `field` is a dotted
+/// path exactly as it is everywhere else, and several conditions mean *all of
+/// them*, exactly as they do on `remember`'s `when`.
+///
+/// Note what this is not: it is a gate on the whole buffer, not a test applied
+/// to each held message. When it opens, everything held is handed on.
+#[derive(Clone, Debug, Deserialize, Serialize, JsonSchema, PartialEq)]
+#[schemars(title = "buffer gate")]
+pub struct BufferGateConfig {
+    /// which bucket to watch. Defaults to the one this pipeline's `state`
+    /// names; a pipeline with no `state` of its own has to name it here.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bucket: Option<String>,
+
+    /// which key in that bucket to read. A literal key, not a field path —
+    /// this is one gate for the whole buffer, so there is no message to take a
+    /// key from. Leave it out for the bucket-wide value, which is what
+    /// `remember` writes when its pipeline's `state` has no `key`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub key: Option<String>,
+
+    /// what has to be true of that key for the buffer to be released. All of
+    /// them, and at least one — a gate with no conditions would be a buffer
+    /// that releases on every write to the bucket.
+    pub conditions: Vec<Condition>,
+}
+
+/// How a number is compared to the one in the config.
 #[derive(Clone, Copy, Debug, Deserialize, Serialize, JsonSchema, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
 pub enum NumericFilterOperatorKind {
     GreaterThan,
     LessThan,
     EqualTo,
 }
 
+/// How a string is compared to the one in the config.
 #[derive(Clone, Copy, Debug, Deserialize, Serialize, JsonSchema, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
 pub enum StringFilterOperatorKind {
     EqualTo,
     Contains,

@@ -136,7 +136,7 @@ pipelines:
   - type: filter
     Numeric:
       field: value
-      operator: GreaterThan
+      operator: greater_than
       value: 8.0
   - type: map
     mappings:
@@ -220,7 +220,7 @@ pipelines:
     when:
     - type: numeric
       field: value
-      operator: GreaterThan
+      operator: greater_than
       value: 8.0
     remember:
     - field: value
@@ -351,7 +351,7 @@ pipelines:
   - type: filter
     Numeric:
       field: value
-      operator: GreaterThan
+      operator: greater_than
       value: 90.0
   outputs:
   - type: postgres
@@ -571,7 +571,7 @@ pipelines:
   - type: filter
     Numeric:
       field: latency_ms
-      operator: GreaterThan
+      operator: greater_than
       value: 400.0
   outputs:
   - type: kafka
@@ -586,7 +586,7 @@ pipelines:
   - type: filter
     String:
       field: ts
-      operator: Contains
+      operator: contains
       value: 'T08:'
   outputs:
   - type: stdout

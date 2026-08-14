@@ -1071,7 +1071,7 @@ mod tests {
         );
         assert_eq!(
             numeric.fields[1].type_name,
-            "GreaterThan | LessThan | EqualTo"
+            "greater_than | less_than | equal_to"
         );
         assert_eq!(numeric.fields[2].type_name, "number");
     }

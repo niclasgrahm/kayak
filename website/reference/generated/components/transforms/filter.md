@@ -9,7 +9,7 @@ Drops messages that don't match a condition, and drops the whole batch if none o
 | field | type | | description |
 | --- | --- | --- | --- |
 | `field` | `string` | <Badge type="warning" text="required" /> | the field to filter on |
-| `operator` | `GreaterThan` \| `LessThan` \| `EqualTo` | <Badge type="warning" text="required" /> |  |
+| `operator` | `greater_than` \| `less_than` \| `equal_to` | <Badge type="warning" text="required" /> | How a number is compared to the one in the config. |
 | `value` | `number` | <Badge type="warning" text="required" /> |  |
 
 **`{"type": "filter", "String": { … }}`**
@@ -17,5 +17,5 @@ Drops messages that don't match a condition, and drops the whole batch if none o
 | field | type | | description |
 | --- | --- | --- | --- |
 | `field` | `string` | <Badge type="warning" text="required" /> |  |
-| `operator` | `EqualTo` \| `Contains` | <Badge type="warning" text="required" /> |  |
+| `operator` | `equal_to` \| `contains` | <Badge type="warning" text="required" /> | How a string is compared to the one in the config. |
 | `value` | `string` | <Badge type="warning" text="required" /> |  |
