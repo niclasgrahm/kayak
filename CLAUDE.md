@@ -23,7 +23,7 @@ cargo run -- --config example_config/config.json --secrets example_config/secret
                                     # `just dev` is the one that works. --connections <path> is optional:
                                     # without it the file is derived from the config's name.
 
-docker compose up                   # NATS :4222 + publisher on test.subject, kafka :9092 + publisher on test.events, postgres :5432, rustfs (s3) :9000 with the `events` bucket
+docker compose up                   # NATS :4222 + publisher on test.subject, kafka :9092 + publisher on test.events, mqtt :1883 + publisher on test.mqtt, redis :6379 + publisher on test.redis, opc ua (opc-plc) :50000, postgres :5432, clickhouse :8123, rustfs (s3) :9000 with the `events` bucket
 just test-http                      # hurl --test hurl/tests/*.hurl (needs the server running)
 just start-baseline                 # hurl hurl/create_baseline.hurl — creates a sample pipeline
 ```
@@ -123,6 +123,70 @@ per-pipeline. There is no rate limiting and no `WWW-Authenticate` header — the
 latter for the reason `auth::refuse` gives. HMAC over the body is the sketched
 third variant and is in `docs/roadmap.md`; it needs the raw body, which the
 handler hands straight to the JSON extractor.
+
+### The opcua input
+
+The industrial one, and the first input whose messages are *assembled* rather
+than parsed: an OPC UA server publishes a value, not a document, so
+`src/inputs/opcua.rs` builds the JSON itself. Subscription only — a monitored
+item per node, one message per value change. Polling is the other half of the
+component and is deliberately not built (`docs/roadmap.md`).
+
+Four decisions are load-bearing:
+
+- **The tag is part of the message, not of the envelope.** Every other input
+  puts what it knows behind the opt-in envelope because the message means
+  something without it; a reading does not — `21.5` with no node and no name is
+  not data. So `node`, `name`, `value`, `status`, `source_timestamp` and
+  `server_timestamp` are always the message, and `metadata.rs` declares only
+  `connection` for this kind. That is also what makes everything downstream
+  ordinary: per-tag aggregation is `group_by: ["name"]` and needs nothing new.
+- **`status` is always present and an absent one reads as `Good`.** A failed
+  instrument does not go quiet — it reports `BadDeviceFailure` with no value
+  once and then nothing — so those are passed on with `value: null` rather than
+  dropped, and a `filter` decides. The encoding leaves a `Good` status *off the
+  wire*, which is why `status_name(None)` is `Good` and not "unknown"; get that
+  backwards and every `status == "Good"` filter drops the whole stream.
+- **The library owns reconnects, this module owns outages.** The client is built
+  with `session_retry_limit(-1)` and `recreate_subscriptions(true)`, so a blip
+  is healed underneath with the monitored items put back — much better than
+  tearing down and browsing again. What is left here is what cannot be healed:
+  a connect that never completes (hence `CONNECT_TIMEOUT`, because
+  `wait_for_connection` never returns while the event loop is retrying) and an
+  event loop that *ends*, which is watched for in `next`'s `select!` because a
+  dead session neither publishes nor closes the queue.
+- **The queue between the callback and the run loop is bounded and overflow is
+  counted.** `DataChangeCallback` is synchronous — it runs inside the client's
+  publish handling — so it cannot wait for a slow pipeline, and there is nothing
+  to push back on in any case: the server publishes regardless. So `try_send`,
+  a counter, and one warning per run of drops.
+
+Two smaller things found the hard way. The endpoint is dialled **directly**
+(`connect_to_endpoint_directly`, no `GetEndpoints` first): a server behind
+docker or NAT advertises the hostname it knows itself by, which is regularly not
+one the client can resolve — the compose simulator does exactly this. And the
+client's default message limits (5 chunks, ~320 kB) are too small for a browse
+of any real address space; the first one attempted came back
+`BadResponseTooLarge`, hence `MAX_MESSAGE_BYTES`/`MAX_CHUNK_COUNT`.
+
+`json_of` is the pure half and is where the value types are decided: scalars map
+across, an `f32` goes through its own **shortest decimal form** (`f64::from(0.1f32)`
+is `0.10000000149011612`, which reads as nonsense in a log line), and the
+structured leftovers — extension objects, nested data values, diagnostic info —
+return `None` so the reading is skipped with a warning rather than rendered as a
+`Debug` string.
+
+`browse` is the convenience with a cost that belongs in any review of it: what
+the pipeline reads is then the address space *at the moment it started*.
+`depth` defaults to 3 and 0 is refused — there is no spelling for "all of them",
+because a plant server's whole address space is thousands of nodes.
+
+Security is anonymous or username/password over `SecurityPolicy::None`, and the
+connection says so rather than pretending. The visible consequence is two ERROR
+lines from the client about a missing application instance certificate on every
+connect; `main.rs`'s `QUIET` silences the one module that is *only* about
+reading those files, and the other two are left alone because their modules log
+real failures too.
 
 ### Message metadata (the envelope)
 

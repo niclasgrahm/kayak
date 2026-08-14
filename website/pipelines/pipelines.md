@@ -96,7 +96,7 @@ and **mqtt at qos `at_least_once` or `exactly_once`** (the client is told to
 leave acking to us, and the broker holds the message open for redelivery until
 it hears back). An mqtt subscription at qos `at_most_once` has no redelivery
 at all, so `on_delivery` is refused there too — the same rule mqtt's own qos
-already draws. Every other input — `nats`, `dummy`, `http`, `pipeline` —
+already draws. Every other input — `nats`, `redis`, `opcua`, `dummy`, `http`, `pipeline` —
 refuses to build if you ask it for `on_delivery`, rather than silently
 behaving like `on_receipt`. The full reasoning, including why the scope stops
 at this pipeline's own outputs, lives in `src/inputs/ack.rs`'s module docs.

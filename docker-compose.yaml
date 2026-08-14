@@ -104,6 +104,41 @@ services:
           sleep 1
         done
 
+  # the OPC UA server the `opcua_line1` and `opcua_anomaly_watch` pipelines in
+  # example_config/config.json subscribe to. Microsoft's PLC simulator, which is
+  # what most OPC UA tooling is tried against: it stands up an address space of
+  # nodes that move on their own, so a subscription has something to report.
+  #
+  # `--ut` is what puts an unencrypted `SecurityPolicy::None` endpoint on the
+  # server — kayak's opcua connection has no certificate yet (see
+  # `OpcuaConnection`'s doc comment), so without it there is no endpoint it can
+  # use. `--aa` trusts whatever connects, which is the same bargain: neither is
+  # a setting for a plant.
+  #
+  # `--ph=localhost` is the hostname the server puts in the endpoints it
+  # advertises. kayak dials the url in the connection file directly and never
+  # reads that list, so this changes nothing for the sample — it is here so that
+  # a UA Expert or a browse tool pointed at :50000 from the host gets an
+  # endpoint it can follow, rather than the container's id.
+  #
+  # `--fn`/`--sn` are how many of the fast (1 s) and slow (10 s) nodes exist;
+  # `ns=3;s=FastUInt1` and friends are what the sample subscribes to by name,
+  # and the `Anomaly` folder it browses (spikes, dips and trends) is always
+  # there.
+  opcua:
+    image: mcr.microsoft.com/iotedge/opc-plc:latest
+    ports:
+      - "50000:50000"
+    command:
+      - --pn=50000
+      - --ph=localhost
+      - --autoaccept
+      - --unsecuretransport
+      - --fn=3
+      - --fr=1
+      - --sn=2
+      - --sr=10
+
   # the postgres output in example_config/config.json writes here. the password
   # is what ${POSTGRES_PASSWORD} has to resolve to — see
   # example_config/secrets.example.json

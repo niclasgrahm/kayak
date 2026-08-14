@@ -126,6 +126,13 @@ pub fn for_input(kind: &str) -> Option<Vec<MetaFieldDoc>> {
             MetaFieldDoc::new("connection", "name of the connection it was received on"),
             MetaFieldDoc::new("channel", "the channel this message was published to"),
         ],
+        "opcua" => vec![MetaFieldDoc::new(
+            "connection",
+            "name of the connection the session was opened through. Which \
+             *node* the reading came from is deliberately not here: it is on \
+             the message itself, as `node` and `name`, because a value without \
+             its tag is not a reading and metadata is opt-in.",
+        )],
         "pipeline" => vec![MetaFieldDoc::new(
             "upstream",
             "id of the pipeline this batch came from. Note that metadata \

@@ -14,6 +14,7 @@ pub mod http;
 pub mod kafka;
 pub mod mqtt;
 pub mod nats;
+pub mod opcua;
 pub mod pipeline;
 pub mod redis;
 

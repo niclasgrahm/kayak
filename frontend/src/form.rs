@@ -365,11 +365,18 @@ fn value_at(
     let at = path(prefix, &field.name);
     match &field.field_type {
         FieldType::Object(fields) => {
+            // where this object's own messages start, so they can be taken back
+            // if it turns out nobody touched it — an optional object with a
+            // required field inside (an `opcua` input's `browse`, whose `root`
+            // is not optional once you want one) would otherwise demand to be
+            // filled in on every form it appears on
+            let mine = errors.len();
             let body = object_at(fields, &at, draft, errors);
             // an object nobody touched is an absent field, not an empty one:
             // `"rotate": {}` says "rotate on nothing", which is a different
             // thing to say than saying nothing
             if body.is_empty() && !field.required {
+                errors.truncate(mine);
                 return None;
             }
             Some(Value::Object(body))
@@ -1467,6 +1474,37 @@ mod tests {
         assert!(field_error(&errors, 1, "connection").is_some());
         assert!(field_error(&errors, 1, "subject").is_some());
         assert_eq!(pipeline_errors(&errors).len(), 1, "the id");
+    }
+
+    /// An optional object left alone must not demand the fields it would need
+    /// if it were there. The `opcua` input's `browse` is the shape: the whole
+    /// object is optional, but a browse without a `root` is not a browse — so
+    /// the requirement is real and must only apply once someone has started
+    /// filling it in.
+    #[test]
+    fn an_untouched_optional_object_does_not_ask_for_its_required_fields() {
+        let doc = component(Family::Input, "opcua");
+        let mut draft = filled(
+            Family::Input,
+            "opcua",
+            &[("connection", "plant"), ("nodes", "1"), ("nodes.0.node_id", "ns=2;i=1")],
+        );
+        let json = match component_json(&doc, &draft) {
+            Ok(json) => json,
+            Err(errors) => panic!("a browse nobody asked for should not be required: {errors:?}"),
+        };
+        assert!(json.get("browse").is_none(), "{json}");
+
+        // ...and the moment one field of it is filled in, the rest of that
+        // object is asked for as usual
+        draft.values.insert("browse.depth".to_string(), "2".to_string());
+        let Err(errors) = component_json(&doc, &draft) else {
+            panic!("a half-filled browse should report its missing root");
+        };
+        assert!(
+            errors.iter().any(|(at, _)| at == "browse.root"),
+            "{errors:?}"
+        );
     }
 
     /// Every component the server can build has to be reachable from the

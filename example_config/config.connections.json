@@ -24,6 +24,10 @@
     "type": "nats",
     "urls": "nats://localhost:4222"
   },
+  "local-opcua": {
+    "type": "opcua",
+    "endpoint": "opc.tcp://localhost:50000"
+  },
   "local-s3": {
     "type": "s3",
     "bucket": "events",

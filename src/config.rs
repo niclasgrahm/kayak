@@ -30,6 +30,7 @@ impl BuildInputConfig for InputKind {
             InputKind::Pipeline(c) => c.build(ctx),
             InputKind::Mqtt(c) => c.build(ctx),
             InputKind::Redis(c) => c.build(ctx),
+            InputKind::Opcua(c) => c.build(ctx),
         }
     }
 }

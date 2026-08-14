@@ -18,6 +18,9 @@ local-mqtt:
 local-nats:
   type: nats
   urls: nats://localhost:4222
+local-opcua:
+  type: opcua
+  endpoint: opc.tcp://localhost:50000
 local-postgres:
   type: postgres
   host: localhost

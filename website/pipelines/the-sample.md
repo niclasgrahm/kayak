@@ -31,6 +31,14 @@ the way past the login when the login is not what is being worked on.
 root pipeline with no source, waiting to be posted to (see [posting into a
 pipeline](/io/posting-into-a-pipeline)).
 
+Three of them are the OPC UA sample and want `docker compose up opcua`, which is
+Microsoft's PLC simulator: `opcua_line1` names three of its nodes and gives them
+plant-ish names, `opcua_anomalies` browses a folder instead of naming anything
+and puts a deadband on it, and `opcua_line1_10s_avg` reduces the first per tag
+over ten seconds — which is a plain `group_by` on `name`, because an opcua
+reading carries its tag in the message rather than behind the envelope (see
+[opcua input](/io/opcua-input)).
+
 ## the four broken ones
 
 `broken_cast`, `broken_aggregate`, `broken_webhook` and `broken_intermittently`
