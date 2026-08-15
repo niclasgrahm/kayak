@@ -768,6 +768,31 @@ async fn a_script_that_does_not_compile_is_a_200_saying_where() -> anyhow::Resul
     Ok(())
 }
 
+/// An `import` on a server with no config file has no directory to resolve
+/// against, and the dry run says so the way the transform's build would: a
+/// compile failure whose message names the fix. Still a 200 — the request was
+/// answered, and where the problem is *is* the answer.
+#[tokio::test]
+async fn a_dry_run_of_an_importing_script_without_a_config_says_why() -> anyhow::Result<()> {
+    let (status, body) = send(
+        &app(),
+        dry_run(&json!({
+            "source": inline("import \"scripts/shared/util\" as u; msg"),
+            "messages": []
+        })),
+    )
+    .await?;
+
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["outcome"], "failed");
+    assert_eq!(body["stage"], "compile");
+    assert!(
+        body["message"].as_str().is_some_and(|m| m.contains("--config")),
+        "the message should say how to fix it: {body}"
+    );
+    Ok(())
+}
+
 /// A runtime failure is a different fact from a compile failure — one refuses
 /// to start a pipeline, the other fails batches on a pipeline that started.
 #[tokio::test]

@@ -4,6 +4,11 @@
 // This is the combination that a script is actually for. `map` has no memory,
 // and `remember`/`recall` have memory but nowhere to put the *comparison* —
 // the "is this bigger than last time" is the bit with no declarative spelling.
+//
+// The three-way classification is shared with the extremes script through
+// `scripts/shared/readings.rhai` — see that file for what a module is for.
+
+import "scripts/shared/readings" as readings;
 
 let previous = recall("heartbeat");
 remember("heartbeat", #{ value: msg.value });
@@ -16,13 +21,7 @@ if previous == () {
 } else {
     let delta = msg.value - previous.value;
     msg.delta = delta;
-    msg.direction = if delta > 0.0 {
-        "rising"
-    } else if delta < 0.0 {
-        "falling"
-    } else {
-        "flat"
-    };
+    msg.direction = readings::direction(delta);
 }
 
 msg

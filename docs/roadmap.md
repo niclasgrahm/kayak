@@ -173,6 +173,17 @@ re-derive. See the [docs site](../website/) for how the finished parts behave, a
       is most of why a scripting language was worth having. Whether the walk is
       fast enough is a `just bench` question and has not been measured yet — see
       the entry below.)
+- [x] **module imports for scripts.**
+      (done 2026-08-15: a script may `import` other `.rhai` files under the
+      config file's directory — the same boundary a file source has, applied
+      recursively. Resolution is at compile time via a self-contained AST
+      (`src/transforms/script/modules.rs`), so a broken module refuses the
+      build and the run loop never touches the filesystem; the runtime engine
+      keeps the resolver that resolves nothing, which is what refuses a
+      dynamically assembled path. Only `.rhai` files resolve — the extension is
+      appended, never trusted — cycles are named rather than recursed into, and
+      the module count is capped. See "sharing code between scripts" in the
+      guide.)
 - [ ] measure the `script` transform in `kayak-bench`. Nothing in the scenario
       suite touches it, so the cost of the `Value` ↔ `Dynamic` walk against the
       cost of the interpreter is currently an argument rather than a number.

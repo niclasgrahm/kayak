@@ -22,10 +22,12 @@
 //!   operations, and one operation can allocate: a doubling loop reaches a
 //!   gigabyte in thirty of them. Strings, arrays and maps are bounded
 //!   separately.
-//! - **There is no module resolver.** rhai's default resolver reads `import`ed
-//!   files off disk, which would hand any script the filesystem and go straight
-//!   past the point of `--data-dir`. It is replaced with one that resolves
-//!   nothing.
+//! - **Imports are resolved at compile time, against one directory.** rhai's
+//!   default resolver reads `import`ed files off disk with no boundary, which
+//!   would hand any script the filesystem and go straight past the point of
+//!   `--data-dir`. Instead the compile is self-contained: every import is
+//!   resolved *then*, under the config directory's boundary, and the engine
+//!   the runner keeps resolves nothing — see [`super::modules`].
 //! - **There is no `eval`.** A script that assembles source at runtime is a
 //!   script the operation budget still bounds but that nothing else can be said
 //!   about — not the editor, not a reviewer reading the config.
@@ -42,6 +44,7 @@ use rhai::{AST, Dynamic, Engine, Scope};
 use serde_json::Value;
 
 use super::error::{ScriptError, position_of, strip_position};
+use super::modules;
 use super::value::{from_dynamic, to_dynamic};
 use crate::inputs::MessageBatch;
 
@@ -99,23 +102,51 @@ pub struct ScriptRunner {
 
 impl ScriptRunner {
     /// Compile a script, failing with a position an editor can point at.
+    ///
+    /// `script_dir` is the directory `import`s resolve against — the config
+    /// file's, when the server has one. Resolution happens **here and never at
+    /// run time**: the compile is self-contained, so a broken import is a
+    /// pipeline that refuses to build and the run loop never touches the
+    /// filesystem. See [`super::modules`], where every rule of that is spelled
+    /// out. `None` is a server without a config file; a script with no imports
+    /// compiles there exactly as before, and one *with* them is refused with
+    /// the message saying why.
     pub fn compile(
         code: &str,
         scope: ScriptScope,
         max_operations: Option<u64>,
         bindings: Bindings,
+        script_dir: Option<&std::path::Path>,
     ) -> Result<Self, ScriptError> {
         let emitted = Arc::new(Mutex::new(Vec::new()));
         let warned = Arc::new(Mutex::new(HashSet::new()));
-        let engine = build_engine(
+        let mut engine = build_engine(
             max_operations.unwrap_or(DEFAULT_MAX_OPERATIONS),
             &emitted,
             &warned,
             bindings,
         );
-        let ast = engine.compile(code).map_err(|err| {
-            ScriptError::compile(err.err_type().to_string(), position_of(err.position()))
-        })?;
+        // The bounded resolver is on the engine only for the compile; the
+        // engine the runner keeps resolves nothing, so a dynamic import path —
+        // the one kind the self-contained compile cannot embed — fails at run
+        // time instead of reaching the filesystem.
+        match script_dir {
+            Some(dir) => {
+                engine.set_module_resolver(modules::ProjectResolver::new(dir));
+            }
+            None => {
+                engine.set_module_resolver(modules::NoProjectResolver);
+            }
+        }
+        let ast = engine
+            .compile_into_self_contained(&Scope::new(), code)
+            .map_err(|err| {
+                ScriptError::compile(
+                    strip_position(&err.to_string()).to_string(),
+                    position_of(err.position()),
+                )
+            })?;
+        engine.set_module_resolver(rhai::module_resolvers::DummyModuleResolver::new());
         Ok(Self {
             engine,
             ast,
@@ -281,9 +312,14 @@ fn build_engine(
     engine.set_max_array_size(MAX_ARRAY_SIZE);
     engine.set_max_map_size(MAX_MAP_SIZE);
     engine.set_max_expr_depths(MAX_EXPR_DEPTH, MAX_EXPR_DEPTH);
-    engine.set_max_modules(0);
-    // rhai's default resolver reads `import`ed files off the filesystem. See
-    // the module docs — this is the line between a sandbox and a shell.
+    // Modules exist at run time only as the evaluated modules a self-contained
+    // compile embedded, so this cap bounds how many one run may bring into
+    // scope; the compile-time cap on how many are *read* is `modules`'s.
+    engine.set_max_modules(modules::MAX_MODULES);
+    // rhai's default resolver reads `import`ed files off the filesystem. The
+    // engine keeps a resolver that resolves nothing; the one bounded to the
+    // config's directory is installed around the compile and taken off again —
+    // see `modules`. This line is still the one between a sandbox and a shell.
     engine.set_module_resolver(rhai::module_resolvers::DummyModuleResolver::new());
     engine.disable_symbol("eval");
 
@@ -419,7 +455,7 @@ mod tests {
         max_operations: Option<u64>,
         bindings: Bindings,
     ) -> Result<Vec<Vec<Value>>, ScriptError> {
-        let mut runner = ScriptRunner::compile(code, scope, max_operations, bindings)?;
+        let mut runner = ScriptRunner::compile(code, scope, max_operations, bindings, None)?;
         let batch: Vec<Arc<Value>> = batch.iter().cloned().map(Arc::new).collect();
         let out = runner.run(&batch)?;
         Ok(out
@@ -607,15 +643,191 @@ mod tests {
         );
     }
 
-    /// rhai's default module resolver reads `import`ed files off disk. That
-    /// would hand every script the filesystem and walk straight past the point
-    /// of `--data-dir`.
+    /// Without a config file there is no directory to bound imports, so they
+    /// are refused whole — at compile time, with the message saying what to do
+    /// about it, not at the first batch.
     #[test]
-    fn a_script_cannot_import_a_module() {
+    fn a_script_cannot_import_without_a_config_directory() {
+        let Err(err) = one("import \"scripts/util\" as u; msg", json!({})) else {
+            panic!("a script must not be able to import without a directory to resolve against");
+        };
+        assert_eq!(err.kind, super::super::error::ScriptErrorKind::Compile);
         assert!(
-            one("import \"/etc/passwd\" as p; msg", json!({})).is_err(),
-            "a script must not be able to import anything"
+            err.message.contains("--config"),
+            "the error should say how to fix it: {err}"
         );
+    }
+
+    // ── imports ─────────────────────────────────────────────────────────────
+    //
+    // The boundary itself — `..`, absolute paths, symlinks — is `source`'s and
+    // is tested there; what these pin is the resolver's own rules: where
+    // resolution happens, what a module is, and the two bounds `modules` adds.
+
+    /// A directory shaped like a project, and a compile bounded to it.
+    fn compile_in(dir: &std::path::Path, code: &str) -> Result<ScriptRunner, ScriptError> {
+        ScriptRunner::compile(code, ScriptScope::Message, None, Bindings::default(), Some(dir))
+    }
+
+    fn run_in(dir: &std::path::Path, code: &str, message: Value) -> Result<Vec<Vec<Value>>, ScriptError> {
+        let mut runner = compile_in(dir, code)?;
+        let out = runner.run(&[Arc::new(message)])?;
+        Ok(out
+            .into_iter()
+            .map(|b| b.iter().map(|m| (**m).clone()).collect())
+            .collect())
+    }
+
+    /// The feature, whole: a script calls a function out of a module that
+    /// lives under the config's directory — and the `.rhai` extension is
+    /// appended rather than written, which is rhai's own import convention.
+    #[test]
+    fn a_script_calls_a_function_from_an_imported_module() -> anyhow::Result<()> {
+        let dir = tempfile::tempdir()?;
+        std::fs::create_dir_all(dir.path().join("scripts/shared"))?;
+        std::fs::write(
+            dir.path().join("scripts/shared/units.rhai"),
+            "fn to_celsius(f) { (f - 32.0) * 5.0 / 9.0 }",
+        )?;
+        let out = run_in(
+            dir.path(),
+            "import \"scripts/shared/units\" as units; \
+             msg.celsius = units::to_celsius(msg.fahrenheit); msg",
+            json!({"fahrenheit": 212.0}),
+        )?;
+        assert_eq!(out, vec![vec![json!({"fahrenheit": 212.0, "celsius": 100.0})]]);
+        Ok(())
+    }
+
+    /// A module may import in turn; the tree resolves at compile time, so the
+    /// whole of it is part of "does this pipeline build".
+    #[test]
+    fn a_module_may_import_another_module() -> anyhow::Result<()> {
+        let dir = tempfile::tempdir()?;
+        std::fs::create_dir_all(dir.path().join("scripts"))?;
+        std::fs::write(
+            dir.path().join("scripts/outer.rhai"),
+            "import \"scripts/inner\" as inner; fn double_then_inc(x) { inner::inc(x * 2) }",
+        )?;
+        std::fs::write(dir.path().join("scripts/inner.rhai"), "fn inc(x) { x + 1 }")?;
+        let out = run_in(
+            dir.path(),
+            "import \"scripts/outer\" as outer; msg.n = outer::double_then_inc(msg.n); msg",
+            json!({"n": 20}),
+        )?;
+        assert_eq!(out, vec![vec![json!({"n": 41})]]);
+        Ok(())
+    }
+
+    /// The boundary, exercised through an import: the same refusals a
+    /// file-sourced script gets, at compile time rather than at the first
+    /// batch.
+    #[test]
+    fn an_import_cannot_climb_out_of_the_directory() -> anyhow::Result<()> {
+        let dir = tempfile::tempdir()?;
+        for path in ["../outside", "/etc/passwd", "scripts/../../outside"] {
+            let Err(err) = compile_in(dir.path(), &format!("import \"{path}\" as p; msg")) else {
+                panic!("'{path}' should have been refused");
+            };
+            assert_eq!(
+                err.kind,
+                super::super::error::ScriptErrorKind::Compile,
+                "'{path}' should fail the compile, not a run"
+            );
+        }
+        Ok(())
+    }
+
+    /// A missing module is a script that does not build — and the error names
+    /// the module, because "the script did not compile" alone would send
+    /// someone to the wrong file.
+    #[test]
+    fn a_missing_module_fails_the_compile_naming_itself() -> anyhow::Result<()> {
+        let dir = tempfile::tempdir()?;
+        let Err(err) = compile_in(dir.path(), "import \"scripts/absent\" as a; msg") else {
+            panic!("an import that is not there cannot compile");
+        };
+        assert!(
+            err.message.contains("scripts/absent"),
+            "the error should name the module: {err}"
+        );
+        Ok(())
+    }
+
+    /// Only `.rhai` files resolve — the extension is appended, never trusted —
+    /// so an import can never open anything else that lives beside the config.
+    /// The file that matters is `secrets.json`, which commonly does.
+    #[test]
+    fn an_import_cannot_read_a_file_that_is_not_a_script() -> anyhow::Result<()> {
+        let dir = tempfile::tempdir()?;
+        std::fs::write(dir.path().join("secrets.json"), "{\"S3_KEY\": \"hunter2\"}")?;
+        let Err(err) = compile_in(dir.path(), "import \"secrets.json\" as s; msg") else {
+            panic!("a non-.rhai file must be unreachable through an import");
+        };
+        assert!(
+            !err.message.contains("hunter2"),
+            "the error must not quote the file it refused to import: {err}"
+        );
+        Ok(())
+    }
+
+    /// A cycle is said to be one rather than recursed into.
+    #[test]
+    fn circular_imports_are_refused() -> anyhow::Result<()> {
+        let dir = tempfile::tempdir()?;
+        std::fs::write(dir.path().join("a.rhai"), "import \"b\" as b; fn fa() { 1 }")?;
+        std::fs::write(dir.path().join("b.rhai"), "import \"a\" as a; fn fb() { 2 }")?;
+        let Err(err) = compile_in(dir.path(), "import \"a\" as a; msg") else {
+            panic!("a cycle of imports cannot resolve");
+        };
+        assert!(
+            err.message.contains("circular"),
+            "the error should say what the shape of the problem is: {err}"
+        );
+        Ok(())
+    }
+
+    /// The one import a self-contained compile cannot embed: a path assembled
+    /// at runtime. The engine the runner keeps resolves nothing, so it fails
+    /// when it runs — and reaches no file.
+    #[test]
+    fn a_dynamic_import_path_never_reaches_the_filesystem() -> anyhow::Result<()> {
+        let dir = tempfile::tempdir()?;
+        std::fs::create_dir_all(dir.path().join("scripts"))?;
+        std::fs::write(dir.path().join("scripts/util.rhai"), "fn inc(x) { x + 1 }")?;
+        let mut runner = compile_in(
+            dir.path(),
+            "let p = \"scripts/util\"; import p as u; msg.n = u::inc(msg.n); msg",
+        )?;
+        let Err(err) = runner.run(&[Arc::new(json!({"n": 1}))]) else {
+            panic!("a dynamic import path must not resolve, even to a file that exists");
+        };
+        assert_eq!(err.kind, super::super::error::ScriptErrorKind::Runtime);
+        Ok(())
+    }
+
+    /// A module's top level runs once, when the script is compiled — what a
+    /// script reaches through an import is functions and exported constants,
+    /// not a body re-run per message.
+    #[test]
+    fn a_module_top_level_runs_at_compile_time_not_per_message() -> anyhow::Result<()> {
+        let dir = tempfile::tempdir()?;
+        std::fs::write(
+            dir.path().join("counter.rhai"),
+            "export const STAMP = 7; fn stamp() { STAMP }",
+        )?;
+        let mut runner = compile_in(
+            dir.path(),
+            "import \"counter\" as c; msg.stamp = c::STAMP; msg",
+        )?;
+        let out = runner.run(&[Arc::new(json!({"n": 1})), Arc::new(json!({"n": 2}))])?;
+        assert_eq!(out.len(), 1, "message scope collects one batch");
+        assert_eq!(
+            *out[0][0],
+            json!({"n": 1, "stamp": 7}),
+            "the exported constant is what the import exposes"
+        );
+        Ok(())
     }
 
     /// A script that assembles source at runtime is one nothing can be said
@@ -658,6 +870,7 @@ mod tests {
             ScriptScope::Message,
             None,
             Bindings::default(),
+            None,
         ) else {
             panic!("that does not parse");
         };
@@ -837,6 +1050,7 @@ mod tests {
             ScriptScope::Message,
             None,
             Bindings::default(),
+            None,
         )?;
         let batch: Vec<Arc<Value>> = vec![Arc::new(json!({})), Arc::new(json!({}))];
         runner.run(&batch)?;

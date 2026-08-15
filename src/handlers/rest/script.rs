@@ -38,8 +38,9 @@ pub async fn dry_run_script(
     // Reading the script is the one part that *is* a request error: a `file`
     // source naming something unreadable is not a script with a bug in it, it
     // is a request that could not be carried out.
-    let code = source::read(&request.source, state.script_directory().as_deref())
-        .map_err(AppError::bad_request)?;
+    let script_dir = state.script_directory();
+    let code =
+        source::read(&request.source, script_dir.as_deref()).map_err(AppError::bad_request)?;
 
     let buckets = scratch(&request.state);
     let bindings = Bindings {
@@ -49,8 +50,13 @@ pub async fn dry_run_script(
         }),
     };
 
-    let mut runner =
-        match ScriptRunner::compile(&code, request.scope, request.max_operations, bindings) {
+    let mut runner = match ScriptRunner::compile(
+        &code,
+        request.scope,
+        request.max_operations,
+        bindings,
+        script_dir.as_deref(),
+    ) {
             Ok(runner) => runner,
             Err(err) => return Ok(Json(failed(&err))),
         };

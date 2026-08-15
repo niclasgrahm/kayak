@@ -35,7 +35,8 @@ pub struct ScriptTransform {
 
 impl BuildTransform for ScriptTransformConfig {
     fn build(self, ctx: &mut BuildCtx) -> Result<Box<dyn Transform>> {
-        let code = source::read(&self.source, ctx.script_dir.as_deref().map(std::path::PathBuf::as_path))
+        let script_dir = ctx.script_dir.as_deref().map(std::path::PathBuf::as_path);
+        let code = source::read(&self.source, script_dir)
             .context("the 'script' transform could not read its script")?;
 
         // The bucket the pipeline declared, if it declared one. A pipeline
@@ -51,8 +52,9 @@ impl BuildTransform for ScriptTransformConfig {
                 })
         });
 
-        let runner = ScriptRunner::compile(&code, self.scope, self.max_operations, Bindings { state })
-            .map_err(|err| anyhow::anyhow!("the 'script' transform did not compile: {err}"))?;
+        let runner =
+            ScriptRunner::compile(&code, self.scope, self.max_operations, Bindings { state }, script_dir)
+                .map_err(|err| anyhow::anyhow!("the 'script' transform did not compile: {err}"))?;
 
         Ok(Box::new(ScriptTransform { runner }))
     }
