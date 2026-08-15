@@ -12,6 +12,7 @@ use crate::state::PipelineId;
 use crate::state::UiEvent;
 use crate::transforms::Transform;
 use anyhow::Context;
+use futures_util::stream::{FuturesUnordered, StreamExt};
 use anyhow::Result;
 use kayak_core::config::Config;
 use kayak_core::Stage;
@@ -61,6 +62,47 @@ async fn next_input_message(input: &mut Box<dyn InputSource>) -> Result<Delivery
     input.next().await
 }
 
+/// Resolves when some transform in the chain wants to hand something on
+/// without a batch arriving, and says which one.
+///
+/// This is the run loop's second source of work and the only tick a transform
+/// gets — see [`Transform::wakeup`] for why one is needed at all. A free
+/// function taking the slice for the borrow checker's sake, the same reason
+/// [`remember_failure`] is one: it is called in a `select!` beside
+/// `next_input_message(&mut self.input)`, and only disjoint field borrows make
+/// that legal.
+///
+/// The futures are built fresh here and the losers dropped on every pass,
+/// which is why a `wakeup` has to be cancel-safe. Building them costs an
+/// allocation per transform per pass, and that is the price of the feature: it
+/// is paid only by pipelines that have a transform which can wake, because
+/// every other `wakeup` is the default `pending()` and `FuturesUnordered`
+/// polls each exactly once before parking.
+async fn next_wakeup(transforms: &mut [Box<dyn Transform>]) -> usize {
+    let mut waiting: FuturesUnordered<_> = transforms
+        .iter_mut()
+        .enumerate()
+        .map(|(index, transform)| async move {
+            transform.wakeup().await;
+            index
+        })
+        .collect();
+    match waiting.next().await {
+        Some(index) => index,
+        // An empty chain has nothing that could ever ask, and a `select!` arm
+        // that returns immediately would spin the loop.
+        None => std::future::pending().await,
+    }
+}
+
+/// What woke the run loop.
+enum Woken {
+    /// The input produced a batch — the ordinary pass.
+    Delivered(Delivery),
+    /// The transform at this index asked to be looked at.
+    Flush(usize),
+}
+
 /// Record a failure in the history store, as `count` occurrences of it.
 ///
 /// A function rather than five call sites of `record_error` because the
@@ -89,6 +131,43 @@ fn remember_failure(
         count,
         crate::events::now_millis(),
     );
+}
+
+/// Report a transform failure: count it, and — if the throttle allows — log
+/// it, record it and put it on the feed.
+///
+/// A free function for [`remember_failure`]'s reason, one step further: both
+/// call sites hold a borrow of `self.transforms` (one iterating the chain, one
+/// flushing a single element), so a `&mut self` method is not available to
+/// either. Shared rather than duplicated because the two paths must report
+/// identically — a flush failure and an apply failure on the same transform
+/// are the same failure to anyone reading the card.
+fn report_transform_error(
+    shared: &Pipeline,
+    history: &History,
+    events: &broadcast::Sender<UiEvent>,
+    throttle: &mut UiThrottle,
+    index: usize,
+    pass: u64,
+    e: &anyhow::Error,
+) {
+    // Counted before anything decides whether to *say* it: the throttle
+    // governs the feed and the log, never the tally history keeps.
+    shared.counters.add_error();
+    // Logged only when the throttle also lets it through the UI: a transform
+    // failing on every message of a fast pipeline would otherwise write a line
+    // to the log for each one, same reasoning as the output error.
+    if let Some(count) = throttle.report_error(Stage::Transform, Some(index), Instant::now()) {
+        error!("[{}]\t transform error: {:?}", shared.id, e);
+        remember_failure(history, &shared.id, Stage::Transform, Some(index), e, count);
+        publish(events, || {
+            UiEvent::error(shared.id.clone(), Stage::Transform, e)
+                .seq(pass)
+                .component(index)
+        });
+    } else {
+        debug!("[{}]\t transform error (suppressed): {:?}", shared.id, e);
+    }
 }
 
 /// The shortest gap between two reported passes on one pipeline. Ten a second
@@ -374,54 +453,161 @@ impl PipelineRuntime {
     ///
     /// A transform that fails drops *that* batch and the chain carries on with
     /// the rest: one bad message must not stop the pipeline.
+    /// `from` is where in the chain to start, which is 0 for an arriving batch
+    /// and one past the flushing transform for a [`Woken::Flush`] pass — what
+    /// a buffer hands on has already been through everything in front of it.
     async fn apply_transforms(
         &mut self,
         batch: Arc<MessageBatch>,
+        from: usize,
         pass: u64,
         throttle: &mut UiThrottle,
     ) -> Vec<Arc<MessageBatch>> {
         let mut batches = vec![batch];
-        for (index, t) in self.transforms.iter_mut().enumerate() {
+        for (offset, t) in self.transforms[from..].iter_mut().enumerate() {
+            let index = from + offset;
             let mut next = Vec::new();
             for b in batches {
                 match t.apply(b).await {
                     Ok(b) => next.extend(b),
-                    Err(e) => {
-                        // Counted before anything decides whether to *say* it:
-                        // the throttle governs the feed and the log, never the
-                        // tally history keeps.
-                        self.shared.counters.add_error();
-                        // Logged only when the throttle also lets it through
-                        // the UI: a transform failing on every message of a
-                        // fast pipeline would otherwise write a line to the
-                        // log for each one, same reasoning as the output
-                        // error below.
-                        if let Some(count) =
-                            throttle.report_error(Stage::Transform, Some(index), Instant::now())
-                        {
-                            error!("[{}]\t transform error: {:?}", self.shared.id, e);
-                            remember_failure(
-                                &self.history,
-                                &self.shared.id,
-                                Stage::Transform,
-                                Some(index),
-                                &e,
-                                count,
-                            );
-                            publish(&self.events, || {
-                                UiEvent::error(self.shared.id.clone(), Stage::Transform, &e)
-                                    .seq(pass)
-                                    .component(index)
-                            });
-                        } else {
-                            debug!("[{}]\t transform error (suppressed): {:?}", self.shared.id, e);
-                        }
-                    }
+                    Err(e) => report_transform_error(
+                        &self.shared,
+                        &self.history,
+                        &self.events,
+                        throttle,
+                        index,
+                        pass,
+                        &e,
+                    ),
                 }
             }
             batches = next;
         }
         batches
+    }
+
+    /// Take what one transform wants to hand on, and put it through the rest
+    /// of the chain.
+    ///
+    /// The transform decides whether it actually has anything — a wakeup is
+    /// "look at me", not a promise — so an empty answer here is ordinary and
+    /// produces a pass with no output events, which is what a gate that was
+    /// woken by a write that didn't open it looks like.
+    async fn flush_transform(
+        &mut self,
+        index: usize,
+        pass: u64,
+        throttle: &mut UiThrottle,
+    ) -> Vec<Arc<MessageBatch>> {
+        let flushed = match self.transforms[index].flush().await {
+            Ok(batches) => batches,
+            Err(e) => {
+                report_transform_error(
+                    &self.shared,
+                    &self.history,
+                    &self.events,
+                    throttle,
+                    index,
+                    pass,
+                    &e,
+                );
+                return Vec::new();
+            }
+        };
+        let mut out = Vec::new();
+        for batch in flushed {
+            out.extend(
+                self.apply_transforms(batch, index + 1, pass, throttle)
+                    .await,
+            );
+        }
+        out
+    }
+
+    /// Everything a pass does with what came out of the transform chain:
+    /// count it, report it, hand it to every output and every downstream.
+    ///
+    /// Split out of [`PipelineRuntime::run`] because both kinds of pass — a
+    /// batch that arrived and a transform that flushed — end here, and because
+    /// what is left in `run` is then the shape of the loop rather than the
+    /// shape of the loop plus the shape of a delivery.
+    async fn deliver(
+        &mut self,
+        batches: &[Arc<MessageBatch>],
+        pass: u64,
+        reported: bool,
+        watching: bool,
+        throttle: &mut UiThrottle,
+    ) {
+        // What the transforms produced, reported before the outputs are
+        // given it: the log is a record of what passed through this
+        // pipeline, which is true whether or not an output then took it.
+        for b in batches {
+            self.shared.counters.add_outbound(b.len());
+            if reported {
+                let skipped = throttle.take_skipped(Stage::Output);
+                publish(&self.events, || {
+                    UiEvent::batch(self.shared.id.clone(), Stage::Output, b, skipped).seq(pass)
+                });
+            } else if watching {
+                throttle.skip(Stage::Output, b.len());
+            }
+        }
+
+        for b in batches {
+            // every output gets every batch. a failing one shouldn't tear
+            // the pipeline down — its siblings and the downstream pipelines
+            // are still fed, same as we do for transform errors
+            for (index, output) in self.outputs.iter_mut().enumerate() {
+                if let Err(e) = output.emit(b.clone()).await {
+                    // Logged only when the throttle also lets it through
+                    // the UI. An output whose broker is down now fails
+                    // fast on its own backoff gate (see `outputs::*`),
+                    // but that still leaves one failed `emit` per batch —
+                    // without this, a fast pipeline against a downed
+                    // broker writes a log line for every one of them,
+                    // which is the "went crazy" a reconnect storm looks
+                    // like even after the reconnect itself is tamed.
+                    self.shared.counters.add_error();
+                    if let Some(count) =
+                        throttle.report_error(Stage::Output, Some(index), Instant::now())
+                    {
+                        error!("[{}]\t output error: {:?}", self.shared.id, e);
+                        remember_failure(
+                            &self.history,
+                            &self.shared.id,
+                            Stage::Output,
+                            Some(index),
+                            &e,
+                            count,
+                        );
+                        publish(&self.events, || {
+                            UiEvent::error(self.shared.id.clone(), Stage::Output, &e)
+                                .seq(pass)
+                                .component(index)
+                        });
+                    } else {
+                        debug!("[{}]\t output error (suppressed): {:?}", self.shared.id, e);
+                    }
+                }
+            }
+            let senders = self.shared.downstream_senders();
+            for tx in &senders {
+                if let Err(e) = tx.send(Arc::clone(b)).await {
+                    debug!(
+                        "[{}]\t dropping batch for a downstream that went away: {}",
+                        self.shared.id, e
+                    );
+                }
+            }
+        }
+        // Every output and every downstream handoff for this pass has now
+        // been *attempted* — not necessarily succeeded, and that's the
+        // deliberate line: a failing output does not withhold the
+        // acknowledgement, because "delivered" here means "this pipeline
+        // finished handling the batch", not "every sink has it". See the
+        // `ack` module docs for the reasoning and the current scope.
+        //
     }
 
     /// Run until the input errors or the pipeline is cancelled.
@@ -434,7 +620,7 @@ impl PipelineRuntime {
         let mut pass = 0u64;
         let mut throttle = UiThrottle::new(self.pass_interval);
         loop {
-            let delivery = match select! {
+            let woken = match select! {
                 // `biased` so cancellation always wins a tie. Tearing the graph
                 // down cancels every pipeline and *then* drops the upstreams,
                 // so a downstream is woken with both its cancellation and an
@@ -442,9 +628,18 @@ impl PipelineRuntime {
                 // report our own shutdown as a pipeline failure half the time.
                 biased;
                 () = self.shared.cancellation_token.cancelled() => break,
-                msg = next_input_message(&mut self.input) => msg,
+                msg = next_input_message(&mut self.input) => msg.map(Woken::Delivered),
+                // The other source of work, and the only one that isn't a
+                // message: a transform that holds messages back — a `buffer`
+                // waiting on a window or on a state bucket — asking to be
+                // looked at. Unbiased against the input on purpose: a pipeline
+                // whose input never goes quiet must still get its windows
+                // closed, and `FuturesUnordered` parks immediately when every
+                // transform in the chain is one that can never wake, which is
+                // the overwhelmingly common case.
+                index = next_wakeup(&mut self.transforms) => Ok(Woken::Flush(index)),
             } {
-                Ok(msg) => msg,
+                Ok(woken) => woken,
                 Err(e) => {
                     // Same reasoning one step later: the error may have been
                     // produced before we were cancelled but read after. An
@@ -471,13 +666,6 @@ impl PipelineRuntime {
                     break;
                 }
             };
-            pass += 1;
-            // Counted before the `watching` gate below and deliberately outside
-            // it: the feed is a sample of what is happening now and costs
-            // nothing when nobody is attached, while this is the record of what
-            // happened, which is worth exactly as much at 3am. Three relaxed
-            // atomic adds a pass is what that costs.
-            self.shared.counters.add_inbound(delivery.len());
             // Nobody watching means no clock read and no accounting: reading
             // the clock once per pass is small but it is not free, and a
             // headless run measured about 12% slower when it did it anyway.
@@ -493,105 +681,95 @@ impl PipelineRuntime {
             // attaching to a pipeline that has been running for a week doesn't
             // get a week's worth of skipped messages on its first event.
             let watching = self.watchers.any();
-            // Decided once, here, and used for every batch event this pass
-            // produces: reporting the input of a pass whose output was dropped
-            // would draw a pass that never finished. See `UiThrottle`.
-            let reported = watching && throttle.report_pass();
-            // The batch as it arrived, before any transform has touched it —
-            // one half of what a card's log shows, the other being what leaves
-            // at the outputs below.
-            if reported {
-                let skipped = throttle.take_skipped(Stage::Input);
-                publish(&self.events, || {
-                    UiEvent::batch(self.shared.id.clone(), Stage::Input, &delivery, skipped)
-                        .seq(pass)
-                });
-            } else if watching {
-                throttle.skip(Stage::Input, delivery.len());
-            }
-            // Taken apart here rather than carried whole: the transforms and
-            // outputs below only ever want the messages, and holding onto
-            // `ack` by name is what lets it be acknowledged once, after all of
-            // them, regardless of how this pass turns out — see the `ack`
-            // module docs for what "delivered" means and its current scope.
-            let Delivery { batch, ack } = delivery;
-            let batches = self.apply_transforms(batch, pass, &mut throttle).await;
 
-            // What the transforms produced, reported before the outputs are
-            // given it: the log is a record of what passed through this
-            // pipeline, which is true whether or not an output then took it.
-            for b in &batches {
-                self.shared.counters.add_outbound(b.len());
-                if reported {
-                    let skipped = throttle.take_skipped(Stage::Output);
-                    publish(&self.events, || {
-                        UiEvent::batch(self.shared.id.clone(), Stage::Output, b, skipped).seq(pass)
-                    });
-                } else if watching {
-                    throttle.skip(Stage::Output, b.len());
-                }
-            }
-
-            for b in &batches {
-                // every output gets every batch. a failing one shouldn't tear
-                // the pipeline down — its siblings and the downstream pipelines
-                // are still fed, same as we do for transform errors
-                for (index, output) in self.outputs.iter_mut().enumerate() {
-                    if let Err(e) = output.emit(b.clone()).await {
-                        // Logged only when the throttle also lets it through
-                        // the UI. An output whose broker is down now fails
-                        // fast on its own backoff gate (see `outputs::*`),
-                        // but that still leaves one failed `emit` per batch —
-                        // without this, a fast pipeline against a downed
-                        // broker writes a log line for every one of them,
-                        // which is the "went crazy" a reconnect storm looks
-                        // like even after the reconnect itself is tamed.
-                        self.shared.counters.add_error();
-                        if let Some(count) =
-                            throttle.report_error(Stage::Output, Some(index), Instant::now())
-                        {
-                            error!("[{}]\t output error: {:?}", self.shared.id, e);
-                            remember_failure(
-                                &self.history,
-                                &self.shared.id,
-                                Stage::Output,
-                                Some(index),
-                                &e,
-                                count,
-                            );
-                            publish(&self.events, || {
-                                UiEvent::error(self.shared.id.clone(), Stage::Output, &e)
-                                    .seq(pass)
-                                    .component(index)
-                            });
-                        } else {
-                            debug!("[{}]\t output error (suppressed): {:?}", self.shared.id, e);
-                        }
-                    }
-                }
-                let senders = self.shared.downstream_senders();
-                for tx in &senders {
-                    if let Err(e) = tx.send(Arc::clone(b)).await {
-                        debug!(
-                            "[{}]\t dropping batch for a downstream that went away: {}",
-                            self.shared.id, e
-                        );
-                    }
-                }
-            }
-            // Every output and every downstream handoff for this pass has now
-            // been *attempted* — not necessarily succeeded, and that's the
-            // deliberate line: a failing output does not withhold the
-            // acknowledgement, because "delivered" here means "this pipeline
-            // finished handling the batch", not "every sink has it". See the
-            // `ack` module docs for the reasoning and the current scope.
+            // A flush pass has no inbound half: nothing arrived, a transform
+            // simply decided it had waited long enough. So it counts no
+            // inbound messages, publishes no input event and has nothing to
+            // acknowledge — the messages it hands on were counted and
+            // acknowledged on the passes they arrived.
             //
-            // Firing unconditionally (a filtered-out message produces zero
-            // `batches`, so the loop above never ran) is deliberate too: a
-            // message a `filter` or a reducer's `group_by` legitimately
-            // dropped was still correctly processed, and there is nothing left
-            // to wait for.
-            ack.ack();
+            // It is also the one kind of pass that can turn out not to be one.
+            // A wakeup is "look at me": a `buffer` gated on a bucket is woken
+            // by every write to it and opens on almost none of them, so the
+            // empty answer is the common one and it is dealt with *before* the
+            // throttle is asked anything. Spending the pipeline's pass budget
+            // on a pass with nothing to show would drop a real one in its
+            // place, and `pass` itself is left alone so the sequence numbers
+            // keep meaning what the UI draws them as.
+            let (batches, ack, reported) = match woken {
+                Woken::Flush(index) => {
+                    let batches = self.flush_transform(index, pass + 1, &mut throttle).await;
+                    if batches.is_empty() {
+                        continue;
+                    }
+                    pass += 1;
+                    (batches, None, watching && throttle.report_pass())
+                }
+                Woken::Delivered(delivery) => {
+                    pass += 1;
+                    // Decided once, here, and used for every batch event this
+                    // pass produces: reporting the input of a pass whose output
+                    // was dropped would draw a pass that never finished. See
+                    // `UiThrottle`.
+                    let reported = watching && throttle.report_pass();
+                    // Counted before the `watching` gate above and deliberately
+                    // outside it: the feed is a sample of what is happening now
+                    // and costs nothing when nobody is attached, while this is
+                    // the record of what happened, which is worth exactly as
+                    // much at 3am. Three relaxed atomic adds a pass is what
+                    // that costs.
+                    self.shared.counters.add_inbound(delivery.len());
+                    // The batch as it arrived, before any transform has touched
+                    // it — one half of what a card's log shows, the other being
+                    // what leaves at the outputs below.
+                    if reported {
+                        let skipped = throttle.take_skipped(Stage::Input);
+                        publish(&self.events, || {
+                            UiEvent::batch(
+                                self.shared.id.clone(),
+                                Stage::Input,
+                                &delivery,
+                                skipped,
+                            )
+                            .seq(pass)
+                        });
+                    } else if watching {
+                        throttle.skip(Stage::Input, delivery.len());
+                    }
+                    // Taken apart here rather than carried whole: the transforms
+                    // and outputs below only ever want the messages, and holding
+                    // onto `ack` by name is what lets it be acknowledged once,
+                    // after all of them, regardless of how this pass turns out —
+                    // see the `ack` module docs for what "delivered" means and
+                    // its current scope.
+                    let Delivery { batch, ack } = delivery;
+                    (
+                        self.apply_transforms(batch, 0, pass, &mut throttle).await,
+                        Some(ack),
+                        reported,
+                    )
+                }
+            };
+
+            self.deliver(&batches, pass, reported, watching, &mut throttle)
+                .await;
+
+            // Firing whatever the pass produced (a filtered-out message
+            // produces zero `batches`, so the loop above never ran) is
+            // deliberate too: a message a `filter` or a reducer's `group_by`
+            // legitimately dropped was still correctly processed, and there is
+            // nothing left to wait for.
+            //
+            // A flush pass has no `ack` at all — nothing arrived on it. Note
+            // what that means for `on_delivery` in front of a `buffer`: a held
+            // message is acknowledged on the pass it *arrived*, not on the one
+            // that hands it on, so a crash while a buffer is holding loses it.
+            // That is the buffer's existing behaviour rather than something
+            // the wait triggers introduced, and it is on the roadmap with the
+            // rest of the ack story.
+            if let Some(ack) = ack {
+                ack.ack();
+            }
         }
         self.finish_outputs().await;
         Ok(())

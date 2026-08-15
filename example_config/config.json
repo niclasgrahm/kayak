@@ -539,7 +539,7 @@
           "type": "filter",
           "Numeric": {
             "field": "value",
-            "operator": "GreaterThan",
+            "operator": "greater_than",
             "value": 90.0
           }
         }
@@ -869,7 +869,7 @@
           "type": "filter",
           "Numeric": {
             "field": "latency_ms",
-            "operator": "GreaterThan",
+            "operator": "greater_than",
             "value": 400.0
           }
         }
@@ -898,7 +898,7 @@
           "type": "filter",
           "String": {
             "field": "ts",
-            "operator": "Contains",
+            "operator": "contains",
             "value": "T08:"
           }
         }
@@ -952,7 +952,7 @@
             {
               "type": "numeric",
               "field": "value",
-              "operator": "GreaterThan",
+              "operator": "greater_than",
               "value": 8.0
             }
           ],
@@ -1098,7 +1098,7 @@
           "type": "filter",
           "Numeric": {
             "field": "value",
-            "operator": "GreaterThan",
+            "operator": "greater_than",
             "value": 8.0
           }
         },

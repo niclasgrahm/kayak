@@ -44,7 +44,7 @@ struct Binding {
 
 /// The key a bucket-wide binding writes under. A name no field path can
 /// produce, so it cannot collide with a real key.
-const WHOLE_BUCKET_KEY: &str = "";
+pub(crate) const WHOLE_BUCKET_KEY: &str = "";
 
 impl Binding {
     /// From the pipeline's `state` block, failing if it hasn't got one.
@@ -89,7 +89,7 @@ impl Binding {
 
 /// Whether a message passes every condition. No conditions is "yes" — a
 /// `remember` with no `when` remembers from everything.
-fn matches(conditions: &[Condition], message: &Value) -> bool {
+pub(crate) fn matches(conditions: &[Condition], message: &Value) -> bool {
     conditions.iter().all(|condition| match condition {
         Condition::Numeric {
             field,

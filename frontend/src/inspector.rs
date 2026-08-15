@@ -354,7 +354,12 @@ mod tests {
         let sections = transform_sections(&config(
             dummy_input(),
             vec![
-                TransformKind::Buffer(BufferTransformConfig { size: 100 }),
+                TransformKind::Buffer(BufferTransformConfig {
+                    size: Some(100),
+                    seconds: None,
+                    until: None,
+                    max_messages: None,
+                }),
                 TransformKind::Splitter(SplitterTransformConfig { out_size: 3 }),
                 TransformKind::Reducer(ReduceTransformConfig {
                     aggregations: vec![Aggregation {

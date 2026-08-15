@@ -65,7 +65,7 @@ matter, write what's left to a file.
       "transforms": [
         {
           "type": "filter",
-          "Numeric": { "field": "value", "operator": "GreaterThan", "value": 30.0 }
+          "Numeric": { "field": "value", "operator": "greater_than", "value": 30.0 }
         }
       ],
       "outputs": [

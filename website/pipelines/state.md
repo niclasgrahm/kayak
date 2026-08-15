@@ -25,7 +25,7 @@ pipelines:
         when:
           - type: string
             field: _meta.signal
-            operator: EqualTo
+            operator: equal_to
             value: unit_id
         remember:
           - { field: value, as: unit_id }
@@ -92,6 +92,62 @@ It **does** survive a revert, which is the case that actually bites: reloading
 the config rebuilds every pipeline, and an edit to an unrelated pipeline
 shouldn't cost an hour of accumulated state. A bucket whose *declaration*
 changed is a different bucket and starts empty.
+
+## gating a buffer on a bucket
+
+The third thing a bucket can do is hold a pipeline back. The `buffer`
+transform's `until` reads a key in a bucket and releases everything it is
+holding once the conditions are true:
+
+```yaml
+transforms:
+  - type: buffer
+    until:
+      bucket: ingest-control
+      key: nightly-load        # omit for the bucket-wide value
+      conditions:
+        - type: string
+          field: status
+          operator: equal_to
+          value: run_complete
+    max_messages: 100000
+```
+
+Because buckets are global, the pipeline that opens the gate is usually **not**
+the one that was waiting: a loader marks its run complete with `remember`, and
+somewhere else a pipeline that has been gathering readings all the while hands
+them on in one batch. That is the case this exists for, and it is not
+expressible as a chain — the two sides have different inputs and different
+rates.
+
+Four things to know before reaching for it:
+
+- **It is a gate on the whole buffer, not a test on each message.** When it
+  opens, everything held goes on as one batch. A `field` here is a name inside
+  the bucket *entry* — the entry is read as an object, so a dotted path reaches
+  into a remembered value exactly as it does into a message — and several
+  conditions mean all of them, as they do on `remember`'s `when`.
+- **`max_messages` is required** whenever `size` isn't also set. A gate that
+  never opens is otherwise a buffer that grows at the rate of the stream until
+  the process dies; reaching the bound releases everything and says so in the
+  log once.
+- **The wait is real, not "until the next message".** A `buffer` is the one
+  transform that gets a tick of its own: it can wake the run loop when the
+  bucket is written or when a `seconds` window closes, so a gate opening at
+  02:14 on a stream that has gone quiet hands its messages on at 02:14. Nothing
+  else in the chain works this way, and everything else in kayak is still
+  driven purely by arriving batches.
+- **It is not a synchronisation primitive**, however much it reads like one.
+  Two pipelines are two run loops with no ordering between them, so the gate
+  says "the bucket said so at the moment we looked" — the same sharp edge
+  sharing a bucket already has, one step more tempting. If the *timing* has to
+  be exact, both halves belong in one pipeline.
+
+The cost on the hot path is close to nothing, and deliberately so: the gate is
+read once per arriving batch rather than once per message, and only when the
+bucket has actually been written since the last look — which is an atomic load,
+not the bucket's lock. A buffer holding nothing subscribes to neither the clock
+nor the bucket.
 
 The `state` tab in the sidebar lists the buckets and how full each one is;
 clicking one opens a card beside it with the keys, their values and when each

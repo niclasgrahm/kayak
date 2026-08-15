@@ -13,7 +13,7 @@
 //! history store, no subscriber, and so nothing that changes the number by
 //! being asked for it.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -62,7 +62,12 @@ struct Graph {
     /// Kept so the watcher attached for a `watched` scenario is released with
     /// the rest of the graph rather than at the end of `build`.
     watching: Option<kayak::events::WatchGuard>,
-    roots: Vec<Arc<Pipeline>>,
+    /// Which entries of `all` are roots, by index rather than by a second set
+    /// of handles — see [`Graph::count`] for why the two sums have to come
+    /// from one read. A set rather than a `Vec` because `pipelines1000` would
+    /// otherwise make the lookup quadratic in a harness whose whole job is
+    /// measuring cost.
+    roots: HashSet<usize>,
     all: Vec<Arc<Pipeline>>,
     tasks: JoinSet<()>,
     /// Kept alive for the duration: dropping the last receiver is what closes
@@ -72,24 +77,28 @@ struct Graph {
 }
 
 impl Graph {
+    /// Read every counter **once** and take both sums from that one read.
+    ///
+    /// Reading the roots and then reading everything was two reads of the same
+    /// counters at two different instants, and a pipeline that passed a batch
+    /// in between made `handled` come out one batch above `ingested` — on a
+    /// graph one deep, where they are the same pipelines and therefore have to
+    /// be the same number. It failed on a loaded CI runner about as often as
+    /// it passed. The counters are relaxed atomics and there is no snapshot of
+    /// all of them to be had, so what this fixes is asking twice, not the
+    /// absence of a lock.
     fn count(&self) -> Counted {
-        let sum = |ps: &[Arc<Pipeline>]| -> (u64, u64, u64) {
-            ps.iter().fold((0, 0, 0), |(i, o, e), p| {
-                (
-                    i + p.counters.inbound(),
-                    o + p.counters.outbound(),
-                    e + p.counters.errors(),
-                )
-            })
-        };
-        let (ingested, _, _) = sum(&self.roots);
-        let (handled, emitted, errors) = sum(&self.all);
-        Counted {
-            ingested,
-            handled,
-            emitted,
-            errors,
+        let mut counted = Counted::default();
+        for (index, pipeline) in self.all.iter().enumerate() {
+            let inbound = pipeline.counters.inbound();
+            counted.handled += inbound;
+            counted.emitted += pipeline.counters.outbound();
+            counted.errors += pipeline.counters.errors();
+            if self.roots.contains(&index) {
+                counted.ingested += inbound;
+            }
         }
+        counted
     }
 
     /// Cancel every run loop and wait for it. Waiting matters between
@@ -159,7 +168,7 @@ fn build(
     watchers: &Watchers,
 ) -> Result<Graph> {
     let mut tasks = JoinSet::new();
-    let mut roots = Vec::with_capacity(scenario.pipelines);
+    let mut roots = HashSet::with_capacity(scenario.pipelines);
     let mut all = Vec::with_capacity(scenario.total_pipelines());
     // The map a `pipeline` input looks its upstream up in. It has to outlive
     // the building of the hop below, which is why the handles are kept here
@@ -222,7 +231,7 @@ fn build(
                 },
             );
             if hop == 0 {
-                roots.push(Arc::clone(&shared));
+                roots.insert(all.len());
             }
             all.push(shared);
             upstream = Some(id);

@@ -371,20 +371,21 @@ fn value_at(
     let at = path(prefix, &field.name);
     match &field.field_type {
         FieldType::Object(fields) => {
-            // where this object's own messages start, so they can be taken back
-            // if it turns out nobody touched it — an optional object with a
-            // required field inside (an `opcua` input's `browse`, whose `root`
-            // is not optional once you want one) would otherwise demand to be
-            // filled in on every form it appears on
-            let mine = errors.len();
-            let body = object_at(fields, &at, draft, errors);
+            // Into a scratch list, because whether these are errors at all
+            // depends on what the walk finds: nothing inside an object nobody
+            // filled in can be *missing*, and a buffer's `until` — an optional
+            // object with a required list inside it — reported "conditions is
+            // required" on every draft that left the gate out until this held
+            // them back.
+            let mut nested = Vec::new();
+            let body = object_at(fields, &at, draft, &mut nested);
             // an object nobody touched is an absent field, not an empty one:
             // `"rotate": {}` says "rotate on nothing", which is a different
             // thing to say than saying nothing
-            if body.is_empty() && !field.required {
-                errors.truncate(mine);
+            if !field.required && !touched(draft, &at) {
                 return None;
             }
+            errors.append(&mut nested);
             Some(Value::Object(body))
         }
         // As many values as there are rows, each of them read exactly as the
@@ -438,6 +439,22 @@ fn value_at(
             }
         },
     }
+}
+
+/// Whether anything under this path has been filled in.
+///
+/// Asked of the *draft* rather than of the built body, because the two differ
+/// exactly where it matters: a box someone typed an unreadable number into
+/// produces no value and an error, and an object holding only that is one
+/// somebody plainly meant to fill in. Reading the body instead would drop it —
+/// error and all — and the form would sit there refusing to submit with
+/// nothing marked.
+fn touched(draft: &ComponentDraft, at: &str) -> bool {
+    let prefix = format!("{at}.");
+    draft
+        .values
+        .iter()
+        .any(|(key, value)| key.starts_with(&prefix) && !value.trim().is_empty())
 }
 
 /// A set of fields under one path, as the object they make up.
@@ -1324,7 +1341,7 @@ mod tests {
         draft.variant = Some("String".to_string());
         for (name, value) in [
             ("field", "level"),
-            ("operator", "Contains"),
+            ("operator", "contains"),
             ("value", "warn"),
         ] {
             draft.values.insert(name.to_string(), value.to_string());
@@ -1334,7 +1351,7 @@ mod tests {
             json,
             json!({
                 "type": "filter",
-                "String": {"field": "level", "operator": "Contains", "value": "warn"}
+                "String": {"field": "level", "operator": "contains", "value": "warn"}
             })
         );
         Ok(())
@@ -1510,6 +1527,32 @@ mod tests {
         assert!(
             errors.iter().any(|(at, _)| at == "browse.root"),
             "{errors:?}"
+        );
+    }
+
+    /// The counterpart of the test above, and the reason `touched` asks the
+    /// *draft* rather than the built body: an unreadable number produces no
+    /// value **and** an error, so an optional object holding only that has an
+    /// empty body. Deciding on the body would drop the object and take the
+    /// error with it — the form would then refuse to submit with nothing
+    /// marked to say why, which is the worst of both answers.
+    #[test]
+    fn an_optional_object_holding_only_an_unreadable_value_still_reports_it() {
+        let doc = component(Family::Input, "opcua");
+        let mut draft = filled(
+            Family::Input,
+            "opcua",
+            &[("connection", "plant"), ("nodes", "1"), ("nodes.0.node_id", "ns=2;i=1")],
+        );
+        // the only thing in `browse` is a depth that is not a number
+        draft.values.insert("browse.depth".to_string(), "deep".to_string());
+
+        let Err(errors) = component_json(&doc, &draft) else {
+            panic!("a browse whose only field is unreadable must not be dropped silently");
+        };
+        assert!(
+            errors.iter().any(|(at, _)| at == "browse.depth"),
+            "the unreadable box has to be the one marked: {errors:?}"
         );
     }
 

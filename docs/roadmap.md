@@ -196,6 +196,19 @@ re-derive. See the [docs site](../website/) for how the finished parts behave, a
       silence the two ERROR lines the client logs on every connect (see `QUIET`
       in `main.rs`).
 - [ ] add time based buffer for the transform buffer
+- [x] rename the filter/condition operators to snake_case
+      (done 2026-08-14: **a breaking wire-format change** — `GreaterThan`,
+      `LessThan`, `EqualTo` and `Contains` are now `greater_than`, `less_than`,
+      `equal_to` and `contains`. They were the only enum in the config surface
+      without `rename_all`, sitting next to `"type": "numeric"` in the same
+      object. Config files using the old spellings fail to parse; there is no
+      alias, deliberately, because a silently accepted old spelling is a second
+      wire format to keep working forever.)
+- [x] add time based buffer for the transform buffer
+      (done 2026-08-14: `seconds` on the `buffer` transform, alongside a
+      `until` gate on a state bucket and a mandatory `max_messages` backstop.
+      Any trigger fires on its own; `size` is unchanged and still emits exact
+      batches. See "the buffer transform" in CLAUDE.md.)
 - [ ] make outputs optional (for example, when a parent pipeline is only used to push data to children)
 - [x] think about necessary metadata to add to each message
       (done 2026-08-08: `envelope` on any input, attached in band. See "message
@@ -215,8 +228,14 @@ re-derive. See the [docs site](../website/) for how the finished parts behave, a
       (done 2026-08-04: and multiple outputs. `inputs` and `outputs` are arrays
       in the config now — a breaking wire-format change, the singular `input`
       and `output` keys are gone. See "pipelines" below.)
-- [ ] new transform (i guess?): wait_for_condition (should it be called buffer_until_condition? or perhaps both are needed?)
+- [x] new transform (i guess?): wait_for_condition (should it be called buffer_until_condition? or perhaps both are needed?)
       for example, we need to wait for x: a and z: b. for this, we also need the multiple input thing
+      (done 2026-08-14: neither, in the end — it is `until` on the existing
+      `buffer` transform rather than a second component, since "hold messages
+      back" was already this transform's job and a second one would have had
+      to answer the same size and time questions. Several conditions mean all
+      of them, so "wait for x: a and z: b" is the list. It is a gate on the
+      whole buffer, not a per-key session window — that is still open below.)
       (2026-08-09: the state half of this landed — named buckets plus `remember`
       and `recall`, see "state" above. What is left is the *session window*, now
       tracked with the rest of the machine-cycle work under "the machine-cycle
@@ -322,10 +341,14 @@ Left to build, roughly in dependency order:
       rather than fatal, and a `linger` on close — a small grace period before
       emitting — which is the cheap answer to the boundary race. Decide whether
       the boundary messages are included (I'd say yes: they're data).
-- [ ] **a tick for transforms** — the window's idle-timeout needs one, and so
-      does the "idle file output holds its part open" issue below. Transforms
-      are currently only ever driven by an arriving batch, which is also why
-      bucket eviction is lazy. One mechanism, three users.
+- [ ] **a tick for transforms** — partly done (2026-08-14): `Transform::wakeup`
+      and `Transform::flush` exist, and the run loop `select!`s on them beside
+      the input, so a `buffer` can close a window or notice a state bucket with
+      no batch arriving. The `buffer` is the only caller. What is left is the
+      other two users: the session window's idle timeout, and the idle `file`
+      output holding its part open — the second needs the same seam on
+      `OutputDestination`, which does not have it. Bucket eviction could stop
+      being lazy on the back of it too.
 - [ ] **`subject_fields` on the nats input** — name the subject's tokens so
       `machine_7.temperature` arrives as `_meta.machine_id` and `_meta.signal`.
       Without it a wildcard subscription is unusable, since nothing can address

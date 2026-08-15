@@ -25,7 +25,7 @@ Needs a `state` on the pipeline; it fails to build without one.
 | field | type | | description |
 | --- | --- | --- | --- |
 | `field` | `string` | <Badge type="warning" text="required" /> | the field to test — a dotted path, like anywhere else |
-| `operator` | `GreaterThan` \| `LessThan` \| `EqualTo` | <Badge type="warning" text="required" /> |  |
+| `operator` | `greater_than` \| `less_than` \| `equal_to` | <Badge type="warning" text="required" /> | How a number is compared to the one in the config. |
 | `value` | `number` | <Badge type="warning" text="required" /> |  |
 
 **`when` — each entry — `type: "string"`**
@@ -33,5 +33,5 @@ Needs a `state` on the pipeline; it fails to build without one.
 | field | type | | description |
 | --- | --- | --- | --- |
 | `field` | `string` | <Badge type="warning" text="required" /> | the field to test — a dotted path, like anywhere else |
-| `operator` | `EqualTo` \| `Contains` | <Badge type="warning" text="required" /> |  |
+| `operator` | `equal_to` \| `contains` | <Badge type="warning" text="required" /> | How a string is compared to the one in the config. |
 | `value` | `string` | <Badge type="warning" text="required" /> |  |
