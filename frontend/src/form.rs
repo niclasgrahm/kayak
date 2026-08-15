@@ -441,7 +441,6 @@ fn value_at(
     }
 }
 
-/// A set of fields under one path, as the object they make up.
 /// Whether anything under this path has been filled in.
 ///
 /// Asked of the *draft* rather than of the built body, because the two differ
@@ -458,6 +457,7 @@ fn touched(draft: &ComponentDraft, at: &str) -> bool {
         .any(|(key, value)| key.starts_with(&prefix) && !value.trim().is_empty())
 }
 
+/// A set of fields under one path, as the object they make up.
 fn object_at(
     fields: &[FieldDoc],
     prefix: &str,
@@ -1527,6 +1527,32 @@ mod tests {
         assert!(
             errors.iter().any(|(at, _)| at == "browse.root"),
             "{errors:?}"
+        );
+    }
+
+    /// The counterpart of the test above, and the reason `touched` asks the
+    /// *draft* rather than the built body: an unreadable number produces no
+    /// value **and** an error, so an optional object holding only that has an
+    /// empty body. Deciding on the body would drop the object and take the
+    /// error with it — the form would then refuse to submit with nothing
+    /// marked to say why, which is the worst of both answers.
+    #[test]
+    fn an_optional_object_holding_only_an_unreadable_value_still_reports_it() {
+        let doc = component(Family::Input, "opcua");
+        let mut draft = filled(
+            Family::Input,
+            "opcua",
+            &[("connection", "plant"), ("nodes", "1"), ("nodes.0.node_id", "ns=2;i=1")],
+        );
+        // the only thing in `browse` is a depth that is not a number
+        draft.values.insert("browse.depth".to_string(), "deep".to_string());
+
+        let Err(errors) = component_json(&doc, &draft) else {
+            panic!("a browse whose only field is unreadable must not be dropped silently");
+        };
+        assert!(
+            errors.iter().any(|(at, _)| at == "browse.depth"),
+            "the unreadable box has to be the one marked: {errors:?}"
         );
     }
 
