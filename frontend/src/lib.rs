@@ -1,8 +1,13 @@
 // The release (optimised) build of the hydrate target overflows rustc's default
 // type-layout query depth on the nested `<For>` closures in the /docs page.
 // Only the release build reaches it — `cargo leptos build --release` fails
-// without this, while `cargo leptos watch` is fine.
-#![recursion_limit = "256"]
+// without this, while `cargo leptos watch` is fine. Which is why it rots
+// quietly: nothing in the development loop or in `just ci` compiles this
+// target optimised, so the limit only ever proves too low when someone builds
+// for production. It has been raised once already, as the card's log grew; if
+// a release build starts failing here again, that is what has happened, and
+// the number rustc names in the error is the number to put here.
+#![recursion_limit = "512"]
 
 pub mod api_client;
 pub mod api_docs;

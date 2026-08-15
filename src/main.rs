@@ -177,7 +177,10 @@ async fn main() -> anyhow::Result<()> {
             let opts = leptos_options.clone();
             move || shell(opts.clone())
         })
-        .fallback(leptos_axum::file_and_error_handler(shell))
+        // The embedded site first, then leptos' own handler for everything
+        // that is not a file — see `kayak::site`. Without the `embed-assets`
+        // feature this *is* leptos' handler, so a dev build is unchanged.
+        .fallback(kayak::site::fallback(shell))
         .with_state(leptos_options.clone());
     let app = api.merge(leptos);
     // the flag if one was given, otherwise whatever LEPTOS_SITE_ADDR or the
@@ -189,6 +192,16 @@ async fn main() -> anyhow::Result<()> {
         .await
         .with_context(|| format!("failed to bind {addr}"))?;
     tracing::info!("Listening on {addr}");
+    if !kayak::site::is_embedded() {
+        // A blank canvas with a 404 for the WASM bundle is the failure this
+        // line exists to name, and the browser's network tab is a bad place to
+        // find it. See `kayak::site`.
+        tracing::info!(
+            "serving the frontend from {} (this binary was built without the 'embed-assets' \
+             feature, so the site directory has to be beside it)",
+            leptos_options.site_root
+        );
+    }
     warn_if_open_to_the_network(&server_config, addr);
     // with_connect_info rather than the plain make service: it is what puts the
     // peer address in the request extensions, which is where the `http` input's

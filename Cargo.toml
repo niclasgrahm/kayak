@@ -51,6 +51,18 @@ style-file = "style/main.scss"
 # that an offline `just dev` still serves a working reference.
 assets-dir = "assets"
 
+[features]
+default = []
+# Compile `target/site` — the WASM bundle, the stylesheet, the vendored
+# API-reference renderer — into the binary, so the release artifact is the
+# binary alone. Off by default because `target/site` is a *build output*:
+# turning it on makes the crate uncompilable until the frontend has been
+# built, which would put a WASM toolchain in the way of `cargo check` and
+# `just ci`. `cargo leptos build --release --bin-features embed-assets` is
+# where it is switched on, and cargo-leptos' client-before-server ordering is
+# what makes that work.
+embed-assets = ["dep:rust-embed"]
+
 [dependencies]
 kayak-core = { path = "kayak-core" }
 anyhow = "1.0.102"
@@ -67,6 +79,11 @@ petname = "3.0.0"
 # travels in the query string of the HTTP interface, so it has to be encoded by
 # something that is not string concatenation.
 reqwest = { version = "0.13.4", features = ["json", "query"]}
+# The frontend's static files, compiled into the binary behind `embed-assets`
+# so that a release is one artifact rather than a binary and a directory. See
+# `src/site.rs` for why it is a feature and not the default; `debug-embed`
+# makes the feature mean the same thing in every profile.
+rust-embed = { version = "8.12.0", features = ["debug-embed", "include-exclude"], optional = true }
 schemars = "1.2.1"
 serde = { version = "1.0.228", features = ["derive", "rc"] }
 serde_json = "1.0.149"

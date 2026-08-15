@@ -1,8 +1,10 @@
 # syntax=docker/dockerfile:1.7
 #
 # Two stages: a cargo-leptos build (server binary + WASM + assets) and a
-# debian-slim runtime that holds the binary, the site directory and nothing
-# else.
+# debian-slim runtime that holds the binary and nothing else. The frontend is
+# *inside* the binary — see `--bin-features embed-assets` below and
+# `src/site.rs` for why — so there is no site directory to copy, and the
+# runtime image is one file plus a CA bundle.
 #
 # The image is the *runtime*, not a deployment: no config is baked in. Started
 # bare it serves the UI with an empty graph, which is a working container to
@@ -50,10 +52,18 @@ ENV RUSTFLAGS="-C strip=symbols"
 RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
   --mount=type=cache,target=/usr/local/cargo/git,sharing=locked \
   --mount=type=cache,target=/app/target,sharing=locked \
-  cargo leptos build --release \
+# `--bin-features embed-assets` is what compiles `target/site` into the
+# binary. It is safe in one command because cargo-leptos builds the client
+# before the server, so the site directory is complete by the time the server
+# crate is compiled — `--frontend-only` then `--server-only` is the same thing
+# said explicitly, if that ordering ever stops holding.
+#
+# `--precompress` would work too (the server negotiates br and gzip out of the
+# embed), at the cost of carrying three copies of the WASM bundle in the
+# binary. Left off: the trade is a deployment's to make.
+  cargo leptos build --release --bin-features embed-assets \
   && mkdir -p /out \
-  && cp target/release/kayak /out/kayak \
-  && cp -r target/site /out/site
+  && cp target/release/kayak /out/kayak
 
 # ---- runtime --------------------------------------------------------------
 FROM debian:${DEBIAN_VERSION}-slim AS runtime
@@ -71,19 +81,18 @@ RUN groupadd --gid 10001 kayak \
   && useradd --uid 10001 --gid 10001 --home-dir /kayak --no-create-home kayak
 
 COPY --from=builder /out/kayak /usr/local/bin/kayak
-COPY --from=builder /out/site /usr/share/kayak/site
 # The sample graph and the connections it names. The pair is found by *derived*
 # name, so both keep the same stem and the same directory; the layout file
 # beside them is what the canvas comes up arranged by.
 COPY example_config/config.json example_config/config.connections.json \
   example_config/config.layout.json /usr/share/kayak/example/
 
-# site-root is where the server reads the WASM bundle and assets from, and it
-# is baked rather than left to the caller: the frontend does not work without
-# it and there is no reason to move it. The address is 0.0.0.0 because the
-# default (127.0.0.1, from Cargo.toml) reaches nothing from outside a container.
-ENV LEPTOS_SITE_ROOT="/usr/share/kayak/site" \
-  LEPTOS_SITE_PKG_DIR="pkg" \
+# There is no LEPTOS_SITE_ROOT: the site directory does not exist in this
+# image, because the binary carries it. What is left is the URL prefix the
+# rendered page links its bundle under, which is a path in the page rather than
+# a path on disk. The address is 0.0.0.0 because the default (127.0.0.1, from
+# Cargo.toml) reaches nothing from outside a container.
+ENV LEPTOS_SITE_PKG_DIR="pkg" \
   LEPTOS_SITE_ADDR="0.0.0.0:6767" \
   LEPTOS_ENV="PROD"
 
