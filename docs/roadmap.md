@@ -159,6 +159,31 @@ re-derive. See the [docs site](../website/) for how the finished parts behave, a
       conversion has to be a custom type with copy-on-write rather than
       `rhai::serde` — the naive round trip deep-clones every message twice and
       would cost more than the interpreter.
+- [x] **an opcua input.** (done 2026-08-14: a subscription with a monitored item
+      per node, one message per value change, nodes named or found by browsing.
+      See "the opcua input" in `CLAUDE.md` and
+      [the page](../website/io/opcua-input.md).)
+- [ ] **an opcua output.** Writing values back to a server: a `write` per
+      message, mapping fields onto nodes the way the postgres output maps them
+      onto columns. The connection and the value conversion are already here;
+      what it needs is the mapping (a `ColumnPlan`-shaped question, one node per
+      field) and a decision about what a rejected write does to the batch.
+- [ ] **polling on the opcua input.** The subscription is the right default and
+      is what a plant server is built for, but a `read` of a fixed node list on
+      a timer is worth having for the servers that throttle subscriptions, and
+      for the case where "the value every ten seconds whether or not it moved"
+      is what a downstream store wants. It is a `mode: subscribe | poll` on the
+      same component: the node list, the value conversion and the message shape
+      are all shared, and only the reading half changes.
+- [ ] **signed and encrypted opcua sessions.** Today every session is
+      `SecurityPolicy::None` and a plaintext one — which is honest but is a
+      network you have to trust. `Basic256Sha256` with `Sign` or `SignAndEncrypt`
+      needs a client certificate, somewhere for it to live (the same question
+      the mqtt connection's missing TLS raises: a `Secret`? a path resolved
+      against `--data-dir`?), and a server trust list. It also has a cheap first
+      step worth taking on its own: an application instance certificate would
+      silence the two ERROR lines the client logs on every connect (see `QUIET`
+      in `main.rs`).
 - [ ] add time based buffer for the transform buffer
 - [ ] make outputs optional (for example, when a parent pipeline is only used to push data to children)
 - [x] think about necessary metadata to add to each message

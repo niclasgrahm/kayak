@@ -60,6 +60,36 @@ pipelines:
   transforms: []
   outputs:
   - type: stdout
+- id: opcua_line1
+  inputs:
+  - type: opcua
+    connection: local-opcua
+    nodes:
+    - node_id: ns=3;s=FastUInt1
+      name: line1_units
+    - node_id: ns=3;s=FastUInt2
+      name: line2_units
+    - node_id: ns=3;s=SlowUInt1
+      name: tank_level
+    publish_interval_ms: 1000
+    max_batch: 100
+  transforms: []
+  outputs:
+  - type: stdout
+- id: opcua_anomalies
+  inputs:
+  - type: opcua
+    connection: local-opcua
+    browse:
+      root: ns=3;s=Anomaly
+      depth: 2
+    deadband: 1.0
+    max_batch: 100
+    envelope:
+      type: merge
+  transforms: []
+  outputs:
+  - type: stdout
 - id: sensors
   inputs:
   - type: nats
@@ -315,6 +345,32 @@ pipelines:
   - type: nats
     connection: local-nats
     subject: test.aggregated.max
+- id: opcua_line1_10s_avg
+  inputs:
+  - type: pipeline
+    upstream: opcua_line1
+    buffer:
+      type: tumbling
+      window_seconds: 10
+  transforms:
+  - type: reducer
+    group_by:
+    - name
+    on_missing: skip
+    aggregations:
+    - function: avg
+      field: value
+      as: mean
+    - function: max
+      field: value
+      as: highest
+    - function: max
+      field: source_timestamp
+      as: last_seen
+    - function: count
+      as: readings
+  outputs:
+  - type: stdout
 - id: sensors_10s_avg
   inputs:
   - type: pipeline

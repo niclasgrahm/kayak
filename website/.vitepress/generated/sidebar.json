@@ -65,6 +65,10 @@
     {
       "link": "/reference/connections#connection-redis",
       "text": "redis"
+    },
+    {
+      "link": "/reference/connections#connection-opcua",
+      "text": "opcua"
     }
   ],
   "inputs": [
@@ -95,6 +99,10 @@
     {
       "link": "/reference/inputs#input-redis",
       "text": "redis"
+    },
+    {
+      "link": "/reference/inputs#input-opcua",
+      "text": "opcua"
     }
   ],
   "outputs": [

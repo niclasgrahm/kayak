@@ -76,6 +76,22 @@ fn input_samples() -> Vec<(&'static str, Value)> {
             "redis",
             json!({"type": "redis", "connection": "local-redis", "channel": "test.channel"}),
         ),
+        (
+            "opcua",
+            json!({
+                "type": "opcua",
+                "connection": "local-opcua",
+                "nodes": [
+                    {"node_id": "ns=3;s=FastUInt1", "name": "line_counter"},
+                    {"node_id": "ns=3;s=SlowUInt1"}
+                ],
+                "browse": {"root": "ns=3;s=Anomaly", "depth": 2},
+                "publish_interval_ms": 500,
+                "sampling_interval_ms": 250,
+                "queue_size": 10,
+                "deadband": 0.5
+            }),
+        ),
     ]
 }
 
@@ -319,6 +335,15 @@ fn connection_samples() -> Vec<(&'static str, Value)> {
         (
             "redis",
             json!({"type": "redis", "url": "redis://localhost:6379"}),
+        ),
+        (
+            "opcua",
+            json!({
+                "type": "opcua",
+                "endpoint": "opc.tcp://localhost:50000",
+                "username": "kayak",
+                "password": "${OPCUA_PASSWORD}"
+            }),
         ),
     ]
 }

@@ -97,6 +97,50 @@ pub struct MqttConnection {
     pub password: Option<Secret>,
 }
 
+/// An OPC UA server, as one client session connects to it.
+///
+/// The endpoint is the whole of "what the system is" here — an OPC UA server
+/// exposes one address space at one url, and *which nodes* a pipeline reads out
+/// of it is the component's business, exactly as a topic is on a kafka
+/// connection.
+///
+/// **Plaintext and anonymous or username/password only.** There is no security
+/// policy field and no certificate: an OPC UA session can be signed and
+/// encrypted, and that is worth having, but it needs a client certificate,
+/// somewhere for it to live and a server trust list — the same question
+/// [`MqttConnection`]'s missing TLS raises, one size larger. It gets its own
+/// pass (see `docs/roadmap.md`) rather than a field bolted on here, and until
+/// then this refuses to pretend: the session is `SecurityPolicy::None`, so
+/// credentials cross the wire in the clear and belong on a network you trust.
+///
+/// One consequence is visible in the log and is not a fault: the OPC UA client
+/// prints two errors about a missing *application instance certificate* when a
+/// session is opened. kayak has none by design, and an unencrypted session
+/// needs none — a pipeline that logs those and then reports readings is
+/// working.
+#[derive(Clone, Debug, Deserialize, Serialize, JsonSchema, PartialEq, Eq)]
+#[schemars(title = "opcua")]
+pub struct OpcuaConnection {
+    /// endpoint url, e.g. `opc.tcp://localhost:50000`. May reference secrets as
+    /// `${NAME}` — see "secrets" in the readme.
+    ///
+    /// This is connected to *directly*: kayak does not ask the server for its
+    /// endpoint list first. Discovery is the usual way, and it is the usual way
+    /// to fail — a server behind docker, NAT or a load balancer advertises the
+    /// hostname it knows itself by, which is regularly not one the client can
+    /// resolve. What is written here is what is dialled.
+    pub endpoint: Secret,
+    /// username to sign in with, if the server requires one. Must be set
+    /// together with `password` or not at all; without either, the session is
+    /// anonymous.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub username: Option<Secret>,
+    /// that username's password. May reference secrets as `${NAME}` — see
+    /// "secrets" in the readme, and prefer a reference to a literal here.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub password: Option<Secret>,
+}
+
 /// A postgres database, as one role connects to it.
 ///
 /// The database and the role are part of the connection; the *table* is not —
@@ -244,6 +288,7 @@ pub enum ConnectionKind {
     S3(S3Connection),
     Mqtt(MqttConnection),
     Redis(RedisConnection),
+    Opcua(OpcuaConnection),
 }
 
 impl ConnectionKind {
@@ -260,6 +305,7 @@ impl ConnectionKind {
             Self::S3(_) => S3,
             Self::Mqtt(_) => MQTT,
             Self::Redis(_) => REDIS,
+            Self::Opcua(_) => OPCUA,
         }
     }
 }
@@ -272,6 +318,7 @@ pub const FILE: &str = "file";
 pub const S3: &str = "s3";
 pub const MQTT: &str = "mqtt";
 pub const REDIS: &str = "redis";
+pub const OPCUA: &str = "opcua";
 
 /// What `POST /api/connections` takes: a name, and the connection itself
 /// flattened alongside it.
@@ -400,6 +447,13 @@ impl Connections {
         match self.lookup(id, REDIS)? {
             ConnectionKind::Redis(c) => Ok(c),
             other => Err(ConnectionError::wrong_kind(id, REDIS, other)),
+        }
+    }
+
+    pub fn opcua(&self, id: &str) -> Result<&OpcuaConnection, ConnectionError> {
+        match self.lookup(id, OPCUA)? {
+            ConnectionKind::Opcua(c) => Ok(c),
+            other => Err(ConnectionError::wrong_kind(id, OPCUA, other)),
         }
     }
 

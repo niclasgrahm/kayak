@@ -1103,7 +1103,17 @@ mod tests {
             .collect();
         assert_eq!(
             kinds,
-            ["kafka", "nats", "postgres", "clickhouse", "file", "s3", "mqtt", "redis"]
+            [
+                "kafka",
+                "nats",
+                "postgres",
+                "clickhouse",
+                "file",
+                "s3",
+                "mqtt",
+                "redis",
+                "opcua"
+            ]
         );
 
         // a file connection is the odd one out — a directory rather than a

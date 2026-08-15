@@ -116,6 +116,132 @@ pub struct RedisConfig {
     pub max_batch: Option<usize>,
 }
 
+/// One node an `opcua` input subscribes to, and what the messages call it.
+#[derive(Clone, Debug, Deserialize, Serialize, JsonSchema)]
+#[schemars(title = "opcua node")]
+pub struct OpcuaNodeConfig {
+    /// the node's id, in OPC UA's own notation — `ns=2;s=Machine1.Temperature`
+    /// for a string identifier, `ns=2;i=1042` for a numeric one, `g=` for a
+    /// guid and `b=` for an opaque one. A node id with no `ns=` is in
+    /// namespace 0, the server's own.
+    pub node_id: String,
+    /// what the messages from this node call it. Defaults to the node id
+    /// itself, which is exact and unreadable; naming the tag here is what makes
+    /// the rest of the pipeline — a `group_by`, a column mapping — legible.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+}
+
+/// Everything under a node in the server's address space, found by browsing it
+/// when the pipeline starts.
+///
+/// The convenient half of naming nodes, and the one with a cost worth knowing:
+/// what this pipeline reads is then decided by the server's address space *at
+/// the moment the pipeline starts*, so a tag added to the machine tomorrow is
+/// picked up by a restart and a tag removed silently stops arriving. An
+/// explicit `nodes` list is the one that says in the config file exactly what
+/// is being read. The two combine — browse a folder and name the handful of
+/// tags elsewhere that belong with it.
+#[derive(Clone, Debug, Deserialize, Serialize, JsonSchema)]
+#[schemars(title = "opcua browse")]
+pub struct OpcuaBrowseConfig {
+    /// id of the node to browse under, in the same notation as `node_id` —
+    /// typically a folder, e.g. `ns=2;s=Machine1`. Every *variable* found
+    /// beneath it is subscribed to; folders and objects are followed, not
+    /// subscribed.
+    pub root: String,
+    /// how many levels below the root to follow. Defaults to 3, and there is
+    /// deliberately no spelling for "all of them": a browse of a plant server's
+    /// whole address space is thousands of nodes, and the pipeline that asked
+    /// for it would find that out by subscribing to them.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub depth: Option<usize>,
+}
+
+/// Subscribes to variables on an OPC UA server, one message per value change.
+///
+/// The server pushes: this creates a subscription with a monitored item per
+/// node and is told when a value changes, rather than reading them round-robin
+/// on a timer. `publish_interval_ms` is how often the server may send, not how
+/// often it samples — a tag that doesn't move produces no messages at all.
+///
+/// Each message is one reading, and carries the tag as well as the value:
+///
+/// ```json
+/// {
+///   "node": "ns=2;s=Machine1.Temperature",
+///   "name": "temperature",
+///   "value": 21.5,
+///   "status": "Good",
+///   "source_timestamp": "2026-01-01T12:00:00.123Z",
+///   "server_timestamp": "2026-01-01T12:00:00.130Z"
+/// }
+/// ```
+///
+/// `status` is the reading's own quality and is **always present** — a sensor
+/// that has failed reports `Bad...` with a `null` value rather than going
+/// quiet, and a pipeline that acted on those as if they were readings would be
+/// acting on nothing. `source_timestamp` is when the *device* says the value
+/// was produced, which is the one to reduce or partition by; the envelope's
+/// `received_at` is when kayak read it, and on a slow link those are not the
+/// same instant.
+///
+/// The nodes are named by `nodes`, or found by `browse`, or both — one of them
+/// is required, since an input with nothing to monitor would sit silent
+/// forever. A node named twice is subscribed to once.
+#[derive(Clone, Debug, Deserialize, Serialize, JsonSchema)]
+#[schemars(title = "opcua")]
+pub struct OpcuaConfig {
+    /// name of the opcua connection to subscribe on — see "connections" in the
+    /// readme. The server it points at is declared once, in the connections
+    /// file, rather than repeated in every pipeline that uses it.
+    #[schemars(extend("x-connection" = "opcua"))]
+    pub connection: ConnectionId,
+    /// the nodes to subscribe to, named one by one.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub nodes: Vec<OpcuaNodeConfig>,
+    /// a node to browse, subscribing to every variable found under it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub browse: Option<OpcuaBrowseConfig>,
+    /// how often the server may send a batch of changes, in milliseconds.
+    /// Defaults to 1000. This bounds how long a change waits, not how often
+    /// anything is measured.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub publish_interval_ms: Option<u64>,
+    /// how often the server should *look* at each node, in milliseconds.
+    /// Absent asks the server to sample at the publishing interval, which is
+    /// what it does by default; a smaller value here is what fills a queue with
+    /// intermediate readings between two publishes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sampling_interval_ms: Option<u64>,
+    /// how many samples the server may hold for a node between publishes.
+    /// Defaults to 1, which means a value that changes twice in one interval is
+    /// reported once — the latest. Raise it, together with
+    /// `sampling_interval_ms`, when every sample matters rather than the
+    /// current value.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub queue_size: Option<u32>,
+    /// how far a value must move before the server reports it, in the value's
+    /// own units. Absent reports every change, however small — which on an
+    /// analogue signal is every sample, since the last digit is always moving.
+    ///
+    /// This is applied by the *server*, so it saves the network and this
+    /// pipeline alike. It only applies to numeric nodes; a string or a boolean
+    /// is reported on every change whatever this says.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub deadband: Option<f64>,
+    /// most messages to put in one batch. Defaults to 1 — one message per
+    /// batch, which is what every other input does unless asked otherwise.
+    ///
+    /// Worth raising here more than elsewhere: one publish from the server
+    /// carries every node that changed in the interval, so a subscription to
+    /// two hundred tags at 1 Hz is two hundred batches a second through the run
+    /// loop unless they are allowed to travel together. Raising it only ever
+    /// coalesces changes that had *already arrived*.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_batch: Option<usize>,
+}
+
 /// Consumes JSON messages from a kafka topic, each emitted as a batch of one.
 ///
 /// A payload that isn't JSON is skipped with a warning rather than taking the
@@ -969,6 +1095,7 @@ pub enum InputKind {
     Pipeline(PipelineConfig),
     Mqtt(MqttConfig),
     Redis(RedisConfig),
+    Opcua(OpcuaConfig),
 }
 /// How an input's messages are gathered into batches before the transforms see
 /// them.
@@ -1220,7 +1347,8 @@ impl Config {
                 | InputKind::Kafka(_)
                 | InputKind::Nats(_)
                 | InputKind::Mqtt(_)
-                | InputKind::Redis(_) => None,
+                | InputKind::Redis(_)
+                | InputKind::Opcua(_) => None,
             })
             .collect()
     }
@@ -1242,6 +1370,7 @@ impl Config {
             InputKind::Nats(c) => Some(&c.connection),
             InputKind::Mqtt(c) => Some(&c.connection),
             InputKind::Redis(c) => Some(&c.connection),
+            InputKind::Opcua(c) => Some(&c.connection),
             InputKind::Dummy(_) | InputKind::Http(_) | InputKind::Pipeline(_) => None,
         });
         let outputs = self.outputs.iter().filter_map(|output| match &output.kind {

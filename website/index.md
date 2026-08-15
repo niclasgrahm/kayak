@@ -20,7 +20,7 @@ hero:
 features:
   - title: configured, not coded
     details: >-
-      nats, kafka, mqtt, redis and http in; postgres, clickhouse, s3, files and
+      nats, kafka, mqtt, redis, opc ua and http in; postgres, clickhouse, s3, files and
       webhooks out; filter, reduce, map, split and remember in between. plain
       JSON the whole way through — no schema to define up front.
   - title: a graph, not a list of jobs

@@ -9,7 +9,7 @@ web canvas shows the graph while it's running.
 [Rust](https://rustup.rs), [`just`](https://github.com/casey/just) and
 [`cargo-leptos`](https://github.com/leptos-rs/cargo-leptos)
 (`cargo install cargo-leptos`). Docker is optional — it's needed only for the
-nats, kafka, mqtt, database and S3 pipelines in the sample graph.
+nats, kafka, mqtt, opc ua, database and S3 pipelines in the sample graph.
 
 ## run it
 

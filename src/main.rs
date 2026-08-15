@@ -107,6 +107,23 @@ fn warn_if_open_to_the_network(config: &ServerConfig, addr: SocketAddr) {
     );
 }
 
+/// One dependency silenced by name, because what it says is not true here.
+///
+/// The OPC UA client loads an *application instance certificate* from a pki
+/// directory when a session is built, and logs at ERROR when there is none.
+/// kayak has none on purpose — every session it opens is
+/// `SecurityPolicy::None`, so there is nothing to sign with and nothing to sign
+/// (see `OpcuaConnection`) — which made two ERROR lines about a missing
+/// certificate appear on every connect of a pipeline that was working
+/// perfectly.
+///
+/// Only the module whose whole job is reading those files is turned off, and
+/// only until the connection grows a security policy: at that point a
+/// certificate that cannot be read *is* the error it claims to be, and this
+/// comes back out. Everything else the client logs, including the rest of the
+/// crypto and the secure channel, is left alone.
+const QUIET: &str = "opcua_crypto::certificate_store=off";
+
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     let args = Args::parse();
@@ -121,8 +138,8 @@ async fn main() -> anyhow::Result<()> {
 
     tracing_subscriber::fmt()
         .with_env_filter(match level {
-            Level::DEBUG => "info,pipeline=debug",
-            _ => "info",
+            Level::DEBUG => format!("info,pipeline=debug,{QUIET}"),
+            _ => format!("info,{QUIET}"),
         })
         .init();
 

@@ -74,6 +74,7 @@ export default defineConfig({
           { text: 'secrets', link: '/io/secrets' },
           { text: 'posting into a pipeline', link: '/io/posting-into-a-pipeline' },
           { text: 'sending over http', link: '/io/sending-over-http' },
+          { text: 'opcua input', link: '/io/opcua-input' },
           { text: 'file output', link: '/io/file-output' },
           { text: 's3 output', link: '/io/s3-output' },
           { text: 'database outputs', link: '/io/database-outputs' },

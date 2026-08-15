@@ -1435,6 +1435,19 @@ One pipeline: every input is merged into one stream, that stream runs through th
             "type"
           ],
           "type": "object"
+        },
+        {
+          "$ref": "#/$defs/OpcuaConfig",
+          "properties": {
+            "type": {
+              "const": "opcua",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type"
+          ],
+          "type": "object"
         }
       ],
       "properties": {
@@ -2091,6 +2104,127 @@ One pipeline: every input is merged into one stream, that stream runs through th
         "EqualTo"
       ],
       "type": "string"
+    },
+    "OpcuaBrowseConfig": {
+      "description": "Everything under a node in the server's address space, found by browsing it\nwhen the pipeline starts.\n\nThe convenient half of naming nodes, and the one with a cost worth knowing:\nwhat this pipeline reads is then decided by the server's address space *at\nthe moment the pipeline starts*, so a tag added to the machine tomorrow is\npicked up by a restart and a tag removed silently stops arriving. An\nexplicit `nodes` list is the one that says in the config file exactly what\nis being read. The two combine — browse a folder and name the handful of\ntags elsewhere that belong with it.",
+      "properties": {
+        "depth": {
+          "description": "how many levels below the root to follow. Defaults to 3, and there is\ndeliberately no spelling for \"all of them\": a browse of a plant server's\nwhole address space is thousands of nodes, and the pipeline that asked\nfor it would find that out by subscribing to them.",
+          "format": "uint",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "root": {
+          "description": "id of the node to browse under, in the same notation as `node_id` —\ntypically a folder, e.g. `ns=2;s=Machine1`. Every *variable* found\nbeneath it is subscribed to; folders and objects are followed, not\nsubscribed.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "root"
+      ],
+      "title": "opcua browse",
+      "type": "object"
+    },
+    "OpcuaConfig": {
+      "description": "Subscribes to variables on an OPC UA server, one message per value change.\n\nThe server pushes: this creates a subscription with a monitored item per\nnode and is told when a value changes, rather than reading them round-robin\non a timer. `publish_interval_ms` is how often the server may send, not how\noften it samples — a tag that doesn't move produces no messages at all.\n\nEach message is one reading, and carries the tag as well as the value:\n\n```json\n{\n  \"node\": \"ns=2;s=Machine1.Temperature\",\n  \"name\": \"temperature\",\n  \"value\": 21.5,\n  \"status\": \"Good\",\n  \"source_timestamp\": \"2026-01-01T12:00:00.123Z\",\n  \"server_timestamp\": \"2026-01-01T12:00:00.130Z\"\n}\n```\n\n`status` is the reading's own quality and is **always present** — a sensor\nthat has failed reports `Bad...` with a `null` value rather than going\nquiet, and a pipeline that acted on those as if they were readings would be\nacting on nothing. `source_timestamp` is when the *device* says the value\nwas produced, which is the one to reduce or partition by; the envelope's\n`received_at` is when kayak read it, and on a slow link those are not the\nsame instant.\n\nThe nodes are named by `nodes`, or found by `browse`, or both — one of them\nis required, since an input with nothing to monitor would sit silent\nforever. A node named twice is subscribed to once.",
+      "properties": {
+        "browse": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/OpcuaBrowseConfig"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "a node to browse, subscribing to every variable found under it."
+        },
+        "connection": {
+          "description": "name of the opcua connection to subscribe on — see \"connections\" in the\nreadme. The server it points at is declared once, in the connections\nfile, rather than repeated in every pipeline that uses it.",
+          "type": "string",
+          "x-connection": "opcua"
+        },
+        "deadband": {
+          "description": "how far a value must move before the server reports it, in the value's\nown units. Absent reports every change, however small — which on an\nanalogue signal is every sample, since the last digit is always moving.\n\nThis is applied by the *server*, so it saves the network and this\npipeline alike. It only applies to numeric nodes; a string or a boolean\nis reported on every change whatever this says.",
+          "format": "double",
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "max_batch": {
+          "description": "most messages to put in one batch. Defaults to 1 — one message per\nbatch, which is what every other input does unless asked otherwise.\n\nWorth raising here more than elsewhere: one publish from the server\ncarries every node that changed in the interval, so a subscription to\ntwo hundred tags at 1 Hz is two hundred batches a second through the run\nloop unless they are allowed to travel together. Raising it only ever\ncoalesces changes that had *already arrived*.",
+          "format": "uint",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "nodes": {
+          "description": "the nodes to subscribe to, named one by one.",
+          "items": {
+            "$ref": "#/$defs/OpcuaNodeConfig"
+          },
+          "type": "array"
+        },
+        "publish_interval_ms": {
+          "description": "how often the server may send a batch of changes, in milliseconds.\nDefaults to 1000. This bounds how long a change waits, not how often\nanything is measured.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "queue_size": {
+          "description": "how many samples the server may hold for a node between publishes.\nDefaults to 1, which means a value that changes twice in one interval is\nreported once — the latest. Raise it, together with\n`sampling_interval_ms`, when every sample matters rather than the\ncurrent value.",
+          "format": "uint32",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "sampling_interval_ms": {
+          "description": "how often the server should *look* at each node, in milliseconds.\nAbsent asks the server to sample at the publishing interval, which is\nwhat it does by default; a smaller value here is what fills a queue with\nintermediate readings between two publishes.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "connection"
+      ],
+      "title": "opcua",
+      "type": "object"
+    },
+    "OpcuaNodeConfig": {
+      "description": "One node an `opcua` input subscribes to, and what the messages call it.",
+      "properties": {
+        "name": {
+          "description": "what the messages from this node call it. Defaults to the node id\nitself, which is exact and unreadable; naming the tag here is what makes\nthe rest of the pipeline — a `group_by`, a column mapping — legible.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "node_id": {
+          "description": "the node's id, in OPC UA's own notation — `ns=2;s=Machine1.Temperature`\nfor a string identifier, `ns=2;i=1042` for a numeric one, `g=` for a\nguid and `b=` for an opaque one. A node id with no `ns=` is in\nnamespace 0, the server's own.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "node_id"
+      ],
+      "title": "opcua node",
+      "type": "object"
     },
     "Operand": {
       "description": "One side of an [`Mapping::Arithmetic`]: a field to read, or a fixed number.",
@@ -3009,6 +3143,19 @@ A `BTreeMap` rather than a list of `{id, ...}` objects: the name is the identity
             "type"
           ],
           "type": "object"
+        },
+        {
+          "$ref": "#/$defs/OpcuaConnection",
+          "properties": {
+            "type": {
+              "const": "opcua",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type"
+          ],
+          "type": "object"
         }
       ]
     },
@@ -3098,6 +3245,42 @@ A `BTreeMap` rather than a list of `{id, ...}` objects: the name is the identity
         "urls"
       ],
       "title": "nats",
+      "type": "object"
+    },
+    "OpcuaConnection": {
+      "description": "An OPC UA server, as one client session connects to it.\n\nThe endpoint is the whole of \"what the system is\" here — an OPC UA server\nexposes one address space at one url, and *which nodes* a pipeline reads out\nof it is the component's business, exactly as a topic is on a kafka\nconnection.\n\n**Plaintext and anonymous or username/password only.** There is no security\npolicy field and no certificate: an OPC UA session can be signed and\nencrypted, and that is worth having, but it needs a client certificate,\nsomewhere for it to live and a server trust list — the same question\n[`MqttConnection`]'s missing TLS raises, one size larger. It gets its own\npass (see `docs/roadmap.md`) rather than a field bolted on here, and until\nthen this refuses to pretend: the session is `SecurityPolicy::None`, so\ncredentials cross the wire in the clear and belong on a network you trust.\n\nOne consequence is visible in the log and is not a fault: the OPC UA client\nprints two errors about a missing *application instance certificate* when a\nsession is opened. kayak has none by design, and an unencrypted session\nneeds none — a pipeline that logs those and then reports readings is\nworking.",
+      "properties": {
+        "endpoint": {
+          "$ref": "#/$defs/Secret",
+          "description": "endpoint url, e.g. `opc.tcp://localhost:50000`. May reference secrets as\n`${NAME}` — see \"secrets\" in the readme.\n\nThis is connected to *directly*: kayak does not ask the server for its\nendpoint list first. Discovery is the usual way, and it is the usual way\nto fail — a server behind docker, NAT or a load balancer advertises the\nhostname it knows itself by, which is regularly not one the client can\nresolve. What is written here is what is dialled."
+        },
+        "password": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Secret"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "that username's password. May reference secrets as `${NAME}` — see\n\"secrets\" in the readme, and prefer a reference to a literal here."
+        },
+        "username": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Secret"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "username to sign in with, if the server requires one. Must be set\ntogether with `password` or not at all; without either, the session is\nanonymous."
+        }
+      },
+      "required": [
+        "endpoint"
+      ],
+      "title": "opcua",
       "type": "object"
     },
     "PostgresConnection": {
@@ -3350,6 +3533,42 @@ The name is a field here rather than a path segment because it is part of what i
       "title": "nats",
       "type": "object"
     },
+    "OpcuaConnection": {
+      "description": "An OPC UA server, as one client session connects to it.\n\nThe endpoint is the whole of \"what the system is\" here — an OPC UA server\nexposes one address space at one url, and *which nodes* a pipeline reads out\nof it is the component's business, exactly as a topic is on a kafka\nconnection.\n\n**Plaintext and anonymous or username/password only.** There is no security\npolicy field and no certificate: an OPC UA session can be signed and\nencrypted, and that is worth having, but it needs a client certificate,\nsomewhere for it to live and a server trust list — the same question\n[`MqttConnection`]'s missing TLS raises, one size larger. It gets its own\npass (see `docs/roadmap.md`) rather than a field bolted on here, and until\nthen this refuses to pretend: the session is `SecurityPolicy::None`, so\ncredentials cross the wire in the clear and belong on a network you trust.\n\nOne consequence is visible in the log and is not a fault: the OPC UA client\nprints two errors about a missing *application instance certificate* when a\nsession is opened. kayak has none by design, and an unencrypted session\nneeds none — a pipeline that logs those and then reports readings is\nworking.",
+      "properties": {
+        "endpoint": {
+          "$ref": "#/$defs/Secret",
+          "description": "endpoint url, e.g. `opc.tcp://localhost:50000`. May reference secrets as\n`${NAME}` — see \"secrets\" in the readme.\n\nThis is connected to *directly*: kayak does not ask the server for its\nendpoint list first. Discovery is the usual way, and it is the usual way\nto fail — a server behind docker, NAT or a load balancer advertises the\nhostname it knows itself by, which is regularly not one the client can\nresolve. What is written here is what is dialled."
+        },
+        "password": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Secret"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "that username's password. May reference secrets as `${NAME}` — see\n\"secrets\" in the readme, and prefer a reference to a literal here."
+        },
+        "username": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Secret"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "username to sign in with, if the server requires one. Must be set\ntogether with `password` or not at all; without either, the session is\nanonymous."
+        }
+      },
+      "required": [
+        "endpoint"
+      ],
+      "title": "opcua",
+      "type": "object"
+    },
     "PostgresConnection": {
       "description": "A postgres database, as one role connects to it.\n\nThe database and the role are part of the connection; the *table* is not —\nthat is what a particular output writes into, so it stays on the output.",
       "properties": {
@@ -3552,6 +3771,19 @@ The name is a field here rather than a path segment because it is part of what i
       "properties": {
         "type": {
           "const": "redis",
+          "type": "string"
+        }
+      },
+      "required": [
+        "type"
+      ],
+      "type": "object"
+    },
+    {
+      "$ref": "#/$defs/OpcuaConnection",
+      "properties": {
+        "type": {
+          "const": "opcua",
           "type": "string"
         }
       },
@@ -4857,6 +5089,19 @@ The same wire shape the run loop's `PipelineView` serializes to — this is the 
             "type"
           ],
           "type": "object"
+        },
+        {
+          "$ref": "#/$defs/OpcuaConfig",
+          "properties": {
+            "type": {
+              "const": "opcua",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type"
+          ],
+          "type": "object"
         }
       ],
       "properties": {
@@ -5513,6 +5758,127 @@ The same wire shape the run loop's `PipelineView` serializes to — this is the 
         "EqualTo"
       ],
       "type": "string"
+    },
+    "OpcuaBrowseConfig": {
+      "description": "Everything under a node in the server's address space, found by browsing it\nwhen the pipeline starts.\n\nThe convenient half of naming nodes, and the one with a cost worth knowing:\nwhat this pipeline reads is then decided by the server's address space *at\nthe moment the pipeline starts*, so a tag added to the machine tomorrow is\npicked up by a restart and a tag removed silently stops arriving. An\nexplicit `nodes` list is the one that says in the config file exactly what\nis being read. The two combine — browse a folder and name the handful of\ntags elsewhere that belong with it.",
+      "properties": {
+        "depth": {
+          "description": "how many levels below the root to follow. Defaults to 3, and there is\ndeliberately no spelling for \"all of them\": a browse of a plant server's\nwhole address space is thousands of nodes, and the pipeline that asked\nfor it would find that out by subscribing to them.",
+          "format": "uint",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "root": {
+          "description": "id of the node to browse under, in the same notation as `node_id` —\ntypically a folder, e.g. `ns=2;s=Machine1`. Every *variable* found\nbeneath it is subscribed to; folders and objects are followed, not\nsubscribed.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "root"
+      ],
+      "title": "opcua browse",
+      "type": "object"
+    },
+    "OpcuaConfig": {
+      "description": "Subscribes to variables on an OPC UA server, one message per value change.\n\nThe server pushes: this creates a subscription with a monitored item per\nnode and is told when a value changes, rather than reading them round-robin\non a timer. `publish_interval_ms` is how often the server may send, not how\noften it samples — a tag that doesn't move produces no messages at all.\n\nEach message is one reading, and carries the tag as well as the value:\n\n```json\n{\n  \"node\": \"ns=2;s=Machine1.Temperature\",\n  \"name\": \"temperature\",\n  \"value\": 21.5,\n  \"status\": \"Good\",\n  \"source_timestamp\": \"2026-01-01T12:00:00.123Z\",\n  \"server_timestamp\": \"2026-01-01T12:00:00.130Z\"\n}\n```\n\n`status` is the reading's own quality and is **always present** — a sensor\nthat has failed reports `Bad...` with a `null` value rather than going\nquiet, and a pipeline that acted on those as if they were readings would be\nacting on nothing. `source_timestamp` is when the *device* says the value\nwas produced, which is the one to reduce or partition by; the envelope's\n`received_at` is when kayak read it, and on a slow link those are not the\nsame instant.\n\nThe nodes are named by `nodes`, or found by `browse`, or both — one of them\nis required, since an input with nothing to monitor would sit silent\nforever. A node named twice is subscribed to once.",
+      "properties": {
+        "browse": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/OpcuaBrowseConfig"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "a node to browse, subscribing to every variable found under it."
+        },
+        "connection": {
+          "description": "name of the opcua connection to subscribe on — see \"connections\" in the\nreadme. The server it points at is declared once, in the connections\nfile, rather than repeated in every pipeline that uses it.",
+          "type": "string",
+          "x-connection": "opcua"
+        },
+        "deadband": {
+          "description": "how far a value must move before the server reports it, in the value's\nown units. Absent reports every change, however small — which on an\nanalogue signal is every sample, since the last digit is always moving.\n\nThis is applied by the *server*, so it saves the network and this\npipeline alike. It only applies to numeric nodes; a string or a boolean\nis reported on every change whatever this says.",
+          "format": "double",
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "max_batch": {
+          "description": "most messages to put in one batch. Defaults to 1 — one message per\nbatch, which is what every other input does unless asked otherwise.\n\nWorth raising here more than elsewhere: one publish from the server\ncarries every node that changed in the interval, so a subscription to\ntwo hundred tags at 1 Hz is two hundred batches a second through the run\nloop unless they are allowed to travel together. Raising it only ever\ncoalesces changes that had *already arrived*.",
+          "format": "uint",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "nodes": {
+          "description": "the nodes to subscribe to, named one by one.",
+          "items": {
+            "$ref": "#/$defs/OpcuaNodeConfig"
+          },
+          "type": "array"
+        },
+        "publish_interval_ms": {
+          "description": "how often the server may send a batch of changes, in milliseconds.\nDefaults to 1000. This bounds how long a change waits, not how often\nanything is measured.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "queue_size": {
+          "description": "how many samples the server may hold for a node between publishes.\nDefaults to 1, which means a value that changes twice in one interval is\nreported once — the latest. Raise it, together with\n`sampling_interval_ms`, when every sample matters rather than the\ncurrent value.",
+          "format": "uint32",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "sampling_interval_ms": {
+          "description": "how often the server should *look* at each node, in milliseconds.\nAbsent asks the server to sample at the publishing interval, which is\nwhat it does by default; a smaller value here is what fills a queue with\nintermediate readings between two publishes.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "connection"
+      ],
+      "title": "opcua",
+      "type": "object"
+    },
+    "OpcuaNodeConfig": {
+      "description": "One node an `opcua` input subscribes to, and what the messages call it.",
+      "properties": {
+        "name": {
+          "description": "what the messages from this node call it. Defaults to the node id\nitself, which is exact and unreadable; naming the tag here is what makes\nthe rest of the pipeline — a `group_by`, a column mapping — legible.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "node_id": {
+          "description": "the node's id, in OPC UA's own notation — `ns=2;s=Machine1.Temperature`\nfor a string identifier, `ns=2;i=1042` for a numeric one, `g=` for a\nguid and `b=` for an opaque one. A node id with no `ns=` is in\nnamespace 0, the server's own.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "node_id"
+      ],
+      "title": "opcua node",
+      "type": "object"
     },
     "Operand": {
       "description": "One side of an [`Mapping::Arithmetic`]: a field to read, or a fixed number.",

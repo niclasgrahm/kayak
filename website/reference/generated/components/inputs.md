@@ -420,3 +420,87 @@ Plain `SUBSCRIBE`, not `PSUBSCRIBE` — a channel name is exact, the same choice
 | `received_at` | when kayak read it, RFC 3339. This is an arrival time and not an event time: it says when the message reached this pipeline, not when whatever it describes happened. |
 | `connection` | name of the connection it was received on |
 | `channel` | the channel this message was published to |
+
+
+## `opcua` {#input-opcua}
+
+Subscribes to variables on an OPC UA server, one message per value change.
+
+The server pushes: this creates a subscription with a monitored item per node and is told when a value changes, rather than reading them round-robin on a timer. `publish_interval_ms` is how often the server may send, not how often it samples — a tag that doesn't move produces no messages at all.
+
+Each message is one reading, and carries the tag as well as the value:
+
+```json { "node": "ns=2;s=Machine1.Temperature", "name": "temperature", "value": 21.5, "status": "Good", "source_timestamp": "2026-01-01T12:00:00.123Z", "server_timestamp": "2026-01-01T12:00:00.130Z" } ```
+
+`status` is the reading's own quality and is **always present** — a sensor that has failed reports `Bad...` with a `null` value rather than going quiet, and a pipeline that acted on those as if they were readings would be acting on nothing. `source_timestamp` is when the *device* says the value was produced, which is the one to reduce or partition by; the envelope's `received_at` is when kayak read it, and on a slow link those are not the same instant.
+
+The nodes are named by `nodes`, or found by `browse`, or both — one of them is required, since an input with nothing to monitor would sit silent forever. A node named twice is subscribed to once.
+
+| field | type | | description |
+| --- | --- | --- | --- |
+| `connection` | `opcua` connection | <Badge type="warning" text="required" /> | name of the opcua connection to subscribe on — see "connections" in the readme. The server it points at is declared once, in the connections file, rather than repeated in every pipeline that uses it. |
+| `browse` | `object` | <Badge type="info" text="optional" /> | a node to browse, subscribing to every variable found under it. |
+| `deadband` | `number` | <Badge type="info" text="optional" /> | how far a value must move before the server reports it, in the value's own units. Absent reports every change, however small — which on an analogue signal is every sample, since the last digit is always moving. This is applied by the *server*, so it saves the network and this pipeline alike. It only applies to numeric nodes; a string or a boolean is reported on every change whatever this says. |
+| `max_batch` | `integer` | <Badge type="info" text="optional" /> | most messages to put in one batch. Defaults to 1 — one message per batch, which is what every other input does unless asked otherwise. Worth raising here more than elsewhere: one publish from the server carries every node that changed in the interval, so a subscription to two hundred tags at 1 Hz is two hundred batches a second through the run loop unless they are allowed to travel together. Raising it only ever coalesces changes that had *already arrived*. |
+| `nodes` | `list of opcua node` | <Badge type="info" text="optional" /> | the nodes to subscribe to, named one by one. |
+| `publish_interval_ms` | `integer` | <Badge type="info" text="optional" /> | how often the server may send a batch of changes, in milliseconds. Defaults to 1000. This bounds how long a change waits, not how often anything is measured. |
+| `queue_size` | `integer` | <Badge type="info" text="optional" /> | how many samples the server may hold for a node between publishes. Defaults to 1, which means a value that changes twice in one interval is reported once — the latest. Raise it, together with `sampling_interval_ms`, when every sample matters rather than the current value. |
+| `sampling_interval_ms` | `integer` | <Badge type="info" text="optional" /> | how often the server should *look* at each node, in milliseconds. Absent asks the server to sample at the publishing interval, which is what it does by default; a smaller value here is what fills a queue with intermediate readings between two publishes. |
+| `ack` | `on_receipt` \| `on_delivery` | <Badge type="info" text="optional" /> | when this input tells its broker a message is done with. Available on every input kind in the schema, but only honoured by ones with a broker-side notion of "received" vs "delivered" of their own (`kafka`, for now) — an input with nothing to acknowledge refuses to build rather than silently treating this as `on_receipt`. Defaults to `on_receipt`, which is what every input has always done. See "acknowledgement modes" in the guide. |
+| `buffer` | `static \| tumbling \| batch` | <Badge type="info" text="optional" /> | batch messages from this input before the transforms see them — by count (`static`), by time (`tumbling`) or by whichever comes first (`batch`). Never emits an empty batch. Available on every input kind. Not to be confused with the `buffer` transform. |
+| `envelope` | `merge \| wrap` | <Badge type="info" text="optional" /> | attach metadata about where each message came from — the subject, topic, partition and so on listed under "metadata" below. Available on every input kind. Omit it and messages are passed on exactly as they arrive. |
+
+**`browse`**
+
+| field | type | | description |
+| --- | --- | --- | --- |
+| `root` | `string` | <Badge type="warning" text="required" /> | id of the node to browse under, in the same notation as `node_id` — typically a folder, e.g. `ns=2;s=Machine1`. Every *variable* found beneath it is subscribed to; folders and objects are followed, not subscribed. |
+| `depth` | `integer` | <Badge type="info" text="optional" /> | how many levels below the root to follow. Defaults to 3, and there is deliberately no spelling for "all of them": a browse of a plant server's whole address space is thousands of nodes, and the pipeline that asked for it would find that out by subscribing to them. |
+
+**`nodes` — each entry**
+
+| field | type | | description |
+| --- | --- | --- | --- |
+| `node_id` | `string` | <Badge type="warning" text="required" /> | the node's id, in OPC UA's own notation — `ns=2;s=Machine1.Temperature` for a string identifier, `ns=2;i=1042` for a numeric one, `g=` for a guid and `b=` for an opaque one. A node id with no `ns=` is in namespace 0, the server's own. |
+| `name` | `string` | <Badge type="info" text="optional" /> | what the messages from this node call it. Defaults to the node id itself, which is exact and unreadable; naming the tag here is what makes the rest of the pipeline — a `group_by`, a column mapping — legible. |
+
+**`buffer` — `type: "static"`**
+
+| field | type | | description |
+| --- | --- | --- | --- |
+| `size` | `integer` | <Badge type="warning" text="required" /> | how many messages to gather before the batch is handed on |
+
+**`buffer` — `type: "tumbling"`**
+
+| field | type | | description |
+| --- | --- | --- | --- |
+| `window_seconds` | `integer` | <Badge type="warning" text="required" /> | how long to gather messages for, measured from the first one |
+
+**`buffer` — `type: "batch"`**
+
+| field | type | | description |
+| --- | --- | --- | --- |
+| `size` | `integer` | <Badge type="warning" text="required" /> | how many messages end the batch immediately |
+| `window_seconds` | `integer` | <Badge type="warning" text="required" /> | how long to wait for them, measured from the first message in the batch |
+
+**`envelope` — `type: "merge"`**
+
+| field | type | | description |
+| --- | --- | --- | --- |
+| `meta` | `string` | <Badge type="info" text="optional" /> | the field the metadata object is written to. Defaults to `_meta`. |
+
+**`envelope` — `type: "wrap"`**
+
+| field | type | | description |
+| --- | --- | --- | --- |
+| `meta` | `string` | <Badge type="info" text="optional" /> | the field the metadata object is written to. Defaults to `_meta`. |
+| `payload` | `string` | <Badge type="info" text="optional" /> | the field the original payload is written to. Defaults to `value`. |
+
+**metadata** — what this input attaches to a message when its `envelope` is set.
+
+| field | holds |
+| --- | --- |
+| `pipeline` | id of the pipeline that read the message |
+| `input` | kind of input it was read by, e.g. `nats` |
+| `received_at` | when kayak read it, RFC 3339. This is an arrival time and not an event time: it says when the message reached this pipeline, not when whatever it describes happened. |
+| `connection` | name of the connection the session was opened through. Which *node* the reading came from is deliberately not here: it is on the message itself, as `node` and `name`, because a value without its tag is not a reading and metadata is opt-in. |
