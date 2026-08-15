@@ -208,10 +208,16 @@ async fn main() -> anyhow::Result<()> {
         .with_state(leptos_options.clone());
     let app = api.merge(leptos);
     // the flag if one was given, otherwise whatever LEPTOS_SITE_ADDR or the
-    // Cargo.toml `site-addr` already settled on — and the address that is
-    // logged is the one that is bound, which is the whole point of resolving
-    // it in one place.
-    let addr = listen::resolve(args.listen, leptos_options.site_addr);
+    // Cargo.toml `site-addr` already settled on, and `listen::DEFAULT_ADDR`
+    // when nothing did — and the address that is logged is the one that is
+    // bound, which is the whole point of resolving it in one place.
+    //
+    // Reading the variable rather than comparing the address is the whole of
+    // the rule: leptos' own default is indistinguishable from someone asking
+    // for that address, and only one of those should be overridden. This is
+    // the one place it is read; `listen::resolve` stays pure.
+    let site_addr_was_set = std::env::var_os("LEPTOS_SITE_ADDR").is_some();
+    let addr = listen::resolve(args.listen, leptos_options.site_addr, site_addr_was_set);
     let listener = tokio::net::TcpListener::bind(addr)
         .await
         .with_context(|| format!("failed to bind {addr}"))?;
