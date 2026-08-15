@@ -141,6 +141,27 @@ fn transform_samples() -> Vec<(&'static str, Value)> {
                 "on_missing": "null"
             }),
         ),
+        // `source` is a tagged union, so the sample covers the `file` arm as
+        // well — an inline-only sample would let the reference spelling drift.
+        // Neither sample writes `"scope": "message"`: it is the default and is
+        // skipped on the way out, which is what keeps a saved config free of
+        // fields nobody wrote.
+        (
+            "script",
+            json!({
+                "type": "script",
+                "source": {"type": "inline", "code": "msg.total = msg.a + msg.b;\nmsg"},
+                "max_operations": 50000
+            }),
+        ),
+        (
+            "script",
+            json!({
+                "type": "script",
+                "source": {"type": "file", "path": "scripts/enrich.rhai"},
+                "scope": "batch"
+            }),
+        ),
         // deliberately one of every mapping kind: `mappings` is a list of a
         // tagged union, which is the most intricate shape in the config, and a
         // sample that only covered `copy` would let the other six drift.

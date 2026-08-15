@@ -1,6 +1,8 @@
 state:
   heartbeat_peaks:
     max_keys: 1
+  heartbeat_swings:
+    max_keys: 1
   sensor_state:
     max_keys: 500
     idle_timeout_secs: 3600
@@ -32,9 +34,9 @@ pipelines:
     group: kayak-sample
     start_at: latest
     max_batch: 500
-    ack: on_delivery
     envelope:
       type: merge
+    ack: on_delivery
   transforms: []
   outputs:
   - type: stdout
@@ -44,9 +46,9 @@ pipelines:
     connection: local-mqtt
     topic: test.mqtt
     qos: at_least_once
-    ack: on_delivery
     envelope:
       type: merge
+    ack: on_delivery
   transforms: []
   outputs:
   - type: stdout
@@ -101,6 +103,59 @@ pipelines:
   transforms: []
   outputs:
   - type: stdout
+- id: broken_aggregate
+  inputs:
+  - type: pipeline
+    upstream: heartbeat
+  transforms:
+  - type: reducer
+    aggregations:
+    - function: sum
+      as: total_temperature
+      field: temperature
+  outputs:
+  - type: stdout
+- id: broken_cast
+  inputs:
+  - type: pipeline
+    upstream: heartbeat
+  transforms:
+  - type: map
+    mappings:
+    - type: cast
+      from: current_time
+      to: float
+      as: current_time_number
+  outputs:
+  - type: stdout
+- id: broken_intermittently
+  inputs:
+  - type: pipeline
+    upstream: heartbeat
+  transforms:
+  - type: filter
+    Numeric:
+      field: value
+      operator: GreaterThan
+      value: 8.0
+  - type: map
+    mappings:
+    - type: cast
+      from: current_time
+      to: integer
+      as: tick
+  outputs:
+  - type: stdout
+- id: broken_webhook
+  inputs:
+  - type: pipeline
+    upstream: heartbeat
+  transforms:
+  - type: http
+    url: http://127.0.0.1:59999/alerts
+    verb: POST
+  outputs:
+  - type: stdout
 - id: everything
   inputs:
   - type: pipeline
@@ -117,6 +172,34 @@ pipelines:
   - type: nats
     connection: local-nats
     subject: test.everything
+- id: heartbeat_banded
+  inputs:
+  - type: pipeline
+    upstream: heartbeat
+  transforms:
+  - type: script
+    source:
+      type: inline
+      code: |
+        msg.band = if msg.value > 7.0 { "high" } else if msg.value < -7.0 { "low" } else { "normal" };
+        msg
+  outputs:
+  - type: stdout
+- id: heartbeat_extremes
+  inputs:
+  - type: pipeline
+    upstream: heartbeat
+    buffer:
+      type: tumbling
+      window_seconds: 10
+  transforms:
+  - type: script
+    source:
+      type: file
+      path: scripts/extremes.rhai
+    scope: batch
+  outputs:
+  - type: stdout
 - id: heartbeat_pairs
   inputs:
   - type: pipeline
@@ -153,24 +236,6 @@ pipelines:
   - type: stdout
   state:
     bucket: heartbeat_peaks
-- id: heartbeat_to_redis
-  inputs:
-  - type: pipeline
-    upstream: heartbeat
-  transforms: []
-  outputs:
-  - type: redis
-    connection: local-redis
-    channel: heartbeat
-- id: heartbeat_to_webhook
-  inputs:
-  - type: pipeline
-    upstream: heartbeat
-  transforms: []
-  outputs:
-  - type: http
-    url: http://127.0.0.1:6767/api/pipelines/ingest/messages
-    body: batch
 - id: heartbeat_shaped
   inputs:
   - type: pipeline
@@ -179,41 +244,38 @@ pipelines:
   - type: map
     mappings:
     - type: constant
-      as: line
       value:
         type: text
         value: line-3
-    # reads `line`, which the mapping above wrote: mappings apply in order
+      as: line
     - type: concat
-      as: asset
       parts:
       - type: value
         value: heartbeat/
       - type: field
         field: line
+      as: asset
     - type: copy
       from: current_time
       as: observed_at
-    # (value * 1.8) + 32 in two steps through an intermediate the last
-    # mapping drops again — one operation per mapping, deliberately
     - type: arithmetic
-      as: _scaled
-      operator: multiply
       left:
         type: field
         field: value
+      operator: multiply
       right:
         type: value
         value: 1.8
+      as: _scaled
     - type: arithmetic
-      as: fahrenheit
-      operator: add
       left:
         type: field
         field: _scaled
+      operator: add
       right:
         type: value
         value: 32.0
+      as: fahrenheit
     - type: cast
       from: value
       to: text
@@ -224,31 +286,19 @@ pipelines:
       - current_time
   outputs:
   - type: stdout
-- id: sensors_projected
+- id: heartbeat_swings
   inputs:
   - type: pipeline
-    upstream: sensors
+    upstream: heartbeat
   transforms:
-  # the other shape: only the mapped fields come out, which is what
-  # prepares a message for an output with a shape of its own
-  - type: map
-    keep: mapped
-    on_missing: omit
-    mappings:
-    - type: copy
-      from: _meta.subject
-    - type: copy
-      from: sensor
-    - type: coalesce
-      as: reading
-      from:
-      - value
-      - reading
-    - type: copy
-      from: ts
-      as: recorded_at
+  - type: script
+    source:
+      type: file
+      path: scripts/swings.rhai
   outputs:
   - type: stdout
+  state:
+    bucket: heartbeat_swings
 - id: heartbeat_to_disk
   inputs:
   - type: pipeline
@@ -262,6 +312,15 @@ pipelines:
     rotate:
       max_rows: 20
       interval_secs: 60
+- id: heartbeat_to_redis
+  inputs:
+  - type: pipeline
+    upstream: heartbeat
+  transforms: []
+  outputs:
+  - type: redis
+    connection: local-redis
+    channel: heartbeat
 - id: heartbeat_to_s3
   inputs:
   - type: pipeline
@@ -275,6 +334,15 @@ pipelines:
     rotate:
       max_rows: 20
       interval_secs: 60
+- id: heartbeat_to_webhook
+  inputs:
+  - type: pipeline
+    upstream: heartbeat
+  transforms: []
+  outputs:
+  - type: http
+    url: http://127.0.0.1:6767/api/pipelines/ingest/messages
+    body: batch
 - id: hot_readings
   inputs:
   - type: pipeline
@@ -442,6 +510,29 @@ pipelines:
     connection: local-postgres
     table: readings
   - type: stdout
+- id: sensors_projected
+  inputs:
+  - type: pipeline
+    upstream: sensors
+  transforms:
+  - type: map
+    mappings:
+    - type: copy
+      from: _meta.subject
+    - type: copy
+      from: sensor
+    - type: coalesce
+      from:
+      - value
+      - reading
+      as: reading
+    - type: copy
+      from: ts
+      as: recorded_at
+    keep: mapped
+    on_missing: omit
+  outputs:
+  - type: stdout
 - id: sensors_to_clickhouse
   inputs:
   - type: pipeline
@@ -510,58 +601,5 @@ pipelines:
   - type: http
     url: http://localhost:8080/alerts
     verb: POST
-  outputs:
-  - type: stdout
-- id: broken_cast
-  inputs:
-  - type: pipeline
-    upstream: heartbeat
-  transforms:
-  - type: map
-    mappings:
-    - type: cast
-      from: current_time
-      to: float
-      as: current_time_number
-  outputs:
-  - type: stdout
-- id: broken_aggregate
-  inputs:
-  - type: pipeline
-    upstream: heartbeat
-  transforms:
-  - type: reducer
-    aggregations:
-    - function: sum
-      field: temperature
-      as: total_temperature
-  outputs:
-  - type: stdout
-- id: broken_webhook
-  inputs:
-  - type: pipeline
-    upstream: heartbeat
-  transforms:
-  - type: http
-    url: http://127.0.0.1:59999/alerts
-    verb: POST
-  outputs:
-  - type: stdout
-- id: broken_intermittently
-  inputs:
-  - type: pipeline
-    upstream: heartbeat
-  transforms:
-  - type: filter
-    Numeric:
-      field: value
-      operator: GreaterThan
-      value: 8.0
-  - type: map
-    mappings:
-    - type: cast
-      from: current_time
-      to: integer
-      as: tick
   outputs:
   - type: stdout

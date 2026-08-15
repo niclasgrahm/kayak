@@ -6,6 +6,9 @@
     "sensor_state": {
       "max_keys": 500,
       "idle_timeout_secs": 3600
+    },
+    "heartbeat_swings": {
+      "max_keys": 1
     }
   },
   "pipelines": [
@@ -394,6 +397,83 @@
               ]
             }
           ]
+        }
+      ],
+      "outputs": [
+        {
+          "type": "stdout"
+        }
+      ]
+    },
+    {
+      "id": "heartbeat_banded",
+      "inputs": [
+        {
+          "type": "pipeline",
+          "upstream": "heartbeat"
+        }
+      ],
+      "transforms": [
+        {
+          "type": "script",
+          "source": {
+            "type": "inline",
+            "code": "msg.band = if msg.value > 7.0 { \"high\" } else if msg.value < -7.0 { \"low\" } else { \"normal\" };\nmsg\n"
+          }
+        }
+      ],
+      "outputs": [
+        {
+          "type": "stdout"
+        }
+      ]
+    },
+    {
+      "id": "heartbeat_swings",
+      "inputs": [
+        {
+          "type": "pipeline",
+          "upstream": "heartbeat"
+        }
+      ],
+      "state": {
+        "bucket": "heartbeat_swings"
+      },
+      "transforms": [
+        {
+          "type": "script",
+          "source": {
+            "type": "file",
+            "path": "scripts/swings.rhai"
+          }
+        }
+      ],
+      "outputs": [
+        {
+          "type": "stdout"
+        }
+      ]
+    },
+    {
+      "id": "heartbeat_extremes",
+      "inputs": [
+        {
+          "type": "pipeline",
+          "upstream": "heartbeat",
+          "buffer": {
+            "type": "tumbling",
+            "window_seconds": 10
+          }
+        }
+      ],
+      "transforms": [
+        {
+          "type": "script",
+          "source": {
+            "type": "file",
+            "path": "scripts/extremes.rhai"
+          },
+          "scope": "batch"
         }
       ],
       "outputs": [

@@ -179,6 +179,10 @@
     {
       "link": "/reference/transforms#transform-map",
       "text": "map"
+    },
+    {
+      "link": "/reference/transforms#transform-script",
+      "text": "script"
     }
   ]
 }

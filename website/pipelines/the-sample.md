@@ -99,6 +99,27 @@ declares no `key` — one bucket-wide value, shown in the card as "the whole
 bucket". `sensor_state` beside it is the keyed shape, one entry per sensor, and
 needs `docker compose up`.
 
+**All three script pipelines hang off `heartbeat`** for the reason
+`heartbeat_to_disk` does, and between them they cover both sources and both
+scopes. `heartbeat_banded` is the inline one and is deliberately two lines: a
+conditional writing a band onto the message, which is the smallest thing `map`
+cannot express at all. `heartbeat_swings` is the file-sourced one at
+`scripts/swings.rhai` and is the script-plus-state sample — it recalls the
+previous reading, remembers this one, and emits the direction and the delta,
+which is the comparison `remember`/`recall` have no spelling for. Its bucket is
+`max_keys: 1` for the reason `heartbeat_peaks`' is.
+
+`heartbeat_extremes` is the `batch` scope one, and the `buffer` on its input is
+the point rather than a detail: without one the heartbeat arrives a message at a
+time and every batch would hold a single reading, which is what makes batch
+scope look pointless. It emits `spread` alongside `lowest` and `highest` —
+arithmetic *between* two aggregates, which a reducer cannot do.
+
+Note the sample is JSON, which is the format inline scripts read worst in: the
+inline one is a single escaped `\n` away from being unreadable, and that is a
+fair advertisement for keeping scripts in files or writing the config in YAML.
+`config.yaml` beside it renders the same script as a literal block.
+
 `heartbeat_to_disk` is the file output's sample, and it hangs off `heartbeat`
 rather than off the nats source on purpose: the dummy input needs nothing
 running, so it is the one pipeline in here that writes real output on a bare

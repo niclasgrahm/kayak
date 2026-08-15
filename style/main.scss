@@ -30,6 +30,18 @@
   --json-str: #a7c080;
   --json-num: #d8a657;
   --json-literal: #d699b6;
+  // The script editor. Deliberately the json palette's hues reused rather than
+  // a second scheme: a payload and the script that reshapes it sit inches apart
+  // on the same card, and two unrelated colourings there would read as two
+  // unrelated languages.
+  --rhai-keyword: #d699b6;
+  --rhai-str: #a7c080;
+  --rhai-num: #d8a657;
+  --rhai-comment: #6b7280;
+  // The functions kayak puts in scope, which is the whole interface between a
+  // script and the pipeline around it — worth picking out from the identifiers
+  // the script declares itself.
+  --rhai-host: #7fbbb3;
   --text: #cdced2;
   --text-dim: #85878c;
   --radius: 4px;
@@ -72,6 +84,9 @@ body {
 .state-card,
 .docs-content,
 .modal,
+// a script and the messages tried against it are both there to be copied in and
+// out — the whole point of the pane is pasting a real message into it
+.script-editor,
 input,
 textarea {
   user-select: text;
@@ -2506,4 +2521,230 @@ textarea {
     border-color: rgba(216, 166, 87, 0.4);
     background: rgba(216, 166, 87, 0.1);
   }
+}
+
+
+// ── the script editor ───────────────────────────────────────────────────────
+//
+// A `<textarea>` with transparent text sitting exactly on top of a `<pre>` that
+// holds the same characters coloured. Every rule below that looks like
+// duplication between `.script-highlight` and `.script-input` is load-bearing:
+// the two elements have to lay their text out identically, to the pixel, or the
+// colours drift out from under the caret. Change one, change the other.
+.script-editor {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  min-width: 0;
+}
+
+// A script gets the whole width of the modal, with its label above rather than
+// beside it. Every other control in this form is one line and reads fine in a
+// 40% / 60% split; twenty lines of code in the right-hand column of that split
+// is a column about thirty characters wide, which is not somewhere anyone can
+// write anything.
+// The control sits inside a `.form-control` wrapper, so this is a descendant
+// match rather than a child one — and it wants to be: the editor is nested
+// inside the `source` union, so *both* rows (the union's and the code's) have
+// to give up the split for the editor to reach full width.
+.form-row:has(.script-editor) {
+  grid-template-columns: 1fr;
+  align-items: stretch;
+}
+
+.script-surface {
+  display: flex;
+  background: var(--bg-canvas);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  max-height: 320px;
+  // **The one scroll container.** Both layers are inside it, so they move
+  // together by construction — there is no scroll position to keep in sync,
+  // which is the usual way an overlay editor drifts. Horizontal as well as
+  // vertical: the text does not wrap (it must not, or the two layers would have
+  // to agree about where every line breaks), so a long line has to be
+  // reachable.
+  overflow: auto;
+}
+
+.script-gutter {
+  flex: 0 0 auto;
+  padding: 6px 6px 6px 8px;
+  text-align: right;
+  color: var(--text-dim);
+  background: var(--bg-titlebar);
+  border-right: 1px solid var(--border);
+  user-select: none;
+  // stays put while the code scrolls sideways under it
+  position: sticky;
+  left: 0;
+  z-index: 1;
+
+  // shares every metric that decides where a line sits
+  font-family: var(--font-mono);
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.script-code {
+  position: relative;
+  // grows to fill, never shrinks below its content: the `<pre>` inside is what
+  // decides how wide a line is, and the textarea stretches to match it. Shrink
+  // it and the textarea would be narrower than the text it holds, which is the
+  // one thing that makes it scroll independently.
+  flex: 1 0 auto;
+}
+
+.script-highlight,
+.script-input {
+  // the shared metrics — see the block comment above
+  font-family: var(--font-mono);
+  font-size: 12px;
+  line-height: 1.5;
+  padding: 6px 8px;
+  margin: 0;
+  border: 0;
+  white-space: pre;
+  overflow-wrap: normal;
+  tab-size: 2;
+}
+
+.script-highlight {
+  // the layer underneath: it decides how tall *and how wide* the box is, and
+  // the textarea stretches over it
+  min-height: 120px;
+  min-width: 100%;
+  width: max-content;
+  color: var(--text);
+  pointer-events: none;
+}
+
+.script-line {
+  min-height: 1.5em;
+}
+
+.script-input {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  resize: none;
+  background: transparent;
+  // the text is *there* — it carries the selection and the caret — it is simply
+  // invisible, because the `<pre>` behind it is showing the same characters in
+  // colour. `caret-color` is what keeps the cursor visible through it.
+  color: transparent;
+  caret-color: var(--text);
+  outline: none;
+  overflow: hidden;
+
+  &::selection {
+    background: rgba(105, 156, 232, 0.35);
+  }
+}
+
+.rhai-plain,
+.rhai-ident,
+.rhai-punct {
+  color: var(--text);
+}
+.rhai-punct {
+  color: var(--text-dim);
+}
+.rhai-keyword {
+  color: var(--rhai-keyword);
+}
+.rhai-literal {
+  color: var(--rhai-keyword);
+}
+.rhai-str {
+  color: var(--rhai-str);
+}
+.rhai-num {
+  color: var(--rhai-num);
+}
+.rhai-comment {
+  color: var(--rhai-comment);
+  font-style: italic;
+}
+.rhai-host {
+  color: var(--rhai-host);
+}
+
+// ── the try-it pane ─────────────────────────────────────────────────────────
+.try-it {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.try-it-toggle {
+  align-self: flex-start;
+  background: none;
+  border: 0;
+  padding: 0;
+  color: var(--text-dim);
+  font-size: 11px;
+  cursor: pointer;
+
+  &:hover {
+    color: var(--text);
+  }
+}
+
+.try-it-body {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 8px;
+  background: var(--bg-canvas);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+}
+
+.try-it-label {
+  color: var(--text-dim);
+  font-size: 11px;
+}
+
+.try-it-input {
+  font-family: var(--font-mono);
+  font-size: 12px;
+  min-height: 56px;
+  resize: vertical;
+  background: var(--bg-panel);
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 6px 8px;
+}
+
+.try-it-summary {
+  color: var(--text-dim);
+  font-size: 11px;
+}
+
+.try-it-batch {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  margin: 0;
+  padding: 6px 8px;
+  background: var(--bg-panel);
+  border-radius: var(--radius);
+  max-height: 180px;
+  overflow: auto;
+  white-space: pre;
+}
+
+.try-it-error {
+  color: var(--error);
+  background: var(--error-bg);
+  border-radius: var(--radius);
+  padding: 6px 8px;
+  font-size: 12px;
+}
+
+.try-it-warning {
+  color: var(--stat-out);
+  font-size: 11px;
 }

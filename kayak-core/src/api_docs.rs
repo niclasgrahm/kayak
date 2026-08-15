@@ -31,6 +31,7 @@ use crate::connections::{Connections, CreateConnectionRequest};
 use crate::docs::ComponentDoc;
 use crate::history::PipelineHistory;
 use crate::layout::LayoutFile;
+use crate::script::{DryRunRequest, DryRunResponse};
 use crate::server_config::Role;
 use crate::state::{BucketContents, BucketSummary};
 use crate::{
@@ -103,6 +104,7 @@ pub enum Operation {
     IngestMessages,
     ListConnections,
     GetPipelineHistory,
+    DryRunScript,
     ListStateBuckets,
     GetStateBucket,
     CreateConnection,
@@ -132,6 +134,7 @@ impl Operation {
             Self::IngestMessages => "ingestMessages",
             Self::ListConnections => "listConnections",
             Self::GetPipelineHistory => "getPipelineHistory",
+            Self::DryRunScript => "dryRunScript",
             Self::ListStateBuckets => "listStateBuckets",
             Self::GetStateBucket => "getStateBucket",
             Self::CreateConnection => "createConnection",
@@ -729,6 +732,57 @@ pub fn endpoints() -> Vec<ApiDoc> {
             }],
         },
         ApiDoc {
+            path: "/api/scripts/dry-run",
+            method: Method::Post,
+            operation: Operation::DryRunScript,
+            summary: "Run a script over some messages, without creating a pipeline",
+            description: "A `script` transform is the one component whose configuration can \
+                          be wrong in a way the config's *shape* cannot express: for every \
+                          other component, a config that deserializes and builds does what \
+                          it says, and for this one the interesting mistakes are all inside \
+                          a string. This endpoint is where that string gets checked.\n\n\
+                          It compiles the script and runs it over the messages in the body, \
+                          through the same runner and under the same operation budget and \
+                          sandbox a running transform gets — a dry run that could disagree \
+                          with production would be worse than none, because it would be \
+                          trusted.\n\n\
+                          **A script with a bug in it is a 200, not a 400.** The request was \
+                          well formed and the server answered it completely; where the bug \
+                          is *is* the answer. The response is a tagged union: `emitted` \
+                          carries the batches, `failed` carries the message with a line and \
+                          column an editor can point at. A 400 here means the request itself \
+                          was wrong — malformed JSON, or a `file` source naming something \
+                          unreadable.\n\n\
+                          State is **never live**. The run gets a private bucket seeded from \
+                          `state` in the body and thrown away afterwards, and what it holds \
+                          at the end comes back in the response. Reading production state \
+                          would make the answer depend on what the server happened to be \
+                          doing; writing it would give a dry run side effects.",
+            tag: Tag::Pipelines,
+            access: Access::Admin,
+            params: vec![],
+            query: vec![],
+            request: Some(RequestDoc {
+                body: Body::Json("DryRunRequest"),
+                description: "The script, and the messages to run it over.",
+            }),
+            responses: vec![
+                ResponseDoc {
+                    status: 200,
+                    description: "The script ran, or it did not compile — the `outcome` \
+                                  field says which.",
+                    body: Body::Json("DryRunResponse"),
+                },
+                ResponseDoc {
+                    status: 400,
+                    description: "The request itself was wrong: malformed JSON, or a `file` \
+                                  source that could not be read.",
+                    body: Body::Json("ApiError"),
+                },
+                server_error(),
+            ],
+        },
+        ApiDoc {
             path: "/api/state",
             method: Method::Get,
             operation: Operation::ListStateBuckets,
@@ -1214,6 +1268,8 @@ pub fn schemas() -> BTreeMap<&'static str, Value> {
     schemas.insert("SaveConfigResponse", of(schema_for!(SaveConfigResponse)));
     schemas.insert("ComponentDoc", of(schema_for!(ComponentDoc)));
     schemas.insert("UiEvent", of(schema_for!(UiEvent)));
+    schemas.insert("DryRunRequest", of(schema_for!(DryRunRequest)));
+    schemas.insert("DryRunResponse", of(schema_for!(DryRunResponse)));
     schemas.insert("ApiError", of(schema_for!(ApiError)));
     schemas.insert("LoginRequest", of(schema_for!(LoginRequest)));
     schemas.insert("AuthDto", of(schema_for!(AuthDto)));
@@ -1433,6 +1489,13 @@ mod tests {
                 // after the fact
                 ("getPipelineHistory", "read"),
                 ("listConnections", "read"),
+                // executes code the caller supplied. It is sandboxed and its
+                // state is a scratch bucket, so it cannot reach the running
+                // graph — but "runs what you send it" is an operator's
+                // capability whatever the sandbox does, and it is the same
+                // capability `createPipeline` already grants. Never lower this
+                // to `read`.
+                ("dryRunScript", "admin"),
                 ("listStateBuckets", "read"),
                 ("getStateBucket", "read"),
                 ("createConnection", "admin"),
