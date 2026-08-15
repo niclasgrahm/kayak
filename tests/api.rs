@@ -705,3 +705,184 @@ async fn a_declared_bucket_is_listed_and_fills_as_it_is_written_to() -> anyhow::
     assert!(contents["entries"][0]["updated_at"].is_string());
     Ok(())
 }
+
+// ── the script dry run ──────────────────────────────────────────────────────
+
+fn dry_run(body: &Value) -> Request<Body> {
+    post("/api/scripts/dry-run", body)
+}
+
+fn inline(code: &str) -> Value {
+    json!({ "type": "inline", "code": code })
+}
+
+/// The endpoint's reason for existing, in one test: a script and some messages
+/// go in, the batches it emits come out, and no pipeline was created.
+#[tokio::test]
+async fn a_dry_run_returns_what_the_script_emitted() -> anyhow::Result<()> {
+    let app = app();
+    let (status, body) = send(
+        &app,
+        dry_run(&json!({
+            "source": inline("msg.total = msg.a + msg.b; msg"),
+            "messages": [{"a": 1, "b": 2}, {"a": 10, "b": 5}]
+        })),
+    )
+    .await?;
+
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["outcome"], "emitted");
+    assert_eq!(
+        body["batches"],
+        json!([[{"a": 1, "b": 2, "total": 3}, {"a": 10, "b": 5, "total": 15}]])
+    );
+
+    // and nothing was started by asking
+    let (_, pipelines) = send(&app, get("/api/pipelines")).await?;
+    assert_eq!(pipelines, json!([]));
+    Ok(())
+}
+
+/// **A script with a bug in it is a 200.** The request was well formed and the
+/// server answered it completely — where the bug is *is* the answer. See the
+/// `DryRunScript` entry in `kayak_core::api_docs`.
+#[tokio::test]
+async fn a_script_that_does_not_compile_is_a_200_saying_where() -> anyhow::Result<()> {
+    let (status, body) = send(
+        &app(),
+        dry_run(&json!({
+            "source": inline("let a = 1;\nlet b = ;\n"),
+            "messages": []
+        })),
+    )
+    .await?;
+
+    assert_eq!(status, StatusCode::OK, "a bad script is not a bad request");
+    assert_eq!(body["outcome"], "failed");
+    assert_eq!(body["stage"], "compile");
+    assert_eq!(
+        body["line"], 2,
+        "the position is what an editor puts a marker on: {body}"
+    );
+    Ok(())
+}
+
+/// A runtime failure is a different fact from a compile failure — one refuses
+/// to start a pipeline, the other fails batches on a pipeline that started.
+#[tokio::test]
+async fn a_script_that_throws_reports_the_run_rather_than_the_compile() -> anyhow::Result<()> {
+    let (status, body) = send(
+        &app(),
+        dry_run(&json!({
+            "source": inline("throw \"nope\";"),
+            "messages": [{}]
+        })),
+    )
+    .await?;
+
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["outcome"], "failed");
+    assert_eq!(body["stage"], "runtime");
+    assert!(
+        body["message"].as_str().is_some_and(|m| m.contains("nope")),
+        "the thrown value should be in the message: {body}"
+    );
+    Ok(())
+}
+
+/// The property that makes this safe to call against a live server: the run's
+/// bucket is private, seeded from the request, and thrown away. Nothing here
+/// reaches the server's own state.
+#[tokio::test]
+async fn a_dry_run_seeds_its_own_state_and_shows_what_was_remembered() -> anyhow::Result<()> {
+    let app = app();
+    let (status, body) = send(
+        &app,
+        dry_run(&json!({
+            "source": inline(
+                "let last = recall(msg.id);\n\
+                 remember(msg.id, #{ value: msg.value });\n\
+                 emit(#{ id: msg.id, delta: msg.value - last.value });"
+            ),
+            "messages": [{"id": "m-1", "value": 30}],
+            "state": { "m-1": { "value": 10 } }
+        })),
+    )
+    .await?;
+
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["outcome"], "emitted");
+    assert_eq!(body["batches"], json!([[{"id": "m-1", "delta": 20}]]));
+    assert_eq!(
+        body["state"], json!({"m-1": {"value": 30}}),
+        "what the script remembered is shown rather than hidden: {body}"
+    );
+
+    // the server's own state is untouched — it has no buckets at all
+    let (_, buckets) = send(&app, get("/api/state")).await?;
+    assert_eq!(buckets, json!([]), "a dry run must not create live state");
+    Ok(())
+}
+
+/// The sandbox is the runner's, not the endpoint's — this is here to pin that
+/// the endpoint really does go through it rather than building its own engine.
+#[tokio::test]
+async fn a_dry_run_is_bounded_by_the_same_operation_budget() -> anyhow::Result<()> {
+    let (status, body) = send(
+        &app(),
+        dry_run(&json!({ "source": inline("loop { }"), "messages": [{}] })),
+    )
+    .await?;
+
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["outcome"], "failed");
+    assert_eq!(body["stage"], "runtime");
+    Ok(())
+}
+
+/// The other side of the 200/400 line: a `file` source the server cannot read
+/// is a request that could not be carried out, not a script with a bug.
+#[tokio::test]
+async fn a_file_source_the_server_cannot_read_is_a_400() -> anyhow::Result<()> {
+    let (status, body) = send(
+        &app(),
+        dry_run(&json!({
+            "source": {"type": "file", "path": "scripts/absent.rhai"},
+            "messages": []
+        })),
+    )
+    .await?;
+
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert!(
+        body["error"].is_string(),
+        "a request error takes the documented ApiError shape: {body}"
+    );
+    Ok(())
+}
+
+/// `batch` scope is the escape hatch, and the thing it can do that `message`
+/// cannot is decide how many batches leave.
+#[tokio::test]
+async fn a_batch_scoped_dry_run_can_repartition() -> anyhow::Result<()> {
+    let (status, body) = send(
+        &app(),
+        dry_run(&json!({
+            "source": inline(
+                "let a = []; let b = [];\n\
+                 for m in batch { if m.n > 1 { b.push(m); } else { a.push(m); } }\n\
+                 emit(a); emit(b);"
+            ),
+            "scope": "batch",
+            "messages": [{"n": 1}, {"n": 2}, {"n": 3}]
+        })),
+    )
+    .await?;
+
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(
+        body["batches"],
+        json!([[{"n": 1}], [{"n": 2}, {"n": 3}]])
+    );
+    Ok(())
+}

@@ -30,6 +30,12 @@ export default defineConfig({
   ],
   markdown: {
     theme: { light: 'github-light', dark: 'vitesse-dark' },
+    // Shiki has no rhai grammar. Rust's is the closest thing that exists —
+    // rhai is explicitly Rust-flavoured, and `let`, `fn`, `if`, `for … in`,
+    // the comment syntax and the literals all land correctly. `#{ … }` is the
+    // one thing it gets wrong, and a wrong brace beats every keyword falling
+    // back to plain text. The fences still say `rhai`, which is what they are.
+    languageAlias: { rhai: 'rust' },
   },
   themeConfig: {
     logo: undefined,
@@ -64,6 +70,7 @@ export default defineConfig({
           { text: 'message metadata', link: '/pipelines/message-metadata' },
           { text: 'reshaping messages', link: '/pipelines/reshaping-messages' },
           { text: 'state', link: '/pipelines/state' },
+          { text: 'scripting', link: '/pipelines/scripting' },
           { text: 'the sample graph', link: '/pipelines/the-sample' },
         ],
       },

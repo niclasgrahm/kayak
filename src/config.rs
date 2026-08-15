@@ -69,6 +69,7 @@ impl BuildTransformConfig for TransformConfig {
             TransformKind::Remember(c) => c.build(ctx),
             TransformKind::Recall(c) => c.build(ctx),
             TransformKind::Map(c) => c.build(ctx),
+            TransformKind::Script(c) => c.build(ctx),
         }
     }
 }

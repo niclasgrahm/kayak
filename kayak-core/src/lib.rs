@@ -14,6 +14,7 @@ pub mod history;
 pub mod layout;
 pub mod mapping;
 pub mod metadata;
+pub mod script;
 pub mod server_config;
 pub mod state;
 

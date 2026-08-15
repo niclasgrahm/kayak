@@ -7,6 +7,7 @@ pub mod filter;
 pub mod http;
 pub mod map;
 pub mod reduce;
+pub mod script;
 pub mod splitter;
 pub mod state;
 

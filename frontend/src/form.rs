@@ -332,6 +332,12 @@ pub fn parse_field(field: &FieldDoc, raw: &str) -> Result<Option<Value>, String>
         // slip of the keyboard. A connection name is the same kind of thing —
         // picked from a dropdown of what exists, sent as the plain name
         FieldType::PipelineId | FieldType::Connection(_) => Value::String(trimmed.to_string()),
+        // code, sent exactly as it was typed. Not trimmed for a stronger reason
+        // than the text arm's: leading whitespace is *indentation*, and a
+        // trailing newline is what every editor leaves behind. Reformatting
+        // someone's source on the way to the server would also move every line
+        // number the dry run reports.
+        FieldType::Script(_) => Value::String(raw.to_string()),
         FieldType::Enum(values) => {
             if values.iter().any(|v| v == trimmed) {
                 Value::String(trimmed.to_string())
@@ -1537,6 +1543,9 @@ mod tests {
                 FieldType::Text | FieldType::PipelineId | FieldType::Connection(_) => {
                     "x".to_string()
                 }
+                // a script that parses and emits its message — the smallest
+                // thing that is actually a working transform
+                FieldType::Script(_) => "emit(msg);".to_string(),
                 FieldType::Integer => "1".to_string(),
                 FieldType::Number => "1.5".to_string(),
                 FieldType::Boolean => "true".to_string(),

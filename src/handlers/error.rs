@@ -11,6 +11,24 @@ pub struct AppError {
     err: anyhow::Error,
 }
 
+impl AppError {
+    /// A request that was well formed enough to deserialize and still could not
+    /// be carried out — the `file` source of a dry run naming something that
+    /// isn't there is the case this was added for.
+    ///
+    /// Spelled out rather than reached through `From`, because the blanket
+    /// conversion classifies by [`PipelineError`] and an anyhow error that is
+    /// not one of those is a *server* fault by default. That default is the
+    /// right way round: a handler that knows the client is at fault says so,
+    /// and one that doesn't know reports a 500 rather than blaming the caller.
+    pub fn bad_request(err: impl Into<anyhow::Error>) -> Self {
+        Self {
+            status: StatusCode::BAD_REQUEST,
+            err: err.into(),
+        }
+    }
+}
+
 impl IntoResponse for AppError {
     fn into_response(self) -> Response {
         // the full cause chain is useful in the log but not in the response body

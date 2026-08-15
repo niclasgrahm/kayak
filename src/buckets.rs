@@ -245,6 +245,23 @@ impl Buckets {
         .unwrap_or_else(|| names.iter().map(|_| None).collect())
     }
 
+    /// Everything remembered under one key, or `None` when nothing is.
+    ///
+    /// The counterpart of [`Buckets::recall`] for a caller that does not know
+    /// the names in advance — which is the `script` transform, since what a
+    /// script asks for is decided by the script rather than by a config field
+    /// this could be handed. `None` and an empty map are deliberately
+    /// distinguishable: a script's warm-up check is "is there an entry at all",
+    /// and an empty map for a missing key would answer it wrong.
+    #[must_use]
+    pub fn recall_all(&self, bucket: &str, key: &str) -> Option<BTreeMap<String, Value>> {
+        self.with(bucket, |b| {
+            b.expire(Instant::now());
+            b.entries.get(key).map(|entry| entry.values.clone())
+        })
+        .flatten()
+    }
+
     /// Every bucket, in name order, with what it is holding.
     #[must_use]
     pub fn summaries(&self) -> Vec<BucketSummary> {

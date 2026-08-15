@@ -133,6 +133,19 @@ pub struct BuildCtx<'a> {
     /// arm for its absence, and a test driving a run loop directly keeps no
     /// history without saying so.
     pub history: Arc<History>,
+    /// The directory a `script` transform's `file` source is resolved against —
+    /// the directory the config file is in.
+    ///
+    /// `None` — the default — means a server with no config file, where a
+    /// file-sourced script refuses to build. That is deliberately the closed
+    /// position and not a stub: the alternative is resolving against the
+    /// process's working directory, which would make the boundary depend on
+    /// where somebody happened to launch the server from. Inline scripts, which
+    /// are what the HTTP API and the UI carry, work either way. See
+    /// [`crate::transforms::script::source`] for the checks, and note this is a
+    /// *third* directory boundary distinct from both `data_dir` and
+    /// [`AppState`]'s `save_dir`.
+    pub script_dir: Option<Arc<PathBuf>>,
 }
 
 impl<'a> BuildCtx<'a> {
@@ -168,6 +181,7 @@ impl<'a> BuildCtx<'a> {
             state: None,
             history: Arc::new(History::disabled()),
             watchers: crate::events::Watchers::attached(),
+            script_dir: None,
         }
     }
 
@@ -201,6 +215,14 @@ impl<'a> BuildCtx<'a> {
     #[must_use]
     pub fn with_data_dir(mut self, data_dir: Option<Arc<PathBuf>>) -> Self {
         self.data_dir = data_dir;
+        self
+    }
+
+    /// The same, with the directory a file-sourced script is resolved against.
+    /// Without it only inline scripts build.
+    #[must_use]
+    pub fn with_script_dir(mut self, script_dir: Option<Arc<PathBuf>>) -> Self {
+        self.script_dir = script_dir;
         self
     }
 

@@ -1,5 +1,6 @@
 use gloo_net::http::Request;
 use kayak_core::history::{PipelineHistory, Resolution};
+use kayak_core::script::{DryRunRequest, DryRunResponse};
 use kayak_core::state::{BucketContents, BucketSummary};
 use kayak_core::{
     AuthDto, ConfigFormat, Connections, LayoutFile, LoginRequest, PipelineDto, SaveConfigRequest,
@@ -64,6 +65,27 @@ impl ApiClient {
             return Err(rejection(resp).await);
         }
         Ok(resp.json::<PipelineDto>().await?)
+    }
+
+    /// Run a script over some messages without creating a pipeline.
+    ///
+    /// Note the two-level result. The outer `ApiError` is the request going
+    /// wrong; the inner [`DryRunResponse`] carries the script's own outcome,
+    /// because **a script with a bug in it is a 200** — the request succeeded
+    /// and where the bug is is the answer. Collapsing the two would throw away
+    /// the line number, which is the whole point of asking.
+    pub async fn dry_run_script(
+        &self,
+        request: &DryRunRequest,
+    ) -> Result<DryRunResponse, ApiError> {
+        let resp = Request::post(&format!("{}/api/scripts/dry-run", self.base))
+            .json(request)?
+            .send()
+            .await?;
+        if !resp.ok() {
+            return Err(rejection(resp).await);
+        }
+        Ok(resp.json::<DryRunResponse>().await?)
     }
 
     pub async fn delete_pipeline(&self, id: &str) -> Result<(), ApiError> {

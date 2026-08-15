@@ -130,6 +130,30 @@ An unknown or newly created pipeline answers with an empty history rather than a
 | --- | --- | --- |
 | `200` | [PipelineHistory](#schema-pipelinehistory) | The pipeline's history at the resolution asked for. |
 
+### `POST /api/scripts/dry-run` {#post-api-scripts-dry-run}
+
+Run a script over some messages, without creating a pipeline
+
+<Badge type="warning" text="admin" /> <Badge type="info" text="dryRunScript" /> — Signed-in users with the `admin` role.
+
+A `script` transform is the one component whose configuration can be wrong in a way the config's *shape* cannot express: for every other component, a config that deserializes and builds does what it says, and for this one the interesting mistakes are all inside a string. This endpoint is where that string gets checked.
+
+It compiles the script and runs it over the messages in the body, through the same runner and under the same operation budget and sandbox a running transform gets — a dry run that could disagree with production would be worse than none, because it would be trusted.
+
+**A script with a bug in it is a 200, not a 400.** The request was well formed and the server answered it completely; where the bug is *is* the answer. The response is a tagged union: `emitted` carries the batches, `failed` carries the message with a line and column an editor can point at. A 400 here means the request itself was wrong — malformed JSON, or a `file` source naming something unreadable.
+
+State is **never live**. The run gets a private bucket seeded from `state` in the body and thrown away afterwards, and what it holds at the end comes back in the response. Reading production state would make the answer depend on what the server happened to be doing; writing it would give a dry run side effects.
+
+**request body** — [DryRunRequest](#schema-dryrunrequest) The script, and the messages to run it over.
+
+**responses**
+
+| status | body | description |
+| --- | --- | --- |
+| `200` | [DryRunResponse](#schema-dryrunresponse) | The script ran, or it did not compile — the `outcome` field says which. |
+| `400` | [ApiError](#schema-apierror) | The request itself was wrong: malformed JSON, or a `file` source that could not be read. |
+| `500` | [ApiError](#schema-apierror) | Something went wrong on the server. The body says what. |
+
 ## connections {#tag-connections}
 
 The systems pipelines talk to, named once and referred to by the components that use them.

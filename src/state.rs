@@ -848,6 +848,21 @@ impl AppState {
             .map(|name| name.to_string_lossy().into_owned())
     }
 
+    /// The directory a `script` transform's `file` source resolves against: the
+    /// directory the config file is in, or `None` when there is no config file.
+    ///
+    /// Deliberately *not* [`AppState::save_dir`], which falls back to the
+    /// process's working directory when there is no config. That fallback is
+    /// right for saving — somewhere has to be the place a first save lands —
+    /// and wrong for reading, where it would make the boundary depend on where
+    /// the server was launched from. See
+    /// [`crate::transforms::script::source`].
+    #[must_use]
+    pub fn script_directory(&self) -> Option<PathBuf> {
+        self.config_path()
+            .and_then(|path| path.parent().map(Path::to_path_buf))
+    }
+
     /// The directory a save writes into. Fixed for the life of the process.
     #[must_use]
     pub fn save_directory(&self) -> &Path {
@@ -1125,7 +1140,12 @@ impl AppState {
         .with_buckets(self.buckets())
         .with_state(pipeline.config.state.clone())
         .with_history(Arc::clone(&self.history))
-        .with_watchers(self.watchers.clone());
+        .with_watchers(self.watchers.clone())
+        // Read off `config_path` on every build rather than held, because the
+        // path is not fixed: a server started without one adopts the file it is
+        // first saved as, and from that save on a file-sourced script resolves
+        // beside it.
+        .with_script_dir(self.script_directory().map(Arc::new));
         // building the runtime only fails on things the config got wrong
         // (unknown upstream, unbuildable component)
         let join_handle = pipeline.start(ctx).map_err(|e| {

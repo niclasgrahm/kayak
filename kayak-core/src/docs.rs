@@ -98,6 +98,16 @@ pub enum FieldType {
     /// rendering it knows. It is always required — a row that is there is a
     /// value that will be sent.
     List(Box<FieldDoc>),
+    /// Source code in some language, carried as a string — a `script`
+    /// transform's `code`. The language is the payload (`rhai`), because a form
+    /// cannot syntax-highlight what it does not know the name of.
+    ///
+    /// A string on the wire like [`FieldType::Text`], and a separate type for
+    /// the reason [`FieldType::PipelineId`] is: what the *control* should be is
+    /// not derivable from the wire type. A one-line box is the wrong shape for
+    /// twenty lines of code, and tab is a character rather than a way out of
+    /// the field.
+    Script(String),
     /// Something with a shape of its own that is none of the above — a union
     /// tagged in a spelling this module doesn't read, say. There is no general
     /// widget for those, so the form takes them as literal JSON.
@@ -448,6 +458,9 @@ fn type_name_of(root: &Value, schema: &Value) -> String {
     if let Some(kind) = connection_kind(schema) {
         return format!("{kind} connection");
     }
+    if let Some(language) = script_language(schema) {
+        return format!("{language} script");
+    }
     // how an `Option<T>` arrives: T or null. The null half is already said by
     // the field being optional, so it would only add noise here.
     if let Some(branches) = schema["anyOf"].as_array() {
@@ -538,6 +551,16 @@ fn connection_kind(schema: &Value) -> Option<&str> {
     schema[CONNECTION_MARKER].as_str()
 }
 
+/// The same idea again for source code, carrying the *language*
+/// (`#[schemars(extend("x-script" = "rhai"))]`) for the reason the connection
+/// marker carries the kind: a form that knows it is holding code but not which
+/// language cannot highlight it, and "some code" is not a thing to render.
+const SCRIPT_MARKER: &str = "x-script";
+
+fn script_language(schema: &Value) -> Option<&str> {
+    schema[SCRIPT_MARKER].as_str()
+}
+
 /// The values of a closed set of strings, in either of the two spellings
 /// schemars uses for one.
 ///
@@ -583,6 +606,9 @@ fn field_type_at(root: &Value, schema: &Value, depth: usize) -> FieldType {
     }
     if let Some(kind) = connection_kind(schema) {
         return FieldType::Connection(kind.to_string());
+    }
+    if let Some(language) = script_language(schema) {
+        return FieldType::Script(language.to_string());
     }
     // `Option<T>` is T here too: whether it may be omitted is the `required`
     // flag's job, not the widget's
@@ -1095,6 +1121,43 @@ mod tests {
     /// A connection is configured exactly like a component, so it documents
     /// itself through the same reflection — and the `/docs` page and the "add
     /// connection" form both come out of this with nothing written by hand.
+    /// A script field is a string on the wire, so nothing but the marker can
+    /// tell it apart from a name or a topic — and a one-line box is the wrong
+    /// control for twenty lines of code. Same rule as `x-pipeline-id`: the
+    /// field says what it is where it is declared, and this module never learns
+    /// a component's name.
+    #[test]
+    fn a_script_field_carries_its_language() {
+        let script = all_components()
+            .into_iter()
+            .find(|c| c.kind == "script")
+            .unwrap_or_else(|| panic!("the script transform documents itself"));
+
+        let source = script
+            .fields
+            .iter()
+            .find(|f| f.name == "source")
+            .unwrap_or_else(|| panic!("the script transform has a `source` field"));
+
+        // `source` is a union, and the code lives on its `inline` variant
+        let FieldType::Union(union) = &source.field_type else {
+            panic!("`source` should render as a union, got {:?}", source.field_type);
+        };
+        let inline = union
+            .variants
+            .iter()
+            .find(|v| v.name == "inline")
+            .unwrap_or_else(|| panic!("the union has an `inline` variant"));
+        let code = inline
+            .fields
+            .iter()
+            .find(|f| f.name == "code")
+            .unwrap_or_else(|| panic!("the inline variant has a `code` field"));
+
+        assert_eq!(code.field_type, FieldType::Script("rhai".to_string()));
+        assert_eq!(code.type_name, "rhai script");
+    }
+
     #[test]
     fn connections_are_documented_as_their_own_family() {
         let kinds: Vec<String> = connection_components()

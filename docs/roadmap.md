@@ -146,19 +146,30 @@ re-derive. See the [docs site](../website/) for how the finished parts behave, a
       `on_missing`. Declared in `kayak-core/src/mapping.rs`, evaluated in
       `src/transforms/map.rs`, and it is what gave `fields` a write side. See
       "reshaping messages" above.)
-- [ ] **a scripted transform (rhai).** Weighed against `map` and deliberately
-      deferred: most of what was missing was a *map*, and answering that with an
-      embedded language would have been answering a narrow question with a wide
-      one. What `map` doesn't reach is arithmetic more than one operation deep,
-      per-field conditionals and string manipulation, and that is the case to
-      revisit this on — the boundary is legible on purpose. Notes if it happens:
-      rhai costs ~1–2 MB of binary (against wasmtime's 10–20 and V8's 30–50) and
-      is sandboxed by default, but the op budget is load-bearing (a script runs
-      synchronously inside the run loop's task, so an unbounded loop wedges a
-      tokio worker, not just that pipeline), and the `Value` → `Dynamic`
-      conversion has to be a custom type with copy-on-write rather than
-      `rhai::serde` — the naive round trip deep-clones every message twice and
-      would cost more than the interpreter.
+- [x] **a scripted transform (rhai).**
+      (done 2026-08-14: `script`, with `message` and `batch` scope, `emit()`,
+      state access, inline or file-sourced. The case it was revisited on is the
+      one this entry predicted plus a fourth the entry missed — **arrays inside
+      a message**, which nothing declarative reaches at all and which turned out
+      to be the strongest argument. See "scripting" in the guide.
+      Two notes from the entry survived and two were adjusted. The op budget is
+      indeed load-bearing and is enforced, along with separate size caps — the
+      budget counts operations and one operation can allocate. `rhai::serde` is
+      indeed avoided, but with a hand-written bidirectional walk rather than a
+      copy-on-write `Dynamic`: a rooted-path CoW type costs the ergonomics of
+      native rhai values (`for line in msg.lines` stops working without
+      registering an iterator, and every operator needs re-registering), which
+      is most of why a scripting language was worth having. Whether the walk is
+      fast enough is a `just bench` question and has not been measured yet — see
+      the entry below.)
+- [ ] measure the `script` transform in `kayak-bench`. Nothing in the scenario
+      suite touches it, so the cost of the `Value` ↔ `Dynamic` walk against the
+      cost of the interpreter is currently an argument rather than a number.
+      Worth a row with an empty script (the walk alone) and one with a
+      field-touching script, at a couple of batch sizes. If the walk dominates,
+      the copy-on-write type the original entry described is the fix, and the
+      ergonomic cost of it is the thing to weigh. Note the scenario names are
+      the baseline's keys — adding rows is free, renaming existing ones is not.
 - [x] **an opcua input.** (done 2026-08-14: a subscription with a monitored item
       per node, one message per value change, nodes named or found by browsing.
       See "the opcua input" in `CLAUDE.md` and

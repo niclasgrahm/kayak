@@ -1,6 +1,7 @@
 use kayak_core::api_docs::{ApiDoc, endpoints};
 use kayak_core::docs::{Family, FieldType, all_components};
 use kayak_core::history::ErrorSignature;
+use kayak_core::script::{DryRunRequest, DryRunResponse};
 use kayak_core::state::{BucketContents, BucketSummary};
 use kayak_core::{
     AuthDto, ConfigFormat, Connections, EdgeEnd, LayoutFile, PipelineDto, PipelineId, PortLayout,
@@ -3664,6 +3665,12 @@ fn FieldEditor(
             }
             .into_any()
         }
+        // Code, so not a one-line box: a syntax-highlighted editor with a
+        // gutter, and a pane that runs it. See [`ScriptEditor`].
+        FieldType::Script(_) => view! {
+            <ScriptEditor at=at.clone() initial=initial.clone() values=values errors=errors index=index />
+        }
+        .into_any(),
         _ => view! {
             <input
                 class="text-input"
@@ -6247,6 +6254,281 @@ pub fn Card(pipeline_id: PipelineId, config: Config) -> impl IntoView {
                     title="drag to resize"
                     on:mousedown=move |ev| grab(ev, Grab::Resize)
                 />
+            </Show>
+        </div>
+    }
+}
+
+/// The control a [`FieldType::Script`] field renders as.
+///
+/// Three things stacked in one box — a line gutter, the highlighted source, and
+/// the textarea somebody actually types into — plus a pane that runs the script
+/// against real messages. The layering is the part worth understanding:
+///
+/// **The `<textarea>` is on top and transparent, and the highlighted spans sit
+/// behind it.** There is no way to colour text inside a textarea, and a
+/// `contenteditable` div is the other approach — one that reimplements
+/// selection, undo and IME badly. So the box keeps the browser's own text
+/// editing whole, and the colour comes from a `<pre>` underneath holding
+/// character-for-character the same text. That is why
+/// [`crate::rhai::highlight`] must reproduce its input exactly: a dropped space
+/// slides the colours out from under the caret.
+///
+/// **The textarea is still uncontrolled**, the same rule every other box in
+/// this form follows — its value is set once, and rebuilding it while somebody
+/// types would destroy what they were typing. The overlay is a separate signal
+/// that `on:input` writes, so the colours update on every keystroke without the
+/// textarea being touched at all.
+#[component]
+fn ScriptEditor(
+    /// The path this field sits at, which is what the draft is keyed by.
+    at: String,
+    /// What was in the box when it was built. Read once, for the reason above.
+    initial: String,
+    values: RwSignal<HashMap<String, String>>,
+    errors: RwSignal<Vec<form::FormError>>,
+    index: usize,
+) -> impl IntoView {
+    // What the overlay renders. Separate from the draft map so a keystroke
+    // touches one signal rather than the whole form's.
+    let source = RwSignal::new(initial.clone());
+    let editor = NodeRef::<leptos::html::Textarea>::new();
+
+    let write_at = at.clone();
+    let cleared = at.clone();
+    let write = move |ev: leptos::ev::Event| {
+        let value = event_target_value(&ev);
+        values.update(|v| {
+            v.insert(write_at.clone(), value.clone());
+        });
+        errors.update(|errors| form::clear_field_error(errors, index, &cleared));
+        source.set(value);
+    };
+
+    // Tab is a character here, not a way out of the field. That is a real
+    // accessibility trade — it takes the keyboard exit away — so shift-tab is
+    // left alone as the way out, and escape still closes the modal.
+    let indent = move |ev: leptos::ev::KeyboardEvent| {
+        if ev.key() != "Tab" || ev.shift_key() {
+            return;
+        }
+        ev.prevent_default();
+        let Some(area) = editor.get() else { return };
+        let text = area.value();
+        let start = area.selection_start().ok().flatten().unwrap_or(0) as usize;
+        let end = area.selection_end().ok().flatten().unwrap_or(0) as usize;
+        // byte offsets from a textarea are UTF-16 code units; clamp through
+        // char_indices so a multi-byte character can't split the string
+        let split = |at: usize| {
+            text.char_indices()
+                .nth(at)
+                .map_or(text.len(), |(byte, _)| byte)
+        };
+        let (start, end) = (split(start), split(end));
+        let mut next = String::with_capacity(text.len() + 2);
+        next.push_str(&text[..start]);
+        next.push_str("  ");
+        next.push_str(&text[end..]);
+        area.set_value(&next);
+        let caret = text[..start].chars().count() + 2;
+        let _ = area.set_selection_start(Some(caret as u32));
+        let _ = area.set_selection_end(Some(caret as u32));
+        values.update(|v| {
+            v.insert(at.clone(), next.clone());
+        });
+        source.set(next);
+    };
+
+    view! {
+        <div class="script-editor">
+            <div class="script-surface">
+                <div class="script-gutter" aria-hidden="true">
+                    {move || {
+                        let count = source.get().lines().count().max(1);
+                        (1..=count)
+                            .map(|n| view! { <div>{n}</div> })
+                            .collect_view()
+                    }}
+                </div>
+                <div class="script-code">
+                    // aria-hidden because the textarea over it carries the same
+                    // text and is the thing a screen reader should read; two
+                    // copies would be read twice
+                    <pre class="script-highlight" aria-hidden="true">
+                        {move || {
+                            crate::rhai::highlight(&source.get())
+                                .into_iter()
+                                .map(|line| {
+                                    view! {
+                                        <div class="script-line">
+                                            {line
+                                                .into_iter()
+                                                .map(|span| {
+                                                    view! {
+                                                        <span class=span.kind.class()>{span.text}</span>
+                                                    }
+                                                })
+                                                .collect_view()}
+                                        </div>
+                                    }
+                                })
+                                .collect_view()
+                        }}
+                    </pre>
+                    <textarea
+                        node_ref=editor
+                        class="script-input"
+                        spellcheck="false"
+                        autocapitalize="off"
+                        aria-label="rhai script"
+                        prop:value=initial
+                        on:input=write
+                        on:keydown=indent
+                    />
+                </div>
+            </div>
+            <TryIt source=source />
+        </div>
+    }
+}
+
+/// The pane under the script editor: run this script over some messages and see
+/// what comes out.
+///
+/// This is what makes writing a script in the UI viable at all. Every other
+/// component in this form is declarative — a filled-in form either builds or
+/// says which box is wrong — while a script is code, and the only way to find
+/// out what code does is to run it. Without this the loop is "create the
+/// pipeline, watch the card, delete the pipeline".
+///
+/// It goes through `POST /api/scripts/dry-run` rather than running rhai in the
+/// browser. rhai does compile to wasm and the frontend is already wasm, so it
+/// was available — but that would be a second interpreter at a second version
+/// with a second set of features, and a script that passes here and fails on
+/// the server is the worst failure this feature can have.
+#[component]
+fn TryIt(source: RwSignal<String>) -> impl IntoView {
+    // The messages to run over, as text: this is a scratch pad, so what is in
+    // it is whatever somebody pasted out of a card's log — which may well not
+    // be valid JSON yet.
+    let messages = RwSignal::new("[{\"value\": 1}]".to_string());
+    let outcome = RwSignal::new(None::<Result<DryRunResponse, String>>);
+    let running = RwSignal::new(false);
+    let open = RwSignal::new(false);
+
+    let run = move |_| {
+        let parsed = serde_json::from_str::<Vec<serde_json::Value>>(&messages.get_untracked());
+        let messages = match parsed {
+            Ok(messages) => messages,
+            // Caught here rather than sent, because the server would answer
+            // this with a deserialization error about the whole request body
+            // and the fault is in one box of it.
+            Err(err) => {
+                outcome.set(Some(Err(format!("the messages are not a JSON array: {err}"))));
+                return;
+            }
+        };
+        let request = DryRunRequest {
+            source: kayak_core::script::ScriptSource::Inline {
+                code: source.get_untracked(),
+            },
+            scope: kayak_core::script::ScriptScope::Message,
+            max_operations: None,
+            messages,
+            state: std::collections::BTreeMap::new(),
+        };
+        running.set(true);
+        leptos::task::spawn_local(async move {
+            let client = ApiClient {
+                base: String::new(),
+            };
+            let result = client
+                .dry_run_script(&request)
+                .await
+                .map_err(|err| err.to_string());
+            outcome.set(Some(result));
+            running.set(false);
+        });
+    };
+
+    view! {
+        <div class="try-it">
+            <button
+                class="try-it-toggle"
+                type="button"
+                on:click=move |_| open.update(|o| *o = !*o)
+            >
+                {move || if open.get() { "▾ try it" } else { "▸ try it" }}
+            </button>
+            <Show when=move || open.get()>
+                <div class="try-it-body">
+                    <label class="try-it-label">"messages"</label>
+                    <textarea
+                        class="try-it-input"
+                        spellcheck="false"
+                        prop:value=messages.get_untracked()
+                        on:input=move |ev| messages.set(event_target_value(&ev))
+                    />
+                    <button class="button" type="button" on:click=run disabled=move || running.get()>
+                        {move || if running.get() { "running…" } else { "run" }}
+                    </button>
+                    {move || outcome.get().map(|result| match result {
+                        Err(message) => view! {
+                            <div class="try-it-error">{message}</div>
+                        }
+                        .into_any(),
+                        Ok(DryRunResponse::Failed { stage, message, line, column }) => {
+                            let where_ = match (line, column) {
+                                (Some(line), Some(column)) => {
+                                    format!(" (line {line}, column {column})")
+                                }
+                                (Some(line), None) => format!(" (line {line})"),
+                                _ => String::new(),
+                            };
+                            let stage = match stage {
+                                kayak_core::script::DryRunStage::Compile => "does not compile",
+                                kayak_core::script::DryRunStage::Runtime => "failed while running",
+                            };
+                            view! {
+                                <div class="try-it-error">
+                                    <strong>{stage}</strong>
+                                    ": "
+                                    {message}
+                                    {where_}
+                                </div>
+                            }
+                            .into_any()
+                        }
+                        Ok(DryRunResponse::Emitted { batches, warnings, .. }) => {
+                            let total: usize = batches.iter().map(Vec::len).sum();
+                            view! {
+                                <div class="try-it-result">
+                                    <div class="try-it-summary">
+                                        {format!(
+                                            "{total} message{} in {} batch{}",
+                                            if total == 1 { "" } else { "s" },
+                                            batches.len(),
+                                            if batches.len() == 1 { "" } else { "es" },
+                                        )}
+                                    </div>
+                                    {warnings
+                                        .into_iter()
+                                        .map(|text| view! { <div class="try-it-warning">{text}</div> })
+                                        .collect_view()}
+                                    {batches
+                                        .into_iter()
+                                        .map(|batch| {
+                                            let text = serde_json::to_string_pretty(&batch)
+                                                .unwrap_or_default();
+                                            view! { <pre class="try-it-batch">{text}</pre> }
+                                        })
+                                        .collect_view()}
+                                </div>
+                            }
+                            .into_any()
+                        }
+                    })}
+                </div>
             </Show>
         </div>
     }

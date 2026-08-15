@@ -354,6 +354,19 @@ One component: everything `/docs` shows about it.
           "type": "object"
         },
         {
+          "additionalProperties": false,
+          "description": "Source code in some language, carried as a string — a `script`\ntransform's `code`. The language is the payload (`rhai`), because a form\ncannot syntax-highlight what it does not know the name of.\n\nA string on the wire like [`FieldType::Text`], and a separate type for\nthe reason [`FieldType::PipelineId`] is: what the *control* should be is\nnot derivable from the wire type. A one-line box is the wrong shape for\ntwenty lines of code, and tab is a character rather than a way out of\nthe field.",
+          "properties": {
+            "script": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "script"
+          ],
+          "type": "object"
+        },
+        {
           "const": "json",
           "description": "Something with a shape of its own that is none of the above — a union\ntagged in a spelling this module doesn't read, say. There is no general\nwidget for those, so the form takes them as literal JSON.",
           "type": "string"
@@ -2771,6 +2784,90 @@ One pipeline: every input is merged into one stream, that stream runs through th
       "title": "s3",
       "type": "object"
     },
+    "ScriptScope": {
+      "description": "Whether a script is handed one message or the whole batch.\n\n`message` is the default and is what nearly everything wants: the budget is\nthen spent per message rather than per batch, the batch structure is\npreserved without the script having to rebuild it, and a script that emits\nnothing for one message has dropped exactly that message.\n\n`batch` is the escape hatch, and it is needed for the things that are about\nthe batch itself — deduplicating within it, repartitioning it, or computing\nsomething across it that `reduce` has no function for.",
+      "oneOf": [
+        {
+          "const": "message",
+          "description": "The script runs once per message, with the message in `msg`.",
+          "type": "string"
+        },
+        {
+          "const": "batch",
+          "description": "The script runs once per batch, with the messages in `batch` as an\narray. Emitting an array emits a batch of those messages.",
+          "type": "string"
+        }
+      ]
+    },
+    "ScriptSource": {
+      "description": "Where the script's text comes from.\n\nTwo spellings because the three ways someone writes a pipeline want\ndifferent things. Inline is what the HTTP API and the UI can carry — a\nscript in a file is a reference the browser cannot edit and a generated\nconfig has nowhere to put — and YAML renders it as a literal block, so it\nreads as code rather than as an escaped string. A file is what an editor can\nsyntax-highlight, a formatter can format and a test can exercise on its own,\nwhich is what the file-first workflow wants.\n\nInline is the canonical form: a `file` is resolved when the pipeline is\nbuilt and the config keeps the reference, so saving never inlines someone's\nfile out of existence.",
+      "oneOf": [
+        {
+          "description": "The script's text, in the config itself. Prefer a YAML config for this —\na literal block keeps it readable, where JSON has to escape every\nnewline.",
+          "properties": {
+            "code": {
+              "description": "the rhai source",
+              "type": "string",
+              "x-script": "rhai"
+            },
+            "type": {
+              "const": "inline",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "code"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "A path to a `.rhai` file, relative to the directory the config file is\nin — the same place the connections and layout files live.\n\nThe file is read when the pipeline is built, so editing it takes a\nrevert to pick up. A server running without a config file has no\ndirectory to resolve against and refuses this; inline scripts still\nwork there.",
+          "properties": {
+            "path": {
+              "description": "the path, relative to the config file's directory. It may not climb\nout of that directory.",
+              "type": "string"
+            },
+            "type": {
+              "const": "file",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "path"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "ScriptTransformConfig": {
+      "description": "Runs a [rhai](https://rhai.rs) script over each message, or over the batch\nas a whole, and emits whatever the script asks for.\n\nA script reaches the message as `msg`, and emits with `emit(value)` — zero\ntimes to drop it, once to replace it, many times to split it. That covers\n`filter`, `map` and `splitter` in one, which is the point: what a script is\nfor is the case none of those three reach.\n\nThe script is **compiled when the pipeline is built**, so a syntax error is\na pipeline that refuses to start rather than one that fails every batch\nforever — the same rule the reducer's build-time checks follow. What cannot\nbe checked until a message arrives (a field that isn't there, a type that\nwon't convert) fails that batch and shows up on the card.\n\nEvery script runs under an **operation budget**. That is not a tuning knob\nwith a safe default, it is what makes this component safe to have: the\nscript runs synchronously inside the run loop's task, so a script that loops\nforever would wedge a worker thread rather than merely breaking its own\npipeline.",
+      "properties": {
+        "max_operations": {
+          "description": "how many rhai operations one run of the script may take before it is\nstopped and the batch failed. Leave it out for the default, which is\ngenerous for anything that isn't looping by mistake; raise it for a\nscript that legitimately walks a large array.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "scope": {
+          "$ref": "#/$defs/ScriptScope",
+          "description": "whether the script sees one message at a time or the whole batch"
+        },
+        "source": {
+          "$ref": "#/$defs/ScriptSource",
+          "description": "the script itself, written inline or kept in a file beside the config"
+        }
+      },
+      "required": [
+        "source"
+      ],
+      "title": "script",
+      "type": "object"
+    },
     "Secret": {
       "description": "A config value that may *reference* secrets rather than contain them.\n\nOn the wire it is an ordinary JSON string, but `${NAME}` placeholders in it\nare replaced with real values when the pipeline is built, against whatever\nsecret store the server was started with:\n\n```json\n{ \"type\": \"nats\", \"urls\": \"nats://app:${NATS_PASSWORD}@broker:4222\" }\n```\n\nThe unresolved form is the only one this type ever holds. That is what makes\nit safe to commit, safe to hand back from `GET /api/pipelines` and safe to show\nin the UI — a resolved value exists only inside the built runtime component,\nnever in a `Config`. Resolution deliberately lives in the root crate: this\ncrate compiles to wasm for the frontend, which must not be able to hold a\nresolved secret at all.\n\nA value with no `${...}` in it is passed through untouched, so fields that\nhold nothing sensitive need no special handling.",
       "type": "string"
@@ -2925,6 +3022,19 @@ One pipeline: every input is merged into one stream, that stream runs through th
           "properties": {
             "type": {
               "const": "map",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type"
+          ],
+          "type": "object"
+        },
+        {
+          "$ref": "#/$defs/ScriptTransformConfig",
+          "properties": {
+            "type": {
+              "const": "script",
               "type": "string"
             }
           },
@@ -3803,6 +3913,238 @@ The name is a field here rather than a path segment because it is part of what i
   ],
   "title": "CreateConnectionRequest",
   "type": "object"
+}
+```
+
+:::
+
+## `DryRunRequest` {#schema-dryrunrequest}
+
+What `POST /api/scripts/dry-run` takes.
+
+The endpoint exists because a script is the one component whose configuration can be *wrong in a way the config's shape cannot express*. For every other component, a config that deserializes and builds is a component that does what it says; for this one, the interesting mistakes are all inside a string. Without somewhere to run it, the only way to find out is to create a pipeline and watch its card — which for the HTTP API means creating a *running* pipeline you then have to tear down.
+
+Both the transform and this run through the same `kayak::transforms::script::runner`, configured identically. That is not a convenience: a dry run whose agreement with production is a matter of luck is worse than no dry run, because it is trusted.
+
+::: details schema
+
+```json
+{
+  "$defs": {
+    "ScriptScope": {
+      "description": "Whether a script is handed one message or the whole batch.\n\n`message` is the default and is what nearly everything wants: the budget is\nthen spent per message rather than per batch, the batch structure is\npreserved without the script having to rebuild it, and a script that emits\nnothing for one message has dropped exactly that message.\n\n`batch` is the escape hatch, and it is needed for the things that are about\nthe batch itself — deduplicating within it, repartitioning it, or computing\nsomething across it that `reduce` has no function for.",
+      "oneOf": [
+        {
+          "const": "message",
+          "description": "The script runs once per message, with the message in `msg`.",
+          "type": "string"
+        },
+        {
+          "const": "batch",
+          "description": "The script runs once per batch, with the messages in `batch` as an\narray. Emitting an array emits a batch of those messages.",
+          "type": "string"
+        }
+      ]
+    },
+    "ScriptSource": {
+      "description": "Where the script's text comes from.\n\nTwo spellings because the three ways someone writes a pipeline want\ndifferent things. Inline is what the HTTP API and the UI can carry — a\nscript in a file is a reference the browser cannot edit and a generated\nconfig has nowhere to put — and YAML renders it as a literal block, so it\nreads as code rather than as an escaped string. A file is what an editor can\nsyntax-highlight, a formatter can format and a test can exercise on its own,\nwhich is what the file-first workflow wants.\n\nInline is the canonical form: a `file` is resolved when the pipeline is\nbuilt and the config keeps the reference, so saving never inlines someone's\nfile out of existence.",
+      "oneOf": [
+        {
+          "description": "The script's text, in the config itself. Prefer a YAML config for this —\na literal block keeps it readable, where JSON has to escape every\nnewline.",
+          "properties": {
+            "code": {
+              "description": "the rhai source",
+              "type": "string",
+              "x-script": "rhai"
+            },
+            "type": {
+              "const": "inline",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "code"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "A path to a `.rhai` file, relative to the directory the config file is\nin — the same place the connections and layout files live.\n\nThe file is read when the pipeline is built, so editing it takes a\nrevert to pick up. A server running without a config file has no\ndirectory to resolve against and refuses this; inline scripts still\nwork there.",
+          "properties": {
+            "path": {
+              "description": "the path, relative to the config file's directory. It may not climb\nout of that directory.",
+              "type": "string"
+            },
+            "type": {
+              "const": "file",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "path"
+          ],
+          "type": "object"
+        }
+      ]
+    }
+  },
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "description": "What `POST /api/scripts/dry-run` takes.\n\nThe endpoint exists because a script is the one component whose\nconfiguration can be *wrong in a way the config's shape cannot express*. For\nevery other component, a config that deserializes and builds is a component\nthat does what it says; for this one, the interesting mistakes are all\ninside a string. Without somewhere to run it, the only way to find out is to\ncreate a pipeline and watch its card — which for the HTTP API means creating\na *running* pipeline you then have to tear down.\n\nBoth the transform and this run through the same\n`kayak::transforms::script::runner`, configured identically. That is not a\nconvenience: a dry run whose agreement with production is a matter of luck\nis worse than no dry run, because it is trusted.",
+  "properties": {
+    "max_operations": {
+      "description": "the operation budget for this run. Left out, the same default a\ntransform gets.",
+      "format": "uint64",
+      "minimum": 0,
+      "type": [
+        "integer",
+        "null"
+      ]
+    },
+    "messages": {
+      "default": [],
+      "description": "the messages to run it over — one batch. An empty list is allowed and is\nhow a script is checked for compiling without inventing data for it.",
+      "items": true,
+      "type": "array"
+    },
+    "scope": {
+      "$ref": "#/$defs/ScriptScope",
+      "default": "message",
+      "description": "whether the script sees one message at a time or the whole batch"
+    },
+    "source": {
+      "$ref": "#/$defs/ScriptSource",
+      "description": "the script to run, inline or by reference, exactly as a transform\ndeclares it"
+    },
+    "state": {
+      "additionalProperties": {
+        "additionalProperties": true,
+        "type": "object"
+      },
+      "description": "state to seed the run's bucket with, keyed by the key a script would\n`recall` it under.\n\nA dry run **never touches a live bucket**: it gets a private one, seeded\nfrom here and thrown away afterwards. Reading production state would\nmake a dry run's answer depend on what the server happened to be doing,\nand writing it would give a \"dry\" run side effects — the second being\nthe one that would be found out late and badly.",
+      "type": "object"
+    }
+  },
+  "required": [
+    "source"
+  ],
+  "title": "DryRunRequest",
+  "type": "object"
+}
+```
+
+:::
+
+## `DryRunResponse` {#schema-dryrunresponse}
+
+What came back from a dry run.
+
+A script that does not compile comes back **200 with a `failed` outcome**, not a 400. The request was well formed and the server answered it completely; "this script has a bug on line 3" is the answer, not a failure to produce one. A 400 would conflate a malformed request with a working endpoint reporting what it was asked to find out, and a client would have to tell them apart by reading the body anyway.
+
+::: details schema
+
+```json
+{
+  "$defs": {
+    "DryRunStage": {
+      "description": "Which half of a script's life a failure belongs to.",
+      "oneOf": [
+        {
+          "const": "compile",
+          "description": "The script does not parse. A pipeline with this script refuses to start.",
+          "type": "string"
+        },
+        {
+          "const": "runtime",
+          "description": "The script parsed and this run of it failed. A pipeline with this script\nstarts, and fails the batches that hit it.",
+          "type": "string"
+        }
+      ]
+    }
+  },
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "description": "What came back from a dry run.\n\nA script that does not compile comes back **200 with a `failed` outcome**,\nnot a 400. The request was well formed and the server answered it\ncompletely; \"this script has a bug on line 3\" is the answer, not a failure\nto produce one. A 400 would conflate a malformed request with a working\nendpoint reporting what it was asked to find out, and a client would have to\ntell them apart by reading the body anyway.",
+  "oneOf": [
+    {
+      "description": "The script ran. Note this includes a script that emitted nothing —\ndropping every message is a working filter, not a failure.",
+      "properties": {
+        "batches": {
+          "description": "the batches the script emitted, in order. In `message` scope this is\nat most one; in `batch` scope it is however many the script asked\nfor.",
+          "items": {
+            "items": true,
+            "type": "array"
+          },
+          "type": "array"
+        },
+        "outcome": {
+          "const": "emitted",
+          "type": "string"
+        },
+        "state": {
+          "additionalProperties": {
+            "additionalProperties": true,
+            "type": "object"
+          },
+          "description": "what the run's private bucket holds afterwards — what the script\nwould have remembered. Discarded when the response is sent.",
+          "type": "object"
+        },
+        "warnings": {
+          "description": "distinct texts the script passed to `warn()`",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "outcome",
+        "batches"
+      ],
+      "type": "object"
+    },
+    {
+      "description": "The script did not compile, or a run of it failed.",
+      "properties": {
+        "column": {
+          "description": "one-based, beside `line` and absent for the same reasons",
+          "format": "uint",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "line": {
+          "description": "one-based, as an editor counts. Absent when the failure belongs to\nthe run rather than to a line — an exhausted budget, or an error\nraised by a host function.",
+          "format": "uint",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "message": {
+          "description": "what went wrong, in rhai's words and without the position appended —\nthe position is beside it, as a number a client can use",
+          "type": "string"
+        },
+        "outcome": {
+          "const": "failed",
+          "type": "string"
+        },
+        "stage": {
+          "$ref": "#/$defs/DryRunStage",
+          "description": "whether this stopped the script compiling or stopped one run of it.\nThe first would refuse to start a pipeline; the second would fail a\nbatch on one that was already running."
+        }
+      },
+      "required": [
+        "outcome",
+        "stage",
+        "message"
+      ],
+      "type": "object"
+    }
+  ],
+  "title": "DryRunResponse"
 }
 ```
 
@@ -6425,6 +6767,90 @@ The same wire shape the run loop's `PipelineView` serializes to — this is the 
       "title": "s3",
       "type": "object"
     },
+    "ScriptScope": {
+      "description": "Whether a script is handed one message or the whole batch.\n\n`message` is the default and is what nearly everything wants: the budget is\nthen spent per message rather than per batch, the batch structure is\npreserved without the script having to rebuild it, and a script that emits\nnothing for one message has dropped exactly that message.\n\n`batch` is the escape hatch, and it is needed for the things that are about\nthe batch itself — deduplicating within it, repartitioning it, or computing\nsomething across it that `reduce` has no function for.",
+      "oneOf": [
+        {
+          "const": "message",
+          "description": "The script runs once per message, with the message in `msg`.",
+          "type": "string"
+        },
+        {
+          "const": "batch",
+          "description": "The script runs once per batch, with the messages in `batch` as an\narray. Emitting an array emits a batch of those messages.",
+          "type": "string"
+        }
+      ]
+    },
+    "ScriptSource": {
+      "description": "Where the script's text comes from.\n\nTwo spellings because the three ways someone writes a pipeline want\ndifferent things. Inline is what the HTTP API and the UI can carry — a\nscript in a file is a reference the browser cannot edit and a generated\nconfig has nowhere to put — and YAML renders it as a literal block, so it\nreads as code rather than as an escaped string. A file is what an editor can\nsyntax-highlight, a formatter can format and a test can exercise on its own,\nwhich is what the file-first workflow wants.\n\nInline is the canonical form: a `file` is resolved when the pipeline is\nbuilt and the config keeps the reference, so saving never inlines someone's\nfile out of existence.",
+      "oneOf": [
+        {
+          "description": "The script's text, in the config itself. Prefer a YAML config for this —\na literal block keeps it readable, where JSON has to escape every\nnewline.",
+          "properties": {
+            "code": {
+              "description": "the rhai source",
+              "type": "string",
+              "x-script": "rhai"
+            },
+            "type": {
+              "const": "inline",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "code"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "A path to a `.rhai` file, relative to the directory the config file is\nin — the same place the connections and layout files live.\n\nThe file is read when the pipeline is built, so editing it takes a\nrevert to pick up. A server running without a config file has no\ndirectory to resolve against and refuses this; inline scripts still\nwork there.",
+          "properties": {
+            "path": {
+              "description": "the path, relative to the config file's directory. It may not climb\nout of that directory.",
+              "type": "string"
+            },
+            "type": {
+              "const": "file",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "path"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "ScriptTransformConfig": {
+      "description": "Runs a [rhai](https://rhai.rs) script over each message, or over the batch\nas a whole, and emits whatever the script asks for.\n\nA script reaches the message as `msg`, and emits with `emit(value)` — zero\ntimes to drop it, once to replace it, many times to split it. That covers\n`filter`, `map` and `splitter` in one, which is the point: what a script is\nfor is the case none of those three reach.\n\nThe script is **compiled when the pipeline is built**, so a syntax error is\na pipeline that refuses to start rather than one that fails every batch\nforever — the same rule the reducer's build-time checks follow. What cannot\nbe checked until a message arrives (a field that isn't there, a type that\nwon't convert) fails that batch and shows up on the card.\n\nEvery script runs under an **operation budget**. That is not a tuning knob\nwith a safe default, it is what makes this component safe to have: the\nscript runs synchronously inside the run loop's task, so a script that loops\nforever would wedge a worker thread rather than merely breaking its own\npipeline.",
+      "properties": {
+        "max_operations": {
+          "description": "how many rhai operations one run of the script may take before it is\nstopped and the batch failed. Leave it out for the default, which is\ngenerous for anything that isn't looping by mistake; raise it for a\nscript that legitimately walks a large array.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "scope": {
+          "$ref": "#/$defs/ScriptScope",
+          "description": "whether the script sees one message at a time or the whole batch"
+        },
+        "source": {
+          "$ref": "#/$defs/ScriptSource",
+          "description": "the script itself, written inline or kept in a file beside the config"
+        }
+      },
+      "required": [
+        "source"
+      ],
+      "title": "script",
+      "type": "object"
+    },
     "Secret": {
       "description": "A config value that may *reference* secrets rather than contain them.\n\nOn the wire it is an ordinary JSON string, but `${NAME}` placeholders in it\nare replaced with real values when the pipeline is built, against whatever\nsecret store the server was started with:\n\n```json\n{ \"type\": \"nats\", \"urls\": \"nats://app:${NATS_PASSWORD}@broker:4222\" }\n```\n\nThe unresolved form is the only one this type ever holds. That is what makes\nit safe to commit, safe to hand back from `GET /api/pipelines` and safe to show\nin the UI — a resolved value exists only inside the built runtime component,\nnever in a `Config`. Resolution deliberately lives in the root crate: this\ncrate compiles to wasm for the frontend, which must not be able to hold a\nresolved secret at all.\n\nA value with no `${...}` in it is passed through untouched, so fields that\nhold nothing sensitive need no special handling.",
       "type": "string"
@@ -6579,6 +7005,19 @@ The same wire shape the run loop's `PipelineView` serializes to — this is the 
           "properties": {
             "type": {
               "const": "map",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type"
+          ],
+          "type": "object"
+        },
+        {
+          "$ref": "#/$defs/ScriptTransformConfig",
+          "properties": {
+            "type": {
+              "const": "script",
               "type": "string"
             }
           },
