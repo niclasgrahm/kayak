@@ -186,7 +186,8 @@ async fn a_body_that_is_not_a_valid_config_is_rejected() -> anyhow::Result<()> {
     let cases = [
         json!({ "nonsense": true }),
         json!({ "id": "x", "inputs": [{ "type": "no-such-input" }], "transforms": [], "outputs": [{ "type": "stdout" }] }),
-        json!({ "id": "x", "inputs": [{ "type": "dummy", "duration": 1 }], "transforms": [] }),
+        // `transforms` and `outputs` both default, but `inputs` does not
+        json!({ "id": "x", "transforms": [], "outputs": [{ "type": "stdout" }] }),
     ];
     for case in cases {
         let (status, _) = post_stream(&app, &case).await?;

@@ -742,7 +742,8 @@
             "type": "array"
           },
           "outputs": {
-            "description": "may be empty — a pipeline that only feeds downstream pipelines needs no\noutput of its own.",
+            "default": [],
+            "description": "may be omitted — a pipeline that only feeds downstream pipelines needs no\noutput of its own.",
             "items": {
               "$ref": "#/components/schemas/OutputConfig"
             },
@@ -760,6 +761,8 @@
             "description": "the state bucket this pipeline remembers things in, and what its\nmessages are keyed by. Only needed by a pipeline with a `remember` or\n`recall` transform; those fail to build without it."
           },
           "transforms": {
+            "default": [],
+            "description": "may be omitted — a pipeline that only moves messages needs no transform.",
             "items": {
               "$ref": "#/components/schemas/TransformConfig"
             },
@@ -767,9 +770,7 @@
           }
         },
         "required": [
-          "inputs",
-          "transforms",
-          "outputs"
+          "inputs"
         ],
         "title": "Config",
         "type": "object"

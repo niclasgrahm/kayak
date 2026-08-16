@@ -950,3 +950,44 @@ fn the_repository_yaml_config_describes_the_same_graph() -> anyhow::Result<()> {
     );
     Ok(())
 }
+
+/// A pipeline that only feeds downstream ones has no transforms and no outputs,
+/// and writing that by hand should not mean writing two empty arrays. Both
+/// fields default, so the smallest pipeline there is is an id and an input.
+#[test]
+fn a_pipeline_without_transforms_or_outputs_parses() -> anyhow::Result<()> {
+    let config: Config = serde_json::from_value(json!({
+        "id": "ticker",
+        "inputs": [{"type": "dummy", "duration": 1}]
+    }))?;
+    assert!(config.transforms.is_empty());
+    assert!(config.outputs.is_empty());
+    Ok(())
+}
+
+/// …and the same in YAML, which is how the sample is written.
+#[test]
+fn a_yaml_pipeline_without_transforms_or_outputs_parses() -> anyhow::Result<()> {
+    let config: Config = serde_norway::from_str(
+        "id: ticker\ninputs:\n  - type: dummy\n    duration: 1\n",
+    )?;
+    assert!(config.transforms.is_empty());
+    assert!(config.outputs.is_empty());
+    Ok(())
+}
+
+/// Neither field is required by the schema either — the reflection is what the
+/// docs page and the add-pipeline form read, so an omission the parser accepts
+/// has to be an omission they accept too.
+#[test]
+fn neither_transforms_nor_outputs_is_a_required_field() -> anyhow::Result<()> {
+    let schema = serde_json::to_value(schema_for!(Config))?;
+    let required: Vec<&str> = schema["required"]
+        .as_array()
+        .map(|r| r.iter().filter_map(serde_json::Value::as_str).collect())
+        .unwrap_or_default();
+    assert!(required.contains(&"inputs"), "inputs stays required: {required:?}");
+    assert!(!required.contains(&"transforms"), "{required:?}");
+    assert!(!required.contains(&"outputs"), "{required:?}");
+    Ok(())
+}

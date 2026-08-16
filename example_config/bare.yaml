@@ -1,0 +1,19 @@
+- id: ticker
+  inputs:
+    - type: dummy
+      duration: 1
+  transforms: []
+  outputs: []
+# - id: doubled
+#   inputs:
+#     - type: pipeline
+#       upstream: ticker
+#   transforms:
+#     - type: script
+#       source:
+#         type: inline
+#         code: |
+#           msg.value = msg.value * 2;
+#           msg
+#   outputs:
+#     - type: stdout
