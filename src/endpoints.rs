@@ -21,7 +21,7 @@ use kayak_core::api_docs::{ApiDoc, Method, Operation, endpoints};
 
 use crate::handlers::{
     rest::{
-        auth::{login, logout, whoami},
+        auth::{login, logout, token_login, whoami},
         connection::{create_connection, delete_connection, get_connections},
         docs::get_docs,
         history::get_pipeline_history,
@@ -102,6 +102,7 @@ fn handler_for(doc: &ApiDoc) -> MethodRouter<Arc<AppState>> {
         Operation::GetOpenApi => route_of(method, get_openapi),
         Operation::ApiReference => route_of(method, api_reference),
         Operation::Login => route_of(method, login),
+        Operation::TokenLogin => route_of(method, token_login),
         Operation::Logout => route_of(method, logout),
         Operation::WhoAmI => route_of(method, whoami),
     }

@@ -7451,6 +7451,33 @@ How the server was started, and whether what it is running still matches the fil
 
 :::
 
+## `TokenLoginRequest` {#schema-tokenloginrequest}
+
+What `POST /api/auth/token` takes.
+
+The token is the host application's — minted by its identity provider, carried here from the embedding page's URL. Like [`LoginRequest`]'s password it is a live credential rather than a `${NAME}` reference: it exists for the length of one request, is exchanged for a session cookie, and is never stored, serialized back or logged.
+
+::: details schema
+
+```json
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "description": "What `POST /api/auth/token` takes.\n\nThe token is the host application's — minted by its identity provider,\ncarried here from the embedding page's URL. Like [`LoginRequest`]'s\npassword it is a live credential rather than a `${NAME}` reference: it\nexists for the length of one request, is exchanged for a session cookie,\nand is never stored, serialized back or logged.",
+  "properties": {
+    "token": {
+      "type": "string"
+    }
+  },
+  "required": [
+    "token"
+  ],
+  "title": "TokenLoginRequest",
+  "type": "object"
+}
+```
+
+:::
+
 ## `UiEvent` {#schema-uievent}
 
 ::: details schema

@@ -71,6 +71,24 @@ mod tests {
 
     use super::*;
 
+    /// The jwt scheme counts as authentication the way basic does: the
+    /// warning is about an open control plane, and a server that wants a
+    /// token is not open.
+    #[test]
+    fn a_jwt_server_is_not_warned_about() {
+        let auth: AuthConfig = serde_json::from_value(serde_json::json!({
+            "type": "jwt",
+            "jwks_url": "https://issuer.example/jwks.json",
+            "issuer": "https://issuer.example",
+        }))
+        .unwrap_or_else(|error| panic!("the jwt sample parses: {error}"));
+        let config = ServerConfig {
+            auth,
+            ..ServerConfig::default()
+        };
+        assert!(!is_open_to_the_network(&config, v4([0, 0, 0, 0], 6767)));
+    }
+
     /// Built rather than parsed: `.parse()` on a literal is a `Result` these
     /// lints will not let a test unwrap, and the constructors say the same
     /// thing without one.

@@ -13,6 +13,7 @@ pub mod api_client;
 pub mod api_docs;
 pub mod app;
 pub mod docs;
+pub mod embed;
 pub mod form;
 pub mod graph;
 pub mod inspector;

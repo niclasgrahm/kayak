@@ -37,9 +37,9 @@ allowed to reach the server.
 `auth` is a tagged enum rather than a boolean beside a map, and that is the
 point of the shape. `auth: false` sitting above a populated `users:` — an
 operator believing they are protected and not being — is not expressible here,
-because there is nowhere to write it. The two states are the two variants,
-`none` and `basic`, and `basic` with no users refuses to start rather than
-serving a server nobody can log into.
+because there is nowhere to write it. The three states are the three variants,
+`none`, `basic` and `jwt`, and `basic` with no users refuses to start rather
+than serving a server nobody can log into.
 
 Passwords are `Secret`s, so they hold `${NAME}` references resolved against the
 same store everything else uses (the environment, then `--secrets`). The
@@ -47,6 +47,78 @@ settings file stays committable. A literal password works and is what a
 throwaway deployment will write, but it puts a real credential in a file that
 gets committed, which is the habit the reference syntax exists to replace — see
 [secrets](/io/secrets).
+
+## jwt: tokens from an identity provider
+
+The embedding scheme, for a kayak that lives inside a host application the way
+a Grafana panel does: the host's users are already signed in with an identity
+provider — Cognito, Keycloak, anything that publishes a JWKS — and kayak
+accepts that provider's word for it instead of keeping accounts of its own.
+
+```yaml
+# kayak.server.yaml
+auth:
+  type: jwt
+  jwks_url: https://cognito-idp.eu-central-1.amazonaws.com/<pool>/.well-known/jwks.json
+  issuer: https://cognito-idp.eu-central-1.amazonaws.com/<pool>
+  username_claim: cognito:username     # default: sub
+  roles:
+    claim: cognito:groups
+    admin: [Admin]                     # everyone else with a valid token: read
+  service_accounts:                    # optional; checked as HTTP Basic
+    provisioner:
+      password: ${KAYAK_PROVISIONER_PASSWORD}
+      role: admin
+```
+
+The issuer's coordinates are ordinary strings, not `${NAME}` references — a
+pool id and a client id are addresses, not credentials, and belong in the file.
+Only the service accounts' passwords resolve against the secret store.
+
+**Startup is fail-fast.** The signing keys are fetched from `jwks_url` when the
+server starts, and a server that can't fetch them — or fetches a set with
+nothing usable in it — refuses to start, the same way a `${NAME}` nobody set
+does. A key rotation after startup is followed automatically: a token naming an
+unknown key id triggers one re-fetch (rate limited, so junk tokens can't turn
+kayak into a load generator against the issuer), and the same request then
+retries against the new set.
+
+**What a token must carry** to become an identity: a `kid` naming a published
+key, a signature that key verifies — under the algorithm *the key* declares,
+never the one the token claims for itself — the configured `iss`, an unexpired
+`exp`, the configured `aud` when one is set (leave `audience` out for Cognito
+*access* tokens, which carry `client_id` instead), and a non-empty string under
+`username_claim`. The role comes from `roles`: a string claim matches by
+equality, an array claim (Cognito's `cognito:groups`) if any element is listed,
+and everything else — including leaving `roles` out entirely — is a reader.
+There is deliberately no expression language here; one claim and a list of
+admin values is the whole vocabulary.
+
+**Two ways a token gets used:**
+
+```bash
+# an API caller sends it on every request, like Basic
+curl -H "Authorization: Bearer $TOKEN" localhost:6767/api/pipelines
+
+# the embedding page puts it on the iframe URL, once
+<iframe src="https://kayak.example/?auth_token=<jwt>" />
+```
+
+The second is the handshake the scheme exists for. The UI reads `auth_token`
+out of the URL on load, posts it to `POST /api/auth/token`, and gets back the
+same `HttpOnly` session cookie a password login sets — then immediately
+rewrites the address bar without the token, so it appears in exactly one
+request and never in a bookmark, a shared link or an access log again. The
+session it minted expires no later than the token's `exp`: the cookie must not
+outlive the identity provider's word that the caller is signed in. (The
+parameter name is the one Grafana's `url_login` reads, so a host application
+embedding both passes both the same way.)
+
+`service_accounts` exists because machines can't do an identity-provider
+login: a provisioning script or CI pipeline gets an ordinary Basic credential,
+same shape as the `basic` scheme's users, checked the same way. All three
+doors — token, cookie, Basic — land on the same identity and the same two
+roles.
 
 ## two roles
 
@@ -76,8 +148,8 @@ regardless; the UI only avoids offering what it would refuse.
 
 ## two ways in
 
-Both resolve to the same identity, so a role means the same thing however you
-got in.
+All ways in resolve to the same identity, so a role means the same thing
+however you got in.
 
 ```bash
 curl -u niclas:hunter2 localhost:6767/api/pipelines            # anything that is not a browser

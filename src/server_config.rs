@@ -86,6 +86,34 @@ auth:
         Ok(())
     }
 
+    /// The embedding deployment's file, as the docs write it.
+    #[test]
+    fn the_documented_jwt_yaml_shape_parses() -> anyhow::Result<()> {
+        let yaml = "
+auth:
+  type: jwt
+  jwks_url: https://cognito-idp.eu-central-1.amazonaws.com/pool/.well-known/jwks.json
+  issuer: https://cognito-idp.eu-central-1.amazonaws.com/pool
+  audience: 4f9a8b7c6d5e
+  username_claim: cognito:username
+  roles:
+    claim: cognito:groups
+    admin: [Admin]
+  service_accounts:
+    provisioner:
+      password: ${KAYAK_PROVISIONER_PASSWORD}
+      role: admin
+";
+        let config = parse(yaml, ConfigFormat::Yaml)?;
+        assert!(config.requires_auth());
+        config.validate()?;
+        let account = config
+            .user("provisioner")
+            .context("the service account is declared")?;
+        assert_eq!(account.role, Role::Admin);
+        Ok(())
+    }
+
     #[test]
     fn the_same_settings_parse_from_either_format() -> anyhow::Result<()> {
         let json = r#"{"auth": {"type": "basic", "users": {

@@ -36,6 +36,7 @@ use crate::server_config::Role;
 use crate::state::{BucketContents, BucketSummary};
 use crate::{
     AuthDto, IngestRequest, IngestResponse, LoginRequest, PipelineDto, SaveConfigRequest,
+    TokenLoginRequest,
     SaveConfigResponse, SettingsDto, UiEvent,
 };
 
@@ -119,6 +120,7 @@ pub enum Operation {
     GetOpenApi,
     ApiReference,
     Login,
+    TokenLogin,
     Logout,
     WhoAmI,
 }
@@ -149,6 +151,7 @@ impl Operation {
             Self::GetOpenApi => "getOpenApi",
             Self::ApiReference => "apiReference",
             Self::Login => "login",
+            Self::TokenLogin => "tokenLogin",
             Self::Logout => "logout",
             Self::WhoAmI => "whoAmI",
         }
@@ -1146,6 +1149,50 @@ pub fn endpoints() -> Vec<ApiDoc> {
             ],
         },
         ApiDoc {
+            path: "/api/auth/token",
+            method: Method::Post,
+            operation: Operation::TokenLogin,
+            summary: "Exchange an identity provider's JWT for a session",
+            description: "The embedding flow's endpoint, on a server whose auth section is \
+                          `jwt`: a host application that already holds a token from the \
+                          shared identity provider — Cognito, Keycloak — puts it on the \
+                          iframe URL as `?auth_token=`, and the UI posts it here once. The \
+                          token is checked against the issuer's published keys and, on \
+                          success, exchanged for the same `HttpOnly` session cookie a \
+                          password login sets — so the token itself appears in exactly one \
+                          request and never in an access log again.\n\n\
+                          The session ends no later than the token's `exp`: the cookie \
+                          must not outlive the identity provider's word that the caller is \
+                          signed in.\n\n\
+                          API callers don't need this exchange — on a `jwt` server, \
+                          `Authorization: Bearer <token>` works directly on every endpoint.\n\n\
+                          Every way of being refused is the same 401, deliberately: an \
+                          expired token, a wrong issuer and a server that doesn't take \
+                          tokens at all are not distinctions worth handing to a guesser.",
+            tag: Tag::Auth,
+            access: Access::Public,
+            params: vec![],
+            query: vec![],
+            request: Some(RequestDoc {
+                body: Body::Json("TokenLoginRequest"),
+                description: "The token to check.",
+            }),
+            responses: vec![
+                ResponseDoc {
+                    status: 200,
+                    description: "Signed in. The session cookie is in `Set-Cookie`.",
+                    body: Body::Json("AuthDto"),
+                },
+                ResponseDoc {
+                    status: 401,
+                    description: "The token was not accepted, or this server does not \
+                                  take tokens.",
+                    body: Body::Json("ApiError"),
+                },
+                server_error(),
+            ],
+        },
+        ApiDoc {
             path: "/api/auth/logout",
             method: Method::Post,
             operation: Operation::Logout,
@@ -1272,6 +1319,7 @@ pub fn schemas() -> BTreeMap<&'static str, Value> {
     schemas.insert("DryRunResponse", of(schema_for!(DryRunResponse)));
     schemas.insert("ApiError", of(schema_for!(ApiError)));
     schemas.insert("LoginRequest", of(schema_for!(LoginRequest)));
+    schemas.insert("TokenLoginRequest", of(schema_for!(TokenLoginRequest)));
     schemas.insert("AuthDto", of(schema_for!(AuthDto)));
     schemas.insert("OpenApiDocument", openapi_document_schema());
     schemas
@@ -1512,6 +1560,7 @@ mod tests {
                 // themselves need you to be logged in
                 ("whoAmI", "public"),
                 ("login", "public"),
+            ("tokenLogin", "public"),
                 // ...but signing out is something only a signed-in caller can
                 // meaningfully do
                 ("logout", "read"),

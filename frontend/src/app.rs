@@ -819,6 +819,34 @@ pub struct Session {
 }
 
 impl Session {
+    /// The first ask, and the embedding handshake: if the URL carries an
+    /// `auth_token` — the host application's JWT, put there because an iframe
+    /// can set nothing else — exchange it for the session cookie before
+    /// anything decides between the login page and the canvas. The token is
+    /// stripped from the address bar immediately, exchanged or not: it has
+    /// been read, and a credential has no business outliving its one use in
+    /// a place someone can copy a link from.
+    ///
+    /// A failed exchange falls back to [`Session::refresh`], which is what
+    /// puts up the login page — the embedded case's honest answer too, since
+    /// a service account can still type itself in.
+    pub fn bootstrap(self) {
+        let Some(token) = token_from_location() else {
+            self.refresh();
+            return;
+        };
+        strip_token_from_url();
+        leptos::task::spawn_local(async move {
+            let client = ApiClient {
+                base: String::new(),
+            };
+            match client.token_login(&token).await {
+                Ok(auth) => self.auth.set(Some(auth)),
+                Err(_) => self.refresh(),
+            }
+        });
+    }
+
     /// Ask the server again. Called on load, after signing in or out, and
     /// whenever a call comes back 401.
     pub fn refresh(self) {
@@ -891,7 +919,8 @@ fn AuthGate(children: ChildrenFn) -> impl IntoView {
         auth: RwSignal::new(None),
     };
     provide_context(session);
-    Effect::new(move |_| session.refresh());
+    // effects only run in the browser, so the URL is there to read
+    Effect::new(move |_| session.bootstrap());
 
     view! {
         {move || match session.auth.get() {
@@ -901,6 +930,32 @@ fn AuthGate(children: ChildrenFn) -> impl IntoView {
             Some(auth) if auth.needs_login() => view! { <LoginPage /> }.into_any(),
             Some(_) => children().into_any(),
         }}
+    }
+}
+
+/// The embedded token out of this tab's URL, if the host application put one
+/// there. The parsing is `embed::token_in_query`, which is where the tests
+/// are; this is only the window plumbing.
+fn token_from_location() -> Option<String> {
+    let search = leptos::web_sys::window()?.location().search().ok()?;
+    crate::embed::token_in_query(&search)
+}
+
+/// Rewrite the address bar without the token, keeping everything else —
+/// `replaceState`, so the tokened URL doesn't even survive as a history
+/// entry to arrow back to.
+fn strip_token_from_url() {
+    let Some(window) = leptos::web_sys::window() else {
+        return;
+    };
+    let location = window.location();
+    let (Ok(path), Ok(search), Ok(hash)) = (location.pathname(), location.search(), location.hash())
+    else {
+        return;
+    };
+    let url = format!("{path}{}{hash}", crate::embed::query_without_token(&search));
+    if let Ok(history) = window.history() {
+        let _ = history.replace_state_with_url(&wasm_bindgen::JsValue::NULL, "", Some(&url));
     }
 }
 

@@ -424,6 +424,30 @@ A wrong password and an unknown username are the same 401, deliberately: the end
 | `401` | [ApiError](#schema-apierror) | Wrong username or password — the body does not say which. |
 | `500` | [ApiError](#schema-apierror) | Something went wrong on the server. The body says what. |
 
+### `POST /api/auth/token` {#post-api-auth-token}
+
+Exchange an identity provider's JWT for a session
+
+<Badge type="tip" text="public" /> <Badge type="info" text="tokenLogin" /> — Callable without credentials, even when authentication is on.
+
+The embedding flow's endpoint, on a server whose auth section is `jwt`: a host application that already holds a token from the shared identity provider — Cognito, Keycloak — puts it on the iframe URL as `?auth_token=`, and the UI posts it here once. The token is checked against the issuer's published keys and, on success, exchanged for the same `HttpOnly` session cookie a password login sets — so the token itself appears in exactly one request and never in an access log again.
+
+The session ends no later than the token's `exp`: the cookie must not outlive the identity provider's word that the caller is signed in.
+
+API callers don't need this exchange — on a `jwt` server, `Authorization: Bearer <token>` works directly on every endpoint.
+
+Every way of being refused is the same 401, deliberately: an expired token, a wrong issuer and a server that doesn't take tokens at all are not distinctions worth handing to a guesser.
+
+**request body** — [TokenLoginRequest](#schema-tokenloginrequest) The token to check.
+
+**responses**
+
+| status | body | description |
+| --- | --- | --- |
+| `200` | [AuthDto](#schema-authdto) | Signed in. The session cookie is in `Set-Cookie`. |
+| `401` | [ApiError](#schema-apierror) | The token was not accepted, or this server does not take tokens. |
+| `500` | [ApiError](#schema-apierror) | Something went wrong on the server. The body says what. |
+
 ### `POST /api/auth/logout` {#post-api-auth-logout}
 
 End the session this request carries

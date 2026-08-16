@@ -36,6 +36,17 @@ re-derive. See the [docs site](../website/) for how the finished parts behave, a
       Per pipeline, `${NAME}` out of the secret store, constant-time, and
       refused at build time if it names a header the `envelope` copies. Absent
       by default. See "protecting the endpoint" above.)
+- [x] jwt authentication (the embedding scheme)
+      (done 2026-08-16: a third `auth` variant, `jwt` — tokens minted by an
+      external identity provider, validated against its JWKS. Fail-fast key
+      fetch at startup, rate-limited refresh on unknown kid for rotation,
+      `Authorization: Bearer` on every endpoint, and the embedding handshake:
+      the host puts `?auth_token=` on the iframe URL, the UI exchanges it at
+      `POST /api/auth/token` for the ordinary session cookie — capped at the
+      token's `exp` — and strips it from the address bar. A declarative
+      claim→role mapping (no expression language) and optional
+      `service_accounts` checked as Basic for machines. See "authentication"
+      on the site.)
 - [ ] **an hmac option for the http input's `auth`.** The bearer token is a
       shared secret that travels on every request, so it is only as private as
       the transport. A GitHub-style signature over the body

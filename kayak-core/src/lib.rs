@@ -129,6 +129,18 @@ pub struct LoginRequest {
     pub password: String,
 }
 
+/// What `POST /api/auth/token` takes.
+///
+/// The token is the host application's — minted by its identity provider,
+/// carried here from the embedding page's URL. Like [`LoginRequest`]'s
+/// password it is a live credential rather than a `${NAME}` reference: it
+/// exists for the length of one request, is exchanged for a session cookie,
+/// and is never stored, serialized back or logged.
+#[derive(Serialize, Deserialize, Clone, Debug, JsonSchema)]
+pub struct TokenLoginRequest {
+    pub token: String,
+}
+
 /// Who the caller is, and whether this server cares.
 ///
 /// The frontend asks for this before it draws anything: it decides between the
