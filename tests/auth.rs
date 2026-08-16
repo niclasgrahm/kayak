@@ -556,3 +556,254 @@ async fn logging_into_an_open_server_says_there_is_nothing_to_log_into() -> anyh
     assert!(sent.set_cookie.is_none());
     Ok(())
 }
+
+// ---------------------------------------------------------------------------
+// The jwt scheme: tokens from an external issuer, exchanged or sent directly.
+// ---------------------------------------------------------------------------
+
+/// The fixture pair from `tests/fixtures/jwt/`: a throwaway RSA key and the
+/// JWKS document naming its public half as `test-key-1`.
+const PRIVATE_KEY_PEM: &str = include_str!("fixtures/jwt/test_jwt_key.pem");
+const JWKS_JSON: &str = include_str!("fixtures/jwt/test_jwks.json");
+const KID: &str = "test-key-1";
+const ISSUER: &str = "https://issuer.example";
+
+fn jwt_config(jwks_url: &str) -> anyhow::Result<ServerConfig> {
+    let auth = serde_json::from_value(json!({
+        "type": "jwt",
+        "jwks_url": jwks_url,
+        "issuer": ISSUER,
+        "username_claim": "cognito:username",
+        "roles": {"claim": "cognito:groups", "admin": ["Admin"]},
+        "service_accounts": {
+            "provisioner": {"password": "let me in", "role": "admin"}
+        },
+    }))?;
+    Ok(ServerConfig {
+        history: HistoryConfig::default(),
+        auth,
+    })
+}
+
+/// A jwt server with the fixture keys already installed — no fetch, so the
+/// test stays off the network; the fetch path has its own tests below.
+fn jwt_server() -> anyhow::Result<(Router, Arc<Auth>)> {
+    let config = jwt_config("http://127.0.0.1:9/jwks.json")?;
+    let auth = Arc::new(Auth::from_config(&config, &kayak::secrets::EnvStore)?);
+    let validator = auth
+        .jwt_validator()
+        .ok_or_else(|| anyhow::anyhow!("a jwt server has a validator"))?;
+    let set: jsonwebtoken::jwk::JwkSet = serde_json::from_str(JWKS_JSON)?;
+    anyhow::ensure!(validator.install_keys(&set) == 1, "the fixture key installs");
+    let app = api_router(Arc::new(AppState::new().with_auth(Arc::clone(&auth))));
+    Ok((app, auth))
+}
+
+fn now_secs() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or_default()
+}
+
+fn mint(claims: &Value) -> anyhow::Result<String> {
+    let key = jsonwebtoken::EncodingKey::from_rsa_pem(PRIVATE_KEY_PEM.as_bytes())?;
+    let mut header = jsonwebtoken::Header::new(jsonwebtoken::Algorithm::RS256);
+    header.kid = Some(KID.to_string());
+    Ok(jsonwebtoken::encode(&header, claims, &key)?)
+}
+
+fn admin_claims() -> Value {
+    json!({
+        "iss": ISSUER,
+        "exp": now_secs() + 300,
+        "cognito:username": "niclas",
+        "cognito:groups": ["Admin"],
+    })
+}
+
+/// The embedding flow end to end: the token goes in once, the session cookie
+/// comes back, and the cookie is then what reaches a guarded endpoint.
+#[tokio::test]
+async fn a_token_is_exchanged_for_a_session_cookie() -> anyhow::Result<()> {
+    let (app, _auth) = jwt_server()?;
+    let body = json!({"token": mint(&admin_claims())?});
+    let sent = send(&app, request("POST", "/api/auth/token", None, Some(&body))).await?;
+    assert_eq!(sent.status, StatusCode::OK, "{}", sent.body);
+    assert_eq!(sent.body["username"], "niclas");
+    assert_eq!(sent.body["role"], "admin");
+    let cookie = sent
+        .set_cookie
+        .ok_or_else(|| anyhow::anyhow!("the exchange sets the session cookie"))?;
+    assert!(cookie.contains("HttpOnly"), "{cookie}");
+
+    let session = cookie.split(';').next().unwrap_or_default().to_string();
+    let with_cookie = Request::builder()
+        .method("GET")
+        .uri("/api/pipelines")
+        .header(header::COOKIE, &session)
+        .body(Body::empty())?;
+    let listed = send(&app, with_cookie).await?;
+    assert_eq!(listed.status, StatusCode::OK, "{}", listed.body);
+    Ok(())
+}
+
+/// An API caller skips the exchange: `Authorization: Bearer` works directly,
+/// and the role mapping decides what it may do.
+#[tokio::test]
+async fn a_bearer_token_reaches_endpoints_directly() -> anyhow::Result<()> {
+    let (app, _auth) = jwt_server()?;
+    let bearer = format!("Bearer {}", mint(&admin_claims())?);
+    let listed = send(&app, request("GET", "/api/pipelines", Some(&bearer), None)).await?;
+    assert_eq!(listed.status, StatusCode::OK, "{}", listed.body);
+
+    // an admin group token passes the admin gate (404 is the handler's answer,
+    // which means the middleware let it through)
+    let deleted = send(
+        &app,
+        request("DELETE", "/api/pipelines/no-such-pipeline", Some(&bearer), None),
+    )
+    .await?;
+    assert_eq!(deleted.status, StatusCode::NOT_FOUND, "{}", deleted.body);
+
+    // a token outside the admin group reads but does not delete
+    let mut claims = admin_claims();
+    claims["cognito:groups"] = json!(["Operators"]);
+    let reader = format!("Bearer {}", mint(&claims)?);
+    let refused = send(
+        &app,
+        request("DELETE", "/api/pipelines/no-such-pipeline", Some(&reader), None),
+    )
+    .await?;
+    assert_eq!(refused.status, StatusCode::FORBIDDEN, "{}", refused.body);
+    Ok(())
+}
+
+/// Every way of being refused is the same 401: a garbage token, an expired
+/// one, and a token posted to a server that only does passwords.
+#[tokio::test]
+async fn bad_tokens_are_the_same_401_everywhere() -> anyhow::Result<()> {
+    let (app, _auth) = jwt_server()?;
+    let garbage = json!({"token": "not.a.token"});
+    let sent = send(&app, request("POST", "/api/auth/token", None, Some(&garbage))).await?;
+    assert_eq!(sent.status, StatusCode::UNAUTHORIZED);
+
+    let mut claims = admin_claims();
+    claims["exp"] = json!(now_secs() - 300);
+    let expired = json!({"token": mint(&claims)?});
+    let sent = send(&app, request("POST", "/api/auth/token", None, Some(&expired))).await?;
+    assert_eq!(sent.status, StatusCode::UNAUTHORIZED);
+
+    let basic_only = guarded_server()?;
+    let valid = json!({"token": mint(&admin_claims())?});
+    let sent = send(&basic_only, request("POST", "/api/auth/token", None, Some(&valid))).await?;
+    assert_eq!(sent.status, StatusCode::UNAUTHORIZED, "{}", sent.body);
+
+    // and on an open server the endpoint answers like login does: nothing to
+    // sign into, `authentication_required` false
+    let open = open_server();
+    let sent = send(&open, request("POST", "/api/auth/token", None, Some(&valid))).await?;
+    assert_eq!(sent.status, StatusCode::OK);
+    assert_eq!(sent.body["authentication_required"], false);
+    Ok(())
+}
+
+/// The session a token minted dies with the token: a cookie from an exchange
+/// is checked against the token's `exp`, not just against logout.
+#[tokio::test]
+async fn a_token_session_expires_with_the_token() -> anyhow::Result<()> {
+    let (_, auth) = jwt_server()?;
+    let mut claims = admin_claims();
+    // inside the validator's leeway (60s), so the token is accepted — but the
+    // session deadline is the real `exp`, which is already past
+    claims["exp"] = json!(now_secs() - 10);
+    let found = auth
+        .identify_token(&mint(&claims)?)
+        .await
+        .ok_or_else(|| anyhow::anyhow!("a token inside leeway is accepted"))?;
+    let session = auth.log_in_until(&found.identity, found.expires_at)?;
+    let request = Request::builder()
+        .header(header::COOKIE, format!("kayak_session={session}"))
+        .body(Body::empty())?;
+    assert_eq!(
+        auth.identify(kayak::auth::Presented::of(&request)).await,
+        None,
+        "the session must not outlive the token"
+    );
+    Ok(())
+}
+
+/// Machines that can't do an identity-provider login: a service account is an
+/// ordinary Basic credential on a jwt server.
+#[tokio::test]
+async fn a_service_account_signs_in_with_basic_on_a_jwt_server() -> anyhow::Result<()> {
+    let (app, _auth) = jwt_server()?;
+    let credential = basic("provisioner", "let me in");
+    let sent = send(
+        &app,
+        request("DELETE", "/api/pipelines/no-such-pipeline", Some(&credential), None),
+    )
+    .await?;
+    assert_eq!(sent.status, StatusCode::NOT_FOUND, "{}", sent.body);
+
+    let wrong = basic("provisioner", "wrong");
+    let sent = send(&app, request("GET", "/api/pipelines", Some(&wrong), None)).await?;
+    assert_eq!(sent.status, StatusCode::UNAUTHORIZED);
+    Ok(())
+}
+
+/// The fetch path: a local listener serves the JWKS, `prime` loads it, and a
+/// key the set doesn't hold yet is picked up by the unknown-kid refresh —
+/// which is what a real rotation looks like.
+#[tokio::test]
+async fn keys_are_fetched_at_startup_and_refreshed_on_rotation() -> anyhow::Result<()> {
+    use axum::routing::get;
+
+    let served: Arc<std::sync::Mutex<String>> = Arc::new(std::sync::Mutex::new(
+        json!({"keys": []}).to_string(),
+    ));
+    let for_handler = Arc::clone(&served);
+    let jwks_app = Router::new().route(
+        "/jwks.json",
+        get(move || {
+            let served = Arc::clone(&for_handler);
+            async move {
+                let body = served.lock().map(|s| s.clone()).unwrap_or_default();
+                ([(header::CONTENT_TYPE, "application/json")], body)
+            }
+        }),
+    );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+    let addr = listener.local_addr()?;
+    tokio::spawn(async move {
+        let _ = axum::serve(listener, jwks_app).await;
+    });
+
+    // an empty key set is a server nobody could enter, so prime refuses it
+    let config = jwt_config(&format!("http://{addr}/jwks.json"))?;
+    let auth = Auth::from_config(&config, &kayak::secrets::EnvStore)?;
+    assert!(auth.prime().await.is_err(), "an empty JWKS must fail startup");
+
+    // the real set appears (the issuer rotated); a fresh prime succeeds and a
+    // token verifies with no keys ever installed by hand
+    if let Ok(mut body) = served.lock() {
+        *body = JWKS_JSON.to_string();
+    }
+    let auth = Auth::from_config(&config, &kayak::secrets::EnvStore)?;
+    auth.prime().await?;
+    assert!(auth.identify_token(&mint(&admin_claims())?).await.is_some());
+
+    // rotation, seen from a fresh validator that has never fetched: the
+    // cache misses the kid, the rate limiter has no earlier fetch to hold
+    // against, and the refresh picks the key up inside the same call.
+    let config = jwt_config(&format!("http://{addr}/jwks.json"))?;
+    let auth = Auth::from_config(&config, &kayak::secrets::EnvStore)?;
+    let validator = auth
+        .jwt_validator()
+        .ok_or_else(|| anyhow::anyhow!("a jwt server has a validator"))?;
+    let empty: jsonwebtoken::jwk::JwkSet = serde_json::from_value(json!({"keys": []}))?;
+    validator.install_keys(&empty);
+    // unknown kid -> refresh against the served set -> the token verifies
+    assert!(auth.identify_token(&mint(&admin_claims())?).await.is_some());
+    Ok(())
+}

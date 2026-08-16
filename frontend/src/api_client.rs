@@ -4,6 +4,7 @@ use kayak_core::script::{DryRunRequest, DryRunResponse};
 use kayak_core::state::{BucketContents, BucketSummary};
 use kayak_core::{
     AuthDto, ConfigFormat, Connections, LayoutFile, LoginRequest, PipelineDto, SaveConfigRequest,
+    TokenLoginRequest,
     SaveConfigResponse, SettingsDto,
 };
 use serde_json::Value;
@@ -222,6 +223,24 @@ impl ApiClient {
             password: password.to_string(),
         };
         let resp = Request::post(&format!("{}/api/auth/login", self.base))
+            .json(&body)?
+            .send()
+            .await?;
+        if resp.ok() {
+            Ok(resp.json::<AuthDto>().await?)
+        } else {
+            Err(rejection(resp).await)
+        }
+    }
+
+    /// Exchange an identity provider's JWT for the same session cookie a
+    /// password login sets — the embedding flow. See `embed` for where the
+    /// token comes from.
+    pub async fn token_login(&self, token: &str) -> Result<AuthDto, ApiError> {
+        let body = TokenLoginRequest {
+            token: token.to_string(),
+        };
+        let resp = Request::post(&format!("{}/api/auth/token", self.base))
             .json(&body)?
             .send()
             .await?;

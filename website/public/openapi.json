@@ -4040,6 +4040,19 @@
         "title": "index",
         "type": "object"
       },
+      "TokenLoginRequest": {
+        "description": "What `POST /api/auth/token` takes.\n\nThe token is the host application's — minted by its identity provider,\ncarried here from the embedding page's URL. Like [`LoginRequest`]'s\npassword it is a live credential rather than a `${NAME}` reference: it\nexists for the length of one request, is exchanged for a session cookie,\nand is never stored, serialized back or logged.",
+        "properties": {
+          "token": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "token"
+        ],
+        "title": "TokenLoginRequest",
+        "type": "object"
+      },
       "TransformConfig": {
         "oneOf": [
           {
@@ -4378,6 +4391,61 @@
         },
         "security": [],
         "summary": "Who the caller is, and whether this server asks",
+        "tags": [
+          "auth"
+        ],
+        "x-kayak-access": "public"
+      }
+    },
+    "/api/auth/token": {
+      "post": {
+        "description": "The embedding flow's endpoint, on a server whose auth section is `jwt`: a host application that already holds a token from the shared identity provider — Cognito, Keycloak — puts it on the iframe URL as `?auth_token=`, and the UI posts it here once. The token is checked against the issuer's published keys and, on success, exchanged for the same `HttpOnly` session cookie a password login sets — so the token itself appears in exactly one request and never in an access log again.\n\nThe session ends no later than the token's `exp`: the cookie must not outlive the identity provider's word that the caller is signed in.\n\nAPI callers don't need this exchange — on a `jwt` server, `Authorization: Bearer <token>` works directly on every endpoint.\n\nEvery way of being refused is the same 401, deliberately: an expired token, a wrong issuer and a server that doesn't take tokens at all are not distinctions worth handing to a guesser.",
+        "operationId": "tokenLogin",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/TokenLoginRequest"
+              }
+            }
+          },
+          "description": "The token to check.",
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AuthDto"
+                }
+              }
+            },
+            "description": "Signed in. The session cookie is in `Set-Cookie`."
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "The token was not accepted, or this server does not take tokens."
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "Something went wrong on the server. The body says what."
+          }
+        },
+        "security": [],
+        "summary": "Exchange an identity provider's JWT for a session",
         "tags": [
           "auth"
         ],

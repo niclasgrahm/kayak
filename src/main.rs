@@ -176,6 +176,13 @@ async fn main() -> anyhow::Result<()> {
         Auth::from_config(&server_config, secrets_for_auth.as_ref())
             .context("failed to load the accounts")?,
     );
+    // the jwt scheme's startup fetch, and a no-op for every other scheme. It
+    // fails the server on purpose: a jwt server with no keys is a server
+    // nobody can enter, and a crash loop names the problem where a mysterious
+    // wall of 401s would not.
+    auth.prime()
+        .await
+        .context("failed to load the identity provider's signing keys")?;
     let state = state.with_auth(auth);
 
     let conf = get_configuration(None)?;

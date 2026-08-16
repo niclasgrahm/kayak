@@ -4,12 +4,14 @@
 //! the accounts with their passwords resolved, the sessions handed out to
 //! browsers, and the middleware the router wraps each endpoint in.
 //!
-//! # Two schemes, one identity
+//! # Three schemes, one identity
 //!
-//! A request arrives with either HTTP Basic credentials or a session cookie,
-//! and both land on the same [`Identity`]. That is deliberate: the
-//! authorization check is then one check, and a role means the same thing
-//! however you got in.
+//! A request arrives with HTTP Basic credentials, a session cookie, or — on a
+//! server whose auth section is `jwt` — a bearer token minted by an external
+//! identity provider, and all of them land on the same [`Identity`]. That is
+//! deliberate: the authorization check is then one check, and a role means the
+//! same thing however you got in. Token validation itself lives in
+//! [`jwt`]; this module only decides the order the schemes are tried in.
 //!
 //! The cookie is not a convenience. `EventSource` — which is what the whole
 //! canvas is fed by, through `GET /events` — cannot set request headers at all,
@@ -40,8 +42,10 @@
 //! basic credentials on a public network are only as good as the password. The
 //! readme says so.
 
+use std::collections::BTreeMap;
 use std::collections::HashMap;
 use std::sync::Mutex;
+use std::time::SystemTime;
 
 use anyhow::Context;
 use axum::extract::Request;
@@ -50,11 +54,13 @@ use axum::middleware::Next;
 use axum::response::{IntoResponse, Response};
 use base64::Engine;
 use kayak_core::api_docs::Access;
-use kayak_core::server_config::{AuthConfig, Role, ServerConfig};
+use kayak_core::server_config::{AuthConfig, Role, ServerConfig, UserConfig};
 use rand::RngExt;
 use subtle::ConstantTimeEq;
 
 use crate::secrets::{Resolved, SecretStore};
+
+pub mod jwt;
 
 /// The name of the session cookie. One name, used by the middleware that reads
 /// it and the two handlers that set and clear it.
@@ -82,6 +88,10 @@ struct Account {
 struct Session {
     username: String,
     role: Role,
+    /// When this session stops being valid, for sessions minted from a JWT —
+    /// the session must not outlive the token that proved the identity. A
+    /// password-minted session has none and lives until logout or restart.
+    expires_at: Option<SystemTime>,
 }
 
 /// The live authentication state: the accounts, and who is currently logged in.
@@ -91,6 +101,9 @@ pub struct Auth {
     /// map because those are different servers — an empty map would be one
     /// where every login fails, which `ServerConfig::validate` refuses.
     accounts: Option<HashMap<String, Account>>,
+    /// Present exactly when the auth section is `jwt`. Holds the issuer's
+    /// keys and does the token checking; see [`jwt`].
+    jwt: Option<jwt::Validator>,
     sessions: Mutex<HashMap<String, Session>>,
 }
 
@@ -107,6 +120,7 @@ impl Auth {
     pub fn disabled() -> Self {
         Self {
             accounts: None,
+            jwt: None,
             sessions: Mutex::new(HashMap::new()),
         }
     }
@@ -119,40 +133,67 @@ impl Auth {
     /// succeeds.
     pub fn from_config(config: &ServerConfig, secrets: &dyn SecretStore) -> anyhow::Result<Self> {
         config.validate()?;
-        let AuthConfig::Basic { users } = &config.auth else {
-            return Ok(Self::disabled());
-        };
-        let mut accounts = HashMap::with_capacity(users.len());
-        for (username, user) in users {
-            let password = crate::secrets::resolve(&user.password, secrets)
-                .with_context(|| format!("failed to resolve the password for user '{username}'"))?;
-            accounts.insert(
-                username.clone(),
-                Account {
-                    password,
-                    role: user.role,
-                },
-            );
+        match &config.auth {
+            AuthConfig::None => Ok(Self::disabled()),
+            AuthConfig::Basic { users } => {
+                let accounts = resolve_accounts(users, secrets)?;
+                tracing::info!(
+                    "authentication is on, with {} account(s): {}",
+                    accounts.len(),
+                    describe_accounts(users)
+                );
+                Ok(Self {
+                    accounts: Some(accounts),
+                    jwt: None,
+                    sessions: Mutex::new(HashMap::new()),
+                })
+            }
+            AuthConfig::Jwt(jwt_config) => {
+                let accounts = resolve_accounts(&jwt_config.service_accounts, secrets)?;
+                tracing::info!(
+                    "jwt authentication is on for issuer {}, with {} service account(s): {}",
+                    jwt_config.issuer,
+                    accounts.len(),
+                    describe_accounts(&jwt_config.service_accounts)
+                );
+                Ok(Self {
+                    accounts: Some(accounts),
+                    jwt: Some(jwt::Validator::new(jwt_config.clone())),
+                    sessions: Mutex::new(HashMap::new()),
+                })
+            }
         }
-        tracing::info!(
-            "authentication is on, with {} account(s): {}",
-            accounts.len(),
-            users
-                .iter()
-                .map(|(name, user)| format!("{name} ({})", user.role.label()))
-                .collect::<Vec<_>>()
-                .join(", ")
-        );
-        Ok(Self {
-            accounts: Some(accounts),
-            sessions: Mutex::new(HashMap::new()),
-        })
+    }
+
+    /// The startup half of the jwt scheme: fetch the issuer's keys, and fail
+    /// the server if that can't be done. A no-op for every other scheme, so
+    /// `main` calls it unconditionally.
+    pub async fn prime(&self) -> anyhow::Result<()> {
+        match &self.jwt {
+            Some(validator) => validator.prime().await,
+            None => Ok(()),
+        }
+    }
+
+    /// The token validator, if this server takes tokens at all. Tests use it
+    /// to install keys without a fetch; handlers only need
+    /// [`Auth::identify_token`].
+    #[must_use]
+    pub fn jwt_validator(&self) -> Option<&jwt::Validator> {
+        self.jwt.as_ref()
+    }
+
+    /// Check a raw JWT, the way `POST /api/auth/token` needs it checked.
+    /// `None` covers both "not a valid token" and "this server doesn't take
+    /// tokens" — the handler tells those apart with [`Auth::jwt_validator`].
+    pub async fn identify_token(&self, token: &str) -> Option<jwt::TokenIdentity> {
+        self.jwt.as_ref()?.identify(token).await
     }
 
     /// Whether anything is checked at all.
     #[must_use]
     pub fn is_enabled(&self) -> bool {
-        self.accounts.is_some()
+        self.accounts.is_some() || self.jwt.is_some()
     }
 
     /// Check a username and password.
@@ -183,16 +224,31 @@ impl Auth {
     /// Start a session for an identity that has already been checked, and give
     /// back the token that names it.
     pub fn log_in(&self, identity: &Identity) -> anyhow::Result<String> {
+        self.log_in_until(identity, None)
+    }
+
+    /// [`Auth::log_in`], with a deadline — for sessions minted from a JWT,
+    /// which must not outlive the token that proved the identity. Expired
+    /// sessions are swept here rather than by a timer: logins are rare, the
+    /// map is small, and a sweeper task for it would be ceremony.
+    pub fn log_in_until(
+        &self,
+        identity: &Identity,
+        expires_at: Option<SystemTime>,
+    ) -> anyhow::Result<String> {
         let token = session_token();
+        let now = SystemTime::now();
         let mut sessions = self
             .sessions
             .lock()
             .map_err(|_| anyhow::anyhow!("the session store is poisoned"))?;
+        sessions.retain(|_, session| !session.expired(now));
         sessions.insert(
             token.clone(),
             Session {
                 username: identity.username.clone(),
                 role: identity.role,
+                expires_at,
             },
         );
         Ok(token)
@@ -208,11 +264,19 @@ impl Auth {
         }
     }
 
-    /// Who a session token belongs to, if it is still live.
+    /// Who a session token belongs to, if it is still live. A session past
+    /// its deadline is dropped on the way out — lazy eviction, the same rule
+    /// the state buckets follow, because nothing here gets a tick.
     #[must_use]
     fn session(&self, token: &str) -> Option<Identity> {
-        let sessions = self.sessions.lock().ok()?;
-        sessions.get(token).map(|session| Identity {
+        let mut sessions = self.sessions.lock().ok()?;
+        let session = sessions.get(token)?;
+        if session.expired(SystemTime::now()) {
+            sessions.remove(token);
+            return None;
+        }
+        let session = sessions.get(token)?;
+        Some(Identity {
             username: session.username.clone(),
             role: session.role,
         })
@@ -220,22 +284,112 @@ impl Auth {
 
     /// Who this request is from, by whichever scheme it used.
     ///
-    /// The cookie is tried first because it is the cheaper check and the one a
-    /// browser will be using on nearly every request; a request carrying both
-    /// is not a case worth having an opinion about.
-    #[must_use]
-    pub fn identify(&self, request: &Request) -> Option<Identity> {
+    /// The cookie is tried first because it is the cheapest check and the one
+    /// a browser will be using on nearly every request; then a bearer JWT, on
+    /// a server that takes them; then Basic. A request carrying several is not
+    /// a case worth having an opinion about.
+    ///
+    /// Takes [`Presented`] rather than the request because token checking may
+    /// await a key refresh, and a future holding `&Request` across an await is
+    /// not `Send` — the body isn't `Sync`. The extraction is
+    /// [`Presented::of`], done synchronously in the middleware.
+    pub async fn identify(&self, presented: Presented) -> Option<Identity> {
         if !self.is_enabled() {
             return None;
         }
-        if let Some(token) = cookie(request, SESSION_COOKIE)
+        if let Some(token) = presented.session
             && let Some(identity) = self.session(&token)
         {
             return Some(identity);
         }
-        let (username, password) = basic_credentials(request)?;
+        if let Some(validator) = &self.jwt
+            && let Some(token) = presented.bearer
+            && let Some(found) = validator.identify(&token).await
+        {
+            return Some(found.identity);
+        }
+        let (username, password) = presented.basic?;
         self.authenticate(&username, &password)
     }
+}
+
+/// The credentials one request carried, copied out of its headers so the
+/// request itself doesn't have to survive into the async check.
+///
+/// No `Debug` and no `Serialize`, for the reason the http input's
+/// `Credentials` has neither: this is the one struct that holds a live
+/// password or token, and nothing should be able to print it.
+pub struct Presented {
+    session: Option<String>,
+    bearer: Option<String>,
+    basic: Option<(String, String)>,
+}
+
+impl Presented {
+    /// Everything [`Auth::identify`] could want, out of one request's headers.
+    #[must_use]
+    pub fn of(request: &Request) -> Self {
+        Self {
+            session: cookie(request, SESSION_COOKIE),
+            bearer: bearer_token(request),
+            basic: basic_credentials(request),
+        }
+    }
+}
+
+impl Session {
+    fn expired(&self, now: SystemTime) -> bool {
+        self.expires_at.is_some_and(|at| at <= now)
+    }
+}
+
+/// Resolve one account map against the secret store — shared by the `basic`
+/// scheme's users and the `jwt` scheme's service accounts, which are the same
+/// thing under two names.
+fn resolve_accounts(
+    users: &BTreeMap<String, UserConfig>,
+    secrets: &dyn SecretStore,
+) -> anyhow::Result<HashMap<String, Account>> {
+    let mut accounts = HashMap::with_capacity(users.len());
+    for (username, user) in users {
+        let password = crate::secrets::resolve(&user.password, secrets)
+            .with_context(|| format!("failed to resolve the password for user '{username}'"))?;
+        accounts.insert(
+            username.clone(),
+            Account {
+                password,
+                role: user.role,
+            },
+        );
+    }
+    Ok(accounts)
+}
+
+/// The names and roles for the startup log line — names only, obviously.
+fn describe_accounts(users: &BTreeMap<String, UserConfig>) -> String {
+    if users.is_empty() {
+        return "none".to_string();
+    }
+    users
+        .iter()
+        .map(|(name, user)| format!("{name} ({})", user.role.label()))
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+/// The token out of an `Authorization: Bearer` header. The same forgiveness
+/// rule as [`basic_credentials`]: malformed is "no credentials", not an error.
+fn bearer_token(request: &Request) -> Option<String> {
+    let header = request
+        .headers()
+        .get(header::AUTHORIZATION)?
+        .to_str()
+        .ok()?;
+    let token = header
+        .strip_prefix("Bearer ")
+        .or_else(|| header.strip_prefix("bearer "))?
+        .trim();
+    (!token.is_empty()).then(|| token.to_string())
 }
 
 /// Compared against when the username is unknown, so that the wrong-name and
@@ -303,7 +457,7 @@ pub async fn authorize(access: Access, auth: &Auth, mut request: Request, next: 
     if !auth.is_enabled() {
         return next.run(request).await;
     }
-    let identity = auth.identify(&request);
+    let identity = auth.identify(Presented::of(&request)).await;
     if !access.permits(identity.as_ref().map(|i| i.role)) {
         return refuse(access, identity.as_ref());
     }
@@ -521,31 +675,35 @@ mod tests {
 
     /// Both schemes have to land on the same identity, because the
     /// authorization check downstream of them is one check.
-    #[test]
-    fn a_cookie_and_basic_credentials_identify_the_same_person() -> anyhow::Result<()> {
+    #[tokio::test]
+    async fn a_cookie_and_basic_credentials_identify_the_same_person() -> anyhow::Result<()> {
         let auth = auth()?;
         let identity = auth
             .authenticate("sam", "hunter2")
             .context("sam signs in")?;
         let token = auth.log_in(&identity)?;
 
-        let by_cookie = auth.identify(&request_with(
-            header::COOKIE,
-            &format!("{SESSION_COOKIE}={token}"),
-        )?);
+        let by_cookie = auth
+            .identify(Presented::of(&request_with(
+                header::COOKIE,
+                &format!("{SESSION_COOKIE}={token}"),
+            )?))
+            .await;
         let encoded = base64::engine::general_purpose::STANDARD.encode("sam:hunter2");
-        let by_basic = auth.identify(&request_with(
-            header::AUTHORIZATION,
-            &format!("Basic {encoded}"),
-        )?);
+        let by_basic = auth
+            .identify(Presented::of(&request_with(
+                header::AUTHORIZATION,
+                &format!("Basic {encoded}"),
+            )?))
+            .await;
 
         assert_eq!(by_cookie, Some(identity.clone()));
         assert_eq!(by_basic, Some(identity));
         Ok(())
     }
 
-    #[test]
-    fn a_stale_cookie_falls_through_to_the_credentials_that_are_there() -> anyhow::Result<()> {
+    #[tokio::test]
+    async fn a_stale_cookie_falls_through_to_the_credentials_that_are_there() -> anyhow::Result<()> {
         let auth = auth()?;
         let identity = auth
             .authenticate("sam", "hunter2")
@@ -559,9 +717,40 @@ mod tests {
             .headers_mut()
             .insert(header::AUTHORIZATION, format!("Basic {encoded}").parse()?);
         assert_eq!(
-            auth.identify(&request).map(|i| i.username),
+            auth.identify(Presented::of(&request)).await.map(|i| i.username),
             Some("kim".to_string())
         );
+        Ok(())
+    }
+
+    /// A session with a deadline is nobody the moment the deadline passes —
+    /// the session a JWT mints must not outlive the token that proved it.
+    #[test]
+    fn a_session_past_its_deadline_is_nobody() -> anyhow::Result<()> {
+        let auth = auth()?;
+        let identity = auth
+            .authenticate("kim", "correct horse")
+            .context("kim signs in")?;
+        let past = SystemTime::now() - std::time::Duration::from_secs(1);
+        let expired = auth.log_in_until(&identity, Some(past))?;
+        assert_eq!(auth.session(&expired), None);
+
+        let future = SystemTime::now() + std::time::Duration::from_hours(1);
+        let live = auth.log_in_until(&identity, Some(future))?;
+        assert_eq!(auth.session(&live), Some(identity));
+        Ok(())
+    }
+
+    /// A bearer token is read out of the header the way basic credentials
+    /// are, and anything else in that header is no credentials at all.
+    #[test]
+    fn a_bearer_token_is_read_out_of_the_authorization_header() -> anyhow::Result<()> {
+        let request = request_with(header::AUTHORIZATION, "Bearer abc.def.ghi")?;
+        assert_eq!(bearer_token(&request), Some("abc.def.ghi".to_string()));
+        for value in ["Basic abc", "Bearer ", "Bearer", ""] {
+            let request = request_with(header::AUTHORIZATION, value)?;
+            assert_eq!(bearer_token(&request), None, "{value}");
+        }
         Ok(())
     }
 }

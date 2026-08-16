@@ -10,7 +10,7 @@ use std::sync::Arc;
 use axum::http::{HeaderMap, StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use axum::{Extension, Json, extract::State};
-use kayak_core::{AuthDto, LoginRequest};
+use kayak_core::{AuthDto, LoginRequest, TokenLoginRequest};
 
 use crate::auth::{Identity, SESSION_COOKIE};
 use crate::{handlers::error::AppError, state::AppState};
@@ -69,6 +69,53 @@ pub async fn login(
     let body = dto(&state, Some(identity));
     Ok((
         [(header::SET_COOKIE, set_cookie(&token, &headers))],
+        Json(body),
+    )
+        .into_response())
+}
+
+/// Exchange an identity provider's JWT for a session — the embedding flow.
+///
+/// The same shape as [`login`], with the token where the password was: check,
+/// mint a session, set the cookie, answer with `AuthDto`. Two differences.
+/// The session carries the token's `exp` as its deadline, because the cookie
+/// must not outlive the identity provider's word that this person is signed
+/// in. And every refusal is the same 401 — an expired token, a wrong issuer
+/// and a server that doesn't take tokens at all are not distinctions worth
+/// handing to a guesser; the operator's answer is in the log.
+pub async fn token_login(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Json(payload): Json<TokenLoginRequest>,
+) -> Result<Response, AppError> {
+    let auth = state.auth();
+    if !auth.is_enabled() {
+        return Ok(Json(AuthDto::open()).into_response());
+    }
+    let refused = || {
+        (
+            StatusCode::UNAUTHORIZED,
+            Json(serde_json::json!({"error": "the token was not accepted"})),
+        )
+            .into_response()
+    };
+    if auth.jwt_validator().is_none() {
+        tracing::info!("a token sign-in was posted to a server that doesn't take tokens");
+        return Ok(refused());
+    }
+    let Some(found) = auth.identify_token(&payload.token).await else {
+        tracing::info!("failed token sign-in");
+        return Ok(refused());
+    };
+    let session = auth.log_in_until(&found.identity, found.expires_at)?;
+    tracing::info!(
+        "'{}' signed in via token as {}",
+        found.identity.username,
+        found.identity.role.label()
+    );
+    let body = dto(&state, Some(found.identity));
+    Ok((
+        [(header::SET_COOKIE, set_cookie(&session, &headers))],
         Json(body),
     )
         .into_response())
