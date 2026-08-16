@@ -10,6 +10,11 @@ example := "example_config"
 # gitignored: the sample writes pipeline data, not fixtures.
 data := "dev_data"
 
+# Where `just install` puts the binary. `~/.cargo/bin` because it is already on
+# the PATH of anyone who has the toolchain this is built with, so there is
+# nothing to add to a shell profile.
+bin_dir := env("CARGO_HOME", home_directory() / ".cargo") / "bin"
+
 # `cargo leptos watch` is what sets LEPTOS_SITE_ADDR and builds the WASM, which
 # is why this doesn't just `cargo run` — that binds :3000 and serves no
 # frontend. Everything the sample connects to comes up with `docker compose up`;
@@ -123,6 +128,21 @@ pr *ARGS:
 build:
   cargo leptos build --release --bin-features embed-assets
   @echo "built target/release/kayak — the frontend is inside it, nothing else to copy"
+
+# Copies what `build` produced rather than going through `cargo install`, and
+# that is the whole point: `cargo install` runs plain cargo, which does not
+# build the WASM bundle at all — so `target/site` would be missing or stale and
+# the embed would compile against whatever happened to be lying there. The
+# artifact `just build` makes is already the one thing worth shipping, so this
+# puts *that* on the PATH and nothing else.
+#
+# `--data-dir` is not baked in: a file or s3 output refuses to build without one
+# (see "the file output sandbox" in CLAUDE.md), so pass it when you want those.
+
+# install the release binary to ~/.cargo/bin — override with `just bin_dir=... install`
+install: build
+  install -m 755 target/release/kayak "{{bin_dir}}/kayak"
+  @echo "installed {{bin_dir}}/kayak — run it anywhere: kayak --help"
 
 # The other half of `just ci` for this feature: the tests in `src/site.rs` that
 # assert the *real* site directory is embedded can only run once it has been

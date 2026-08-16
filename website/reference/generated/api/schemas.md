@@ -3126,7 +3126,8 @@ One pipeline: every input is merged into one stream, that stream runs through th
       "type": "array"
     },
     "outputs": {
-      "description": "may be empty — a pipeline that only feeds downstream pipelines needs no\noutput of its own.",
+      "default": [],
+      "description": "may be omitted — a pipeline that only feeds downstream pipelines needs no\noutput of its own.",
       "items": {
         "$ref": "#/$defs/OutputConfig"
       },
@@ -3144,6 +3145,8 @@ One pipeline: every input is merged into one stream, that stream runs through th
       "description": "the state bucket this pipeline remembers things in, and what its\nmessages are keyed by. Only needed by a pipeline with a `remember` or\n`recall` transform; those fail to build without it."
     },
     "transforms": {
+      "default": [],
+      "description": "may be omitted — a pipeline that only moves messages needs no transform.",
       "items": {
         "$ref": "#/$defs/TransformConfig"
       },
@@ -3151,9 +3154,7 @@ One pipeline: every input is merged into one stream, that stream runs through th
     }
   },
   "required": [
-    "inputs",
-    "transforms",
-    "outputs"
+    "inputs"
   ],
   "title": "Config",
   "type": "object"
@@ -5011,7 +5012,8 @@ The same wire shape the run loop's `PipelineView` serializes to — this is the 
           "type": "array"
         },
         "outputs": {
-          "description": "may be empty — a pipeline that only feeds downstream pipelines needs no\noutput of its own.",
+          "default": [],
+          "description": "may be omitted — a pipeline that only feeds downstream pipelines needs no\noutput of its own.",
           "items": {
             "$ref": "#/$defs/OutputConfig"
           },
@@ -5029,6 +5031,8 @@ The same wire shape the run loop's `PipelineView` serializes to — this is the 
           "description": "the state bucket this pipeline remembers things in, and what its\nmessages are keyed by. Only needed by a pipeline with a `remember` or\n`recall` transform; those fail to build without it."
         },
         "transforms": {
+          "default": [],
+          "description": "may be omitted — a pipeline that only moves messages needs no transform.",
           "items": {
             "$ref": "#/$defs/TransformConfig"
           },
@@ -5036,9 +5040,7 @@ The same wire shape the run loop's `PipelineView` serializes to — this is the 
         }
       },
       "required": [
-        "inputs",
-        "transforms",
-        "outputs"
+        "inputs"
       ],
       "type": "object"
     },

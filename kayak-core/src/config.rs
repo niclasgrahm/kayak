@@ -1388,9 +1388,12 @@ pub struct Config {
     /// at least one. Batches arrive interleaved in the order the inputs produce
     /// them; there is no ordering between two different inputs.
     pub inputs: Vec<InputConfig>,
+    /// may be omitted — a pipeline that only moves messages needs no transform.
+    #[serde(default)]
     pub transforms: Vec<TransformConfig>,
-    /// may be empty — a pipeline that only feeds downstream pipelines needs no
+    /// may be omitted — a pipeline that only feeds downstream pipelines needs no
     /// output of its own.
+    #[serde(default)]
     pub outputs: Vec<OutputConfig>,
     /// the state bucket this pipeline remembers things in, and what its
     /// messages are keyed by. Only needed by a pipeline with a `remember` or

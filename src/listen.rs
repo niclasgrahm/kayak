@@ -8,11 +8,26 @@
 //!
 //! # Precedence
 //!
-//! The bind address has three possible sources and they are ordered
-//! `--listen` > `LEPTOS_SITE_ADDR` > `Cargo.toml`. Only the first is this
-//! module's business: the other two are already collapsed into one
-//! [`SocketAddr`] by the time leptos hands over its options, so [`resolve`] is
-//! the flag against that answer.
+//! The bind address has four possible sources and they are ordered
+//! `--listen` > `LEPTOS_SITE_ADDR` > `Cargo.toml` > [`DEFAULT_ADDR`]. The
+//! middle two are already collapsed into one [`SocketAddr`] by the time leptos
+//! hands over its options, so [`resolve`] is the flag and the fallback against
+//! that answer.
+//!
+//! # Why there is a fallback at all
+//!
+//! `Cargo.toml`'s `site-addr` is read by **cargo-leptos**, not by this binary:
+//! `cargo leptos watch` reads it and exports `LEPTOS_SITE_ADDR` before
+//! starting the server. A binary that has been installed somewhere has neither
+//! cargo-leptos nor a `Cargo.toml` beside it, so nothing sets that variable and
+//! leptos falls back to its own `127.0.0.1:3000` — which is the one address
+//! nothing in this repository names. `just dev`, the container image, the docs
+//! and every example say 6767.
+//!
+//! So the fallback applies **only when nothing said anything**: an unset
+//! `LEPTOS_SITE_ADDR` is the whole of the condition, which is why [`resolve`]
+//! is told whether it was set rather than comparing the address against 3000.
+//! Someone who genuinely wants 3000 sets the variable to it and is obeyed.
 //!
 //! **The flag is an `Option` and must stay one.** A clap `default_value_t`
 //! would win over the environment on every run, which is not a preference —
@@ -30,15 +45,36 @@
 //! reassembled, and `format!("{host}:{port}")` produces `::1:6767` for IPv6 —
 //! which does not parse. `--listen [::]:6767` needs no rule.
 
-use std::net::SocketAddr;
+use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 
 use kayak_core::server_config::ServerConfig;
 
+/// Where the server listens when nothing says otherwise.
+///
+/// The same address as `site-addr` in `[[workspace.metadata.leptos]]`, and
+/// `the_default_is_the_address_cargo_toml_names` reads that file to make sure
+/// it stays that way — two spellings of one number is exactly the pair that
+/// drifts.
+pub const DEFAULT_ADDR: SocketAddr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 6767);
+
 /// The address to bind: the flag if one was given, otherwise whatever the
-/// leptos options already decided.
+/// leptos options decided — unless nothing decided anything, in which case
+/// [`DEFAULT_ADDR`].
+///
+/// `site_addr_was_set` is whether `LEPTOS_SITE_ADDR` was present in the
+/// environment. It is a parameter rather than a `std::env::var` call so this
+/// stays pure and testable; `main.rs` is the one place that reads it.
 #[must_use]
-pub fn resolve(flag: Option<SocketAddr>, configured: SocketAddr) -> SocketAddr {
-    flag.unwrap_or(configured)
+pub fn resolve(
+    flag: Option<SocketAddr>,
+    configured: SocketAddr,
+    site_addr_was_set: bool,
+) -> SocketAddr {
+    match (flag, site_addr_was_set) {
+        (Some(wanted), _) => wanted,
+        (None, true) => configured,
+        (None, false) => DEFAULT_ADDR,
+    }
 }
 
 /// Whether this is an unauthenticated server reachable from off the machine.
@@ -128,14 +164,71 @@ mod tests {
     /// which speak through `LEPTOS_SITE_ADDR` — working.
     #[test]
     fn no_flag_keeps_the_configured_address() {
-        assert_eq!(resolve(None, loopback()), loopback());
-        assert_eq!(resolve(None, unspecified()), unspecified());
+        assert_eq!(resolve(None, loopback(), true), loopback());
+        assert_eq!(resolve(None, unspecified(), true), unspecified());
     }
 
     #[test]
     fn the_flag_wins_over_the_configured_address() {
         let wanted = v4([0, 0, 0, 0], 8080);
-        assert_eq!(resolve(Some(wanted), loopback()), wanted);
+        assert_eq!(resolve(Some(wanted), loopback(), true), wanted);
+    }
+
+    /// An installed binary: no cargo-leptos, no `Cargo.toml`, so leptos hands
+    /// over its own `127.0.0.1:3000` and nothing in this repository names that
+    /// address. The fallback is what makes `kayak` on its own agree with
+    /// `just dev`, the image and the docs.
+    #[test]
+    fn nothing_set_at_all_lands_on_the_projects_own_address() {
+        let leptos_default = v4([127, 0, 0, 1], 3000);
+        assert_eq!(resolve(None, leptos_default, false), DEFAULT_ADDR);
+        assert_eq!(DEFAULT_ADDR, loopback());
+    }
+
+    /// The fallback is about *silence*, not about the number 3000: someone who
+    /// asks for it gets it, which is what keeps this a default rather than a
+    /// refusal to bind where you said.
+    #[test]
+    fn an_address_that_was_asked_for_is_obeyed_even_when_it_is_the_leptos_one() {
+        let three_thousand = v4([127, 0, 0, 1], 3000);
+        assert_eq!(resolve(None, three_thousand, true), three_thousand);
+        assert_eq!(
+            resolve(Some(three_thousand), loopback(), false),
+            three_thousand
+        );
+    }
+
+    /// The flag still wins when nothing else was set — otherwise installing the
+    /// binary would take `--listen` away from it.
+    #[test]
+    fn the_flag_wins_over_the_fallback() {
+        let wanted = v4([0, 0, 0, 0], 8080);
+        assert_eq!(resolve(Some(wanted), v4([127, 0, 0, 1], 3000), false), wanted);
+    }
+
+    /// Two spellings of one number, so this reads the other one. `site-addr`
+    /// under `[[workspace.metadata.leptos]]` is what `cargo leptos watch` and
+    /// the docs use; [`DEFAULT_ADDR`] is what an installed binary uses, and a
+    /// change to either that left the other behind would be invisible until
+    /// someone wondered why two ways of starting the same server disagreed.
+    #[test]
+    fn the_default_is_the_address_cargo_toml_names() {
+        let Ok(manifest) = std::fs::read_to_string("Cargo.toml") else {
+            panic!("the workspace manifest is not where the test is run from");
+        };
+        let quoted = manifest
+            .lines()
+            .map(str::trim)
+            .find(|line| line.starts_with("site-addr"))
+            .and_then(|line| line.split('"').nth(1));
+        let Some(quoted) = quoted else {
+            panic!("no quoted site-addr under [[workspace.metadata.leptos]]");
+        };
+        assert_eq!(
+            quoted,
+            DEFAULT_ADDR.to_string(),
+            "Cargo.toml's site-addr and listen::DEFAULT_ADDR have drifted apart"
+        );
     }
 
     /// One `SocketAddr` rather than a host beside a port, so the case
@@ -143,7 +236,7 @@ mod tests {
     #[test]
     fn an_ipv6_address_is_expressible() {
         let any = v6(Ipv6Addr::UNSPECIFIED, 6767);
-        assert_eq!(resolve(Some(any), loopback()), any);
+        assert_eq!(resolve(Some(any), loopback(), true), any);
         assert!(!any.ip().is_loopback());
         assert!(v6(Ipv6Addr::LOCALHOST, 6767).ip().is_loopback());
     }
