@@ -155,6 +155,51 @@ to escape every newline.
 The file is read when the pipeline is built, so editing it takes a revert to
 pick up.
 
+## sharing code between scripts
+
+A script may `import` other rhai files, and the boundary is the one a file
+source already has: the path is relative to the **config file's directory**, it
+may not climb out, and the `.rhai` extension is implied.
+
+```rhai
+import "scripts/shared/readings" as readings;
+
+msg.direction = readings::direction(msg.delta);
+msg
+```
+
+That makes a more involved project look like this, with the helpers written
+once instead of pasted into every script that classifies the same way:
+
+```
+config.yaml
+scripts/swings.rhai
+scripts/shared/readings.rhai
+```
+
+Three rules keep imports as reviewable as the rest of the config:
+
+- **Everything resolves when the pipeline is built.** A missing or broken
+  module is a pipeline that refuses to start, the same rule a script that does
+  not parse follows — and a running pipeline never touches the filesystem.
+  Editing a module, like editing a script file, takes a revert to pick up.
+- **A module's top level runs once, at build time.** What a script reaches
+  through an import is the module's functions and exported constants, not a
+  body re-run per message — so a module is for functions, and anything
+  per-message belongs in the importing script.
+- **The path is a literal.** An import whose path is assembled at runtime
+  resolves nothing, for the reason `eval` is refused: a script whose
+  dependencies cannot be read off the page is not one a reviewer can approve.
+
+Imports follow the file source's other consequence too: a server started
+without `--config` has no directory to resolve against and refuses them, even
+in an inline script. And only `.rhai` files resolve at all — an import can
+never open anything else that lives beside the config, which matters because
+`secrets.json` usually does.
+
+The sample uses this: `scripts/shared/readings.rhai` in `example_config/` holds
+the classification both heartbeat scripts share.
+
 ## trying one out
 
 `POST /api/scripts/dry-run` runs a script over messages you hand it, without
@@ -200,8 +245,10 @@ thread, not merely break its own pipeline.
   operation can allocate — a doubling string reaches a gigabyte in thirty of
   them.
 - **There is no filesystem, no network and no `eval`.** rhai's default module
-  resolver reads `import`ed files off disk and is replaced with one that
-  resolves nothing. A script that needs a service is the [`http`
+  resolver reads `import`ed files off disk with no boundary; here
+  [imports](#sharing-code-between-scripts) resolve when the pipeline is built,
+  under the config directory's boundary, and a running script resolves nothing.
+  A script that needs a service is the [`http`
   transform](/reference/transforms), which can await; this cannot.
 - **Nothing survives between runs.** Each run gets a fresh scope, so a top-level
   variable is not a way to accumulate. That is deliberate: it would be state

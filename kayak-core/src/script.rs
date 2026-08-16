@@ -52,6 +52,12 @@ use serde::{Deserialize, Serialize};
 /// script runs synchronously inside the run loop's task, so a script that loops
 /// forever would wedge a worker thread rather than merely breaking its own
 /// pipeline.
+///
+/// A script may **`import`** other rhai files — shared helpers, written once —
+/// by a literal path relative to the config file's directory, which it may not
+/// climb out of; the `.rhai` extension is implied. Imports resolve when the
+/// pipeline is built, so a broken one refuses to start rather than failing
+/// batches, and a running script never touches the filesystem.
 #[derive(Clone, Debug, Deserialize, Serialize, JsonSchema, PartialEq)]
 #[schemars(title = "script")]
 pub struct ScriptTransformConfig {
@@ -95,10 +101,11 @@ pub enum ScriptSource {
     /// A path to a `.rhai` file, relative to the directory the config file is
     /// in — the same place the connections and layout files live.
     ///
-    /// The file is read when the pipeline is built, so editing it takes a
-    /// revert to pick up. A server running without a config file has no
-    /// directory to resolve against and refuses this; inline scripts still
-    /// work there.
+    /// The file is read when the pipeline is built — as are any modules it
+    /// `import`s, which resolve against the same directory — so editing one
+    /// takes a revert to pick up. A server running without a config file has
+    /// no directory to resolve against and refuses this; inline scripts still
+    /// work there, though their imports are refused for the same reason.
     File {
         /// the path, relative to the config file's directory. It may not climb
         /// out of that directory.

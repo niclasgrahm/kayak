@@ -8,6 +8,12 @@
 //
 // A reducer can do `min` and `max`; what it cannot do is `spread`, because that
 // is arithmetic *between* two aggregates.
+//
+// The arithmetic itself lives in `scripts/shared/readings.rhai` — the swings
+// script classifies with the same module, and a helper written twice drifts.
+// The import path is relative to the config file's directory.
+
+import "scripts/shared/readings" as readings;
 
 let lowest = batch[0].value;
 let highest = batch[0].value;
@@ -26,6 +32,6 @@ emit([#{
     readings: batch.len,
     lowest: lowest,
     highest: highest,
-    spread: highest - lowest,
+    spread: readings::spread(lowest, highest),
     at: now(),
 }]);

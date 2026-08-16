@@ -115,6 +115,11 @@ time and every batch would hold a single reading, which is what makes batch
 scope look pointless. It emits `spread` alongside `lowest` and `highest` —
 arithmetic *between* two aggregates, which a reducer cannot do.
 
+The two file-sourced scripts also share a module: `scripts/shared/readings.rhai`
+holds the classification both use, `import`ed by a path relative to the config's
+directory — the [shared-code sample](/pipelines/scripting#sharing-code-between-scripts),
+and the shape a project grows into once two scripts want the same helper.
+
 Note the sample is JSON, which is the format inline scripts read worst in: the
 inline one is a single escaped `\n` away from being unreadable, and that is a
 fair advertisement for keeping scripts in files or writing the config in YAML.

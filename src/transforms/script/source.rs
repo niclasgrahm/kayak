@@ -43,6 +43,31 @@ pub fn read(source: &ScriptSource, script_dir: Option<&Path>) -> Result<String> 
     }
 }
 
+/// The text of an `import`ed module, under the same boundary a file-sourced
+/// script is read under.
+///
+/// A module is more of the same thing a script file is — part of the
+/// description of the graph, living beside the config — so it gets exactly the
+/// rules [`read`] applies to a `file` source: a relative path of ordinary
+/// names, resolved against the config file's directory, re-checked after
+/// canonicalizing. One rule is added rather than relaxed: the file read is
+/// **always** a `.rhai` file. The extension is appended when the import leaves
+/// it off (rhai's own convention — `import "scripts/shared/util"`), and because
+/// it is appended rather than trusted, an import can never read anything else
+/// out of the config's directory — which matters, because `secrets.json`
+/// commonly lives there, and a parse error quoting a file it should never have
+/// opened is a disclosure, not a diagnostic.
+pub fn read_module(path: &str, script_dir: &Path) -> Result<String> {
+    let with_extension;
+    let path = if Path::new(path.trim()).extension().is_some_and(|ext| ext == "rhai") {
+        path
+    } else {
+        with_extension = format!("{}.rhai", path.trim());
+        &with_extension
+    };
+    read_file(path, Some(script_dir))
+}
+
 fn read_file(path: &str, script_dir: Option<&Path>) -> Result<String> {
     let Some(script_dir) = script_dir else {
         bail!(
@@ -201,6 +226,33 @@ mod tests {
         assert!(
             format!("{err:#}").contains("outside the config's directory"),
             "the error should say what happened: {err:#}"
+        );
+        Ok(())
+    }
+
+    /// The `.rhai` extension is appended when the import leaves it off and
+    /// accepted when it doesn't — the two spellings read the same file. What
+    /// there is no spelling for is any *other* extension: appending is what
+    /// keeps every file an import can open a script.
+    #[test]
+    fn a_module_is_read_with_the_extension_appended_or_written() -> Result<()> {
+        let dir = tempfile::tempdir()?;
+        std::fs::create_dir(dir.path().join("shared"))?;
+        std::fs::write(dir.path().join("shared/util.rhai"), "fn id(x) { x }")?;
+        assert_eq!(read_module("shared/util", dir.path())?, "fn id(x) { x }");
+        assert_eq!(read_module("shared/util.rhai", dir.path())?, "fn id(x) { x }");
+        Ok(())
+    }
+
+    /// `secrets.json` commonly lives beside the config, and a parse error
+    /// quoting a file an import should never have opened is a disclosure.
+    #[test]
+    fn a_module_path_naming_another_extension_reads_no_such_file() -> Result<()> {
+        let dir = tempfile::tempdir()?;
+        std::fs::write(dir.path().join("secrets.json"), "{}")?;
+        assert!(
+            read_module("secrets.json", dir.path()).is_err(),
+            "only .rhai files are reachable through an import"
         );
         Ok(())
     }

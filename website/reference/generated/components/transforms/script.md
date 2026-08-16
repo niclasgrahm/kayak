@@ -10,6 +10,8 @@ The script is **compiled when the pipeline is built**, so a syntax error is a pi
 
 Every script runs under an **operation budget**. That is not a tuning knob with a safe default, it is what makes this component safe to have: the script runs synchronously inside the run loop's task, so a script that loops forever would wedge a worker thread rather than merely breaking its own pipeline.
 
+A script may **`import`** other rhai files — shared helpers, written once — by a literal path relative to the config file's directory, which it may not climb out of; the `.rhai` extension is implied. Imports resolve when the pipeline is built, so a broken one refuses to start rather than failing batches, and a running script never touches the filesystem.
+
 | field | type | | description |
 | --- | --- | --- | --- |
 | `source` | `inline \| file` | <Badge type="warning" text="required" /> | the script itself, written inline or kept in a file beside the config |
