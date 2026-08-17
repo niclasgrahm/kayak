@@ -100,8 +100,17 @@ ci: lint test
 # deliberately-fake credentials that are committed on purpose; a hit that
 # isn't in there is worth stopping for.
 #
-# needs `brew install gitleaks`. Not part of `just ci` — it is a gate on
-# publishing rather than on a commit, and CI runs it in the workflow.
+# Needs `brew install gitleaks`. Not part of `just ci`: it is a gate on
+# publishing rather than on a commit.
+
+# Dependency policy: licences, RUSTSEC advisories, and where crates come from.
+# `deny.toml` carries the reasoning. Needs `brew install cargo-deny`.
+
+# check the dependency graph's licences and advisories
+deny:
+  cargo deny check
+
+# secret scan over the whole git history
 scan-secrets:
   gitleaks git --no-banner --redact .
 

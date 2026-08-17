@@ -8,6 +8,11 @@ edition = "2024"
 # The server and everything compiled into it. See LICENSE, and licensing.md
 # for why this side is copyleft and kayak-core is not.
 license = "AGPL-3.0-or-later"
+# The server. Not publishable to crates.io and not meant to be: it depends on
+# `kayak-core` and `frontend` by path, which crates.io does not accept. Saying
+# so is also what lets `cargo deny` tell a workspace path dependency from a
+# real `version = "*"`.
+publish = false
 
 [lints.clippy]
 # Groups (lower priority so individual lints below can override them)
