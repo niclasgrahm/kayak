@@ -7,6 +7,17 @@ container that runs with no arguments and a Kubernetes Deployment that needs no
 volume:
 
 ```bash
+docker run -p 6767:6767 ghcr.io/niclasgrahm/kayak
+```
+
+Every push to `main` publishes that image, tagged `latest` and `sha-<short>`;
+a `v1.2.3` tag additionally publishes `1.2.3` and `1.2`. Pin a version for
+anything you care about — `latest` is the tip of `main`, not a release. Only
+`linux/amd64` is published today, so an arm64 host runs it under emulation.
+
+Building it yourself is the same image:
+
+```bash
 docker build -t kayak .
 docker run -p 6767:6767 kayak
 ```

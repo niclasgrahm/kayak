@@ -71,8 +71,10 @@ Once it's up:
 just ci                              # lint + test — what CI runs; green before calling anything done
 just test                            # offline unit + integration tests, no Docker needed
 just build                           # production build — one binary, frontend included
+docker run -p 6767:6767 ghcr.io/niclasgrahm/kayak
+                                      # the published image; empty graph — mount a config to run your own
 docker build -t kayak . && docker run -p 6767:6767 kayak
-                                      # runs with an empty graph — mount a config to run your own
+                                      # or build it yourself
 ```
 
 ## documentation
