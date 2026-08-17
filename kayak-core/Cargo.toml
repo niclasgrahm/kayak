@@ -2,6 +2,10 @@
 name = "kayak-core"
 version = "0.1.0"
 edition = "2024"
+# Permissive on purpose, and the one crate that is: it is the shared
+# vocabulary anything talking to kayak needs, so copyleft here would be a
+# tax on writing a client. See licensing.md.
+license = "Apache-2.0"
 
 [dependencies]
 schemars = "1.2.1"

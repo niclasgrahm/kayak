@@ -89,3 +89,17 @@ docker build -t kayak . && docker run -p 6767:6767 kayak
 - **[CLAUDE.md](CLAUDE.md)** — architecture notes for anyone (human or
   otherwise) working on kayak itself: how the crates fit together and why
   particular things are built the way they are.
+
+## license
+
+kayak is **AGPL-3.0-or-later**, except `kayak-core` — the shared config types
+and DTOs — which is **Apache-2.0** so that anything talking to kayak can be
+built against it freely.
+
+Self-hosting, modifying, and running kayak inside a company are all what the
+licence is for and ask nothing of you beyond keeping the notices. Offering a
+*modified* kayak to others over a network is the case the AGPL covers, and a
+commercial licence is available for anyone that doesn't suit.
+
+[licensing.md](licensing.md) has the reasoning, the third-party notices and
+what a contribution is licensed under.
