@@ -95,6 +95,16 @@ test:
 # what CI runs — run this before pushing
 ci: lint test
 
+# secret scan over the whole history, not just the working tree — what a
+# public repo makes permanent. `.gitleaks.toml` allowlists the handful of
+# deliberately-fake credentials that are committed on purpose; a hit that
+# isn't in there is worth stopping for.
+#
+# needs `brew install gitleaks`. Not part of `just ci` — it is a gate on
+# publishing rather than on a commit, and CI runs it in the workflow.
+scan-secrets:
+  gitleaks git --no-banner --redact .
+
 # `main` is only moved by merging a pull request. GitHub won't enforce that on a
 # private repo on this plan, so the rule lives in a hook instead — see
 # `.githooks/pre-push`. The hooks are committed rather than left in one clone's
