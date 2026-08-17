@@ -4,6 +4,8 @@ version = "0.1.0"
 edition = "2024"
 # Depends on the server crate, so it carries the server's licence.
 license = "AGPL-3.0-or-later"
+# A tool for this repository — it writes the doc site's reference tables.
+publish = false
 
 # The doc site's generator. It depends on the server crate for one thing only —
 # `kayak::openapi::document()` — and on core for everything else; both are

@@ -1,0 +1,102 @@
+# Dependency policy — `cargo deny check`, run in CI.
+#
+# The licence half is the one that matters here: kayak is AGPL with an
+# Apache-2.0 core and is offered commercially, so a copyleft dependency that
+# arrived quietly would be a licensing problem rather than a nuisance. This
+# file is what makes that a build failure instead of a discovery.
+#
+# Every licence below was in the graph when the policy was written. Adding one
+# is a decision — write down why, next to it.
+
+[graph]
+all-features = true
+
+[licenses]
+# Permissive, and the whole reason this list can be short.
+allow = [
+  "Apache-2.0",
+  "Apache-2.0 WITH LLVM-exception",
+  "MIT",
+  "MIT-0",
+  "BSD-1-Clause",
+  "BSD-2-Clause",
+  "BSD-3-Clause",
+  "ISC",
+  "BSL-1.0",
+  "Zlib",
+  "Unlicense",
+  "CC0-1.0",
+  # the icu crates' licence — permissive, Unicode's own
+  "Unicode-3.0",
+  # webpki-roots: a permissive licence for *data*, which is what a root store is
+  "CDLA-Permissive-2.0",
+  # File-level copyleft, which reaches those crates' own files and nothing of
+  # ours: async-opcua (the opcua input) and smartstring (via rhai). It places
+  # no condition on kayak's licence, and the source being on crates.io is what
+  # satisfies it. A *new* MPL dependency is still worth a second look — this
+  # allows the licence, not the habit.
+  "MPL-2.0",
+  # kayak's own crates. Note this necessarily also allows an AGPL dependency
+  # through; there are none today, and one would be fine for the server and
+  # wrong for kayak-core, which is a judgement no allow-list can make.
+  "AGPL-3.0-or-later",
+]
+# A crate offering several licences satisfies this policy with any one of them,
+# so `MIT OR Apache-2.0 OR LGPL-2.1-or-later` (r-efi) resolves to MIT and the
+# LGPL arm is never taken.
+confidence-threshold = 0.9
+
+[advisories]
+# RUSTSEC advisories. Every entry here needs a reason and the date it was
+# assessed, so this list can be re-read rather than accumulated. Anything that
+# has a fixed version gets updated instead of listed — `anyhow` was in here for
+# about a minute before `cargo update` was the answer.
+ignore = [
+  # --- no fixed version exists anywhere -----------------------------------
+  # rumqttc 0.25.1 is the latest release and pins rustls-webpki 0.102, which
+  # these four are all against. They are flaws in verifying a *server's*
+  # certificate, so reaching them means already being in a position to
+  # man-in-the-middle the broker connection with a crafted chain; none is
+  # reachable from message data. Revisit when rumqttc moves off rustls 0.23's
+  # old webpki — that is the only thing that will clear them.
+  # assessed 2026-08-17
+  { id = "RUSTSEC-2026-0049", reason = "rustls-webpki via rumqttc; no rumqttc release carries a fixed version" },
+  { id = "RUSTSEC-2026-0098", reason = "rustls-webpki via rumqttc; no rumqttc release carries a fixed version" },
+  { id = "RUSTSEC-2026-0099", reason = "rustls-webpki via rumqttc; no rumqttc release carries a fixed version" },
+  { id = "RUSTSEC-2026-0104", reason = "rustls-webpki via rumqttc; no rumqttc release carries a fixed version" },
+  # The Marvin attack is a timing sidechannel in RSA decryption, unfixed
+  # upstream in `rsa` since 2023 — there is no version to move to. It arrives
+  # under async-opcua, where kayak connects with SecurityPolicy::None and so
+  # performs no RSA operation with a private key of its own. Worth re-reading
+  # the moment the opcua input grows real security policies, which is on the
+  # roadmap. assessed 2026-08-17
+  { id = "RUSTSEC-2023-0071", reason = "rsa via async-opcua; unfixed upstream, and kayak's opcua client uses SecurityPolicy::None" },
+
+  # --- unmaintained, all transitive ---------------------------------------
+  # None of these is a vulnerability; they are notices that nobody is looking
+  # after the crate. All four arrive through dependencies rather than being
+  # chosen here, so the fix is upstream in each case. assessed 2026-08-17
+  { id = "RUSTSEC-2024-0436", reason = "paste, transitive through several proc-macro crates" },
+  { id = "RUSTSEC-2026-0173", reason = "proc-macro-error2, transitive" },
+  { id = "RUSTSEC-2025-0134", reason = "rustls-pemfile, transitive through the rustls stack" },
+  { id = "RUSTSEC-2026-0249", reason = "smartstring, transitive through rhai" },
+]
+
+[bans]
+# This workspace compiles leptos, axum and rdkafka in one graph, so duplicate
+# versions of small crates are constant and mean nothing. Failing on them would
+# train everyone to ignore this check.
+multiple-versions = "allow"
+wildcards = "deny"
+# The workspace's own crates refer to each other by path with no version, which
+# is what a wildcard *is* to this check. They are the one kind that carries
+# none of the risk — the code is in this repository.
+allow-wildcard-paths = true
+
+[sources]
+# Everything comes from crates.io. A git dependency is a decision — it pins no
+# version, is not yanked when it is broken, and would not be visible in a
+# release audit.
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]

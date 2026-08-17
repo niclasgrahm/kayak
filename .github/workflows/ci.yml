@@ -24,6 +24,32 @@ jobs:
       - name: test
         run: cargo test --workspace --all-targets
 
+  # Dependency policy — licences, RUSTSEC advisories, and where crates come
+  # from. Its own job rather than a step in `test`: it needs no build, so it
+  # answers in seconds and says which of the four checks failed on its own
+  # line. `deny.toml` carries the reasoning, including why each ignored
+  # advisory is ignored.
+  deny:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: EmbarkStudios/cargo-deny-action@v2
+        with:
+          command: check
+
+  # Secret scan over the whole history, not only the diff — the same thing
+  # `just scan-secrets` runs. `.gitleaks.toml` allowlists the handful of
+  # deliberately-fake credentials this repo commits on purpose.
+  secrets:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: gitleaks/gitleaks-action@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
   # The site's reference is committed, and `kayak-docsgen`'s tests are what say
   # it still matches the schemas — that runs in the job above. This one only
   # checks that the site itself still builds: a doc comment can be valid Rust
