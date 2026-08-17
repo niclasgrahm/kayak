@@ -81,6 +81,11 @@ RUN groupadd --gid 10001 kayak \
   && useradd --uid 10001 --gid 10001 --home-dir /kayak --no-create-home kayak
 
 COPY --from=builder /out/kayak /usr/local/bin/kayak
+# The AGPL asks for its text to travel with the binary, and this image is the
+# binary. Scalar's MIT notice needs no line here: `assets/` is copied into the
+# site directory by cargo-leptos and compiled into the binary along with the
+# bundle it covers.
+COPY LICENSE /usr/share/kayak/LICENSE
 # The sample graph and the connections it names. The pair is found by *derived*
 # name, so both keep the same stem and the same directory; the layout file
 # beside them is what the canvas comes up arranged by.
@@ -112,7 +117,9 @@ EXPOSE 6767
 # smallest thing that works.
 ENTRYPOINT ["/usr/local/bin/kayak"]
 
+# `image.source` is also what links the package to this repository on GHCR,
+# so it has to be the real url rather than a description of one.
 LABEL org.opencontainers.image.title="kayak" \
   org.opencontainers.image.description="Graph-based stream processing with a web UI" \
-  org.opencontainers.image.source="https://github.com/niclasgrahm/streamer" \
-  org.opencontainers.image.licenses="MIT"
+  org.opencontainers.image.source="https://github.com/niclasgrahm/kayak" \
+  org.opencontainers.image.licenses="AGPL-3.0-or-later"
