@@ -2,6 +2,8 @@
 name = "frontend"
 version = "0.1.0"
 edition = "2024"
+# Compiled into the server binary, so it carries the server's licence.
+license = "AGPL-3.0-or-later"
 
 [lib]
 crate-type = ["cdylib", "rlib"]

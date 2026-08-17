@@ -5,6 +5,9 @@ members = ["kayak-core", "frontend", "kayak-bench", "docsgen"]
 name = "kayak"
 version = "0.1.0"
 edition = "2024"
+# The server and everything compiled into it. See LICENSE, and licensing.md
+# for why this side is copyleft and kayak-core is not.
+license = "AGPL-3.0-or-later"
 
 [lints.clippy]
 # Groups (lower priority so individual lints below can override them)

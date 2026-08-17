@@ -1,0 +1,21 @@
+# Secret scanning, run over the full history — `just scan-secrets`.
+#
+# Everything allowlisted here is deliberately committed and deliberately
+# fake. Nothing real belongs in this file: the point of the allowlist is that
+# a hit which *isn't* listed is worth stopping for, so keep it short and keep
+# the reason next to each entry.
+
+[extend]
+useDefault = true
+
+[[allowlists]]
+description = "the RSA key pair the jwt tests sign with — generated for the suite, kid `test-key-1`, used only by tests/auth.rs and src/auth/jwt.rs's own tests"
+paths = ['''tests/fixtures/jwt/.*''']
+
+[[allowlists]]
+description = "the vendored Scalar bundle ships a table of fake sample data (IBANs, bitcoin addresses, keys) for its API playground"
+paths = ['''assets/scalar\.js''']
+
+[[allowlists]]
+description = "the sample login the docs and example_config use throughout — `just dev` creates it"
+regexes = ['''hunter2''']

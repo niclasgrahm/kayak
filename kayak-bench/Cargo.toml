@@ -2,6 +2,8 @@
 name = "kayak-bench"
 version = "0.1.0"
 edition = "2024"
+# Drives the runtime in process, so it carries the server's licence.
+license = "AGPL-3.0-or-later"
 # Not published and not part of the server. It exists to produce numbers, and
 # it is a member of the workspace so that `cargo check` and `just lint` keep it
 # compiling against the runtime it measures — a bench that has quietly stopped
