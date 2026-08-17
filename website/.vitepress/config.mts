@@ -12,6 +12,13 @@ const reference = (title: string, page: string, items: { text: string; link: str
 })
 
 export default defineConfig({
+  // The site is served as a *project page* — https://propell.dev/kayak/, since
+  // propell.dev is the CNAME on the account's user site — so every generated
+  // asset url needs the prefix. Getting this wrong is not subtle: the html
+  // loads and every stylesheet and script under it 404s, so the page renders
+  // unstyled rather than failing outright. This line goes the day kayak has a
+  // domain of its own serving it from a root, and not before.
+  base: '/kayak/',
   title: 'kayak',
   description: 'graph-based stream processing — configurable input → transforms → output pipelines, running on a live canvas',
   lang: 'en',
@@ -119,11 +126,11 @@ export default defineConfig({
       },
     ],
     socialLinks: [
-      { icon: 'github', link: 'https://github.com/niclasgrahm/streamer' },
+      { icon: 'github', link: 'https://github.com/niclasgrahm/kayak' },
     ],
     search: { provider: 'local' },
     editLink: {
-      pattern: 'https://github.com/niclasgrahm/streamer/edit/main/website/:path',
+      pattern: 'https://github.com/niclasgrahm/kayak/edit/main/website/:path',
       text: 'edit this page',
     },
     footer: {

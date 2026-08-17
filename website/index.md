@@ -16,7 +16,7 @@ hero:
       link: /reference/inputs
     - theme: alt
       text: github
-      link: https://github.com/niclasgrahm/streamer
+      link: https://github.com/niclasgrahm/kayak
 features:
   - title: configured, not coded
     details: >-
