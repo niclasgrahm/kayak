@@ -79,7 +79,7 @@ docker build -t kayak . && docker run -p 6767:6767 kayak
 
 ## documentation
 
-- **[the docs site](website/)** — the full documentation: how the canvas and
+- **[the docs site](https://propell.dev/kayak/)** — the full documentation: how the canvas and
   editor work, the pipeline and metadata model, every transform and output,
   connections, secrets, authentication, deployment and testing, plus a
   generated reference for every component and every endpoint. `just docs-dev`
