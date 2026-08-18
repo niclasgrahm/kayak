@@ -28,23 +28,36 @@ bin_dir := env("CARGO_HOME", home_directory() / ".cargo") / "bin"
 # checks as the one part of the UI nobody ever looks at; `dev-yaml` below is
 # the escape hatch when a login is in the way. See {{example}}/server.yaml.
 
-# Kills whatever is bound to :6767. `cargo leptos watch` sometimes gets left
-# running detached (e.g. after a terminal closes without Ctrl-C), and a
-# leftover holding the port makes the next `dev` fail with a bind error
-# instead of a useful message — so both dev recipes clear it first.
+# Kills whatever is bound to :6767 *and* :3001. `cargo leptos watch` sometimes
+# gets left running detached (e.g. after a terminal closes without Ctrl-C), and
+# a leftover holding either port breaks the next `dev`: the server's :6767 is a
+# bind error, and :3001 — cargo-leptos' hot-reload socket — makes the new watch
+# give up right after "Serving", which reads as the server dying for no reason.
+# So every dev recipe clears both first.
 
-# free :6767 by killing whatever process is bound to it
+# free :6767 and :3001 by killing whatever processes are bound to them
 kill-dev-server:
   #!/usr/bin/env sh
-  pid=$(lsof -ti tcp:6767)
-  if [ -n "$pid" ]; then
-    echo "killing process on :6767 ($pid)"
-    kill -9 $pid
+  # -sTCP:LISTEN is load-bearing: without it lsof also lists *clients* of the
+  # port, and a browser with the canvas open would be kill -9'd with the server
+  pids=$(lsof -ti tcp:6767 -i tcp:3001 -sTCP:LISTEN | sort -u)
+  if [ -n "$pids" ]; then
+    echo "killing processes on :6767/:3001 ($(echo $pids | tr '\n' ' '))"
+    kill -9 $pids
   fi
 
 # dev server on :6767, hot reload, against example_config/ — asks for a login
 dev: kill-dev-server secrets
   cargo leptos watch -- --config {{example}}/config.json --secrets {{example}}/secrets.json --data-dir {{data}} --server-config {{example}}/server.yaml
+
+# No config at all: the server comes up blank, which is the state the project
+# creator dialog exists for — this is the recipe for working on the first-run
+# experience. A save from the UI writes into the working directory (the repo
+# root), so files it creates are things to delete, not commit.
+
+# blank instance on :6767 — no config, greets you with the project creator
+dev-blank: kill-dev-server
+  cargo leptos watch
 
 # The same graph in its other spelling, and deliberately *without* a
 # `--server-config`: it is what this recipe is for (the YAML config path) plus
