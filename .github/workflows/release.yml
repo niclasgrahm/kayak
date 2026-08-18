@@ -12,6 +12,20 @@
 #
 # so `latest` is the tip of main and a release tag is the only thing that ever
 # produces a version number.
+#
+# ---- why this is two jobs and not one `platforms:` line -------------------
+#
+# The image is built once per architecture on a runner of *that* architecture,
+# and the two are then joined into one manifest list. The obvious spelling —
+# one job with `platforms: linux/amd64,linux/arm64` — builds the second one
+# under QEMU, and a cargo-leptos release build emulated is hours rather than
+# minutes. GitHub gives public repositories free arm64 runners, so the honest
+# build is also the fast one.
+#
+# The per-arch job pushes *by digest* and pushes no tag: a tag can only mean
+# one thing, and two jobs racing to write `latest` would leave whichever
+# finished last, not the manifest list. `merge` is what creates the tags, once
+# both digests exist.
 name: release
 
 on:
@@ -27,17 +41,78 @@ env:
   IMAGE: ${{ github.repository }}
 
 jobs:
-  image:
-    runs-on: ubuntu-latest
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: linux/amd64
+            runner: ubuntu-latest
+          - platform: linux/arm64
+            runner: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runner }}
     permissions:
-      # `contents: read` to check out; `packages: write` is what lets the
-      # built-in GITHUB_TOKEN push to GHCR — no account and no stored
-      # credential of our own is involved.
       contents: read
       packages: write
 
     steps:
       - uses: actions/checkout@v4
+
+      - uses: docker/setup-buildx-action@v3
+
+      - uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.IMAGE }}
+
+      - id: build
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          platforms: ${{ matrix.platform }}
+          labels: ${{ steps.meta.outputs.labels }}
+          # No tags: this pushes a digest for `merge` to assemble. See the
+          # header.
+          outputs: type=image,name=${{ env.REGISTRY }}/${{ env.IMAGE }},push-by-digest=true,name-canonical=true,push=true
+          # Scoped per architecture — one shared scope means each build evicts
+          # the other's layers on every run.
+          cache-from: type=gha,scope=${{ matrix.platform }}
+          cache-to: type=gha,mode=max,scope=${{ matrix.platform }}
+
+      # The digest is the only thing the next job needs, and an artifact is how
+      # it crosses between them. The filename is the digest with its `sha256:`
+      # prefix stripped, because a colon is not a filename on every runner.
+      - name: export the digest
+        run: |
+          mkdir -p /tmp/digests
+          touch "/tmp/digests/${{ steps.build.outputs.digest }}"
+        shell: bash
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: digest-${{ strategy.job-index }}
+          path: /tmp/digests/*
+          if-no-files-found: error
+          retention-days: 1
+
+  merge:
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: /tmp/digests
+          pattern: digest-*
+          merge-multiple: true
 
       - uses: docker/setup-buildx-action@v3
 
@@ -57,22 +132,17 @@ jobs:
             type=semver,pattern={{version}}
             type=semver,pattern={{major}}.{{minor}}
 
-      - uses: docker/build-push-action@v6
-        with:
-          context: .
-          push: true
-          tags: ${{ steps.meta.outputs.tags }}
-          labels: ${{ steps.meta.outputs.labels }}
-          annotations: ${{ steps.meta.outputs.annotations }}
-          # linux/amd64 only for now. arm64 through QEMU makes a cargo-leptos
-          # release build take hours; the way to add it is a second *native*
-          # runner (ubuntu-24.04-arm, free for public repos) and a manifest
-          # merge, not a `platforms:` list.
-          platforms: linux/amd64
-          # Caches the image layers — the apt, rustup and cargo-binstall steps,
-          # which is most of a cold build's setup. It does *not* carry the
-          # Dockerfile's `RUN --mount=type=cache` directories: buildkit does
-          # not export cache mounts, so cargo still compiles the workspace from
-          # scratch on every run.
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
+      # One manifest list carrying both architectures, published under every
+      # tag the metadata step worked out.
+      - name: create the manifest list
+        working-directory: /tmp/digests
+        run: |
+          docker buildx imagetools create \
+            $(jq -cr '.tags | map("-t " + .) | join(" ")' <<< "$DOCKER_METADATA_OUTPUT_JSON") \
+            $(printf '${{ env.REGISTRY }}/${{ env.IMAGE }}@sha256:%s ' *)
+
+      - name: check both architectures are in it
+        run: |
+          docker buildx imagetools inspect \
+            ${{ env.REGISTRY }}/${{ env.IMAGE }}:${{ steps.meta.outputs.version }} \
+            --format '{{ range .Manifest.Manifests }}{{ .Platform.OS }}/{{ .Platform.Architecture }} {{ end }}'
