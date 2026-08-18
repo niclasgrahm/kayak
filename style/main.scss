@@ -2255,6 +2255,18 @@ textarea {
   }
 }
 
+// The heading over one transform's worth of the panel. A rule above it, so a
+// long chain reads as a sequence of steps rather than as one wall of JSON.
+.sample-stage {
+  color: var(--text-dim);
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  border-top: 1px solid var(--border);
+  margin: 10px 0 6px;
+  padding-top: 8px;
+}
+
 .sample-count {
   color: var(--text-dim);
   font-size: 11px;

@@ -1,4 +1,5 @@
 use gloo_net::http::Request;
+use kayak_core::dry_run::{PipelineDryRunRequest, PipelineDryRunResponse};
 use kayak_core::history::{PipelineHistory, Resolution};
 use kayak_core::sample::{SampleRequest, SampleResponse};
 use kayak_core::script::{DryRunRequest, DryRunResponse};
@@ -106,6 +107,22 @@ impl ApiClient {
             return Err(rejection(resp).await);
         }
         Ok(resp.json::<SampleResponse>().await?)
+    }
+
+    /// Put some messages through a draft's transforms, without creating a
+    /// pipeline. Two-level for the reason the two above are.
+    pub async fn dry_run_pipeline(
+        &self,
+        request: &PipelineDryRunRequest,
+    ) -> Result<PipelineDryRunResponse, ApiError> {
+        let resp = Request::post(&format!("{}/api/pipelines/dry-run", self.base))
+            .json(request)?
+            .send()
+            .await?;
+        if !resp.ok() {
+            return Err(rejection(resp).await);
+        }
+        Ok(resp.json::<PipelineDryRunResponse>().await?)
     }
 
     pub async fn delete_pipeline(&self, id: &str) -> Result<(), ApiError> {

@@ -1224,6 +1224,63 @@ The frontend has two routes behind `leptos_router` (`frontend/src/app.rs`): `/` 
 
 Of the older Askama templates, only `templates/index.html` and the dead `/ui` `index_handler` are left; both are slated for removal, and Askama goes with them.
 
+### Seeing the data while building (sample, schema, dry run)
+
+Three pieces that only pay off together, and the split is the usual one —
+declaration in `kayak-core`, the half that talks to a broker in the root crate:
+
+- **`kayak_core::schema::infer`** turns a handful of messages into the fields
+  they carry. The rule it is built around: **a path it reports must be one
+  `fields::get` can read**, or a picker offers names that resolve to nothing.
+  So an array is a leaf (no indexing in a field path), a key containing a dot
+  is a leaf (nothing can address inside it), and a message that is not an
+  object contributes no fields at all — counted in `non_objects` so the UI can
+  say that rather than showing an empty list that reads as a bug. Bounded in
+  both directions (`MAX_FIELDS`, `MAX_DEPTH`) because the messages come off
+  somebody's broker. `suggested_column` is an *opening bid*: a whole number
+  suggests `bigint` because a sample cannot bound a range, a field the sample
+  disagreed about suggests nothing at all, and text formats are recognised by
+  **shape** rather than parsed — core has no date library and should not grow
+  one for a hint.
+- **`kayak_core::sample` + `src/handlers/rest/sample.rs`** — `POST
+  /api/inputs/sample`. It builds the **production** input through the same
+  `BuildCtx` `create_pipeline` uses (so the envelope is in the sample too),
+  reads under a bounded wait, and drops it. Three rules are load-bearing.
+  **Sampling is not free for every broker, so each input kind declares what it
+  would cost** (`sample::for_input`, with `every_input_says_whether_it_can_be_sampled`
+  failing for a kind that hasn't answered — the bargain `metadata.rs` makes):
+  kafka reads under a throwaway consumer group, mqtt under its own client id
+  (both derived from the throwaway pipeline id, which is why that id is
+  random), `http` is refused because it is posted to rather than read from.
+  **Nothing is acknowledged** — the `Ack` is dropped unfired, since a sample
+  has not delivered anything anywhere. And **an empty result is a 200**: no
+  input here can replay what was published before the sample started, so a
+  quiet subject samples empty and that is the answer. Whatever the sample
+  changed comes back in `notes` and the UI shows it *verbatim*.
+- **`kayak_core::dry_run` + `src/handlers/rest/dry_run.rs`** — `POST
+  /api/pipelines/dry-run`, the `script` dry run generalised from one transform
+  to the chain, keeping both of its rules (production `build()`, private
+  buckets seeded from the request and thrown away). Reported **per stage as a
+  list of batches**, because cardinality is where the answer usually is. There
+  are no outputs and there cannot be: a dry run that emitted would be a
+  pipeline. A failure **stops** the chain (unlike the run loop, which drops the
+  batch and carries on) and keeps the stages that ran, because where it stopped
+  is the question. The drain at the end is `Transform::flush` called directly —
+  a dry run has no tick to give, so a buffer with 30 seconds left on it hands
+  on nothing, and that is reported as the empty stage it is rather than faked.
+
+On the frontend, `FieldType::MessageField` (marker `x-message-field`, read the
+way `x-pipeline-id` is) renders a **box with a `<datalist>`, never a dropdown**
+— a sample is a handful of messages, so a field it didn't happen to carry must
+still be typeable. `SampleSchemas` is the ambient map from **draft position**
+to what that component *sees* (not what it produces: a transform is configured
+against its input), and the position is the same key `form::FormError` uses.
+Sampling an input runs the chain straight afterwards, which is what makes an
+output's column mapping suggest the fields that will actually reach it.
+
+Known and on the roadmap: the sample is never refreshed, so editing a transform
+afterwards leaves the boxes behind it offering the old shape.
+
 ### The component reference (`/docs`)
 
 Generated, never hand-written. `kayak-core/src/docs.rs` reflects over `schema_for!(InputKind)` etc. and produces `ComponentDoc`s — kind, family, description, fields (name, type, required) and, for enum-shaped configs like `filter`, variants. **The doc comments on the config structs are the docs**, and a component with no doc comment fails a unit test. Two consumers: the Leptos `/docs` page renders it, `GET /api/docs` serves it as JSON.

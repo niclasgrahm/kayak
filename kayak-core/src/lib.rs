@@ -9,6 +9,7 @@ pub mod columns;
 pub mod config;
 pub mod connections;
 pub mod docs;
+pub mod dry_run;
 pub mod format;
 pub mod history;
 pub mod layout;

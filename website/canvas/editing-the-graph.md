@@ -54,6 +54,54 @@ belongs to — two `nats` inputs stay distinguishable. It is not a security
 boundary; the server still rejects what it must, and its message (a duplicate
 id, an unknown upstream) is shown verbatim in the modal footer.
 
+## seeing the data while you build
+
+Every field reference in a pipeline — a column's `field`, a filter's
+comparison, an aggregation's source — is a name you have to already know, and
+a config file is a bad place to find out you didn't. So the form can go and
+look.
+
+**`fetch messages`**, on any input in the modal, builds that input exactly as a
+pipeline would, takes a few real messages from it and shows them in a panel
+beside the form. Nothing is created: there is no pipeline afterwards, and
+nothing is acknowledged to the broker — a sample has not delivered anything
+anywhere. It waits a few seconds and then answers with what arrived, which is
+sometimes nothing: none of these inputs can replay what was published before
+the sample started, so a quiet subject samples empty and says so.
+
+**Sampling is not free for every kind of input, and the ones where it isn't say
+what they did.** A kafka sample reads under a throwaway consumer group, so it
+neither rebalances your pipeline's group nor commits on its behalf — which also
+means it starts where the input's `start_at` says rather than where the
+pipeline has got to. An mqtt sample connects under a client id of its own,
+because a broker disconnects the older client holding one. An input `buffer` is
+ignored, since a buffer's job is to make the pipeline wait. Each of those shows
+as a note above the messages.
+
+An `http` input cannot be sampled at all and says so: it is posted to rather
+than read from. Create the pipeline and post a message to its endpoint.
+
+**The messages then go down the rest of the draft.** The transforms you have
+configured are built and run over the sample — through the production
+`build()`, so a transform that will not build here would not have built there
+either — and the panel shows what each stage handed on. That is per stage and
+per batch because that is where the answer usually is: a `splitter` hands on
+several batches, a `filter` that matched nothing hands on none, and a `buffer`
+hands on nothing at all because it is still holding what it was given. Nothing
+is emitted to any output; a dry run that emitted would be a pipeline.
+
+**What it learns fills in the field boxes.** Every box that names a field of the
+messages offers what the sample carried, with the type and an example value —
+and offers it *as of that point in the chain*, so an output's column mapping is
+suggested the fields that will actually reach it rather than the ones the input
+produced. They are suggestions and never a closed list: a sample is a handful
+of messages, so a field that only appears when something breaks is still a
+field you can type.
+
+Both halves are ordinary endpoints — `POST /api/inputs/sample` and
+`POST /api/pipelines/dry-run` — so the same thing is available to anything
+else that wants it.
+
 ## the config file
 
 The `--config` file is a **load source and a save target, never a mirror**. The

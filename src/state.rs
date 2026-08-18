@@ -1337,6 +1337,42 @@ impl AppState {
         input.build(&mut ctx)
     }
 
+    /// Builds one transform the way a pipeline would, for a dry run — see
+    /// [`crate::handlers::rest::dry_run`].
+    ///
+    /// The same `BuildCtx` [`AppState::build_sample_input`] assembles, with
+    /// two differences, and both are the dry run's whole safety story: the
+    /// **buckets are the caller's** rather than the server's, so nothing it
+    /// remembers outlives the request; and the pipeline map is borrowed only
+    /// long enough to build, since a transform never registers itself on
+    /// another pipeline the way a `pipeline` input does.
+    pub fn build_dry_run_transform(
+        &self,
+        id: &str,
+        transform: kayak_core::config::TransformConfig,
+        buckets: Arc<Buckets>,
+        state: Option<kayak_core::state::PipelineState>,
+    ) -> anyhow::Result<Box<dyn crate::transforms::Transform>> {
+        use crate::config::BuildTransformConfig;
+        let mut app = self.lock_pipelines();
+        let connections = Arc::new(self.connections());
+        let mut ctx = BuildCtx::with_secrets(
+            &mut app,
+            id.to_string(),
+            self.events.clone(),
+            Arc::clone(&self.secrets),
+        )
+        .with_connections(connections)
+        .with_data_dir(self.data_dir.clone())
+        .with_inboxes(Arc::clone(&self.inboxes))
+        .with_buckets(buckets)
+        .with_history(Arc::clone(&self.history))
+        .with_watchers(self.watchers.clone())
+        .with_script_dir(self.script_directory().map(Arc::new));
+        ctx.state = state;
+        transform.build(&mut ctx)
+    }
+
     pub fn delete_pipeline(&self, id: &str) -> Result<(), PipelineError> {
         let mut app = self.lock_pipelines();
         let Some(handle) = app.remove(id) else {

@@ -178,6 +178,32 @@ The **real** input, including its `envelope`, so the metadata fields the message
 | `400` | [ApiError](#schema-apierror) | The request itself was wrong: malformed JSON, an input that isn't a kind of input, or one that cannot be sampled at all. |
 | `500` | [ApiError](#schema-apierror) | Something went wrong on the server. The body says what. |
 
+### `POST /api/pipelines/dry-run` {#post-api-pipelines-dry-run}
+
+Run a draft's transforms over some messages, without creating a pipeline
+
+<Badge type="warning" text="admin" /> <Badge type="info" text="dryRunPipeline" /> — Signed-in users with the `admin` role.
+
+What a `map` writes, what a `filter` drops, what a `reduce` collapses a batch to — questions the config cannot answer and one real message can. This builds the transforms in the body exactly as a pipeline would and puts the messages down the chain, reporting **what each stage handed on**.
+
+Per stage and as a list of batches, because that is where the answer usually is: a `splitter` hands on several batches, a `filter` that dropped everything hands on none, and a `buffer` hands on nothing because it is still holding what it was given. What a transform only releases when the chain is drained is reported separately, as `on_flush`, so a buffer doesn't look like it passes everything straight through. A transform that is *still* holding what it was given hands on nothing at all, and the chain says so rather than pretending the messages came through: a dry run has no tick to give a window that has thirty seconds left on it.
+
+**There are no outputs and there cannot be.** A dry run that emitted would be a pipeline; everything up to the outputs is a question about the data, and the outputs are the part that changes somebody else's system.
+
+**State is never live**, exactly as for a script dry run: the buckets are private to the request, seeded from `buckets` in the body, returned in the response and thrown away with it.
+
+A transform that cannot be built, or that fails on a message, is a 200 whose `outcome` is `failed` — the request was carried out and where it broke is the answer. The stages that completed first come back with it.
+
+**request body** — [PipelineDryRunRequest](#schema-pipelinedryrunrequest) The messages, and the transforms to put them through.
+
+**responses**
+
+| status | body | description |
+| --- | --- | --- |
+| `200` | [PipelineDryRunResponse](#schema-pipelinedryrunresponse) | The chain ran, or it broke on the way — the `outcome` field says which. |
+| `400` | [ApiError](#schema-apierror) | The request itself was wrong: malformed JSON, or a transform that isn't a kind of transform. |
+| `500` | [ApiError](#schema-apierror) | Something went wrong on the server. The body says what. |
+
 ## connections {#tag-connections}
 
 The systems pipelines talk to, named once and referred to by the components that use them.

@@ -3329,7 +3329,22 @@ impl SampleTarget {
             index,
             kind: kind.to_string(),
             state,
+            stages: Vec::new(),
+            chain_note: None,
         }));
+    }
+
+    /// Puts what the chain did under the messages the input produced, if the
+    /// panel is still showing the component that was sampled. It may not be:
+    /// a dry run is a second round trip, and the kind may have been changed
+    /// while it was out.
+    fn show_chain(self, index: usize, stages: Vec<StageView>, note: Option<String>) {
+        self.0.update(|open| {
+            if let Some(view) = open.as_mut().filter(|view| view.index == index) {
+                view.stages = stages;
+                view.chain_note = note;
+            }
+        });
     }
 
     /// Closes the panel if it is showing this component — what changing a
@@ -3347,6 +3362,23 @@ struct SampleView {
     index: usize,
     kind: String,
     state: SampleState,
+    /// What each transform in the draft did to those messages, once the dry
+    /// run has answered. Empty while it is out, and for a draft with no
+    /// transforms — which is the same picture, correctly.
+    stages: Vec<StageView>,
+    /// Why there are no stages, when there is a reason worth giving: a
+    /// transform that isn't filled in yet, or a chain that broke.
+    chain_note: Option<String>,
+}
+
+/// One transform's worth of the panel: what it handed on.
+#[derive(Clone)]
+struct StageView {
+    title: String,
+    messages: Vec<serde_json::Value>,
+    /// Set when the stage handed on nothing, saying which kind of nothing it
+    /// was — dropped, or still held.
+    empty: Option<String>,
 }
 
 #[derive(Clone)]
@@ -3364,6 +3396,116 @@ enum SampleState {
     /// it belongs in the panel, next to where the messages would have been,
     /// because it is the answer to the same question.
     Failed(String),
+}
+
+/// Puts the sampled messages through the draft's transforms and records what
+/// every component of the draft ends up seeing.
+///
+/// The second half of the sample and the reason it is worth taking: an input's
+/// fields are only the fields the *first* transform sees, and a column mapping
+/// three stages later is written against something else entirely. Running the
+/// chain is the only way to know what that something else is.
+///
+/// The schemas are recorded by what each component **sees**, not by what it
+/// produces: a transform is configured against its input, so the box asking
+/// for a field name should offer the fields that will reach it. Which is also
+/// why every output gets the last stage's answer.
+async fn run_chain(
+    sampled_at: usize,
+    messages: Vec<serde_json::Value>,
+    drafts: RwSignal<Vec<DraftSignals>>,
+    docs: StoredValue<Vec<kayak_core::docs::ComponentDoc>>,
+    target: SampleTarget,
+    schemas: Option<SampleSchemas>,
+) {
+    let snapshots: Vec<form::ComponentDraft> = drafts
+        .get_untracked()
+        .into_iter()
+        .map(DraftSignals::snapshot)
+        .collect();
+    let chain = match docs.with_value(|docs| form::transform_chain(&snapshots, docs)) {
+        Ok(chain) => chain,
+        // The ordinary state of a form someone is still filling in, so it is a
+        // note rather than an error: the messages above it are still the
+        // answer to what was asked.
+        Err(unbuildable) => {
+            let which = unbuildable
+                .iter()
+                .map(|at| snapshots.get(*at).map_or("?", |d| d.kind.as_str()))
+                .collect::<Vec<_>>()
+                .join(", ");
+            target.show_chain(
+                sampled_at,
+                Vec::new(),
+                Some(format!("not run: {which} is not filled in yet")),
+            );
+            return;
+        }
+    };
+
+    let transforms = match serde_json::from_value(serde_json::Value::Array(
+        chain.iter().map(|(_, value)| value.clone()).collect(),
+    )) {
+        Ok(transforms) => transforms,
+        Err(err) => {
+            target.show_chain(sampled_at, Vec::new(), Some(err.to_string()));
+            return;
+        }
+    };
+
+    let answer = ApiClient {
+        base: String::new(),
+    }
+    .dry_run_pipeline(&kayak_core::dry_run::PipelineDryRunRequest {
+        messages: messages.clone(),
+        transforms,
+        state: None,
+        buckets: std::collections::BTreeMap::new(),
+    })
+    .await;
+
+    let (results, note) = match answer {
+        Ok(kayak_core::dry_run::PipelineDryRunResponse::Ran { stages, .. }) => (stages, None),
+        Ok(kayak_core::dry_run::PipelineDryRunResponse::Failed {
+            stages,
+            kind,
+            message,
+            ..
+        }) => (stages, Some(format!("{kind} failed: {message}"))),
+        Err(err) => {
+            target.show_chain(sampled_at, Vec::new(), Some(err.to_string()));
+            return;
+        }
+    };
+
+    // What arrives at the next component, threaded down the draft. It starts
+    // as the sample, which is exactly what the first transform is handed.
+    let mut arriving = messages;
+    let mut views = Vec::with_capacity(results.len());
+    for (position, stage) in results.iter().enumerate() {
+        if let (Some(schemas), Some((at, _))) = (schemas, chain.get(position)) {
+            schemas.set_at(*at, kayak_core::schema::infer(&arriving));
+        }
+        arriving = stage.messages();
+        views.push(StageView {
+            title: format!("{} · {}", position + 1, stage.kind),
+            empty: arriving
+                .is_empty()
+                .then(|| "handed on nothing".to_string()),
+            messages: arriving.clone(),
+        });
+    }
+    // Every output sees what came out of the last transform — or the sample
+    // itself, for a pipeline that transforms nothing.
+    if let Some(schemas) = schemas {
+        let final_schema = kayak_core::schema::infer(&arriving);
+        for (at, draft) in snapshots.iter().enumerate() {
+            if draft.family == Family::Output {
+                schemas.set_at(at, final_schema.clone());
+            }
+        }
+    }
+    target.show_chain(sampled_at, views, note);
 }
 
 /// The panel beside the add-pipeline form: what the input being configured is
@@ -3394,7 +3536,38 @@ fn SamplePanel() -> impl IntoView {
                         "×"
                     </button>
                 </header>
-                <div class="sample-body">{sample_body(view.state)}</div>
+                <div class="sample-body">
+                    {sample_body(view.state)}
+                    {view
+                        .chain_note
+                        .map(|note| view! { <div class="form-hint">{note}</div> })}
+                    {view
+                        .stages
+                        .into_iter()
+                        .map(|stage| {
+                            view! {
+                                <div class="sample-stage">{stage.title}</div>
+                                {match stage.empty {
+                                    // said rather than left blank: a stage with
+                                    // nothing under it is indistinguishable
+                                    // from one that hasn't been drawn
+                                    Some(why) => view! { <div class="empty">{why}</div> }.into_any(),
+                                    None => {
+                                        stage
+                                            .messages
+                                            .into_iter()
+                                            .map(|message| {
+                                                let rendered = pretty::render(&message.to_string());
+                                                view! { <MessageBody message=rendered /> }
+                                            })
+                                            .collect_view()
+                                            .into_any()
+                                    }
+                                }}
+                            }
+                        })
+                        .collect_view()}
+                </div>
             </aside>
         })
     }
@@ -3607,14 +3780,27 @@ fn ComponentEditor(
                             if let Some(schemas) = schemas {
                                 schemas.set_at(index, kayak_core::schema::infer(&messages));
                             }
-                            SampleState::Sampled { messages, notes }
+                            SampleState::Sampled {
+                                messages: messages.clone(),
+                                notes,
+                            }
                         }
                         Ok(kayak_core::sample::SampleResponse::Failed { message, .. }) => {
                             SampleState::Failed(message)
                         }
                         Err(err) => SampleState::Failed(err.to_string()),
                     };
+                    let sampled = match &state {
+                        SampleState::Sampled { messages, .. } => Some(messages.clone()),
+                        _ => None,
+                    };
                     target.show(index, &kind, state);
+                    // and straight on to what the rest of the draft does with
+                    // them: a second round trip, so the messages are on screen
+                    // while it is out
+                    if let Some(messages) = sampled {
+                        run_chain(index, messages, drafts, docs, target, schemas).await;
+                    }
                 });
             }
         }

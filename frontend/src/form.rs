@@ -604,6 +604,41 @@ pub fn build_config(
     ])))
 }
 
+/// The draft's transforms as they would go on the wire, each with **its
+/// position in the draft list**.
+///
+/// The position rather than its place among the transforms, because that is
+/// what everything else about a draft is keyed by — a field error, a sample,
+/// the suggestions behind a message-field box — and a second numbering that
+/// agreed with the first only while there was exactly one input would be a
+/// bug waiting to be written.
+///
+/// `Err` names the components that cannot be built yet, so the caller can say
+/// which ones rather than "something is wrong". A half-filled transform is the
+/// ordinary state of a form someone is still typing into, so this is a
+/// question with an expected negative answer rather than a failure.
+pub fn transform_chain(
+    drafts: &[ComponentDraft],
+    docs: &[ComponentDoc],
+) -> Result<Vec<(usize, Value)>, Vec<usize>> {
+    let mut chain = Vec::new();
+    let mut unbuildable = Vec::new();
+    for (index, draft) in drafts.iter().enumerate() {
+        if draft.family != Family::Transform {
+            continue;
+        }
+        match doc_for(docs, draft.family, &draft.kind).map(|doc| component_json(doc, draft)) {
+            Some(Ok(value)) => chain.push((index, value)),
+            _ => unbuildable.push(index),
+        }
+    }
+    if unbuildable.is_empty() {
+        Ok(chain)
+    } else {
+        Err(unbuildable)
+    }
+}
+
 /// A family named as one component rather than as the stage — "there is no
 /// input called 'x'" reads better than "no inputs called 'x'".
 #[must_use]
@@ -712,6 +747,41 @@ mod tests {
 
     fn dummy_input() -> ComponentDraft {
         filled(Family::Input, "dummy", &[("duration", "5")])
+    }
+
+    /// The chain a dry run is given, keyed by draft position — which is the
+    /// key everything else about a draft uses.
+    #[test]
+    fn the_transform_chain_carries_each_transforms_place_in_the_draft() {
+        let drafts = vec![
+            dummy_input(),
+            filled(Family::Transform, "splitter", &[("out_size", "2")]),
+            filled(Family::Output, "stdout", &[]),
+            filled(Family::Transform, "buffer", &[("size", "10")]),
+        ];
+        let chain = match transform_chain(&drafts, &docs()) {
+            Ok(chain) => chain,
+            Err(unbuildable) => panic!("nothing should be unbuildable: {unbuildable:?}"),
+        };
+        let positions: Vec<usize> = chain.iter().map(|(at, _)| *at).collect();
+        assert_eq!(positions, [1, 3], "the output is not a stage, and 3 is not 2");
+        assert_eq!(chain[0].1["type"], "splitter");
+    }
+
+    /// A half-filled transform is the ordinary state of a form someone is
+    /// still typing into, so it comes back as a list of which ones rather than
+    /// as a failure with nothing in it.
+    #[test]
+    fn a_transform_that_cannot_be_built_yet_is_named() {
+        let drafts = vec![
+            dummy_input(),
+            // `out_size` is required and empty
+            filled(Family::Transform, "splitter", &[]),
+        ];
+        match transform_chain(&drafts, &docs()) {
+            Ok(chain) => panic!("built an empty splitter: {chain:?}"),
+            Err(unbuildable) => assert_eq!(unbuildable, [1]),
+        }
     }
 
     #[test]

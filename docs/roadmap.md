@@ -7,6 +7,31 @@ re-derive. See the [docs site](../website/) for how the finished parts behave, a
 
 ## currently working on
 
+- [x] **see the actual data while building a pipeline**
+      (done 2026-08-19, in three pieces: `kayak_core::schema::infer` reads the
+      fields back off a handful of messages and `FieldType::MessageField`
+      offers them in every box that names one; `POST /api/inputs/sample`
+      fetches those messages from a draft input, with a per-kind declaration
+      of what sampling costs the running system; and
+      `POST /api/pipelines/dry-run` puts them down the draft's transforms so
+      the suggestions are right *at each point in the chain*. See "seeing the
+      data while you build" on the site.)
+- [ ] **the sample is taken once and never refreshed.** The field suggestions
+      are as of the fetch, so editing a transform afterwards leaves the boxes
+      behind it offering the old shape until something is sampled again. A
+      re-run on a chain edit is the obvious fix and needs a debounce and a
+      rule for what a half-typed transform means — which is why it isn't in
+      the first version.
+- [ ] **nothing samples an `http` input.** It is refused, because sampling it
+      would mean claiming the endpoint of the pipeline that owns it. The
+      honest version is a *listen* rather than a fetch: register a temporary
+      inbox under a path of its own and show what is posted to it while the
+      modal is open.
+- [ ] **a dry run has no tick**, so a `buffer` waiting on its window hands on
+      nothing and everything behind it shows empty. Truthful, and unhelpful
+      for exactly the transform whose behaviour is hardest to picture. Fixing
+      it properly means letting the request drive a clock, which is a bigger
+      change to `Transform::wakeup`'s contract than it looks.
 - [x] expose a standardised http api specification
       (done 2026-08-07: OpenAPI 3.1 at `/api/openapi.json`, rendered at
       `/api/reference`, plus an "http api" tab on `/docs` — all three off the
