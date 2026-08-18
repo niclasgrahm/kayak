@@ -1324,7 +1324,7 @@ dependencies = [
 
 [[package]]
 name = "frontend"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "anyhow",
  "codee",
@@ -2118,7 +2118,7 @@ dependencies = [
 
 [[package]]
 name = "kayak"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "anyhow",
  "askama",
@@ -2164,7 +2164,7 @@ dependencies = [
 
 [[package]]
 name = "kayak-bench"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "anyhow",
  "clap",
@@ -2179,7 +2179,7 @@ dependencies = [
 
 [[package]]
 name = "kayak-core"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "schemars",
  "serde",
@@ -2188,7 +2188,7 @@ dependencies = [
 
 [[package]]
 name = "kayak-docsgen"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "kayak",
  "kayak-core",
