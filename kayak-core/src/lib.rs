@@ -107,6 +107,23 @@ pub struct SaveConfigRequest {
     /// writing the format the file is named for.
     #[serde(default)]
     pub format: Option<ConfigFormat>,
+    /// Whether an existing file under this name may be replaced. `false` turns
+    /// the save into a *create*: a name that already exists is refused with a
+    /// 409 and nothing is written. The project creator sends `false`, because
+    /// its user has typed a suggested default into a directory they have never
+    /// seen — one Enter keypress away from replacing a config nobody meant to
+    /// touch.
+    ///
+    /// Defaults to `true`, because omitted has to stay byte-for-byte the old
+    /// behaviour — "save as" over the loaded file's own name is how a save has
+    /// always overwritten it, and a client that predates this field must keep
+    /// working.
+    #[serde(default = "overwrite_default")]
+    pub overwrite: bool,
+}
+
+fn overwrite_default() -> bool {
+    true
 }
 
 /// Where a save actually landed, so the UI can name it rather than guess.

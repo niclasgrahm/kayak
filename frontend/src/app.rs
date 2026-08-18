@@ -4124,7 +4124,9 @@ fn SaveAsModal() -> impl IntoView {
             let result = ApiClient {
                 base: String::new(),
             }
-            .save_config(&file, ConfigFormat::of_file_name(&file))
+            // replacing the named file is what "save as" is; the warning above
+            // the button is the whole of the ceremony
+            .save_config(&file, ConfigFormat::of_file_name(&file), true)
             .await;
             saving.set(false);
             match result {
@@ -4296,7 +4298,10 @@ fn CreateProjectModal() -> impl IntoView {
             let result = ApiClient {
                 base: String::new(),
             }
-            .save_config(&file, ConfigFormat::of_file_name(&file))
+            // never overwrite: this dialog suggests a name into a directory
+            // its user has usually never seen, so an existing file has to come
+            // back as a refusal rather than as a silent replacement
+            .save_config(&file, ConfigFormat::of_file_name(&file), false)
             .await;
             creating.set(false);
             match result {

@@ -292,13 +292,16 @@ Writes the running pipelines out in a deterministic order (topological, ties by 
 
 `format` picks JSON or YAML; leaving it out takes the format from the name's extension. On a server started without `--config` this is how a config file comes into existence at all, and from that save on it is the file `revert` reloads.
 
-**request body** — [SaveConfigRequest](#schema-saveconfigrequest) The file name to write, and optionally the format.
+`overwrite` defaults to `true`, which is what makes saving over the loaded file the ordinary thing it has always been. Sending `false` turns the save into a **create**: if the name — or either of the two files written beside it — is already on disk, the request is refused with a 409 and nothing is written. That is what the UI's project creator sends, since it suggests a file name into a directory its user has often never looked at.
+
+**request body** — [SaveConfigRequest](#schema-saveconfigrequest) The file name to write, optionally the format, and whether an existing file may be replaced.
 
 **responses**
 
 | status | body | description |
 | --- | --- | --- |
 | `200` | [SaveConfigResponse](#schema-saveconfigresponse) | Written, with the path it landed at. |
+| `409` | [ApiError](#schema-apierror) | `overwrite` was `false` and the file — or one of the two written beside it — is already there. Nothing was written; the message names the files. |
 | `422` | [ApiError](#schema-apierror) | `name` is not a bare file name. |
 | `500` | [ApiError](#schema-apierror) | Something went wrong on the server. The body says what. |
 

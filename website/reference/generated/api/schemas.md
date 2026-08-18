@@ -7378,6 +7378,11 @@ What `POST /api/config/save` takes: a bare file name, saved beside the config th
     },
     "name": {
       "type": "string"
+    },
+    "overwrite": {
+      "default": true,
+      "description": "Whether an existing file under this name may be replaced. `false` turns\nthe save into a *create*: a name that already exists is refused with a\n409 and nothing is written. The project creator sends `false`, because\nits user has typed a suggested default into a directory they have never\nseen — one Enter keypress away from replacing a config nobody meant to\ntouch.\n\nDefaults to `true`, because omitted has to stay byte-for-byte the old\nbehaviour — \"save as\" over the loaded file's own name is how a save has\nalways overwritten it, and a client that predates this field must keep\nworking.",
+      "type": "boolean"
     }
   },
   "required": [

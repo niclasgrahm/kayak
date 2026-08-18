@@ -181,11 +181,22 @@ impl ApiClient {
     /// Write the running graph to `name`, in `format`, beside the config the
     /// server was started from. Returns the path it landed at, which is the
     /// server's to report — the UI knows the file name but not the directory.
-    pub async fn save_config(&self, name: &str, format: ConfigFormat) -> Result<String, ApiError> {
+    ///
+    /// `overwrite` is what separates the two callers: "save as" replaces the
+    /// file it names, and the project creator refuses to, so a suggested
+    /// default typed into an unfamiliar directory cannot land on somebody's
+    /// config. A refusal comes back as a 409 with the file named in it.
+    pub async fn save_config(
+        &self,
+        name: &str,
+        format: ConfigFormat,
+        overwrite: bool,
+    ) -> Result<String, ApiError> {
         let resp = Request::post(&format!("{}/api/config/save", self.base))
             .json(&SaveConfigRequest {
                 name: name.to_string(),
                 format: Some(format),
+                overwrite,
             })?
             .send()
             .await?;

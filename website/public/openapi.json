@@ -3834,6 +3834,11 @@
           },
           "name": {
             "type": "string"
+          },
+          "overwrite": {
+            "default": true,
+            "description": "Whether an existing file under this name may be replaced. `false` turns\nthe save into a *create*: a name that already exists is refused with a\n409 and nothing is written. The project creator sends `false`, because\nits user has typed a suggested default into a directory they have never\nseen — one Enter keypress away from replacing a config nobody meant to\ntouch.\n\nDefaults to `true`, because omitted has to stay byte-for-byte the old\nbehaviour — \"save as\" over the loaded file's own name is how a save has\nalways overwritten it, and a client that predates this field must keep\nworking.",
+            "type": "boolean"
           }
         },
         "required": [
@@ -4509,7 +4514,7 @@
     },
     "/api/config/save": {
       "post": {
-        "description": "Writes the running pipelines out in a deterministic order (topological, ties by id) via a temp file and a rename, because the result is meant to be committed. The connections file and the canvas layout are written beside it by the same save — a config saved without the connections it names would not start.\n\n`name` is a **bare file name**, not a path, and is validated as one: the file lands in the server's save directory and nowhere else. Using the loaded file's own name is how you overwrite it.\n\n`format` picks JSON or YAML; leaving it out takes the format from the name's extension. On a server started without `--config` this is how a config file comes into existence at all, and from that save on it is the file `revert` reloads.",
+        "description": "Writes the running pipelines out in a deterministic order (topological, ties by id) via a temp file and a rename, because the result is meant to be committed. The connections file and the canvas layout are written beside it by the same save — a config saved without the connections it names would not start.\n\n`name` is a **bare file name**, not a path, and is validated as one: the file lands in the server's save directory and nowhere else. Using the loaded file's own name is how you overwrite it.\n\n`format` picks JSON or YAML; leaving it out takes the format from the name's extension. On a server started without `--config` this is how a config file comes into existence at all, and from that save on it is the file `revert` reloads.\n\n`overwrite` defaults to `true`, which is what makes saving over the loaded file the ordinary thing it has always been. Sending `false` turns the save into a **create**: if the name — or either of the two files written beside it — is already on disk, the request is refused with a 409 and nothing is written. That is what the UI's project creator sends, since it suggests a file name into a directory its user has often never looked at.",
         "operationId": "saveConfig",
         "requestBody": {
           "content": {
@@ -4519,7 +4524,7 @@
               }
             }
           },
-          "description": "The file name to write, and optionally the format.",
+          "description": "The file name to write, optionally the format, and whether an existing file may be replaced.",
           "required": true
         },
         "responses": {
@@ -4552,6 +4557,16 @@
               }
             },
             "description": "Signed in, but without the `admin` role this endpoint needs."
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "`overwrite` was `false` and the file — or one of the two written beside it — is already there. Nothing was written; the message names the files."
           },
           "422": {
             "content": {

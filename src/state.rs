@@ -47,6 +47,14 @@ pub enum PipelineError {
     /// pipelines. Deleting it would leave them running on settings nothing
     /// records, and the next revert would refuse to rebuild them.
     ConnectionInUse(ConnectionId, Vec<PipelineId>),
+    /// A save that asked not to overwrite (`overwrite: false`) named files that
+    /// are already there. A 409 like [`PipelineError::DuplicateId`], and the
+    /// same shape of mistake: the caller asked to create something that exists.
+    ///
+    /// Carries every file the save would have written, not just the config —
+    /// naming only the one that was typed would leave someone renaming around
+    /// a refusal they can't see the cause of.
+    ConfigExists(Vec<PathBuf>),
     /// The config parsed, but describes a pipeline that can't be built — e.g.
     /// it names an upstream pipeline that doesn't exist. That's the caller's
     /// mistake, not ours.
@@ -75,6 +83,15 @@ impl std::fmt::Display for PipelineError {
                 f,
                 "connection '{id}' is still used by {}",
                 used_by.join(", ")
+            ),
+            Self::ConfigExists(paths) => write!(
+                f,
+                "{} already exists; save with a different name, or overwrite it deliberately",
+                paths
+                    .iter()
+                    .map(|path| path.display().to_string())
+                    .collect::<Vec<_>>()
+                    .join(", ")
             ),
             // only this layer — the rest of the chain is reachable through
             // source(), so printing it here too would duplicate it
@@ -1045,9 +1062,16 @@ impl AppState {
         &self,
         name: &str,
         format: Option<ConfigFormat>,
+        overwrite: bool,
     ) -> Result<PathBuf, PipelineError> {
         let target = crate::persist::save_path(&self.save_dir, name)
             .map_err(PipelineError::InvalidConfig)?;
+        if !overwrite {
+            let existing = self.files_written_for(&target);
+            if !existing.is_empty() {
+                return Err(PipelineError::ConfigExists(existing));
+            }
+        }
         let format = format.unwrap_or_else(|| crate::persist::format_of(&target));
 
         let app = self.lock_pipelines();
@@ -1086,6 +1110,40 @@ impl AppState {
         self.save_connections()?;
         tracing::info!("config saved to {} as {format}", target.display());
         Ok(target)
+    }
+
+    /// Which of the files a save under `target` would claim are already there.
+    ///
+    /// A save writes up to three files — the config, the connections beside it
+    /// and the canvas layout — so a *create* has to ask about all of them.
+    /// Checking only the config would let a create called `config.json` write
+    /// `{}` over an existing `config.connections.json`, which is the same data
+    /// loss one file along.
+    ///
+    /// The exception is a `--connections` file the operator named on the
+    /// command line: it is fixed for the process and shared deliberately
+    /// between configs, so an existing one is the arrangement working rather
+    /// than a collision. Only the *derived* sibling is a claim on a name.
+    ///
+    /// In save order, so the message names the file that was typed first. This
+    /// is a check and not a guarantee — nothing stops a file appearing between
+    /// here and the write — but the gap is microseconds against a person
+    /// choosing a name, and the alternative (`create_new` on the temp file)
+    /// cannot cover the rename or the sibling files anyway.
+    fn files_written_for(&self, target: &Path) -> Vec<PathBuf> {
+        let derived_connections = self
+            .connections_file
+            .is_none()
+            .then(|| crate::connections::connections_path(target));
+        [
+            Some(target.to_path_buf()),
+            derived_connections,
+            Some(crate::layout::layout_path(target)),
+        ]
+        .into_iter()
+        .flatten()
+        .filter(|path| path.exists())
+        .collect()
     }
 
     /// Write the connections out beside the config, and treat that as the new
