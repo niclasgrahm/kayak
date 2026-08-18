@@ -93,7 +93,7 @@ the server's flags.
 
 Four things worth knowing before you put it anywhere real:
 
-- **Pin a tag.** `latest` is the tip of `main`. Release tags are `0.1.0` and
+- **Pin a tag.** `latest` is the tip of `main`. Release tags are `0.1.1` and
   `0.1`. Both `linux/amd64` and `linux/arm64` are published, built natively.
 - **Turn authentication on.** Without `--server-config`, anyone who can reach
   the port can create and delete pipelines and rewrite the config. kayak warns

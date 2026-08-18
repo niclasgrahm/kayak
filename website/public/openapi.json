@@ -4281,7 +4281,7 @@
   "info": {
     "description": "Graph-based stream processing: an HTTP API over configurable `input → transforms → output` pipelines.\n\nEdits through this API apply to the running graph immediately and write nothing to disk — the config file is a load source and a save target, never a mirror of the runtime. `POST /api/config/save` is the only thing that writes it, and `POST /api/config/revert` is the only undo.",
     "title": "kayak",
-    "version": "0.1.0"
+    "version": "0.1.1"
   },
   "openapi": "3.1.0",
   "paths": {
