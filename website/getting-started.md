@@ -4,27 +4,59 @@ kayak is a graph-based stream processing engine: you describe pipelines as
 `inputs → transforms → outputs` in a config file, kayak runs them, and a live
 web canvas shows the graph while it's running.
 
-## what you need
+## try it, in one command
 
-[Rust](https://rustup.rs), [`just`](https://github.com/casey/just) and
+```bash
+docker run --rm -p 6767:6767 --entrypoint sh ghcr.io/niclasgrahm/kayak \
+  -c 'echo "[{id: ticker, inputs: [{type: dummy, duration: 1}]}]" > c.yaml && exec kayak --config c.yaml'
+```
+
+Open `localhost:6767` — one pipeline, ticking once a
+second. `transforms` and `outputs` are optional, so an input on its own is a
+complete pipeline.
+
+To run your own, write a config and mount it:
+
+```yaml
+# pipelines/config.yaml
+- id: readings
+  inputs:
+    - type: dummy
+      duration: 1
+  outputs:
+    - type: stdout
+```
+
+```bash
+docker run -p 6767:6767 -v "$PWD/pipelines:/kayak" \
+  ghcr.io/niclasgrahm/kayak --config /kayak/config.yaml
+```
+
+The image is the runtime and nothing else — no config is baked in, and the
+`ENTRYPOINT` is the binary, so the container's arguments are the server's
+flags. [Deployment](/operating/deployment) covers running it properly.
+
+## the worked example
+
+`example_config/` is the sample everything is tried against, and it needs a
+checkout rather than the image: it names the systems in `docker-compose.yaml`
+and reads credentials from a secrets file. You'll need [Rust](https://rustup.rs),
+[`just`](https://github.com/casey/just) and
 [`cargo-leptos`](https://github.com/leptos-rs/cargo-leptos)
-(`cargo install cargo-leptos`). Docker is optional — it's needed only for the
-nats, kafka, mqtt, opc ua, database and S3 pipelines in the sample graph.
-
-## run it
+(`cargo install cargo-leptos`).
 
 ```bash
 just dev
 ```
 
 That builds the frontend, starts the server on `localhost:6767` against the
-worked example in `example_config/`, and creates a secrets file for you on
-first run. Sign in as `niclas` / `hunter2` (admin) or `viewer` / `hunter2`
-(read-only) — the sample runs with [authentication](/operating/authentication)
-on by default, so both sides of the login are there to look at.
+worked example, and creates a secrets file for you on first run. Sign in as
+`niclas` / `hunter2` (admin) or `viewer` / `hunter2` (read-only) — the sample
+runs with [authentication](/operating/authentication) on by default, so both
+sides of the login are there to look at.
 
-To see every pipeline in the sample actually flowing, bring up the systems it
-talks to first:
+To see every pipeline in it actually flowing, bring up the systems it talks to
+first:
 
 ```bash
 docker compose up
