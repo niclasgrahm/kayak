@@ -194,7 +194,7 @@ async fn main() -> anyhow::Result<()> {
     // at all when history is turned off. See `kayak::history::sampler`.
     tokio::spawn(kayak::history::sampler(Arc::clone(&state)));
 
-    let api = api_router(state);
+    let api = api_router(Arc::clone(&state));
 
     let leptos = Router::new()
         .leptos_routes(&leptos_options, routes, {
@@ -238,11 +238,42 @@ async fn main() -> anyhow::Result<()> {
     // `remote_addr` metadata is read from. Nothing fails without it — the
     // address is simply absent, as it is in the tests that drive the router
     // directly — so this is the only place it has to be asked for.
-    axum::serve(
+    // Everything from here down is the shutdown path, and the order is the
+    // whole of it — see `kayak::shutdown`. The signal comes first, then the
+    // token that ends the `/events` streams, and only then does axum drain: a
+    // drain that started first would wait on an SSE response that never ends.
+    let shutdown = Arc::clone(&state);
+    let server = axum::serve(
         listener,
         app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
     )
-    .await
-    .context("server error")?;
+    .with_graceful_shutdown(async move {
+        kayak::shutdown::requested().await;
+        shutdown.begin_shutdown();
+    });
+
+    // axum's graceful shutdown has no timeout and waits for every connection
+    // still open, so one wedged client would hold the process here until a
+    // second signal killed it — which is the behaviour being removed. The
+    // deadline starts when the shutdown does, not when the server did.
+    let deadline = {
+        let token = state.shutdown_token();
+        async move {
+            token.cancelled().await;
+            tokio::time::sleep(kayak::shutdown::DRAIN_GRACE).await;
+        }
+    };
+    tokio::select! {
+        result = server => result.context("server error")?,
+        () = deadline => tracing::warn!(
+            "connections were still open after {}s; stopping the pipelines anyway",
+            kayak::shutdown::DRAIN_GRACE.as_secs()
+        ),
+    }
+
+    // Only now are the run loops stopped, which is what gives every output its
+    // `finish` — the `file` output's closing bracket and the `s3` output's
+    // buffered part, which exists nowhere else.
+    state.shutdown().await;
     Ok(())
 }

@@ -61,5 +61,13 @@ pub async fn events_handler(
         Ok(event)
     });
 
+    // The stream ends when the process is asked to stop, and that is what makes
+    // a graceful shutdown possible at all: an SSE response never completes on
+    // its own, so axum's drain would wait on an attached browser forever. The
+    // token is read once, here — not once per event. See `crate::shutdown`.
+    // Fully qualified because `tokio_stream::StreamExt` is what `map` above
+    // comes from and importing both traits makes that call ambiguous.
+    let stream = futures_util::StreamExt::take_until(stream, state.shutdown_token().cancelled_owned());
+
     Sse::new(stream).keep_alive(KeepAlive::default())
 }
