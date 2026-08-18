@@ -28,6 +28,7 @@ pub mod persist;
 pub mod pipeline;
 pub mod secrets;
 pub mod server_config;
+pub mod shutdown;
 pub mod site;
 pub mod state;
 pub mod testing;

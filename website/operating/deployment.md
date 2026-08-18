@@ -128,3 +128,40 @@ deploy.
 it. `LEPTOS_SITE_PKG_DIR` stays: that one is the URL prefix the rendered page
 links its bundle under, which is a path in the page rather than a path on
 disk.
+
+## shutting down
+
+`SIGTERM` and `SIGINT` both stop the server, and they stop it in a defined
+order: the process stops accepting new connections, ends the `/events` streams,
+drains the requests that are still open, and only then cancels the pipelines and
+waits for the run loops to end.
+
+That last step is the one worth knowing about, because it is where each output
+gets its `finish`. A `file` output writing a `json_array` closes the bracket
+there, so the part it was filling is a file a reader can parse rather than a
+truncated one. The `s3` output has more at stake: an object store has no append,
+so a part that has not rotated yet exists **only in memory**, and a process that
+dies without running `finish` loses it outright rather than truncating it.
+
+Two bounds, neither configurable:
+
+- **ten seconds** for the connections to drain. A client that will not go away
+  does not get to hold the process open.
+- **five seconds** for the run loops, which is normally instant — a loop checks
+  its cancellation on every pass. The bound is for an output already inside a
+  write, waiting on a socket that is not answering.
+
+Past either bound the process says so in the log and carries on stopping. Send a
+second signal and it dies immediately, as it always would.
+
+A shutdown **never writes the config file**. The file is a load source and a
+save target, not a mirror of what is running, and that does not change because
+the process is on its way out — unsaved changes are still unsaved after a
+restart. The same is true of state buckets and history, which are in memory by
+design.
+
+Under docker this matters more than it looks. The image's `ENTRYPOINT` is the
+binary, so kayak runs as pid 1, and pid 1 has no default action for a signal it
+has not handled. `docker stop` therefore relies on the server handling `SIGTERM`
+itself; give it a `--stop-timeout` longer than the bounds above if your outputs
+are slow to land.

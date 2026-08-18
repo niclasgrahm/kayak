@@ -777,6 +777,51 @@ The file can be JSON or YAML (`kayak_core::ConfigFormat`), decided by the extens
 
 Three things to preserve. `persist::save_path` rejects anything but a bare file name and is a security boundary, not a nicety — the path comes from an HTTP request, so an unconstrained one is an arbitrary write; refuse, never normalise. `has_unsaved_changes` compares `render(current)` against the `saved` snapshot, which is exact *because* `render` is deterministic. And `revert` parses the file before tearing the runtime down, so a file broken by hand doesn't cost you the running graph.
 
+### Shutdown (`src/shutdown.rs`)
+
+`SIGTERM` and `SIGINT` both stop the process, and the **order** is the whole of
+it:
+
+1. `shutdown::requested()` resolves,
+2. `AppState::begin_shutdown()` cancels the server's `CancellationToken`, which
+   is what ends the `/events` streams,
+3. axum's `with_graceful_shutdown` stops accepting and drains,
+4. `AppState::shutdown()` cancels every pipeline and awaits the run loops.
+
+Steps 2 and 3 are one step in the wrong order — an SSE response never completes
+on its own, so a drain that started first would wait on an attached browser
+forever. `events_handler` reads the token **once per stream**, never per event;
+`the_event_stream_ends_when_the_process_stops` in `tests/shutdown.rs` hangs
+without it, which is how that was found.
+
+Four things are load-bearing:
+
+- **Step 4 is the point of the whole thing.** It is the only path to
+  `OutputDestination::finish` on the way out — the `file` output's closing
+  bracket, and the `s3` output's buffered part, which exists nowhere but in
+  memory. Before this existed a `^C` threw that part away outright.
+- **The server's token is not a pipeline's.** Run loops are stopped through
+  their own tokens by `stop_pipelines`; this one is only for what has to end
+  *before* the drain. `revert` shares `stop_pipelines` and must never touch the
+  shutdown token — cancelling it there would close every watching browser's
+  feed, once per revert, with no way back.
+- **Both bounds exist because neither wait can be trusted.** `DRAIN_GRACE`
+  (10s) bounds axum's, which has no timeout of its own and waits on every open
+  connection; `TEARDOWN_GRACE` (5s, shared with `revert`) bounds the run loops',
+  which is only ever reached by an output already inside a write.
+- **A shutdown never saves.** The config file is a load source and a save
+  target and never a mirror; a process writing the graph out because it was
+  killed is exactly the mirror that rule exists to prevent.
+
+The pid 1 case is why `SIGTERM` is handled and not just `ctrl_c`: the image's
+`ENTRYPOINT` is the binary, and pid 1 has no default disposition, so an
+unhandled signal is *ignored* and `docker stop` was a 10-second wait for a
+`SIGKILL` every time.
+
+`requested()` itself has no test and that is deliberate — the only honest one
+raises a real signal at the test binary every other test shares. It is kept to
+two branchless lines for that reason; everything it reaches is tested directly.
+
 ### The static assets (`src/site.rs`)
 
 The frontend's files — the WASM bundle, the stylesheet, the vendored

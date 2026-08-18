@@ -219,6 +219,19 @@ pub struct AppState {
     /// that asks nobody for anything, which is what a `--server-config`-less
     /// process runs.
     auth: Arc<Auth>,
+    /// Cancelled once, when the process has been asked to stop.
+    ///
+    /// It is the *server's* token and not a pipeline's: the run loops are
+    /// stopped through their own tokens by [`AppState::stop_pipelines`], and
+    /// what this one is for is everything that has to end before those can be
+    /// — which today is the `/events` streams. An SSE response never completes
+    /// on its own, so axum's graceful shutdown would wait for an attached
+    /// browser forever; the stream watches this instead and ends with it. See
+    /// [`crate::shutdown`] for the order the whole thing runs in.
+    ///
+    /// Deliberately **not** consulted by anything on the hot path. It is read
+    /// once per SSE stream, not once per event.
+    shutdown: tokio_util::sync::CancellationToken,
     /// What the pipelines have done, kept for the UI to show after the fact.
     ///
     /// Beside the graph rather than inside a pipeline because it deliberately
@@ -285,6 +298,7 @@ impl AppState {
             buckets: Mutex::new(Arc::new(Buckets::new())),
             declared_buckets: Mutex::new(StateBuckets::new()),
             auth: Arc::new(Auth::disabled()),
+            shutdown: tokio_util::sync::CancellationToken::new(),
             history: Arc::new(History::disabled()),
         }
     }
@@ -699,6 +713,93 @@ impl AppState {
         Ok(())
     }
 
+    /// The token that says the process has been asked to stop.
+    ///
+    /// Handed out so a long-lived response can end itself; the `/events` SSE
+    /// stream is the one that must, since it never completes on its own and
+    /// axum's graceful shutdown waits for every open connection. See
+    /// [`crate::shutdown`].
+    #[must_use]
+    pub fn shutdown_token(&self) -> tokio_util::sync::CancellationToken {
+        self.shutdown.clone()
+    }
+
+    /// Cancel every run loop and wait for the loops to end.
+    ///
+    /// Returns whether they all stopped inside [`TEARDOWN_GRACE`]. The map is
+    /// drained first, so the graph is empty from the caller's point of view
+    /// even if a straggler is still unwinding — which is what lets [`revert`]
+    /// rebuild on top and [`shutdown`] carry on to exit.
+    ///
+    /// The awkward shape is load-bearing and is the reason this is one method
+    /// rather than two lines at each call site: `pipelines` is a
+    /// `std::sync::Mutex`, so the cancelling and the taking-out happen under
+    /// the guard, the guard is dropped, and only *then* is anything awaited.
+    ///
+    /// [`revert`]: AppState::revert
+    /// [`shutdown`]: AppState::shutdown
+    pub async fn stop_pipelines(&self) -> bool {
+        let waiting: Vec<tokio::task::JoinHandle<()>> = {
+            let mut app = self.lock_pipelines();
+            app.drain()
+                .map(|(_, handle)| {
+                    handle.shared.cancellation_token.cancel();
+                    handle.join_handle
+                })
+                .collect()
+        };
+
+        // A run loop checks its cancellation on every iteration, so this is
+        // normally immediate. The bound is for the one thing that can't be
+        // cancelled — an output already inside `emit()`, waiting on a socket.
+        // Timing out is not fatal: the stragglers are cancelled and will exit
+        // on their own.
+        tokio::time::timeout(TEARDOWN_GRACE, async {
+            for handle in waiting {
+                let _ = handle.await;
+            }
+        })
+        .await
+        .is_ok()
+    }
+
+    /// Begin shutting down: end the long-lived responses, but leave the graph
+    /// running.
+    ///
+    /// Separate from [`AppState::shutdown`] because the two happen either side
+    /// of axum's drain, and in that order — the streams have to end *before*
+    /// the connections are waited on, or the wait never finishes. Idempotent:
+    /// cancelling an already-cancelled token does nothing.
+    pub fn begin_shutdown(&self) {
+        self.shutdown.cancel();
+    }
+
+    /// Stop the graph on the way out of the process.
+    ///
+    /// The thing this buys, and the whole reason the signal handling exists, is
+    /// that every output gets its [`finish`] — the one chance a `file` output
+    /// has to close its `json_array` and the only chance the `s3` output has to
+    /// upload a part that exists nowhere but in memory. A `^C` used to lose
+    /// that part outright.
+    ///
+    /// Deliberately says nothing about *saving*. The config file is a load
+    /// source and a save target and never a mirror, and a process writing the
+    /// graph out because it happened to be killed would be exactly the mirror
+    /// that rule exists to prevent. Unsaved changes stay unsaved.
+    ///
+    /// [`finish`]: crate::outputs::OutputDestination::finish
+    pub async fn shutdown(&self) {
+        self.begin_shutdown();
+        if self.stop_pipelines().await {
+            tracing::info!("all pipelines stopped");
+        } else {
+            tracing::warn!(
+                "some pipelines were still stopping after {}s; exiting anyway",
+                TEARDOWN_GRACE.as_secs()
+            );
+        }
+    }
+
     /// Throw away the running graph and start again from the config file.
     ///
     /// This is the undo that the file being read-only otherwise takes away:
@@ -728,31 +829,7 @@ impl AppState {
             let _ = crate::connections::read(&connections)?;
         }
 
-        // Cancel everything and take the join handles out, then drop the guard:
-        // this is a `std::sync::Mutex` and must not be held across an await.
-        let waiting: Vec<tokio::task::JoinHandle<()>> = {
-            let mut app = self.lock_pipelines();
-            app.drain()
-                .map(|(_, handle)| {
-                    handle.shared.cancellation_token.cancel();
-                    handle.join_handle
-                })
-                .collect()
-        };
-
-        // A run loop checks its cancellation on every iteration, so this is
-        // normally immediate. The bound is for the one thing that can't be
-        // cancelled — an output already inside `emit()`, waiting on a socket.
-        // Timing out is not fatal: the stragglers are cancelled and will exit
-        // on their own, and rebuilding on top of them is still better than
-        // refusing to revert.
-        let stopped = tokio::time::timeout(TEARDOWN_GRACE, async {
-            for handle in waiting {
-                let _ = handle.await;
-            }
-        })
-        .await;
-        if stopped.is_err() {
+        if !self.stop_pipelines().await {
             tracing::warn!(
                 "some pipelines were still shutting down after {}s; reloading anyway",
                 TEARDOWN_GRACE.as_secs()
