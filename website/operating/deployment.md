@@ -12,8 +12,11 @@ docker run -p 6767:6767 ghcr.io/niclasgrahm/kayak
 
 Every push to `main` publishes that image, tagged `latest` and `sha-<short>`;
 a `v1.2.3` tag additionally publishes `1.2.3` and `1.2`. Pin a version for
-anything you care about — `latest` is the tip of `main`, not a release. Only
-`linux/amd64` is published today, so an arm64 host runs it under emulation.
+anything you care about — `latest` is the tip of `main`, not a release.
+
+`linux/amd64` and `linux/arm64` are both published, each built on a runner of
+its own architecture rather than under emulation, and joined into one manifest
+list — so a pull picks the right one with no `--platform` flag.
 
 Building it yourself is the same image:
 
