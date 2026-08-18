@@ -312,6 +312,11 @@ One component: everything `/docs` shows about it.
           "type": "object"
         },
         {
+          "const": "message_field",
+          "description": "The name of a field *in the messages* — a column's `field`, a filter's\ncomparison, an aggregation's source. A string on the wire like\n[`FieldType::PipelineId`], and a separate type for the same reason:\nwhat the control should be is not derivable from the wire type.\n\nUnlike the two dropdowns above this one is a **box with suggestions**,\nnever a closed list. The suggestions come from a sample of real\nmessages ([`crate::schema::infer`]), and a sample is a handful of\nmessages rather than a schema — a stream that carries `error_code` only\nwhen something breaks would otherwise have no way to say so.",
+          "type": "string"
+        },
+        {
           "additionalProperties": false,
           "description": "A value that is one of several shapes, tagged by one of its own\nproperties — an input's `buffer`, which is `{\"type\": \"static\", \"size\":\n10}` or `{\"type\": \"tumbling\", \"window_seconds\": 30}`.\n\nThis is the field-level twin of [`ComponentDoc::variants`], and it is\nwhat makes a form conditional: which fields a value has depends on which\nvariant was picked, so the tag is chosen first and the rest of the form\nfollows from it.",
           "properties": {
@@ -518,7 +523,8 @@ One pipeline: every input is merged into one stream, that stream runs through th
           "type": [
             "string",
             "null"
-          ]
+          ],
+          "x-message-field": true
         },
         "function": {
           "$ref": "#/$defs/ReduceFnKind",
@@ -803,7 +809,8 @@ One pipeline: every input is merged into one stream, that stream runs through th
           "type": [
             "string",
             "null"
-          ]
+          ],
+          "x-message-field": true
         },
         "message": {
           "description": "store the whole message in this column instead of one of its fields.\nOnly for a `json` column, and not together with `field`.",
@@ -1188,7 +1195,8 @@ One pipeline: every input is merged into one stream, that stream runs through th
               "properties": {
                 "field": {
                   "description": "the field to filter on",
-                  "type": "string"
+                  "type": "string",
+                  "x-message-field": true
                 },
                 "operator": {
                   "$ref": "#/$defs/NumericFilterOperatorKind"
@@ -1216,7 +1224,8 @@ One pipeline: every input is merged into one stream, that stream runs through th
             "String": {
               "properties": {
                 "field": {
-                  "type": "string"
+                  "type": "string",
+                  "x-message-field": true
                 },
                 "operator": {
                   "$ref": "#/$defs/StringFilterOperatorKind"
@@ -4516,7 +4525,8 @@ The same wire shape the run loop's `PipelineView` serializes to — this is the 
           "type": [
             "string",
             "null"
-          ]
+          ],
+          "x-message-field": true
         },
         "function": {
           "$ref": "#/$defs/ReduceFnKind",
@@ -4801,7 +4811,8 @@ The same wire shape the run loop's `PipelineView` serializes to — this is the 
           "type": [
             "string",
             "null"
-          ]
+          ],
+          "x-message-field": true
         },
         "message": {
           "description": "store the whole message in this column instead of one of its fields.\nOnly for a `json` column, and not together with `field`.",
@@ -5235,7 +5246,8 @@ The same wire shape the run loop's `PipelineView` serializes to — this is the 
               "properties": {
                 "field": {
                   "description": "the field to filter on",
-                  "type": "string"
+                  "type": "string",
+                  "x-message-field": true
                 },
                 "operator": {
                   "$ref": "#/$defs/NumericFilterOperatorKind"
@@ -5263,7 +5275,8 @@ The same wire shape the run loop's `PipelineView` serializes to — this is the 
             "String": {
               "properties": {
                 "field": {
-                  "type": "string"
+                  "type": "string",
+                  "x-message-field": true
                 },
                 "operator": {
                   "$ref": "#/$defs/StringFilterOperatorKind"

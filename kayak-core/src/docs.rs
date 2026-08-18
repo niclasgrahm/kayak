@@ -74,6 +74,17 @@ pub enum FieldType {
     /// the connections of *that kind*, since a nats connection is no use to a
     /// kafka input.
     Connection(String),
+    /// The name of a field *in the messages* — a column's `field`, a filter's
+    /// comparison, an aggregation's source. A string on the wire like
+    /// [`FieldType::PipelineId`], and a separate type for the same reason:
+    /// what the control should be is not derivable from the wire type.
+    ///
+    /// Unlike the two dropdowns above this one is a **box with suggestions**,
+    /// never a closed list. The suggestions come from a sample of real
+    /// messages ([`crate::schema::infer`]), and a sample is a handful of
+    /// messages rather than a schema — a stream that carries `error_code` only
+    /// when something breaks would otherwise have no way to say so.
+    MessageField,
     /// A value that is one of several shapes, tagged by one of its own
     /// properties — an input's `buffer`, which is `{"type": "static", "size":
     /// 10}` or `{"type": "tumbling", "window_seconds": 30}`.
@@ -540,6 +551,21 @@ fn is_pipeline_id(schema: &Value) -> bool {
     schema[PIPELINE_ID_MARKER] == Value::Bool(true)
 }
 
+/// The same idea for a field of the *messages* rather than of the config:
+/// `#[schemars(extend("x-message-field" = true))]`.
+///
+/// A marker for the reason the pipeline-id one is a marker — this module knows
+/// no component's name and no component's field names — and it is worth
+/// saying which fields deserve it: the ones whose value is read back out of a
+/// message by `kayak::fields::get`. Anything else is a name the config
+/// invents (a column's `name`, an aggregation's `as`), and offering the
+/// message's own fields for those would suggest the wrong answer.
+const MESSAGE_FIELD_MARKER: &str = "x-message-field";
+
+fn is_message_field(schema: &Value) -> bool {
+    schema[MESSAGE_FIELD_MARKER] == Value::Bool(true)
+}
+
 /// The same idea for connections, one step further: the marker carries the
 /// *kind* of connection the field wants (`#[schemars(extend("x-connection" =
 /// "kafka"))]`), because "any connection" isn't a useful answer — a kafka input
@@ -603,6 +629,9 @@ fn join_values<'a>(values: impl Iterator<Item = &'a str>) -> String {
 fn field_type_at(root: &Value, schema: &Value, depth: usize) -> FieldType {
     if is_pipeline_id(schema) {
         return FieldType::PipelineId;
+    }
+    if is_message_field(schema) {
+        return FieldType::MessageField;
     }
     if let Some(kind) = connection_kind(schema) {
         return FieldType::Connection(kind.to_string());
@@ -1116,6 +1145,68 @@ mod tests {
             field(&component("nats"), "subject").field_type,
             FieldType::Text
         );
+    }
+
+    /// A field naming a field of the *messages* is a string on the wire like
+    /// the two above, and the marker is what lets the form offer the names a
+    /// sample of real messages actually carried. The distinction the test
+    /// pins is the one that is easy to lose: a name the config *invents* is
+    /// not one of these, and suggesting the message's fields for it would
+    /// suggest the wrong answer.
+    #[test]
+    fn a_field_that_names_a_field_of_the_messages_says_so() {
+        let numeric = &component("filter").variants[0];
+        let compared = numeric
+            .fields
+            .iter()
+            .find(|f| f.name == "field")
+            .expect("the numeric filter compares a field");
+        assert_eq!(compared.field_type, FieldType::MessageField);
+
+        let reducer = in_family("reducer", Family::Transform);
+        let aggregations = field(&reducer, "aggregations");
+        let FieldType::List(element) = &aggregations.field_type else {
+            panic!("aggregations is a list");
+        };
+        let FieldType::Object(fields) = &element.field_type else {
+            panic!("an aggregation has fields");
+        };
+        let named = |name: &str| {
+            fields
+                .iter()
+                .find(|f| f.name == name)
+                .unwrap_or_else(|| panic!("an aggregation has no '{name}'"))
+        };
+        assert_eq!(named("field").field_type, FieldType::MessageField);
+        // `as` is the name the *output* message will carry, which the input's
+        // fields say nothing about
+        assert_eq!(named("as").field_type, FieldType::Text);
+
+        let columns = field(
+            &all_components()
+                .into_iter()
+                .find(|c| c.kind == "postgres" && matches!(c.family, Family::Output))
+                .expect("there is a postgres output"),
+            "columns",
+        )
+        .clone();
+        let FieldType::List(element) = &columns.field_type else {
+            panic!("columns is a list");
+        };
+        let FieldType::Object(fields) = &element.field_type else {
+            panic!("a column has fields");
+        };
+        for (name, expected) in [
+            ("field", FieldType::MessageField),
+            // the column's own name is the table's business, not the stream's
+            ("name", FieldType::Text),
+        ] {
+            let found = fields
+                .iter()
+                .find(|f| f.name == name)
+                .unwrap_or_else(|| panic!("a column has no '{name}'"));
+            assert_eq!(found.field_type, expected, "column field '{name}'");
+        }
     }
 
     /// A connection is configured exactly like a component, so it documents

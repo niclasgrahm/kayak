@@ -1,6 +1,7 @@
 use kayak_core::api_docs::{ApiDoc, endpoints};
 use kayak_core::docs::{Family, FieldType, all_components};
 use kayak_core::history::ErrorSignature;
+use kayak_core::schema::MessageSchema;
 use kayak_core::script::{DryRunRequest, DryRunResponse};
 use kayak_core::state::{BucketContents, BucketSummary};
 use kayak_core::{
@@ -3007,6 +3008,10 @@ fn AddPipelineModal() -> impl IntoView {
 
     let id = RwSignal::new(String::new());
     let drafts = RwSignal::new(Vec::<DraftSignals>::new());
+    // What sampling the input found, by draft position. Empty until something
+    // is sampled; see [`SampleSchemas`].
+    let schemas = SampleSchemas(RwSignal::new(Vec::<MessageSchema>::new()));
+    provide_context(schemas);
     let errors = RwSignal::new(Vec::<form::FormError>::new());
     // the server's own answer, which says things the form can't know — a
     // duplicate id, an upstream that doesn't exist
@@ -3251,6 +3256,74 @@ fn StageEditor(
     }
 }
 
+/// What a sample of real messages showed at each component of the draft, by
+/// that component's position in the flat draft list — the same index
+/// [`form::FormError`] keys a field error by.
+///
+/// Ambient rather than a prop for the reason [`AppState`] is ambient in the
+/// navbar: it is threaded through [`FieldEditor`], which renders *itself* for a
+/// nested field, so a prop would have to be carried through every level of
+/// that recursion to reach a `field` box three deep in a column mapping.
+///
+/// Empty until something samples the input, which is the state every form
+/// starts in and the one it stays in for a stream nobody has fetched from: an
+/// empty list of suggestions renders as an ordinary text box, which is exactly
+/// what a message-field box was before any of this existed.
+#[derive(Clone, Copy)]
+struct SampleSchemas(RwSignal<Vec<MessageSchema>>);
+
+impl SampleSchemas {
+    /// What the component at `index` sees, if anything has been sampled.
+    fn at(self, index: usize) -> Option<MessageSchema> {
+        self.0.with(|schemas| schemas.get(index).cloned())
+    }
+
+    /// The id of the `<datalist>` holding that component's field names.
+    /// Per component rather than one for the form: what a transform sees is
+    /// what the transforms in front of it left behind, so the answer differs
+    /// down the chain.
+    fn list_id(index: usize) -> String {
+        format!("message-fields-{index}")
+    }
+}
+
+/// The suggestions behind one component's message-field boxes.
+///
+/// A `<datalist>` and not a `<select>`, which is the whole design of this
+/// control: a sample is a handful of messages, so a field it did not happen to
+/// carry is still a field, and the box has to accept one. The list only makes
+/// the common case a click instead of a retype.
+#[component]
+fn MessageFieldOptions(index: usize) -> impl IntoView {
+    let schemas = use_context::<SampleSchemas>();
+    move || {
+        let schema = schemas?.at(index)?;
+        Some(view! {
+            <datalist id=SampleSchemas::list_id(index)>
+                {schema
+                    .fields
+                    .iter()
+                    .map(|field| {
+                        // the label carries what the sample knew: the type, and
+                        // a value to recognise the field by. A field the sample
+                        // disagreed about says so rather than picking one.
+                        let mut label = field
+                            .types
+                            .iter()
+                            .map(|t| t.as_str())
+                            .collect::<Vec<_>>()
+                            .join(" | ");
+                        if let Some(example) = &field.example {
+                            label.push_str(&format!(" · {example}"));
+                        }
+                        view! { <option value=field.path.clone() label=label></option> }
+                    })
+                    .collect_view()}
+            </datalist>
+        })
+    }
+}
+
 /// One component: which kind it is, and the fields that kind has.
 #[component]
 fn ComponentEditor(
@@ -3296,6 +3369,7 @@ fn ComponentEditor(
 
     view! {
         <div class="component-editor">
+            <MessageFieldOptions index=index />
             <div class="component-header">
                 <select class="select" on:change=choose_kind>
                     {move || {
@@ -3767,6 +3841,20 @@ fn FieldEditor(
             }
             .into_any()
         }
+        // A field of the *messages*, so a box with a list rather than a
+        // dropdown: what a sample carried is a suggestion, never the set of
+        // legal answers. See [`SampleSchemas`]. With nothing sampled the list
+        // is empty and this is the plain text box it has always been.
+        FieldType::MessageField => view! {
+            <input
+                class="text-input"
+                list=SampleSchemas::list_id(index)
+                value=initial.clone()
+                placeholder="field path"
+                on:input=write
+            />
+        }
+        .into_any(),
         // Code, so not a one-line box: a syntax-highlighted editor with a
         // gutter, and a pane that runs it. See [`ScriptEditor`].
         FieldType::Script(_) => view! {

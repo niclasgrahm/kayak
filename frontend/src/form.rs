@@ -331,7 +331,12 @@ pub fn parse_field(field: &FieldDoc, raw: &str) -> Result<Option<Value>, String>
         // an id: it goes in a URL path, so surrounding whitespace can only be a
         // slip of the keyboard. A connection name is the same kind of thing —
         // picked from a dropdown of what exists, sent as the plain name
-        FieldType::PipelineId | FieldType::Connection(_) => Value::String(trimmed.to_string()),
+        // and a message field is trimmed for the same reason: it is a path
+        // read by `fields::get`, where a stray space is a segment that will
+        // never match rather than a field anyone meant
+        FieldType::PipelineId | FieldType::Connection(_) | FieldType::MessageField => {
+            Value::String(trimmed.to_string())
+        }
         // code, sent exactly as it was typed. Not trimmed for a stronger reason
         // than the text arm's: leading whitespace is *indentation*, and a
         // trailing newline is what every editor leaves behind. Reformatting
@@ -1583,9 +1588,10 @@ mod tests {
             }
             let at = path(prefix, &field.name);
             let sample = match &field.field_type {
-                FieldType::Text | FieldType::PipelineId | FieldType::Connection(_) => {
-                    "x".to_string()
-                }
+                FieldType::Text
+                | FieldType::PipelineId
+                | FieldType::Connection(_)
+                | FieldType::MessageField => "x".to_string(),
                 // a script that parses and emits its message — the smallest
                 // thing that is actually a working transform
                 FieldType::Script(_) => "emit(msg);".to_string(),
