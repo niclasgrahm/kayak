@@ -154,6 +154,30 @@ State is **never live**. The run gets a private bucket seeded from `state` in th
 | `400` | [ApiError](#schema-apierror) | The request itself was wrong: malformed JSON, or a `file` source that could not be read. |
 | `500` | [ApiError](#schema-apierror) | Something went wrong on the server. The body says what. |
 
+### `POST /api/inputs/sample` {#post-api-inputs-sample}
+
+Fetch a few real messages from an input, without creating a pipeline
+
+<Badge type="warning" text="admin" /> <Badge type="info" text="sampleInput" /> — Signed-in users with the `admin` role.
+
+Configuring a stream you cannot see is guesswork, and every field reference downstream — a column's `field`, a filter's comparison — is a name someone had to already know. This builds the input in the body exactly as a pipeline would, takes up to `max_messages` from it within `timeout_ms`, and drops it.
+
+The **real** input, including its `envelope`, so the metadata fields the messages will actually carry are in the sample too. Its `buffer` is the one thing ignored: a buffer's job is to make the pipeline wait, which is not what a sample is for. Anything the sample did differently comes back in `notes`.
+
+**Sampling is not free for every kind of input, and the ones where it isn't say so.** A kafka sample runs under a throwaway consumer group, so it neither rebalances the pipeline's group nor commits on its behalf; an mqtt sample connects under a client id of its own, because a broker disconnects the older client holding one. An `http` input is refused outright with a 400 — it is posted to rather than read from, so there is nothing to fetch.
+
+**No messages is a 200 with an empty list.** A subject nobody is publishing to is a real state of the world and the answer to the question asked; none of these inputs can replay what was published before the sample started.
+
+**request body** — [SampleRequest](#schema-samplerequest) The input to read from, and how much to take.
+
+**responses**
+
+| status | body | description |
+| --- | --- | --- |
+| `200` | [SampleResponse](#schema-sampleresponse) | The sample was taken — `outcome` says whether it produced messages or failed on the way. |
+| `400` | [ApiError](#schema-apierror) | The request itself was wrong: malformed JSON, an input that isn't a kind of input, or one that cannot be sampled at all. |
+| `500` | [ApiError](#schema-apierror) | Something went wrong on the server. The body says what. |
+
 ## connections {#tag-connections}
 
 The systems pipelines talk to, named once and referred to by the components that use them.

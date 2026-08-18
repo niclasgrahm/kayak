@@ -228,6 +228,45 @@ async fn a_batch_reaches_the_output_and_all_downstreams() {
     assert!(rx_b.try_recv().is_ok(), "downstream b got nothing");
 }
 
+/// A downstream whose receiver is gone is forgotten rather than kept and
+/// failed for the life of the pipeline.
+///
+/// The subscription outlives the thing that made it in two ordinary cases —
+/// a deleted downstream pipeline, and a sample of a `pipeline` input, which
+/// subscribes for a few seconds and goes away — and without this the upstream
+/// pays for both on every batch, forever.
+#[tokio::test]
+async fn a_downstream_that_went_away_is_pruned_from_the_fan_out() {
+    let shared = pipeline("upstream");
+    let (tx_gone, rx_gone) = mpsc::channel(8);
+    let (tx_alive, mut rx_alive) = mpsc::channel(8);
+    shared.subscribe(tx_gone);
+    shared.subscribe(tx_alive);
+    drop(rx_gone);
+    assert_eq!(shared.downstream_count(), 2);
+
+    let (events, _events_rx) = broadcast::channel(16);
+    let runtime = runtime(
+        vec![Box::new(ScriptedInput::new(
+            vec![batch(vec![json!({"n": 1})])],
+            WhenExhausted::Fail,
+        ))],
+        vec![],
+        vec![],
+        Arc::clone(&shared),
+        events,
+    );
+    let _ = runtime.run().await;
+
+    assert_eq!(
+        shared.downstream_count(),
+        1,
+        "the dead downstream is still being sent to"
+    );
+    // and the one that is still there was not disturbed by the pruning
+    assert!(rx_alive.try_recv().is_ok(), "the live downstream got nothing");
+}
+
 /// Cancelling the token stops a run loop parked on its input — this is what
 /// `DELETE /api/pipelines/{id}` relies on.
 #[tokio::test]

@@ -31,6 +31,7 @@ use crate::connections::{Connections, CreateConnectionRequest};
 use crate::docs::ComponentDoc;
 use crate::history::PipelineHistory;
 use crate::layout::LayoutFile;
+use crate::sample::{SampleRequest, SampleResponse};
 use crate::script::{DryRunRequest, DryRunResponse};
 use crate::server_config::Role;
 use crate::state::{BucketContents, BucketSummary};
@@ -106,6 +107,7 @@ pub enum Operation {
     ListConnections,
     GetPipelineHistory,
     DryRunScript,
+    SampleInput,
     ListStateBuckets,
     GetStateBucket,
     CreateConnection,
@@ -137,6 +139,7 @@ impl Operation {
             Self::ListConnections => "listConnections",
             Self::GetPipelineHistory => "getPipelineHistory",
             Self::DryRunScript => "dryRunScript",
+            Self::SampleInput => "sampleInput",
             Self::ListStateBuckets => "listStateBuckets",
             Self::GetStateBucket => "getStateBucket",
             Self::CreateConnection => "createConnection",
@@ -786,6 +789,58 @@ pub fn endpoints() -> Vec<ApiDoc> {
             ],
         },
         ApiDoc {
+            path: "/api/inputs/sample",
+            method: Method::Post,
+            operation: Operation::SampleInput,
+            summary: "Fetch a few real messages from an input, without creating a pipeline",
+            description: "Configuring a stream you cannot see is guesswork, and every field \
+                          reference downstream — a column's `field`, a filter's comparison — \
+                          is a name someone had to already know. This builds the input in \
+                          the body exactly as a pipeline would, takes up to `max_messages` \
+                          from it within `timeout_ms`, and drops it.\n\n\
+                          The **real** input, including its `envelope`, so the metadata \
+                          fields the messages will actually carry are in the sample too. \
+                          Its `buffer` is the one thing ignored: a buffer's job is to make \
+                          the pipeline wait, which is not what a sample is for. Anything \
+                          the sample did differently comes back in `notes`.\n\n\
+                          **Sampling is not free for every kind of input, and the ones \
+                          where it isn't say so.** A kafka sample runs under a throwaway \
+                          consumer group, so it neither rebalances the pipeline's group \
+                          nor commits on its behalf; an mqtt sample connects under a \
+                          client id of its own, because a broker disconnects the older \
+                          client holding one. An `http` input is refused outright with a \
+                          400 — it is posted to rather than read from, so there is nothing \
+                          to fetch.\n\n\
+                          **No messages is a 200 with an empty list.** A subject nobody \
+                          is publishing to is a real state of the world and the answer to \
+                          the question asked; none of these inputs can replay what was \
+                          published before the sample started.",
+            tag: Tag::Pipelines,
+            access: Access::Admin,
+            params: vec![],
+            query: vec![],
+            request: Some(RequestDoc {
+                body: Body::Json("SampleRequest"),
+                description: "The input to read from, and how much to take.",
+            }),
+            responses: vec![
+                ResponseDoc {
+                    status: 200,
+                    description: "The sample was taken — `outcome` says whether it \
+                                  produced messages or failed on the way.",
+                    body: Body::Json("SampleResponse"),
+                },
+                ResponseDoc {
+                    status: 400,
+                    description: "The request itself was wrong: malformed JSON, an input \
+                                  that isn't a kind of input, or one that cannot be \
+                                  sampled at all.",
+                    body: Body::Json("ApiError"),
+                },
+                server_error(),
+            ],
+        },
+        ApiDoc {
             path: "/api/state",
             method: Method::Get,
             operation: Operation::ListStateBuckets,
@@ -1333,6 +1388,8 @@ pub fn schemas() -> BTreeMap<&'static str, Value> {
     schemas.insert("UiEvent", of(schema_for!(UiEvent)));
     schemas.insert("DryRunRequest", of(schema_for!(DryRunRequest)));
     schemas.insert("DryRunResponse", of(schema_for!(DryRunResponse)));
+    schemas.insert("SampleRequest", of(schema_for!(SampleRequest)));
+    schemas.insert("SampleResponse", of(schema_for!(SampleResponse)));
     schemas.insert("ApiError", of(schema_for!(ApiError)));
     schemas.insert("LoginRequest", of(schema_for!(LoginRequest)));
     schemas.insert("TokenLoginRequest", of(schema_for!(TokenLoginRequest)));
@@ -1560,6 +1617,12 @@ mod tests {
                 // capability `createPipeline` already grants. Never lower this
                 // to `read`.
                 ("dryRunScript", "admin"),
+                // Sampling opens a connection to somebody's broker with the
+                // server's own credentials and reads what is on it. That is a
+                // capability, not a view of the graph — the same one
+                // `createPipeline` grants, one message at a time. Never lower
+                // this to `read`.
+                ("sampleInput", "admin"),
                 ("listStateBuckets", "read"),
                 ("getStateBucket", "read"),
                 ("createConnection", "admin"),

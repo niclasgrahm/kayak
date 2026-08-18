@@ -974,6 +974,31 @@ mod tests {
         }
     }
 
+    /// The same bargain as the metadata declaration above, for the same
+    /// reason: what sampling an input costs the system already running is a
+    /// question only somebody who knows the broker can answer, so it is
+    /// answered where the input is added rather than guessed at by the
+    /// sampler. A new input that says nothing would otherwise silently become
+    /// unsamplable — or, worse, be sampled by a rule written for a different
+    /// broker.
+    #[test]
+    fn every_input_says_whether_it_can_be_sampled() {
+        let inputs: Vec<ComponentDoc> = all_components()
+            .into_iter()
+            .filter(|c| c.family == Family::Input)
+            .collect();
+        assert!(inputs.len() > 1, "expected several input kinds");
+        for input in inputs {
+            assert!(
+                crate::sample::for_input(&input.kind).is_some(),
+                "input '{}' hasn't said what sampling it would involve — add \
+                 an arm to sample::for_input, refusing it if that is the \
+                 answer",
+                input.kind
+            );
+        }
+    }
+
     /// Only inputs have any: a transform or an output is not where a message
     /// comes from.
     #[test]

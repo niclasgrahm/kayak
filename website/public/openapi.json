@@ -3856,6 +3856,111 @@
         "title": "s3",
         "type": "object"
       },
+      "SampleRequest": {
+        "description": "Take a few messages from an input, without creating a pipeline.",
+        "properties": {
+          "input": {
+            "$ref": "#/components/schemas/InputConfig",
+            "description": "the input to read from, exactly as it would be written in a pipeline —\nincluding its `envelope`, so the metadata fields the messages will\nreally carry are in the sample too."
+          },
+          "max_messages": {
+            "description": "how many messages to take. Defaults to [`DEFAULT_MAX_MESSAGES`], capped\nat [`MAX_MESSAGES`].",
+            "format": "uint",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "timeout_ms": {
+            "description": "how long to wait for them, in milliseconds. Defaults to\n[`DEFAULT_TIMEOUT_MS`], capped at [`MAX_TIMEOUT_MS`]. The wait ends as\nsoon as enough messages have arrived.",
+            "format": "uint64",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "input"
+        ],
+        "title": "sample request",
+        "type": "object"
+      },
+      "SampleResponse": {
+        "description": "What a sample found.\n\nNote there is no separate \"nothing arrived\" arm: an empty `messages` is\nexactly that, and it is an ordinary answer rather than a failure. A stream\nnobody is publishing to is a real state of the world, and one the user\noften needs to be shown rather than protected from.",
+        "oneOf": [
+          {
+            "properties": {
+              "messages": {
+                "description": "the messages, exactly as the pipeline's first transform would have\nseen them.",
+                "items": true,
+                "type": "array"
+              },
+              "notes": {
+                "description": "what the sample did differently from the pipeline it is standing in\nfor — a throwaway consumer group, an ignored buffer. Empty when it\ndid nothing differently.",
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              "outcome": {
+                "const": "sampled",
+                "type": "string"
+              },
+              "waited_ms": {
+                "description": "how long it waited, in milliseconds.",
+                "format": "uint64",
+                "minimum": 0,
+                "type": "integer"
+              }
+            },
+            "required": [
+              "outcome",
+              "messages",
+              "waited_ms"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "message": {
+                "type": "string"
+              },
+              "outcome": {
+                "const": "failed",
+                "type": "string"
+              },
+              "stage": {
+                "$ref": "#/components/schemas/SampleStage"
+              }
+            },
+            "required": [
+              "outcome",
+              "stage",
+              "message"
+            ],
+            "type": "object"
+          }
+        ],
+        "title": "sample response"
+      },
+      "SampleStage": {
+        "description": "Where a sample went wrong, when it did.",
+        "oneOf": [
+          {
+            "const": "build",
+            "description": "The input could not be built at all — a connection that isn't\nconfigured, a secret that doesn't resolve. The same failure creating\nthe pipeline would have given, which is the point of building the real\nthing.",
+            "type": "string"
+          },
+          {
+            "const": "read",
+            "description": "It was built, and reading from it failed — the broker refused the\nsubscription, the host is unreachable.",
+            "type": "string"
+          }
+        ]
+      },
       "SaveConfigRequest": {
         "description": "What `POST /api/config/save` takes: a bare file name, saved beside the\nconfig the server was started from. Not a path — see `persist::save_path`.",
         "properties": {
@@ -4874,6 +4979,88 @@
           "reference"
         ],
         "x-kayak-access": "public"
+      }
+    },
+    "/api/inputs/sample": {
+      "post": {
+        "description": "Configuring a stream you cannot see is guesswork, and every field reference downstream — a column's `field`, a filter's comparison — is a name someone had to already know. This builds the input in the body exactly as a pipeline would, takes up to `max_messages` from it within `timeout_ms`, and drops it.\n\nThe **real** input, including its `envelope`, so the metadata fields the messages will actually carry are in the sample too. Its `buffer` is the one thing ignored: a buffer's job is to make the pipeline wait, which is not what a sample is for. Anything the sample did differently comes back in `notes`.\n\n**Sampling is not free for every kind of input, and the ones where it isn't say so.** A kafka sample runs under a throwaway consumer group, so it neither rebalances the pipeline's group nor commits on its behalf; an mqtt sample connects under a client id of its own, because a broker disconnects the older client holding one. An `http` input is refused outright with a 400 — it is posted to rather than read from, so there is nothing to fetch.\n\n**No messages is a 200 with an empty list.** A subject nobody is publishing to is a real state of the world and the answer to the question asked; none of these inputs can replay what was published before the sample started.",
+        "operationId": "sampleInput",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SampleRequest"
+              }
+            }
+          },
+          "description": "The input to read from, and how much to take.",
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SampleResponse"
+                }
+              }
+            },
+            "description": "The sample was taken — `outcome` says whether it produced messages or failed on the way."
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "The request itself was wrong: malformed JSON, an input that isn't a kind of input, or one that cannot be sampled at all."
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "No credentials, or credentials that were not recognised."
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "Signed in, but without the `admin` role this endpoint needs."
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "Something went wrong on the server. The body says what."
+          }
+        },
+        "security": [
+          {
+            "basicAuth": []
+          },
+          {
+            "cookieAuth": []
+          }
+        ],
+        "summary": "Fetch a few real messages from an input, without creating a pipeline",
+        "tags": [
+          "pipelines"
+        ],
+        "x-kayak-access": "admin"
       }
     },
     "/api/layout": {

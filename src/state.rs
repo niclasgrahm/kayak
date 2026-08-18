@@ -1296,6 +1296,47 @@ impl AppState {
         Ok(pipeline)
     }
 
+    /// Builds one input the way a pipeline would, for a sample — see
+    /// [`crate::handlers::rest::sample`].
+    ///
+    /// The *real* build, through the same `BuildCtx` [`AppState::create_locked`]
+    /// assembles, because a sample built any other way could disagree with the
+    /// pipeline it is standing in for and would then be worse than none. The
+    /// only difference is the id, which is a throwaway rather than a
+    /// pipeline's: it is what an input derives a client id from, and a sample
+    /// must not turn up at a broker claiming to be a pipeline that already
+    /// exists.
+    ///
+    /// Nothing is registered and nothing is spawned. The caller owns the input
+    /// and drops it, which is what ends the subscription.
+    pub fn build_sample_input(
+        &self,
+        id: &PipelineId,
+        input: kayak_core::config::InputConfig,
+    ) -> anyhow::Result<Box<dyn crate::inputs::InputSource>> {
+        use crate::config::BuildInputConfig;
+        // the pipelines lock before the connections lock, as everywhere else —
+        // and held across the build because a `pipeline` input subscribes to
+        // its upstream through the map. It is dropped with this guard, well
+        // before anything is awaited.
+        let mut app = self.lock_pipelines();
+        let connections = Arc::new(self.connections());
+        let mut ctx = BuildCtx::with_secrets(
+            &mut app,
+            id.clone(),
+            self.events.clone(),
+            Arc::clone(&self.secrets),
+        )
+        .with_connections(connections)
+        .with_data_dir(self.data_dir.clone())
+        .with_inboxes(Arc::clone(&self.inboxes))
+        .with_buckets(self.buckets())
+        .with_history(Arc::clone(&self.history))
+        .with_watchers(self.watchers.clone())
+        .with_script_dir(self.script_directory().map(Arc::new));
+        input.build(&mut ctx)
+    }
+
     pub fn delete_pipeline(&self, id: &str) -> Result<(), PipelineError> {
         let mut app = self.lock_pipelines();
         let Some(handle) = app.remove(id) else {

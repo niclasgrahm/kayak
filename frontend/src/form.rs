@@ -98,6 +98,17 @@ pub fn clear_field_error(errors: &mut Vec<FormError>, component: usize, field: &
     });
 }
 
+/// Whether this message is about a field of the component at `component`.
+///
+/// The counterpart to [`clear_field_error`] for the case where *every* message
+/// about one component goes at once — re-validating that component on its own,
+/// which is what sampling its input does. Clearing the lot would take the other
+/// components' messages down with it, and those have not been re-derived.
+#[must_use]
+pub fn is_field_error_for(error: &FormError, component: usize) -> bool {
+    matches!(error, FormError::Field { component: at, .. } if *at == component)
+}
+
 /// The messages that aren't about any one field.
 #[must_use]
 pub fn pipeline_errors(errors: &[FormError]) -> Vec<String> {

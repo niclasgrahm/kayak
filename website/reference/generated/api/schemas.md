@@ -7386,6 +7386,866 @@ What `GET /api/pipelines/{id}/history` answers with.
 
 :::
 
+## `SampleRequest` {#schema-samplerequest}
+
+Take a few messages from an input, without creating a pipeline.
+
+::: details schema
+
+```json
+{
+  "$defs": {
+    "AckMode": {
+      "description": "When an input acknowledges a message to its broker — see \"acknowledgement\nmodes\" in the guide for the reasoning and, importantly, its current scope.",
+      "oneOf": [
+        {
+          "const": "on_receipt",
+          "description": "Acknowledge as soon as the message arrives, before any transform or\noutput has touched it. The default, and the behaviour every input has\nalways had — a crash between receipt and output can lose the message.",
+          "type": "string"
+        },
+        {
+          "const": "on_delivery",
+          "description": "Acknowledge once the message has left *this* pipeline: every output\nthis pipeline owns has returned, successfully or not, and every\ndownstream pipeline fed from here has accepted it into its inbox. A\nfailing output does not hold up the acknowledgement — see the\narchitecture notes on why that is the current line, not a permanent\none. Not yet propagated any further than this pipeline: a downstream\npipeline's own outputs are not waited on.",
+          "type": "string"
+        }
+      ]
+    },
+    "BufferConfig": {
+      "description": "How an input's messages are gathered into batches before the transforms see\nthem.\n\nAll three shapes are the same two limits with different halves left off — a\ncount, a time, or both, whichever is reached first. **A buffer never emits an\nempty batch**: the clock starts when the first message of a batch arrives,\nnot when the window was asked for, so an input that goes quiet emits nothing\nrather than a tick of nothing.\n\n`size` is a floor rather than a ceiling, the same rule a file output's\n`max_rows` follows: an arriving batch is never split, so an input already\nproducing batches of its own (`max_batch` on kafka and nats) can overshoot.",
+      "oneOf": [
+        {
+          "description": "Wait for a number of messages, however long that takes.",
+          "properties": {
+            "size": {
+              "description": "how many messages to gather before the batch is handed on",
+              "format": "uint",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "type": {
+              "const": "static",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "size"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "Wait for a length of time, however few messages that gathers — but at\nleast one. The window opens when the first message arrives.",
+          "properties": {
+            "type": {
+              "const": "tumbling",
+              "type": "string"
+            },
+            "window_seconds": {
+              "description": "how long to gather messages for, measured from the first one",
+              "format": "uint",
+              "minimum": 0,
+              "type": "integer"
+            }
+          },
+          "required": [
+            "type",
+            "window_seconds"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "Both limits: whichever is reached first ends the batch. The usual\nchoice for a stream whose rate varies, since it bounds the batch size\nwhen the input is busy and the latency when it is quiet.",
+          "properties": {
+            "size": {
+              "description": "how many messages end the batch immediately",
+              "format": "uint",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "type": {
+              "const": "batch",
+              "type": "string"
+            },
+            "window_seconds": {
+              "description": "how long to wait for them, measured from the first message in the\nbatch",
+              "format": "uint",
+              "minimum": 0,
+              "type": "integer"
+            }
+          },
+          "required": [
+            "type",
+            "size",
+            "window_seconds"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "DummyConfig": {
+      "description": "Emits one generated message on a fixed interval — a heartbeat for testing a\npipeline without a real source attached.\n\nEvery message carries a `value` and the `current_time` it was emitted at.\nWhat the `value` holds is the `payload` field's business: a number sampled\nfrom a sine wave, so a chart of it has a shape, or a random sentence, so a\ntext transform has something to chew on.",
+      "properties": {
+        "amplitude": {
+          "description": "peak of the sine wave — it swings between `-amplitude` and `+amplitude`.\nNumeric payloads only; defaults to 1.",
+          "format": "double",
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "duration": {
+          "description": "seconds between messages",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "payload": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/DummyPayload"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "what each message's `value` holds: a `number` sampled from a sine wave,\nor a random sentence as `text`. Defaults to `number`."
+        },
+        "period": {
+          "description": "seconds for one full turn of the sine wave. Numeric payloads only;\ndefaults to 60. Sampling is by wall clock rather than by message count,\nso the wave keeps its period whatever `duration` is.",
+          "format": "double",
+          "type": [
+            "number",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "duration"
+      ],
+      "title": "dummy",
+      "type": "object"
+    },
+    "DummyPayload": {
+      "description": "What a dummy input puts in each message's `value`.",
+      "oneOf": [
+        {
+          "const": "number",
+          "description": "a number sampled from a sine wave",
+          "type": "string"
+        },
+        {
+          "const": "text",
+          "description": "a random sentence",
+          "type": "string"
+        }
+      ]
+    },
+    "EnvelopeConfig": {
+      "description": "Whether — and how — an input attaches metadata about where a message came\nfrom.\n\nThe metadata itself is documented per input under \"metadata\" on this page:\nthe subject a nats message arrived on, the topic, partition and offset of a\nkafka record, and so on, plus the pipeline and input kind that read it. It\nis attached **in band**, as ordinary fields on the message, so every\ntransform can filter, group and aggregate on it exactly as it does on the\npayload's own fields — `\"group_by\": [\"_meta.subject\"]` needs nothing new.\n\nLeaving this out is the default and means what it always meant: the message\nis passed on exactly as it arrived. Attaching metadata changes the shape of\nevery message from this input, which is not something to do to a running\nconfig without being asked.",
+      "oneOf": [
+        {
+          "description": "Add the metadata as one more field on the message. The payload's own\nfields stay exactly where they were, so nothing downstream has to\nchange.\n\nOnly works on a payload that is a JSON *object*: a message that is a\nbare number or string has nowhere to put the field, and is skipped with\na warning rather than taking the pipeline down. Use `wrap` for those.",
+          "properties": {
+            "meta": {
+              "description": "the field the metadata object is written to. Defaults to `_meta`.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "type": {
+              "const": "merge",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "Put the whole payload under a field of its own, beside the metadata —\n`{\"value\": <what arrived>, \"_meta\": {…}}`.\n\nWorks whatever the payload is, which is what a source of bare readings\n(a `1`, a `\"recipe-a\"`) needs. The cost is that every field reference\ndownstream now goes through the payload field: `value.temperature`\nrather than `temperature`.",
+          "properties": {
+            "meta": {
+              "description": "the field the metadata object is written to. Defaults to `_meta`.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "payload": {
+              "description": "the field the original payload is written to. Defaults to `value`.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "type": {
+              "const": "wrap",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "HttpAuthConfig": {
+      "description": "A credential carried in a header — checked by the `http` input on a post to\na pipeline's endpoint, and presented by the `http` output on a request it\nsends.\n\nOne type for both directions because it is one fact: a fixed string in a\nnamed header. The two halves read it differently — the input compares what\narrived against this, the output sets it — and only the input has the rule\nabout `ALLOWED_HEADERS`, since only the input can write a header into the\nmessages.\n\nThis is the **data plane's** own credential and has nothing to do with the\naccounts in the settings file: those are people signing in to look at and\nedit the graph, this is one system pushing data into one pipeline. A machine\nposting readings should not need an account that can rewrite the config, and\na person with such an account should not thereby be able to post readings.\n\nThe token is a fixed string the sender repeats on every request, which makes\nit **only as private as the transport**. kayak speaks plain HTTP; putting\nTLS in front of it is the deployment's job, and without that the token is\nreadable by anything on the path. It is the same trade every log-ingest API\nmakes, and worth making deliberately rather than by accident.",
+      "oneOf": [
+        {
+          "description": "A token in the standard `Authorization` header, as\n`Authorization: Bearer <token>`. The one to reach for unless the system\non the other end can't use that header.",
+          "properties": {
+            "token": {
+              "$ref": "#/$defs/Secret",
+              "description": "the token. A `${NAME}` reference, so the config file holds the name\nand the secret store holds the value."
+            },
+            "type": {
+              "const": "bearer",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "token"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "A fixed value in a header of your choosing — for webhook senders and\nreceivers that can't use `Authorization` but can carry a header of their\nown, which is most of them.",
+          "properties": {
+            "name": {
+              "description": "the header's name, matched case-insensitively on the way in. On an\n`http` input it may not be one of the headers an `envelope` passes\nthrough, since that would write the credential into the messages.",
+              "type": "string"
+            },
+            "type": {
+              "const": "header",
+              "type": "string"
+            },
+            "value": {
+              "$ref": "#/$defs/Secret",
+              "description": "the exact value that header must have. A `${NAME}` reference, as\nabove."
+            }
+          },
+          "required": [
+            "type",
+            "name",
+            "value"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "HttpInputConfig": {
+      "description": "Accepts messages posted to this pipeline's own endpoint,\n`POST /api/pipelines/{id}/messages` — the pipeline is the receiving end of\nan http API rather than something that reaches out to a broker.\n\nThe endpoint is derived from the pipeline's id and appears as soon as the\npipeline is running; nothing is configured about it here. The body is one\nJSON message or an array of them, and an array arrives as one batch. A\npipeline can only have one of these — two would share an endpoint, and which\nof them a request went to would be a coin toss — so a second one fails to\nbuild.",
+      "properties": {
+        "auth": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/HttpAuthConfig"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "what a post must present to be accepted. Absent — the default — means\nthe endpoint takes anything that reaches it, which is what every\npipeline with an `http` input has always done."
+        },
+        "capacity": {
+          "description": "how many posted batches may queue up ahead of the pipeline before it\nstarts refusing them with a `503`. Defaults to 1024. The queue is what\nlets a burst through; refusing past it is deliberate, since the\nalternative is holding a request open until the pipeline catches up.",
+          "format": "uint",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        }
+      },
+      "title": "http",
+      "type": "object"
+    },
+    "InputConfig": {
+      "oneOf": [
+        {
+          "$ref": "#/$defs/DummyConfig",
+          "properties": {
+            "type": {
+              "const": "dummy",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type"
+          ],
+          "type": "object"
+        },
+        {
+          "$ref": "#/$defs/HttpInputConfig",
+          "properties": {
+            "type": {
+              "const": "http",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type"
+          ],
+          "type": "object"
+        },
+        {
+          "$ref": "#/$defs/KafkaConfig",
+          "properties": {
+            "type": {
+              "const": "kafka",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type"
+          ],
+          "type": "object"
+        },
+        {
+          "$ref": "#/$defs/NatsConfig",
+          "properties": {
+            "type": {
+              "const": "nats",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type"
+          ],
+          "type": "object"
+        },
+        {
+          "$ref": "#/$defs/PipelineConfig",
+          "properties": {
+            "type": {
+              "const": "pipeline",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type"
+          ],
+          "type": "object"
+        },
+        {
+          "$ref": "#/$defs/MqttConfig",
+          "properties": {
+            "type": {
+              "const": "mqtt",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type"
+          ],
+          "type": "object"
+        },
+        {
+          "$ref": "#/$defs/RedisConfig",
+          "properties": {
+            "type": {
+              "const": "redis",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type"
+          ],
+          "type": "object"
+        },
+        {
+          "$ref": "#/$defs/OpcuaConfig",
+          "properties": {
+            "type": {
+              "const": "opcua",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type"
+          ],
+          "type": "object"
+        }
+      ],
+      "properties": {
+        "ack": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/AckMode"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "when this input tells its broker a message is done with. Available on\nevery input kind in the schema, but only honoured by ones with a\nbroker-side notion of \"received\" vs \"delivered\" of their own (`kafka`,\nfor now) — an input with nothing to acknowledge refuses to build rather\nthan silently treating this as `on_receipt`. Defaults to `on_receipt`,\nwhich is what every input has always done. See \"acknowledgement modes\"\nin the guide."
+        },
+        "buffer": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/BufferConfig"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "batch messages from this input before the transforms see them — by\ncount (`static`), by time (`tumbling`) or by whichever comes first\n(`batch`). Never emits an empty batch. Available on every input kind.\nNot to be confused with the `buffer` transform."
+        },
+        "envelope": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/EnvelopeConfig"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "attach metadata about where each message came from — the subject, topic,\npartition and so on listed under \"metadata\" below. Available on every\ninput kind. Omit it and messages are passed on exactly as they arrive."
+        }
+      },
+      "type": "object"
+    },
+    "KafkaConfig": {
+      "description": "Consumes JSON messages from a kafka topic, each emitted as a batch of one.\n\nA payload that isn't JSON is skipped with a warning rather than taking the\npipeline down, same as the nats input. The consumer connects on the first\nread and joins a consumer group, so kafka remembers where this pipeline got\nto between restarts.",
+      "properties": {
+        "connection": {
+          "description": "name of the kafka connection to consume from — see \"connections\" in the\nreadme. The brokers are declared once, in the connections file, rather\nthan repeated in every pipeline reading from the same cluster.",
+          "type": "string",
+          "x-connection": "kafka"
+        },
+        "group": {
+          "description": "consumer group id. Kafka tracks the read position per group, so two\npipelines sharing a group split the topic between them, and two with\ndifferent groups each get every message.",
+          "type": "string"
+        },
+        "max_batch": {
+          "description": "most messages to put in one batch. Defaults to 1 — one message per\nbatch, which is what this input has always done.\n\nRaising it only ever coalesces records that had *already arrived*: the\ninput still returns as soon as it has one, so an idle topic is no slower\nthan it was. It is worth raising when a consumer is catching up on a\nbacklog, where one-message batches make the run loop, the transforms and\nevery downstream pipeline do their per-batch work a hundred times over.",
+          "format": "uint",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "start_at": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/KafkaStartAt"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "where to start when the group has no committed position yet: `earliest`\nreplays the topic from the beginning, `latest` only sees new messages.\nDefaults to `latest`."
+        },
+        "topic": {
+          "description": "the topic to consume from",
+          "type": "string"
+        }
+      },
+      "required": [
+        "connection",
+        "topic",
+        "group"
+      ],
+      "title": "kafka",
+      "type": "object"
+    },
+    "KafkaStartAt": {
+      "description": "Where a new consumer group starts reading.",
+      "enum": [
+        "earliest",
+        "latest"
+      ],
+      "type": "string"
+    },
+    "MqttConfig": {
+      "description": "Subscribes to an mqtt topic — or a topic *filter*, since mqtt's `+` and `#`\nwildcards are valid here. Each message is parsed as JSON and emitted as a\nbatch of one; a payload that isn't JSON is skipped with a warning rather\nthan taking the pipeline down, the same rule every other input follows.\n\nThe connection is opened on the first read, and a stable client id is\nderived from the pipeline's id and this topic — not configurable, since\nnothing about it is a choice this pipeline needs to make and getting it\nwrong (two inputs sharing one id) silently drops one of them.",
+      "properties": {
+        "connection": {
+          "description": "name of the mqtt connection to subscribe on — see \"connections\" in the\nreadme. The broker it points at is declared once, in the connections\nfile, rather than repeated in every pipeline that uses it.",
+          "type": "string",
+          "x-connection": "mqtt"
+        },
+        "max_batch": {
+          "description": "most messages to put in one batch. Defaults to 1 — one message per\nbatch, which is what this input has always done.\n\nRaising it only ever coalesces messages that had *already arrived*: the\ninput still returns as soon as it has one, so a quiet topic is no\nslower than it was.",
+          "format": "uint",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "qos": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/MqttQos"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "the quality of service to subscribe with. Defaults to `at_most_once`.\n`ack: on_delivery` needs at least `at_least_once` here — a QoS-0\nsubscription has nothing for it to acknowledge."
+        },
+        "topic": {
+          "description": "the topic, or topic filter, to subscribe to",
+          "type": "string"
+        }
+      },
+      "required": [
+        "connection",
+        "topic"
+      ],
+      "title": "mqtt",
+      "type": "object"
+    },
+    "MqttQos": {
+      "description": "The delivery guarantee to ask for on an mqtt subscribe or publish, spelled\nthe way mqtt itself names them rather than as the bare numbers `0`/`1`/`2`.",
+      "oneOf": [
+        {
+          "const": "at_most_once",
+          "description": "fire and forget — the broker never resends and there is no ack of any\nkind. The default.",
+          "type": "string"
+        },
+        {
+          "const": "at_least_once",
+          "description": "the broker resends until acknowledged, so a message may arrive more\nthan once. Required for an input's `ack: on_delivery` to mean anything\n— see \"acknowledgement modes\" in the guide.",
+          "type": "string"
+        },
+        {
+          "const": "exactly_once",
+          "description": "the broker's four-part handshake that guarantees exactly one delivery.\nThe most expensive of the three; reach for `at_least_once` unless a\nduplicate would actually be wrong.",
+          "type": "string"
+        }
+      ]
+    },
+    "NatsConfig": {
+      "description": "Subscribes to a nats subject. Each message is parsed as JSON and emitted as\na batch of one; a payload that isn't JSON is skipped with a warning rather\nthan taking the pipeline down. The connection is opened on the first read.",
+      "properties": {
+        "connection": {
+          "description": "name of the nats connection to subscribe on — see \"connections\" in the\nreadme. The server it points at is declared once, in the connections\nfile, rather than repeated in every pipeline that uses it.",
+          "type": "string",
+          "x-connection": "nats"
+        },
+        "max_batch": {
+          "description": "most messages to put in one batch. Defaults to 1 — one message per\nbatch, which is what this input has always done.\n\nRaising it only ever coalesces messages that had *already arrived*: the\ninput still returns as soon as it has one, so a quiet subject is no\nslower than it was.",
+          "format": "uint",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "subject": {
+          "description": "the subject to subscribe to",
+          "type": "string"
+        }
+      },
+      "required": [
+        "connection",
+        "subject"
+      ],
+      "title": "nats",
+      "type": "object"
+    },
+    "OpcuaBrowseConfig": {
+      "description": "Everything under a node in the server's address space, found by browsing it\nwhen the pipeline starts.\n\nThe convenient half of naming nodes, and the one with a cost worth knowing:\nwhat this pipeline reads is then decided by the server's address space *at\nthe moment the pipeline starts*, so a tag added to the machine tomorrow is\npicked up by a restart and a tag removed silently stops arriving. An\nexplicit `nodes` list is the one that says in the config file exactly what\nis being read. The two combine — browse a folder and name the handful of\ntags elsewhere that belong with it.",
+      "properties": {
+        "depth": {
+          "description": "how many levels below the root to follow. Defaults to 3, and there is\ndeliberately no spelling for \"all of them\": a browse of a plant server's\nwhole address space is thousands of nodes, and the pipeline that asked\nfor it would find that out by subscribing to them.",
+          "format": "uint",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "root": {
+          "description": "id of the node to browse under, in the same notation as `node_id` —\ntypically a folder, e.g. `ns=2;s=Machine1`. Every *variable* found\nbeneath it is subscribed to; folders and objects are followed, not\nsubscribed.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "root"
+      ],
+      "title": "opcua browse",
+      "type": "object"
+    },
+    "OpcuaConfig": {
+      "description": "Subscribes to variables on an OPC UA server, one message per value change.\n\nThe server pushes: this creates a subscription with a monitored item per\nnode and is told when a value changes, rather than reading them round-robin\non a timer. `publish_interval_ms` is how often the server may send, not how\noften it samples — a tag that doesn't move produces no messages at all.\n\nEach message is one reading, and carries the tag as well as the value:\n\n```json\n{\n  \"node\": \"ns=2;s=Machine1.Temperature\",\n  \"name\": \"temperature\",\n  \"value\": 21.5,\n  \"status\": \"Good\",\n  \"source_timestamp\": \"2026-01-01T12:00:00.123Z\",\n  \"server_timestamp\": \"2026-01-01T12:00:00.130Z\"\n}\n```\n\n`status` is the reading's own quality and is **always present** — a sensor\nthat has failed reports `Bad...` with a `null` value rather than going\nquiet, and a pipeline that acted on those as if they were readings would be\nacting on nothing. `source_timestamp` is when the *device* says the value\nwas produced, which is the one to reduce or partition by; the envelope's\n`received_at` is when kayak read it, and on a slow link those are not the\nsame instant.\n\nThe nodes are named by `nodes`, or found by `browse`, or both — one of them\nis required, since an input with nothing to monitor would sit silent\nforever. A node named twice is subscribed to once.",
+      "properties": {
+        "browse": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/OpcuaBrowseConfig"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "a node to browse, subscribing to every variable found under it."
+        },
+        "connection": {
+          "description": "name of the opcua connection to subscribe on — see \"connections\" in the\nreadme. The server it points at is declared once, in the connections\nfile, rather than repeated in every pipeline that uses it.",
+          "type": "string",
+          "x-connection": "opcua"
+        },
+        "deadband": {
+          "description": "how far a value must move before the server reports it, in the value's\nown units. Absent reports every change, however small — which on an\nanalogue signal is every sample, since the last digit is always moving.\n\nThis is applied by the *server*, so it saves the network and this\npipeline alike. It only applies to numeric nodes; a string or a boolean\nis reported on every change whatever this says.",
+          "format": "double",
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "max_batch": {
+          "description": "most messages to put in one batch. Defaults to 1 — one message per\nbatch, which is what every other input does unless asked otherwise.\n\nWorth raising here more than elsewhere: one publish from the server\ncarries every node that changed in the interval, so a subscription to\ntwo hundred tags at 1 Hz is two hundred batches a second through the run\nloop unless they are allowed to travel together. Raising it only ever\ncoalesces changes that had *already arrived*.",
+          "format": "uint",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "nodes": {
+          "description": "the nodes to subscribe to, named one by one.",
+          "items": {
+            "$ref": "#/$defs/OpcuaNodeConfig"
+          },
+          "type": "array"
+        },
+        "publish_interval_ms": {
+          "description": "how often the server may send a batch of changes, in milliseconds.\nDefaults to 1000. This bounds how long a change waits, not how often\nanything is measured.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "queue_size": {
+          "description": "how many samples the server may hold for a node between publishes.\nDefaults to 1, which means a value that changes twice in one interval is\nreported once — the latest. Raise it, together with\n`sampling_interval_ms`, when every sample matters rather than the\ncurrent value.",
+          "format": "uint32",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "sampling_interval_ms": {
+          "description": "how often the server should *look* at each node, in milliseconds.\nAbsent asks the server to sample at the publishing interval, which is\nwhat it does by default; a smaller value here is what fills a queue with\nintermediate readings between two publishes.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "connection"
+      ],
+      "title": "opcua",
+      "type": "object"
+    },
+    "OpcuaNodeConfig": {
+      "description": "One node an `opcua` input subscribes to, and what the messages call it.",
+      "properties": {
+        "name": {
+          "description": "what the messages from this node call it. Defaults to the node id\nitself, which is exact and unreadable; naming the tag here is what makes\nthe rest of the pipeline — a `group_by`, a column mapping — legible.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "node_id": {
+          "description": "the node's id, in OPC UA's own notation — `ns=2;s=Machine1.Temperature`\nfor a string identifier, `ns=2;i=1042` for a numeric one, `g=` for a\nguid and `b=` for an opaque one. A node id with no `ns=` is in\nnamespace 0, the server's own.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "node_id"
+      ],
+      "title": "opcua node",
+      "type": "object"
+    },
+    "PipelineConfig": {
+      "description": "Takes another pipeline's output as its input. This is what makes the\npipelines a graph: several pipelines can read from the same upstream, and it\nfans out to all of them. The upstream must already exist when this pipeline\nis created, so declare it earlier in the config file.",
+      "properties": {
+        "upstream": {
+          "description": "id of the pipeline to read from",
+          "type": "string",
+          "x-pipeline-id": true
+        }
+      },
+      "required": [
+        "upstream"
+      ],
+      "title": "pipeline",
+      "type": "object"
+    },
+    "RedisConfig": {
+      "description": "Subscribes to a redis channel. Each message is parsed as JSON and emitted\nas a batch of one; a payload that isn't JSON is skipped with a warning\nrather than taking the pipeline down. The connection is opened on the\nfirst read.\n\nPlain `SUBSCRIBE`, not `PSUBSCRIBE` — a channel name is exact, the same\nchoice the nats input makes for a subject with no wildcard. Redis pub/sub\nhas no broker-side redelivery of any kind: an unsubscribed client simply\nmisses whatever was published while it was gone, and there is nothing an\nack could hold open — the same limitation `NatsConfig` has, for the same\nreason.",
+      "properties": {
+        "channel": {
+          "description": "the channel to subscribe to",
+          "type": "string"
+        },
+        "connection": {
+          "description": "name of the redis connection to subscribe on — see \"connections\" in\nthe readme. The server it points at is declared once, in the\nconnections file, rather than repeated in every pipeline that uses it.",
+          "type": "string",
+          "x-connection": "redis"
+        },
+        "max_batch": {
+          "description": "most messages to put in one batch. Defaults to 1 — one message per\nbatch, which is what this input has always done.\n\nRaising it only ever coalesces messages that had *already arrived*: the\ninput still returns as soon as it has one, so a quiet channel is no\nslower than it was.",
+          "format": "uint",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "connection",
+        "channel"
+      ],
+      "title": "redis",
+      "type": "object"
+    },
+    "Secret": {
+      "description": "A config value that may *reference* secrets rather than contain them.\n\nOn the wire it is an ordinary JSON string, but `${NAME}` placeholders in it\nare replaced with real values when the pipeline is built, against whatever\nsecret store the server was started with:\n\n```json\n{ \"type\": \"nats\", \"urls\": \"nats://app:${NATS_PASSWORD}@broker:4222\" }\n```\n\nThe unresolved form is the only one this type ever holds. That is what makes\nit safe to commit, safe to hand back from `GET /api/pipelines` and safe to show\nin the UI — a resolved value exists only inside the built runtime component,\nnever in a `Config`. Resolution deliberately lives in the root crate: this\ncrate compiles to wasm for the frontend, which must not be able to hold a\nresolved secret at all.\n\nA value with no `${...}` in it is passed through untouched, so fields that\nhold nothing sensitive need no special handling.",
+      "type": "string"
+    }
+  },
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "description": "Take a few messages from an input, without creating a pipeline.",
+  "properties": {
+    "input": {
+      "$ref": "#/$defs/InputConfig",
+      "description": "the input to read from, exactly as it would be written in a pipeline —\nincluding its `envelope`, so the metadata fields the messages will\nreally carry are in the sample too."
+    },
+    "max_messages": {
+      "description": "how many messages to take. Defaults to [`DEFAULT_MAX_MESSAGES`], capped\nat [`MAX_MESSAGES`].",
+      "format": "uint",
+      "minimum": 0,
+      "type": [
+        "integer",
+        "null"
+      ]
+    },
+    "timeout_ms": {
+      "description": "how long to wait for them, in milliseconds. Defaults to\n[`DEFAULT_TIMEOUT_MS`], capped at [`MAX_TIMEOUT_MS`]. The wait ends as\nsoon as enough messages have arrived.",
+      "format": "uint64",
+      "minimum": 0,
+      "type": [
+        "integer",
+        "null"
+      ]
+    }
+  },
+  "required": [
+    "input"
+  ],
+  "title": "sample request",
+  "type": "object"
+}
+```
+
+:::
+
+## `SampleResponse` {#schema-sampleresponse}
+
+What a sample found.
+
+Note there is no separate "nothing arrived" arm: an empty `messages` is exactly that, and it is an ordinary answer rather than a failure. A stream nobody is publishing to is a real state of the world, and one the user often needs to be shown rather than protected from.
+
+::: details schema
+
+```json
+{
+  "$defs": {
+    "SampleStage": {
+      "description": "Where a sample went wrong, when it did.",
+      "oneOf": [
+        {
+          "const": "build",
+          "description": "The input could not be built at all — a connection that isn't\nconfigured, a secret that doesn't resolve. The same failure creating\nthe pipeline would have given, which is the point of building the real\nthing.",
+          "type": "string"
+        },
+        {
+          "const": "read",
+          "description": "It was built, and reading from it failed — the broker refused the\nsubscription, the host is unreachable.",
+          "type": "string"
+        }
+      ]
+    }
+  },
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "description": "What a sample found.\n\nNote there is no separate \"nothing arrived\" arm: an empty `messages` is\nexactly that, and it is an ordinary answer rather than a failure. A stream\nnobody is publishing to is a real state of the world, and one the user\noften needs to be shown rather than protected from.",
+  "oneOf": [
+    {
+      "properties": {
+        "messages": {
+          "description": "the messages, exactly as the pipeline's first transform would have\nseen them.",
+          "items": true,
+          "type": "array"
+        },
+        "notes": {
+          "description": "what the sample did differently from the pipeline it is standing in\nfor — a throwaway consumer group, an ignored buffer. Empty when it\ndid nothing differently.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "outcome": {
+          "const": "sampled",
+          "type": "string"
+        },
+        "waited_ms": {
+          "description": "how long it waited, in milliseconds.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "outcome",
+        "messages",
+        "waited_ms"
+      ],
+      "type": "object"
+    },
+    {
+      "properties": {
+        "message": {
+          "type": "string"
+        },
+        "outcome": {
+          "const": "failed",
+          "type": "string"
+        },
+        "stage": {
+          "$ref": "#/$defs/SampleStage"
+        }
+      },
+      "required": [
+        "outcome",
+        "stage",
+        "message"
+      ],
+      "type": "object"
+    }
+  ],
+  "title": "sample response"
+}
+```
+
+:::
+
 ## `SaveConfigRequest` {#schema-saveconfigrequest}
 
 What `POST /api/config/save` takes: a bare file name, saved beside the config the server was started from. Not a path — see `persist::save_path`.
