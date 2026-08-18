@@ -19,6 +19,7 @@ pub mod graph;
 pub mod inspector;
 pub mod log;
 pub mod pretty;
+pub mod project;
 pub mod rhai;
 pub mod selection;
 pub mod sidebar;

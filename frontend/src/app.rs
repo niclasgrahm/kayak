@@ -34,6 +34,7 @@ use crate::graph::{
 use crate::inspector;
 use crate::log;
 use crate::pretty;
+use crate::project;
 use crate::selection::{self, Selection};
 use crate::sidebar;
 use crate::sidebar::{Row, SidebarMode};
@@ -336,6 +337,15 @@ pub struct AppState {
     /// file is left alone, so this is the only thing standing between an
     /// afternoon's work and a restart.
     pub unsaved: Signal<bool>,
+    /// What kind of server this tab is looking at — blank, or already a
+    /// project — once the resources have answered. The creator dialog and the
+    /// empty canvas's hint both read it; see [`crate::project`].
+    pub instance: Signal<project::Instance>,
+    /// The session's "not now" to the creator dialog. Lives here rather than in
+    /// the dialog because the dialog is mounted under a `<Show>`: its own state
+    /// would be forgotten the moment declining unmounted it, and the dialog
+    /// would come straight back.
+    pub creator_dismissed: RwSignal<bool>,
     pub mode: RwSignal<Mode>,
     /// Whether this caller may change the graph at all — an admin, or anyone
     /// on a server with no accounts configured.
@@ -1117,6 +1127,16 @@ pub fn CanvasPage() -> impl IntoView {
             .and_then(|res| res.as_ref().ok().map(|s| s.save_directory.clone()))
             .unwrap_or_default()
     });
+    // unlike `config_file` this keeps "still loading" apart from "no file":
+    // the creator dialog must not flash up before the answers arrive
+    let instance = Signal::derive(move || project::Instance {
+        config_file: settings
+            .get()
+            .and_then(|res| res.as_ref().ok().map(|s| s.config_file.clone())),
+        pipelines: pipelines
+            .get()
+            .and_then(|res| res.as_ref().ok().map(Vec::len)),
+    });
     // false until the answer arrives — a "unsaved changes" warning that flashes
     // up on every load would train people to ignore it
     let unsaved = Signal::derive(move || {
@@ -1155,6 +1175,8 @@ pub fn CanvasPage() -> impl IntoView {
         config_file,
         save_directory,
         unsaved,
+        instance,
+        creator_dismissed: RwSignal::new(false),
         mode: RwSignal::new(Mode::ReadOnly),
         // read once, not subscribed to — see the field's docs
         may_edit: session.may_edit(),
@@ -1492,6 +1514,21 @@ pub fn CanvasPage() -> impl IntoView {
                                 }
                             })
                     }}
+                    // A blank server's empty canvas says so, and keeps a way
+                    // back into the creator dialog after a "not now" — declining
+                    // it must never be a dead end. Behind the dialog's backdrop
+                    // while it is open, which is fine: the dialog covers it.
+                    <Show when=move || state.instance.get().is_blank() && state.may_edit>
+                        <div class="canvas-blank">
+                            <p>"this server has no project yet"</p>
+                            <button
+                                class="button primary"
+                                on:click=move |_| state.creator_dismissed.set(false)
+                            >
+                                "create a project"
+                            </button>
+                        </div>
+                    </Show>
                 </div>
             </div>
             <Show when=move || state.adding.get()>
@@ -1502,6 +1539,15 @@ pub fn CanvasPage() -> impl IntoView {
             </Show>
             <Show when=move || state.saving.get()>
                 <SaveAsModal />
+            </Show>
+            <Show when=move || {
+                project::offer_creator(
+                    &state.instance.get(),
+                    state.may_edit,
+                    state.creator_dismissed.get(),
+                )
+            }>
+                <CreateProjectModal />
             </Show>
         </Suspense>
     }
@@ -4054,8 +4100,6 @@ fn SaveAsModal() -> impl IntoView {
     let saving = RwSignal::new(false);
     let failure = RwSignal::new(Option::<String>::None);
     let loaded = StoredValue::new(current);
-    let format = Memo::new(move |_| ConfigFormat::of_file_name(&name.get()));
-    let choose = move |chosen: ConfigFormat| name.update(|n| *n = chosen.rename(n));
 
     let close = move || state.saving.set(false);
     let _ = use_event_listener(use_window(), leptos::ev::keydown, move |ev| {
@@ -4076,10 +4120,11 @@ fn SaveAsModal() -> impl IntoView {
         failure.set(None);
         saving.set(true);
         leptos::task::spawn_local(async move {
+            let file = name.get_untracked();
             let result = ApiClient {
                 base: String::new(),
             }
-            .save_config(&name.get_untracked(), format.get_untracked())
+            .save_config(&file, ConfigFormat::of_file_name(&file))
             .await;
             saving.set(false);
             match result {
@@ -4106,45 +4151,7 @@ fn SaveAsModal() -> impl IntoView {
                     </button>
                 </header>
                 <div class="modal-body">
-                    <div class="form-row">
-                        <label for="save-name">"file name"</label>
-                        // controlled, unlike the component fields: picking a
-                        // format rewrites the name, and the box has to show it
-                        <input
-                            id="save-name"
-                            class="text-input"
-                            prop:value=move || name.get()
-                            placeholder="config.json"
-                            on:input=move |ev| name.set(event_target_value(&ev))
-                            on:keydown=move |ev| {
-                                if ev.key() == "Enter" {
-                                    submit();
-                                }
-                            }
-                        />
-                    </div>
-                    <div class="form-row">
-                        <label>"format"</label>
-                        <div class="format-picker">
-                            {[ConfigFormat::Json, ConfigFormat::Yaml]
-                                .map(|option| {
-                                    view! {
-                                        <button
-                                            class="button"
-                                            class:active=move || format.get() == option
-                                            title=move || {
-                                                format!("write the file as {option}")
-                                            }
-                                            on:click=move |_| choose(option)
-                                        >
-                                            {option.to_string()}
-                                        </button>
-                                    }
-                                })
-                                .into_iter()
-                                .collect::<Vec<_>>()}
-                        </div>
-                    </div>
+                    <ConfigNameFields id="save-name" name=name on_enter=Callback::new(move |()| submit()) />
                     <p class="form-hint">
                         {move || {
                             if creating {
@@ -4186,6 +4193,173 @@ fn SaveAsModal() -> impl IntoView {
                             (false, true) => "create",
                             (false, false) => "save",
                         }}
+                    </button>
+                </footer>
+            </div>
+        </div>
+    }
+}
+
+/// A config file's name and the format it is written in, edited together.
+///
+/// The two are one decision shown twice: the format selection is *derived*
+/// from the extension rather than held separately, and picking a format
+/// rewrites the name to match, so there is no state in which the button says
+/// "yaml" and the file is called `config.json`. Shared by [`SaveAsModal`] and
+/// [`CreateProjectModal`], which are the same act with different framing —
+/// both read the format back off the name at submit time.
+#[component]
+fn ConfigNameFields(
+    /// Unique per dialog, so each label's `for` points at its own box.
+    id: &'static str,
+    name: RwSignal<String>,
+    on_enter: Callback<()>,
+) -> impl IntoView {
+    let format = Memo::new(move |_| ConfigFormat::of_file_name(&name.get()));
+    let choose = move |chosen: ConfigFormat| name.update(|n| *n = chosen.rename(n));
+
+    view! {
+        <div class="form-row">
+            <label for=id>"file name"</label>
+            // controlled, unlike the component fields: picking a format
+            // rewrites the name, and the box has to show it
+            <input
+                id=id
+                class="text-input"
+                prop:value=move || name.get()
+                placeholder="config.json"
+                on:input=move |ev| name.set(event_target_value(&ev))
+                on:keydown=move |ev| {
+                    if ev.key() == "Enter" {
+                        on_enter.run(());
+                    }
+                }
+            />
+        </div>
+        <div class="form-row">
+            <label>"format"</label>
+            <div class="format-picker">
+                {[ConfigFormat::Json, ConfigFormat::Yaml]
+                    .map(|option| {
+                        view! {
+                            <button
+                                class="button"
+                                class:active=move || format.get() == option
+                                title=move || format!("write the file as {option}")
+                                on:click=move |_| choose(option)
+                            >
+                                {option.to_string()}
+                            </button>
+                        }
+                    })
+                    .into_iter()
+                    .collect::<Vec<_>>()}
+            </div>
+        </div>
+    }
+}
+
+/// The greeting on a blank server: no config file, nothing running.
+///
+/// Creating a project is exactly [`SaveAsModal`]'s "create config file" — the
+/// same endpoint, the same adoption — offered up front rather than two clicks
+/// into edit mode, because a blank canvas with no explanation is the worst
+/// first minute a new instance can have. On success it opens edit mode, the
+/// way creating a project anywhere opens the editor.
+///
+/// Declining is "not now", never "no": it only sets
+/// [`AppState::creator_dismissed`], and the empty canvas behind keeps a way
+/// back in. When the dialog is offered at all is [`project::offer_creator`]'s
+/// decision, tested there.
+#[component]
+fn CreateProjectModal() -> impl IntoView {
+    let state = expect_context::<AppState>();
+    let name = RwSignal::new(DEFAULT_CONFIG_NAME.to_string());
+    let creating = RwSignal::new(false);
+    let failure = RwSignal::new(Option::<String>::None);
+
+    let dismiss = move || state.creator_dismissed.set(true);
+    let _ = use_event_listener(use_window(), leptos::ev::keydown, move |ev| {
+        if ev.key() == "Escape" {
+            dismiss();
+        }
+    });
+
+    let submit = move || {
+        if creating.get_untracked() {
+            return;
+        }
+        failure.set(None);
+        creating.set(true);
+        leptos::task::spawn_local(async move {
+            let file = name.get_untracked();
+            let result = ApiClient {
+                base: String::new(),
+            }
+            .save_config(&file, ConfigFormat::of_file_name(&file))
+            .await;
+            creating.set(false);
+            match result {
+                Ok(_) => {
+                    // the refresh is what actually retires this dialog — the
+                    // server now names a config file, so the instance is no
+                    // longer blank; the dismissal only covers the moment until
+                    // that answer lands
+                    state.creator_dismissed.set(true);
+                    state.mode.set(Mode::Edit);
+                    state.refresh();
+                }
+                Err(err) => failure.set(Some(err.to_string())),
+            }
+        });
+    };
+
+    view! {
+        <div class="modal-backdrop" on:click=move |_| dismiss()>
+            <div class="modal narrow" on:click=move |ev| ev.stop_propagation()>
+                <header>
+                    <span class="modal-title">"create a new project"</span>
+                    <button class="icon-button" title="not now" on:click=move |_| dismiss()>
+                        "×"
+                    </button>
+                </header>
+                <div class="modal-body">
+                    <p class="modal-intro">
+                        "this server has no project yet — no config file the graph is \
+                         saved to. pipelines built on the canvas run immediately either \
+                         way; the project is what lets them survive a restart."
+                    </p>
+                    <ConfigNameFields
+                        id="project-name"
+                        name=name
+                        on_enter=Callback::new(move |()| submit())
+                    />
+                    <p class="form-hint">
+                        {move || match state.save_directory.get() {
+                            dir if dir.is_empty() => {
+                                "created in the server's working directory".to_string()
+                            }
+                            dir => format!("created in {dir}"),
+                        }}
+                    </p>
+                </div>
+                <footer>
+                    <div class="modal-messages">
+                        {move || {
+                            failure
+                                .get()
+                                .map(|message| view! { <div class="form-error">{message}</div> })
+                        }}
+                    </div>
+                    <button class="button" on:click=move |_| dismiss()>
+                        "not now"
+                    </button>
+                    <button
+                        class="button primary"
+                        disabled=move || creating.get() || name.get().trim().is_empty()
+                        on:click=move |_| submit()
+                    >
+                        {move || if creating.get() { "creating…" } else { "create project" }}
                     </button>
                 </footer>
             </div>
