@@ -33,12 +33,15 @@ pub async fn get_settings(State(state): State<Arc<AppState>>) -> impl IntoRespon
 ///
 /// `format` picks JSON or YAML; leaving it out takes the format from the name's
 /// extension.
+///
+/// `overwrite: false` turns it into a create: a name already on disk is refused
+/// with a 409 and nothing is written.
 #[allow(clippy::unused_async)]
 pub async fn save_config(
     State(state): State<Arc<AppState>>,
     Json(payload): Json<SaveConfigRequest>,
 ) -> Result<impl IntoResponse, AppError> {
-    let path = state.save_config_as(&payload.name, payload.format)?;
+    let path = state.save_config_as(&payload.name, payload.format, payload.overwrite)?;
     Ok((
         StatusCode::OK,
         Json(SaveConfigResponse {

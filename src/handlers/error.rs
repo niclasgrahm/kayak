@@ -71,9 +71,11 @@ where
             Some(PipelineError::Unauthorized(_)) => StatusCode::UNAUTHORIZED,
             // both are "the server's state disagrees with what you asked for",
             // and both are fixed by doing something else first
-            Some(PipelineError::DuplicateId(_) | PipelineError::ConnectionInUse(..)) => {
-                StatusCode::CONFLICT
-            }
+            Some(
+                PipelineError::DuplicateId(_)
+                | PipelineError::ConnectionInUse(..)
+                | PipelineError::ConfigExists(_),
+            ) => StatusCode::CONFLICT,
             Some(PipelineError::InvalidConfig(_)) => StatusCode::UNPROCESSABLE_ENTITY,
             Some(PipelineError::Internal(_)) | None => StatusCode::INTERNAL_SERVER_ERROR,
         };

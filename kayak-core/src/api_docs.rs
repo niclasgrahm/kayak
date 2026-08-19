@@ -946,20 +946,36 @@ pub fn endpoints() -> Vec<ApiDoc> {
                           `format` picks JSON or YAML; leaving it out takes the format \
                           from the name's extension. On a server started without \
                           `--config` this is how a config file comes into existence at \
-                          all, and from that save on it is the file `revert` reloads.",
+                          all, and from that save on it is the file `revert` reloads.\n\n\
+                          `overwrite` defaults to `true`, which is what makes saving \
+                          over the loaded file the ordinary thing it has always been. \
+                          Sending `false` turns the save into a **create**: if the name \
+                          — or either of the two files written beside it — is already \
+                          on disk, the request is refused with a 409 and nothing is \
+                          written. That is what the UI's project creator sends, since \
+                          it suggests a file name into a directory its user has often \
+                          never looked at.",
             tag: Tag::Config,
             access: Access::Admin,
             params: vec![],
             query: vec![],
             request: Some(RequestDoc {
                 body: Body::Json("SaveConfigRequest"),
-                description: "The file name to write, and optionally the format.",
+                description: "The file name to write, optionally the format, and \
+                              whether an existing file may be replaced.",
             }),
             responses: vec![
                 ResponseDoc {
                     status: 200,
                     description: "Written, with the path it landed at.",
                     body: Body::Json("SaveConfigResponse"),
+                },
+                ResponseDoc {
+                    status: 409,
+                    description: "`overwrite` was `false` and the file — or one of the \
+                                  two written beside it — is already there. Nothing was \
+                                  written; the message names the files.",
+                    body: Body::Json("ApiError"),
                 },
                 ResponseDoc {
                     status: 422,
@@ -1657,7 +1673,13 @@ mod tests {
             .collect();
         assert_eq!(
             matching,
-            ["createPipeline", "createConnection", "deleteConnection"]
+            [
+                "createPipeline",
+                "createConnection",
+                "deleteConnection",
+                // a save that asked not to overwrite, onto a name that is taken
+                "saveConfig"
+            ]
         );
     }
 

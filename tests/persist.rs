@@ -79,6 +79,16 @@ async fn save_as(app: &Router, name: &str) -> anyhow::Result<(StatusCode, Value)
     post(app, "/api/config/save", &json!({ "name": name })).await
 }
 
+/// A save that refuses to replace anything, as the project creator does.
+async fn create_as(app: &Router, name: &str) -> anyhow::Result<(StatusCode, Value)> {
+    post(
+        app,
+        "/api/config/save",
+        &json!({ "name": name, "overwrite": false }),
+    )
+    .await
+}
+
 /// A save that says which format it wants, as the UI's picker does.
 async fn save_as_format(
     app: &Router,
@@ -392,6 +402,135 @@ async fn creating_a_config_cannot_escape_the_save_directory() -> anyhow::Result<
     );
     // a refused save must not have left the server thinking it has a file
     assert_eq!(settings(&app).await?["config_file"], Value::Null);
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// creating refuses to overwrite
+// ---------------------------------------------------------------------------
+//
+// The UI's project creator suggests `config.json` into whichever directory the
+// server was started in, to someone who has usually never looked at it. Started
+// in a directory that already has a config — one `--config` flag forgotten —
+// pressing the primary button would otherwise replace it with an empty graph.
+// So the creator sends `overwrite: false` and the server is what refuses.
+
+/// The refusal itself: a 409, and the file is left exactly as it was.
+#[tokio::test]
+async fn creating_over_an_existing_file_is_refused() -> anyhow::Result<()> {
+    let dir = tempfile::tempdir()?;
+    let occupied = seeded(&dir, &[idle_config("precious")])?;
+    let before = std::fs::read_to_string(&occupied)?;
+    // a server that knows nothing about that file — started blank in the
+    // directory it happens to sit in, which is exactly the accident
+    let app = api_router(Arc::new(AppState::new_in(dir.path().to_path_buf())));
+    post_stream(&app, &idle_config("new-work")).await?;
+
+    let (status, body) = create_as(&app, "config.json").await?;
+    assert_eq!(status, StatusCode::CONFLICT);
+    // the message names the file, so the fix is visible from the error alone
+    assert!(
+        body["error"].as_str().unwrap_or_default().contains("config.json"),
+        "the refusal should name the file: {body}"
+    );
+    assert_eq!(std::fs::read_to_string(&occupied)?, before);
+    Ok(())
+}
+
+/// A refused create leaves the server blank rather than half-adopted: nothing
+/// is written, so nothing is adopted, and the dialog can be tried again under
+/// another name.
+#[tokio::test]
+async fn a_refused_create_does_not_adopt_the_file() -> anyhow::Result<()> {
+    let dir = tempfile::tempdir()?;
+    seeded(&dir, &[idle_config("precious")])?;
+    let app = api_router(Arc::new(AppState::new_in(dir.path().to_path_buf())));
+
+    assert_eq!(
+        create_as(&app, "config.json").await?.0,
+        StatusCode::CONFLICT
+    );
+    assert_eq!(settings(&app).await?["config_file"], json!(null));
+
+    // and the second attempt works, which is the whole point of refusing
+    assert_eq!(create_as(&app, "mine.json").await?.0, StatusCode::OK);
+    assert_eq!(settings(&app).await?["config_file"], json!("mine.json"));
+    Ok(())
+}
+
+/// The sibling files are claims on the name too. A create called `config.json`
+/// beside an existing `config.connections.json` would write `{}` over it — the
+/// same data loss one file along, and the reason the check is not just
+/// `target.exists()`.
+#[tokio::test]
+async fn creating_is_refused_by_an_existing_connections_file() -> anyhow::Result<()> {
+    let dir = tempfile::tempdir()?;
+    let connections = dir.path().join("config.connections.json");
+    let before = r#"{"prod-kafka":{"type":"kafka","brokers":["kafka:9092"]}}"#;
+    std::fs::write(&connections, before)?;
+    let app = api_router(Arc::new(AppState::new_in(dir.path().to_path_buf())));
+
+    let (status, body) = create_as(&app, "config.json").await?;
+    assert_eq!(status, StatusCode::CONFLICT);
+    assert!(
+        body["error"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("config.connections.json"),
+        "the refusal should name the sibling it was stopped by: {body}"
+    );
+    assert_eq!(std::fs::read_to_string(&connections)?, before);
+    // nothing of the config landed either
+    assert!(!dir.path().join("config.json").exists());
+    Ok(())
+}
+
+/// The same, for the layout file — the third thing a save writes beside the
+/// config.
+#[tokio::test]
+async fn creating_is_refused_by_an_existing_layout_file() -> anyhow::Result<()> {
+    let dir = tempfile::tempdir()?;
+    let layout = dir.path().join("config.layout.json");
+    std::fs::write(&layout, r#"{"pipelines":{}}"#)?;
+    let app = api_router(Arc::new(AppState::new_in(dir.path().to_path_buf())));
+
+    assert_eq!(
+        create_as(&app, "config.json").await?.0,
+        StatusCode::CONFLICT
+    );
+    assert!(!dir.path().join("config.json").exists());
+    Ok(())
+}
+
+/// A free name is not a collision: the ordinary path through the creator still
+/// works, and works exactly as a plain save does.
+#[tokio::test]
+async fn creating_under_a_free_name_is_an_ordinary_save() -> anyhow::Result<()> {
+    let dir = tempfile::tempdir()?;
+    let app = api_router(Arc::new(AppState::new_in(dir.path().to_path_buf())));
+    post_stream(&app, &idle_config("root")).await?;
+
+    let (status, body) = create_as(&app, "config.json").await?;
+    assert_eq!(status, StatusCode::OK);
+
+    let written = dir.path().join("config.json");
+    assert_eq!(body["path"], json!(written.display().to_string()));
+    assert_eq!(ids_in(&written)?, ["root"]);
+    Ok(())
+}
+
+/// The promise the default makes: a request that says nothing about
+/// overwriting behaves as every save always has. A client that predates the
+/// field — or a hand-written `curl` — must not start being refused.
+#[tokio::test]
+async fn a_save_that_says_nothing_about_overwriting_still_overwrites() -> anyhow::Result<()> {
+    let dir = tempfile::tempdir()?;
+    let path = seeded(&dir, &[idle_config("seeded")])?;
+    let app = app_from(&path)?;
+    post_stream(&app, &idle_config("added")).await?;
+
+    assert_eq!(save_as(&app, "config.json").await?.0, StatusCode::OK);
+    assert_eq!(ids_in(&path)?, ["added", "seeded"]);
     Ok(())
 }
 
