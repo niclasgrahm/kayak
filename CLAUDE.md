@@ -761,6 +761,47 @@ Three rules there:
 Note this made the run loop long enough that the output/downstream tail moved
 into `PipelineRuntime::deliver`; both kinds of pass end there.
 
+### Starting up: an output that isn't there yet, and `RunStatus`
+
+Two halves of one problem — a pipeline that is registered but not running.
+
+**`init_outputs` retries; it does not fail the run.** The invariant is
+unchanged: no batch reaches an output that hasn't initialised, because there is
+no pass until every one of them has. What changed is what happens *while* one
+is unreachable. It used to return the error, ending `run()` before the loop was
+entered — and since nothing removes a handle when a run loop exits, a
+`postgres` output pointed at a database that simply wasn't up yet left a
+pipeline registered, dead, and unrecoverable short of restarting the server.
+Now it waits on the same `backoff::Backoff` every input and output already
+reconnects on, cancellable so a delete doesn't wait out a 30-second sleep, and
+resumed at the failing index rather than restarted (re-`init`ing a connected
+output would leak the first connection). Not reading the input meanwhile is the
+right backpressure: there is nowhere to put a message.
+
+**Retrying is deliberately not conditional on the kind of failure.** A wrong
+password and a downed host are the same `Err` to most drivers, and guessing
+wrong is expensive in one direction only — a misclassified outage never comes
+back, a misclassified config error costs one connect attempt per 30s. A
+permanent failure is legible anyway: it arrives as one `ErrorSignature` whose
+count climbs, and "password authentication failed, 240 times since 02:14" reads
+as fatal without the runtime having to rule on it. Don't add classification.
+
+**`RunStatus`** (`kayak-core/src/lib.rs`) is the second half: starting /
+running / stopped / failed, held in a `Mutex` on `Pipeline`, written **only by
+the run loop** — it is a report of what that task is doing, and anything else
+writing it would be a claim rather than an observation. Which of the two ways
+out a loop took is decided by the same question the input error arm asks, "was
+*I* cancelled". It rides on `PipelineView`/`PipelineDto` and shows as a badge on
+the card, rendered only when there is something to say.
+
+Two things worth knowing. A dead pipeline's handle **stays in the map** on
+purpose — removing it would take the card, the config and the history with it,
+and "this pipeline is over" is precisely what someone needs to see. And the
+badge updates on the next load of the pipeline list, not live: a status change
+is not a `UiEvent`, because `UiEvent.stage` is a `Stage` and a run loop's
+lifecycle is not one. Fixing that means `Option<Stage>` on the wire, which is a
+bigger change than the gap deserves so far.
+
 ### Runtime & state
 
 `AppState` (`src/state.rs`) holds `Mutex<HashMap<PipelineId, PipelineHandle>>`, the connections (plus their own saved-snapshot), and the UI event broadcast channel. Creating a pipeline builds a `PipelineRuntime` and `tokio::spawn`s its `run()` loop; each `Pipeline` owns a `CancellationToken` that `delete_pipeline` cancels, and the run loop `select!`s on it against the next input message. Downstream fan-out is a `Mutex<Vec<mpsc::Sender>>` on `Pipeline`, populated by `subscribe()`.

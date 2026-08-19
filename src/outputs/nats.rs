@@ -36,8 +36,10 @@ pub struct NatsOutput {
     subject: String,
     client: Option<async_nats::Client>,
     /// Paces reconnect attempts after the connection is lost — see `emit`.
-    /// `init` never consults it: a pipeline that can't reach its output at
-    /// startup still fails to build, same as always.
+    /// `init` never consults it, and does not need to: an
+    /// output that can't reach its output at startup is retried by the run
+    /// loop instead, on this same schedule — see
+    /// `PipelineRuntime::init_outputs`.
     gate: Gate,
 }
 

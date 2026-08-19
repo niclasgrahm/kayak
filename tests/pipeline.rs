@@ -20,7 +20,7 @@ use kayak::testing::{
     Ticking, WhenExhausted, batch, stub_config,
 };
 use kayak::transforms::Transform;
-use kayak_core::{EventPayload, Stage};
+use kayak_core::{EventPayload, RunStatus, Stage};
 use kayak::buckets::Buckets;
 use kayak_core::config::{
     Aggregation, BufferGateConfig, BufferTransformConfig, Condition, MissingFieldPolicy,
@@ -625,6 +625,130 @@ async fn the_output_is_initialised_once_before_the_first_emit() {
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
     assert_eq!(calls, 1);
+}
+
+/// An output that can't initialise *yet* is waited for, not fatal.
+///
+/// The case is a `postgres` output whose database is not up when the pipeline
+/// starts. This used to end the run loop before it began, which left the
+/// pipeline registered, dead and unrecoverable without restarting the server;
+/// now the outputs are retried on a backoff and the pipeline comes up on its
+/// own. Time is paused, so the backoff's waits cost the test nothing.
+#[tokio::test(start_paused = true)]
+async fn an_output_that_cannot_initialise_yet_is_retried_rather_than_killing_the_pipeline() {
+    let output = CollectingOutput::failing_init(2);
+    let init_calls = output.init_calls();
+
+    let emitted = run_to_completion(vec![batch(vec![json!({"n": 1})])], vec![], output).await;
+
+    assert_eq!(
+        emitted.values(),
+        vec![vec![json!({"n": 1})]],
+        "the batch should have been delivered once the output came up"
+    );
+    let calls = *init_calls
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    assert_eq!(calls, 3, "two failed attempts and the one that worked");
+}
+
+/// Waiting for an output that is never coming back must not hold up a delete,
+/// a revert or a shutdown — and must not be a spin, either.
+///
+/// Real time rather than paused, because both halves of the assertion are
+/// about pacing: a run loop retrying without a backoff would rack up thousands
+/// of attempts in the 50ms before it is cancelled, and one that waited
+/// uncancellably would still be sitting in its first sleep when the timeout
+/// fires.
+#[tokio::test]
+async fn a_pipeline_waiting_for_an_output_can_still_be_cancelled() {
+    let shared = pipeline("waiting");
+    let output = CollectingOutput::failing_init(usize::MAX);
+    let init_calls = output.init_calls();
+    let (events, _rx) = broadcast::channel(16);
+    let runtime = runtime(
+        vec![Box::new(Ticking::new(
+            Duration::from_millis(10),
+            json!({"tick": 1}),
+        ))],
+        vec![],
+        vec![Box::new(output)],
+        Arc::clone(&shared),
+        events,
+    );
+
+    let handle = tokio::spawn(runtime.run());
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    assert_eq!(
+        shared.status(),
+        RunStatus::Starting,
+        "a pipeline whose output won't initialise is starting, not running"
+    );
+    shared.cancellation_token.cancel();
+
+    let finished = tokio::time::timeout(Duration::from_secs(1), handle).await;
+    assert!(
+        finished.is_ok(),
+        "a cancellation should not wait out the backoff"
+    );
+    assert_eq!(shared.status(), RunStatus::Stopped);
+
+    let calls = *init_calls
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    assert!(
+        calls <= 3,
+        "the retries should be paced by the backoff, not spun: {calls} attempts in 50ms"
+    );
+}
+
+/// A run loop that ends on its own says so, which is the whole point of the
+/// status: nothing removes the handle when a pipeline's last input dies, so
+/// without this a dead pipeline is indistinguishable from a quiet one.
+#[tokio::test]
+async fn a_run_loop_that_ends_on_its_own_is_marked_failed() {
+    let shared = pipeline("dies");
+    let (events, _rx) = broadcast::channel(16);
+    let runtime = runtime(
+        vec![Box::new(ScriptedInput::new(vec![], WhenExhausted::Fail))],
+        vec![],
+        vec![Box::new(CollectingOutput::new())],
+        Arc::clone(&shared),
+        events,
+    );
+    let _ = runtime.run().await;
+
+    assert_eq!(shared.status(), RunStatus::Failed);
+    assert!(!shared.status().is_running());
+}
+
+/// The other two states, in the order a healthy pipeline passes through them.
+/// Separate from the one above because a pipeline that was *told* to stop is
+/// not a pipeline that broke, and a card should not read the same for both.
+#[tokio::test]
+async fn a_healthy_pipeline_runs_until_it_is_cancelled() {
+    let shared = pipeline("healthy");
+    let (events, _rx) = broadcast::channel(16);
+    let runtime = runtime(
+        vec![Box::new(Ticking::new(
+            Duration::from_millis(10),
+            json!({"tick": 1}),
+        ))],
+        vec![],
+        vec![Box::new(CollectingOutput::new())],
+        Arc::clone(&shared),
+        events,
+    );
+
+    let handle = tokio::spawn(runtime.run());
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    assert_eq!(shared.status(), RunStatus::Running);
+    assert!(shared.status().is_running());
+
+    shared.cancellation_token.cancel();
+    let finished = tokio::time::timeout(Duration::from_secs(1), handle).await;
+    assert!(finished.is_ok(), "a cancelled run loop should exit");
+    assert_eq!(shared.status(), RunStatus::Stopped);
 }
 
 /// An input error ends this pipeline's loop. Downstream pipelines detect it
