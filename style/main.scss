@@ -2255,6 +2255,18 @@ textarea {
   }
 }
 
+// The buttons under a list of rows: "+ add", and "fill from sample" once
+// something has been sampled. In a row so the second one doesn't push the
+// first onto a line of its own when it appears.
+.form-list-actions {
+  display: flex;
+  gap: 6px;
+
+  > .button {
+    flex: 1;
+  }
+}
+
 // The heading over one transform's worth of the panel. A rule above it, so a
 // long chain reads as a sequence of steps rather than as one wall of JSON.
 .sample-stage {

@@ -59,6 +59,15 @@ dev: kill-dev-server secrets
 dev-blank: kill-dev-server
   cargo leptos watch
 
+# Also blank, but not empty-handed: the secrets, the data dir and the server
+# config are all passed, so a pipeline built from scratch in the UI can name a
+# sample connection and write a file without the server being restarted first.
+# `dev-blank` above is the one for the first-run experience itself.
+
+# blank instance on :6767 with the sample's secrets and connections available
+dev-bare: kill-dev-server secrets
+  cargo leptos watch --  --secrets {{example}}/secrets.json --data-dir {{data}} --server-config {{example}}/server.yaml
+
 # The same graph in its other spelling, and deliberately *without* a
 # `--server-config`: it is what this recipe is for (the YAML config path) plus
 # the one way to get at the canvas without signing in, which is worth having

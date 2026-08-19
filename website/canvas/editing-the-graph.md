@@ -90,6 +90,23 @@ several batches, a `filter` that matched nothing hands on none, and a `buffer`
 hands on nothing at all because it is still holding what it was given. Nothing
 is emitted to any output; a dry run that emitted would be a pipeline.
 
+**A whole mapping can be filled in from it.** A list whose rows map a message
+field onto something — a database output's `columns` — grows a `fill from
+sample` button beside `+ add` once something has been sampled. It adds a row
+per field the sample carried: the path in the field box, a name made from it
+(the whole path, since `sensor.id` and `device.id` must not become one column),
+and the type the sample suggests.
+
+Three things it deliberately will not decide for you. A field the sample
+disagreed about — a number in one message, a string in the next — gets its row
+with the **type left blank**, because there is no honest suggestion and an
+unanswered required box is what that should look like. **Nullability is never
+guessed**: five messages cannot prove a field is always there, and a column
+declared `NOT NULL` on that evidence is a pipeline that fails at three in the
+morning, so every filled row is nullable and you tighten the ones you know
+about. And it **appends**, skipping fields already mapped, so pressing it twice
+adds nothing and a row you have edited is never overwritten.
+
 **What it learns fills in the field boxes.** Every box that names a field of the
 messages offers what the sample carried, with the type and an example value —
 and offers it *as of that point in the chain*, so an output's column mapping is

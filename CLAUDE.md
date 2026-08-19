@@ -1278,6 +1278,18 @@ against its input), and the position is the same key `form::FormError` uses.
 Sampling an input runs the chain straight afterwards, which is what makes an
 output's column mapping suggest the fields that will actually reach it.
 
+`form::fill_from_sample` is the other half of that: a list whose element holds
+a `MessageField` grows a "fill from sample" button, and the sub-fields it
+writes are found **by type, not by name** — the message-field box gets the
+path, the first required text box gets a name made from it, and an enum box
+gets the suggested column type *only if the suggestion is one of its values*,
+so a dropdown about something else is left alone. Same rule `draft_fed_by`
+follows. It appends and skips what is already mapped (pressing it twice does
+nothing), skips a path that has children (mapping `sensor` and `sensor.id`
+stores the same data twice), and **never writes nullability** — a sample cannot
+prove a field is always present, and a `NOT NULL` column on that evidence fails
+at 3am.
+
 Known and on the roadmap: the sample is never refreshed, so editing a transform
 afterwards leaves the boxes behind it offering the old shape.
 

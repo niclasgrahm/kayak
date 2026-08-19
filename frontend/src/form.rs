@@ -21,6 +21,7 @@
 use std::collections::HashMap;
 
 use kayak_core::docs::{ComponentDoc, Family, FieldDoc, FieldType};
+use kayak_core::schema::MessageSchema;
 use serde_json::{Map, Value};
 
 /// One component being filled in.
@@ -231,6 +232,147 @@ pub fn list_len(values: &HashMap<String, String>, at: &str) -> usize {
         .and_then(|raw| raw.parse::<usize>().ok())
         .unwrap_or(0)
         .min(MAX_LIST_ROWS)
+}
+
+/// The sub-fields of a list row that a sample can answer, found by their
+/// **type** rather than by their name.
+///
+/// Same rule [`draft_fed_by`] follows and that `kayak_core::docs` follows one
+/// level up: this module knows the name of no component and no component's
+/// fields. A row that maps a message field onto something is recognisable
+/// without knowing it is a column — it has a [`FieldType::MessageField`] in it
+/// — and the two other things a sample knows are then found the same way.
+struct RowRoles {
+    /// where the field's path goes.
+    field: String,
+    /// where a name for it goes: the first *required* text box in the row,
+    /// which is what a row that names its target has. Absent is fine — the
+    /// row is filled in as far as it can be.
+    name: Option<String>,
+    /// where a type goes, with the values that dropdown accepts. A suggestion
+    /// is only written if it is one of them, so a dropdown that turns out to
+    /// be about something else is left alone rather than filled with nonsense.
+    types: Option<(String, Vec<String>)>,
+}
+
+impl RowRoles {
+    /// The roles in one list element, or `None` if it is not a row that maps a
+    /// message field at all.
+    fn of(element: &FieldDoc) -> Option<Self> {
+        let FieldType::Object(fields) = &element.field_type else {
+            return None;
+        };
+        let field = fields
+            .iter()
+            .find(|f| f.field_type == FieldType::MessageField)?
+            .name
+            .clone();
+        let name = fields
+            .iter()
+            .find(|f| f.required && f.field_type == FieldType::Text)
+            .map(|f| f.name.clone());
+        let types = fields.iter().find_map(|f| match &f.field_type {
+            FieldType::Enum(values) => Some((f.name.clone(), values.clone())),
+            _ => None,
+        });
+        Some(Self { field, name, types })
+    }
+}
+
+/// Whether a list of rows can be filled in from a sample at all — what the
+/// "fill from sample" button asks before it draws itself.
+#[must_use]
+pub fn can_fill_from_sample(element: &FieldDoc) -> bool {
+    RowRoles::of(element).is_some()
+}
+
+/// Adds a row per field the sample carried, and says how many rows there are
+/// now.
+///
+/// Three rules, and they are the difference between a button that saves typing
+/// and one that has to be undone:
+///
+/// - **A field already mapped is skipped**, so pressing it twice adds nothing
+///   and it never overwrites a row someone has edited. Appending rather than
+///   replacing is what makes it safe to press at all.
+/// - **A path with children of its own is skipped.** A message carrying
+///   `sensor.id` offers both `sensor` and `sensor.id`; mapping both would
+///   store the same data twice, once as JSON and once as a column.
+/// - **Nullability is not written down.** The sample knows whether a field was
+///   ever missing, and that is deliberately not turned into `nullable: false`:
+///   five messages cannot prove a field is always there, and a column declared
+///   `NOT NULL` on that evidence is a pipeline that fails at three in the
+///   morning. The default — nullable — is the honest reading, and the sample's
+///   answer is shown in the field list instead.
+///
+/// A field the sample disagreed about (a number in one message, a string in
+/// the next) gets its row with the **type box left empty**: there is no honest
+/// suggestion, and a required box nobody has answered is exactly what that
+/// should look like.
+pub fn fill_from_sample(
+    values: &mut HashMap<String, String>,
+    at: &str,
+    element: &FieldDoc,
+    schema: &MessageSchema,
+) -> usize {
+    let Some(roles) = RowRoles::of(element) else {
+        return list_len(values, at);
+    };
+    let mut len = list_len(values, at);
+    let mapped: Vec<String> = (0..len)
+        .filter_map(|row| {
+            let row_at = path(at, &row.to_string());
+            values
+                .get(&path(&row_at, &roles.field))
+                .filter(|value| !value.trim().is_empty())
+                .cloned()
+        })
+        .collect();
+
+    for field in &schema.fields {
+        if len >= MAX_LIST_ROWS {
+            break;
+        }
+        let prefix = format!("{}.", field.path);
+        if schema.fields.iter().any(|other| other.path.starts_with(&prefix)) {
+            continue;
+        }
+        if mapped.iter().any(|already| already == &field.path) {
+            continue;
+        }
+        let row_at = path(at, &len.to_string());
+        values.insert(path(&row_at, &roles.field), field.path.clone());
+        if let Some(name) = &roles.name {
+            values.insert(path(&row_at, name), column_name(&field.path));
+        }
+        if let Some((box_name, accepted)) = &roles.types
+            && let Some(suggestion) = field.suggested_column()
+            && accepted.iter().any(|value| value == suggestion.as_str())
+        {
+            values.insert(path(&row_at, box_name), suggestion.as_str().to_string());
+        }
+        len += 1;
+        values.insert(at.to_string(), len.to_string());
+    }
+    len
+}
+
+/// A field path as a name for the thing it lands in.
+///
+/// The whole path rather than its last segment, because two paths can share a
+/// leaf — `sensor.id` and `device.id` are different fields and must not become
+/// one column. Everything a name may not contain becomes an underscore, and a
+/// name that would start with a digit gets one in front: it ends up in an SQL
+/// identifier, which the output checks and would otherwise refuse.
+fn column_name(path: &str) -> String {
+    let mut name: String = path
+        .chars()
+        .map(|c| if c.is_ascii_alphanumeric() { c } else { '_' })
+        .collect();
+    if name.starts_with(|c: char| c.is_ascii_digit()) {
+        name.insert(0, '_');
+    }
+    name
 }
 
 /// Add a row to the end of a list, and say how many there are now.
@@ -747,6 +889,143 @@ mod tests {
 
     fn dummy_input() -> ComponentDraft {
         filled(Family::Input, "dummy", &[("duration", "5")])
+    }
+
+    fn field_named<'a>(component: &'a ComponentDoc, name: &str) -> &'a FieldDoc {
+        match component.fields.iter().find(|f| f.name == name) {
+            Some(f) => f,
+            None => panic!("no field '{name}' on '{}'", component.kind),
+        }
+    }
+
+    /// One row of the postgres output's `columns`.
+    fn column_element() -> FieldDoc {
+        let postgres = component(Family::Output, "postgres");
+        let columns = field_named(&postgres, "columns");
+        match &columns.field_type {
+            FieldType::List(element) => (**element).clone(),
+            other => panic!("columns is a list, not a {other:?}"),
+        }
+    }
+
+    /// The postgres output's `columns` is the list this exists for: a row per
+    /// field the sample carried, with the path in the field box, a name made
+    /// from it and the type the sample suggests.
+    #[test]
+    fn a_column_list_is_filled_in_from_a_sample() {
+        let postgres = component(Family::Output, "postgres");
+        let columns = field_named(&postgres, "columns");
+        let FieldType::List(element) = &columns.field_type else {
+            panic!("columns is a list");
+        };
+        let schema = kayak_core::schema::infer(&[json!({
+            "current_time": "2026-08-18T09:12:00Z",
+            "value": 0.5,
+        })]);
+
+        let mut values = HashMap::new();
+        let rows = fill_from_sample(&mut values, "columns", element, &schema);
+
+        assert_eq!(rows, 2);
+        assert_eq!(values.get("columns"), Some(&"2".to_string()));
+        assert_eq!(
+            values.get("columns.0.field"),
+            Some(&"current_time".to_string())
+        );
+        assert_eq!(
+            values.get("columns.0.name"),
+            Some(&"current_time".to_string())
+        );
+        // the shape of the string is what makes this a timestamp rather than
+        // text — see `kayak_core::schema::TextFormat`
+        assert_eq!(values.get("columns.0.type"), Some(&"timestamp".to_string()));
+        assert_eq!(values.get("columns.1.field"), Some(&"value".to_string()));
+        assert_eq!(values.get("columns.1.type"), Some(&"float".to_string()));
+    }
+
+    /// Pressing it twice must add nothing, and it must never overwrite a row
+    /// someone has edited — appending rather than replacing is what makes it
+    /// safe to press at all.
+    #[test]
+    fn filling_twice_adds_nothing_and_leaves_edited_rows_alone() {
+        let element = column_element();
+        let schema = kayak_core::schema::infer(&[json!({"a": 1, "b": 2})]);
+
+        let mut values = HashMap::new();
+        assert_eq!(fill_from_sample(&mut values, "columns", &element, &schema), 2);
+        values.insert("columns.0.name".to_string(), "renamed_by_hand".to_string());
+
+        assert_eq!(fill_from_sample(&mut values, "columns", &element, &schema), 2);
+        assert_eq!(
+            values.get("columns.0.name"),
+            Some(&"renamed_by_hand".to_string())
+        );
+    }
+
+    /// A message carrying `sensor.id` offers both `sensor` and `sensor.id`;
+    /// mapping both would store the same data twice, once as JSON and once as
+    /// a column.
+    #[test]
+    fn a_path_with_children_is_not_mapped_as_well_as_its_children() {
+        let element = column_element();
+        let schema = kayak_core::schema::infer(&[json!({"sensor": {"id": 1}})]);
+
+        let mut values = HashMap::new();
+        assert_eq!(fill_from_sample(&mut values, "columns", &element, &schema), 1);
+        assert_eq!(
+            values.get("columns.0.field"),
+            Some(&"sensor.id".to_string())
+        );
+        // and the name carries the whole path, since two paths can share a leaf
+        assert_eq!(
+            values.get("columns.0.name"),
+            Some(&"sensor_id".to_string())
+        );
+    }
+
+    /// There is no honest suggestion for a field the sample disagreed about,
+    /// and a required box nobody has answered is what that should look like.
+    #[test]
+    fn a_field_the_sample_disagreed_about_gets_no_type() {
+        let element = column_element();
+        let schema = kayak_core::schema::infer(&[json!({"a": 1}), json!({"a": "x"})]);
+
+        let mut values = HashMap::new();
+        fill_from_sample(&mut values, "columns", &element, &schema);
+        assert_eq!(values.get("columns.0.field"), Some(&"a".to_string()));
+        assert_eq!(values.get("columns.0.type"), None);
+    }
+
+    /// Five messages cannot prove a field is always there, so what the sample
+    /// knows about absence is deliberately not written into the row.
+    #[test]
+    fn nullability_is_not_guessed_from_a_sample() {
+        let element = column_element();
+        let schema = kayak_core::schema::infer(&[json!({"a": 1, "b": 2}), json!({"a": 1})]);
+
+        let mut values = HashMap::new();
+        fill_from_sample(&mut values, "columns", &element, &schema);
+        assert!(
+            values.keys().all(|key| !key.ends_with("nullable")),
+            "the sample decided a column's nullability: {values:?}"
+        );
+    }
+
+    /// A list of something else is left alone rather than filled with nonsense
+    /// — the row has to be one that maps a message field.
+    #[test]
+    fn a_list_that_maps_no_message_field_cannot_be_filled() {
+        let reducer = component(Family::Transform, "reducer");
+        let group_by = field_named(&reducer, "group_by");
+        let FieldType::List(element) = &group_by.field_type else {
+            panic!("group_by is a list");
+        };
+        assert!(!can_fill_from_sample(element));
+
+        let mut values = HashMap::new();
+        let schema = kayak_core::schema::infer(&[json!({"a": 1})]);
+        assert_eq!(fill_from_sample(&mut values, "group_by", element, &schema), 0);
+        assert!(values.is_empty());
     }
 
     /// The chain a dry run is given, keyed by draft position — which is the

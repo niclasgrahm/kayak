@@ -3972,6 +3972,9 @@ fn FieldEditor(
     connections: Signal<Vec<(String, String)>>,
 ) -> AnyView {
     let name = form::path(&prefix, &field.name);
+    // what a sample found at this component, for the message-field boxes and
+    // for the list button that fills a whole mapping in from it
+    let schemas = use_context::<SampleSchemas>();
     // read once, on purpose: the control is uncontrolled from here on, so that
     // typing into it doesn't rebuild it
     let initial = values.with_untracked(|v| v.get(&name).cloned().unwrap_or_default());
@@ -4143,6 +4146,11 @@ fn FieldEditor(
         // local signal so a keystroke inside a row can't reach it.
         FieldType::List(element) => {
             let element = (**element).clone();
+            // kept back for the "fill from sample" button below, which needs
+            // the element to know what a row is made of and the path to write
+            // the rows at
+            let fillable = element.clone();
+            let fill_at = at.clone();
             let at = at.clone();
             let rows = RwSignal::new(values.with_untracked(|v| form::list_len(v, &at)));
             let add = {
@@ -4202,9 +4210,43 @@ fn FieldEditor(
                             })
                             .collect_view()
                     }}
-                    <button class="button" on:click=add>
-                        "+ add"
-                    </button>
+                    <div class="form-list-actions">
+                        <button class="button" on:click=add>
+                            "+ add"
+                        </button>
+                        // Only for a list whose rows map a *message* field, and
+                        // only once something has been sampled: with nothing to
+                        // fill from, a button that filled in nothing would read
+                        // as broken. See [`form::fill_from_sample`] for what it
+                        // will and won't decide for you.
+                        {move || {
+                            let schema = schemas?.at(index)?;
+                            if schema.fields.is_empty() || !form::can_fill_from_sample(&fillable) {
+                                return None;
+                            }
+                            let fill_at = fill_at.clone();
+                            let element = fillable.clone();
+                            let fill = move |_: leptos::ev::MouseEvent| {
+                                let len = values
+                                    .try_update(|v| {
+                                        form::fill_from_sample(v, &fill_at, &element, &schema)
+                                    })
+                                    .unwrap_or_default();
+                                rows.set(len);
+                            };
+                            Some(
+                                view! {
+                                    <button
+                                        class="button"
+                                        title="add a row per field the sampled messages carried"
+                                        on:click=fill
+                                    >
+                                        "fill from sample"
+                                    </button>
+                                },
+                            )
+                        }}
+                    </div>
                 </div>
             }
             .into_any()
