@@ -2683,9 +2683,22 @@ textarea {
 //
 // A `<textarea>` with transparent text sitting exactly on top of a `<pre>` that
 // holds the same characters coloured. Every rule below that looks like
-// duplication between `.script-highlight` and `.script-input` is load-bearing:
-// the two elements have to lay their text out identically, to the pixel, or the
-// colours drift out from under the caret. Change one, change the other.
+// duplication between `.script-highlight`, `.script-input` and
+// `.script-measure` is load-bearing: the three elements have to lay their text
+// out identically, to the pixel, or the colours drift out from under the caret
+// and the hint lands on the wrong word. Change one, change the others.
+//
+// The three metrics are variables because Rust reads two of them as well: the
+// popup and the hint are placed in `ch` and `--script-line-height`, and
+// `PADDING_X`/`PADDING_Y` in `app.rs` mirror the padding so a pointer position
+// can be turned back into a cell. Change these and change those — the same rule
+// `GRID` and the canvas background follow.
+:root {
+  --script-line-height: 18px;
+  --script-pad-x: 8px;
+  --script-pad-y: 6px;
+}
+
 .script-editor {
   display: flex;
   flex-direction: column;
@@ -2707,6 +2720,90 @@ textarea {
   align-items: stretch;
 }
 
+.script-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 11px;
+}
+
+.script-toolbar-gap {
+  flex: 1 1 auto;
+}
+
+// The component's `scope`, set from here as well as from the form row under
+// the editor. Styled as the label it mostly is — no border until it is pointed
+// at — because it is read far more often than it is changed.
+.script-scope {
+  appearance: none;
+  background: none;
+  border: 1px solid transparent;
+  border-radius: 2px;
+  padding: 1px 4px;
+  color: var(--rhai-host);
+  font-family: var(--font-mono);
+  font-size: 11px;
+  cursor: pointer;
+
+  &:hover,
+  &:focus {
+    border-color: var(--border);
+    background: var(--bg-hover);
+    outline: none;
+  }
+
+  // the popup is the browser's, and it inherits none of the above
+  > option {
+    background: var(--bg-panel);
+    color: var(--text);
+  }
+}
+
+// The chevron the select cannot draw for itself. On the wrapper rather than the
+// control because `appearance: none` also takes the arrow away, and a select
+// has no `::after` of its own to put one back.
+.script-scope-picker {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+
+  > .script-scope {
+    padding-right: 14px;
+  }
+
+  &::after {
+    content: "▾";
+    position: absolute;
+    right: 4px;
+    color: var(--text-dim);
+    font-size: 9px;
+    pointer-events: none;
+  }
+}
+
+.script-toolbar-button {
+  appearance: none;
+  background: none;
+  border: 1px solid transparent;
+  border-radius: 2px;
+  padding: 1px 6px;
+  color: var(--text-dim);
+  font: inherit;
+  font-size: 11px;
+  cursor: pointer;
+
+  &:hover {
+    color: var(--text);
+    background: var(--bg-hover);
+  }
+
+  &.active {
+    color: var(--text);
+    border-color: var(--border);
+    background: var(--bg-hover);
+  }
+}
+
 .script-surface {
   display: flex;
   background: var(--bg-canvas);
@@ -2720,6 +2817,13 @@ textarea {
   // to agree about where every line breaks), so a long line has to be
   // reachable.
   overflow: auto;
+
+  // A script that does not compile says so on its own edge as well as in the
+  // strip underneath: the strip is one line of prose under a box that may be
+  // twenty lines tall, and the eye is in the box.
+  &.failed {
+    border-color: var(--error);
+  }
 }
 
 .script-gutter {
@@ -2741,6 +2845,14 @@ textarea {
   line-height: 1.5;
 }
 
+.script-gutter-line {
+  min-height: var(--script-line-height);
+
+  &.failed {
+    color: var(--error);
+  }
+}
+
 .script-code {
   position: relative;
   // grows to fill, never shrinks below its content: the `<pre>` inside is what
@@ -2751,17 +2863,22 @@ textarea {
 }
 
 .script-highlight,
-.script-input {
+.script-input,
+.script-measure {
   // the shared metrics — see the block comment above
   font-family: var(--font-mono);
   font-size: 12px;
   line-height: 1.5;
-  padding: 6px 8px;
   margin: 0;
   border: 0;
   white-space: pre;
   overflow-wrap: normal;
   tab-size: 2;
+}
+
+.script-highlight,
+.script-input {
+  padding: var(--script-pad-y) var(--script-pad-x);
 }
 
 .script-highlight {
@@ -2774,8 +2891,28 @@ textarea {
   pointer-events: none;
 }
 
+// Two lines of ten characters, never shown and never in the flow: its width is
+// ten character cells and its height two lines, which is how `cell_size` in
+// `app.rs` learns the size of one. Measured rather than assumed because the
+// mono fallback font differs by platform.
+.script-measure {
+  position: absolute;
+  top: 0;
+  left: 0;
+  visibility: hidden;
+  pointer-events: none;
+  padding: 0;
+}
+
 .script-line {
-  min-height: 1.5em;
+  min-height: var(--script-line-height);
+
+  // The line the compiler named, tinted the width of the box rather than
+  // underlined: an underline under a line of code that is still being typed
+  // moves on every keystroke, and this does not.
+  &.failed {
+    background: var(--error-bg);
+  }
 }
 
 .script-input {
@@ -2826,14 +2963,217 @@ textarea {
   color: var(--rhai-host);
 }
 
-// ── the try-it pane ─────────────────────────────────────────────────────────
-.try-it {
+// ── the completion popup and the hint ───────────────────────────────────────
+//
+// Both are placed in `ch` units, which on a monospaced font *is* the character
+// cell — so a column is a column with nothing to keep in sync. Both therefore
+// have to carry the code's own font metrics, whatever they show.
+.script-popup,
+.script-hint {
+  position: absolute;
+  z-index: 3;
+  font-family: var(--font-mono);
+  font-size: 12px;
+  background: var(--bg-titlebar);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  box-shadow: 0 6px 20px rgba(0, 0, 0, 0.5);
+}
+
+.script-popup {
+  margin: 2px 0 0;
+  padding: 2px;
+  list-style: none;
+  max-height: 168px;
+  overflow-y: auto;
+  min-width: 220px;
+  max-width: 520px;
+}
+
+.script-popup-row {
+  > button {
+    display: flex;
+    align-items: baseline;
+    gap: 6px;
+    width: 100%;
+    // one row is one line: a signature that wrapped would make the list a
+    // different height per row, and the arrow keys walk it
+    white-space: nowrap;
+    appearance: none;
+    background: none;
+    border: 0;
+    border-radius: 2px;
+    padding: 2px 6px;
+    color: var(--text);
+    font: inherit;
+    text-align: left;
+    cursor: pointer;
+  }
+
+  &.selected > button,
+  > button:hover {
+    background: var(--accent);
+    color: #fff;
+
+    .script-popup-detail,
+    .script-popup-kind {
+      color: rgba(255, 255, 255, 0.75);
+    }
+  }
+}
+
+.completion-builtin {
+  color: var(--rhai-host);
+}
+.completion-field {
+  color: var(--json-key);
+}
+.completion-keyword {
+  color: var(--rhai-keyword);
+}
+
+.script-popup-detail {
+  flex: 1 1 auto;
+  color: var(--text-dim);
+  // prose, so the body's font rather than the code's — the popup itself has to
+  // be monospaced for its `ch` placement, which does not make its descriptions
+  // code
+  font-family: "Noto Sans", "Open Sans", system-ui, sans-serif;
+  font-size: 11px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.script-popup-kind {
+  flex: 0 0 auto;
+  color: var(--text-dim);
+  font-size: 10px;
+}
+
+.script-hint {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 4px 8px;
+  max-width: 380px;
+  pointer-events: none;
+
+  > code {
+    color: var(--rhai-host);
+  }
+
+  > span {
+    color: var(--text-dim);
+    font-size: 11px;
+    white-space: normal;
+  }
+}
+
+.script-hint-warn {
+  color: var(--stat-out) !important;
+}
+
+// ── what the server said ────────────────────────────────────────────────────
+.script-problem {
+  display: flex;
+  gap: 6px;
+  align-items: baseline;
+  flex-wrap: wrap;
+  font-size: 12px;
+  padding: 4px 8px;
+  border-radius: var(--radius);
+  color: var(--error);
+  background: var(--error-bg);
+
+  // The messages box is not JSON, or the request did not come back: neither is
+  // a fault in the script, so neither is coloured as one.
+  &.unasked,
+  &.checking {
+    color: var(--text-dim);
+    background: none;
+    padding-left: 0;
+  }
+}
+
+.script-problem-where {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  opacity: 0.85;
+}
+
+.script-problem-message {
+  flex: 1 1 200px;
+}
+
+// ── the reference ───────────────────────────────────────────────────────────
+.script-reference {
+  background: var(--bg-canvas);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 8px;
+  max-height: 320px;
+  overflow: auto;
+  min-width: 0;
+
+  > h4 {
+    margin: 0 0 6px;
+    font-size: 11px;
+    color: var(--text-dim);
+    font-weight: 600;
+  }
+
+  > ul {
+    list-style: none;
+    margin: 0;
+    padding: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+  }
+}
+
+.script-reference-row {
+  // Shown rather than hidden when it belongs to the other scope: leaving it out
+  // would make `batch` look like something that does not exist, rather than
+  // something this component is not configured for.
+  &.out-of-scope {
+    opacity: 0.55;
+  }
+
+  > code {
+    font-family: var(--font-mono);
+    font-size: 12px;
+  }
+}
+
+.script-reference-scope {
+  margin-left: 6px;
+  font-size: 10px;
+  color: var(--stat-out);
+}
+
+.script-reference-summary {
+  margin: 2px 0 0;
+  font-size: 11px;
+  color: var(--text);
+}
+
+.script-reference-detail {
+  margin: 2px 0 0;
+  font-size: 11px;
+  color: var(--text-dim);
+}
+
+// ── what the script does to the messages ────────────────────────────────────
+.script-results {
   display: flex;
   flex-direction: column;
   gap: 4px;
+  min-height: 0;
 }
 
-.try-it-toggle {
+.script-results-toggle {
   align-self: flex-start;
   background: none;
   border: 0;
@@ -2847,59 +3187,151 @@ textarea {
   }
 }
 
-.try-it-body {
-  display: flex;
-  flex-direction: column;
-  gap: 6px;
-  padding: 8px;
-  background: var(--bg-canvas);
-  border: 1px solid var(--border);
-  border-radius: var(--radius);
+.script-results-body {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 8px;
+  min-height: 0;
 }
 
-.try-it-label {
+.script-pane {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  min-width: 0;
+  min-height: 0;
+}
+
+.script-pane-head {
+  display: flex;
+  gap: 6px;
+  align-items: baseline;
   color: var(--text-dim);
   font-size: 11px;
 }
 
-.try-it-input {
+.script-pane-note {
+  color: var(--rhai-host);
+  font-size: 10px;
+}
+
+.script-messages {
   font-family: var(--font-mono);
-  font-size: 12px;
-  min-height: 56px;
+  font-size: 11px;
+  min-height: 96px;
   resize: vertical;
-  background: var(--bg-panel);
+  background: var(--bg-canvas);
   color: var(--text);
   border: 1px solid var(--border);
   border-radius: var(--radius);
   padding: 6px 8px;
+  white-space: pre;
 }
 
-.try-it-summary {
+.script-out {
+  flex: 1 1 auto;
+  min-height: 96px;
+  max-height: 260px;
+  overflow: auto;
+  background: var(--bg-canvas);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 4px 6px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.script-out-empty {
   color: var(--text-dim);
   font-size: 11px;
 }
 
-.try-it-batch {
-  font-family: var(--font-mono);
-  font-size: 11px;
-  margin: 0;
-  padding: 6px 8px;
-  background: var(--bg-panel);
-  border-radius: var(--radius);
-  max-height: 180px;
-  overflow: auto;
-  white-space: pre;
-}
-
-.try-it-error {
-  color: var(--error);
-  background: var(--error-bg);
-  border-radius: var(--radius);
-  padding: 6px 8px;
-  font-size: 12px;
-}
-
-.try-it-warning {
+.script-warning {
   color: var(--stat-out);
   font-size: 11px;
+}
+
+// ── the full-screen editor ──────────────────────────────────────────────────
+//
+// Over the modal rather than inside it: the form is 520px wide and a script is
+// the one field that is not a line, so the choice is between editing code
+// through a letterbox and taking the screen for as long as it takes. The form
+// is still there underneath and the draft is untouched — this is a way of
+// looking at one field, like a maximized card is a way of looking at one
+// pipeline, and like that one it goes no further than the browser tab.
+.script-overlay {
+  position: fixed;
+  inset: 24px;
+  z-index: 20;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 0 12px 12px;
+  background: var(--bg-panel);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  box-shadow: 0 12px 40px rgba(0, 0, 0, 0.6);
+  min-height: 0;
+}
+
+.script-overlay-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 0 -12px;
+  padding: 6px 6px 6px 10px;
+  background: var(--bg-titlebar);
+  border-bottom: 1px solid var(--border);
+
+  .script-toolbar {
+    flex: 1 1 auto;
+  }
+}
+
+.script-overlay-body {
+  display: flex;
+  gap: 8px;
+  flex: 1 1 auto;
+  min-height: 0;
+
+  .script-reference {
+    flex: 0 0 300px;
+    max-height: none;
+  }
+}
+
+.script-overlay-code {
+  flex: 1 1 auto;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  min-width: 0;
+  min-height: 0;
+
+  // the box takes what is left, rather than the 320px a form row gives it
+  .script-surface {
+    flex: 1 1 auto;
+    max-height: none;
+  }
+}
+
+// In the overlay the messages and what came of them are half the point, so
+// they get a third of the height rather than the fixed strip a form row can
+// spare.
+.script-overlay > .script-results {
+  flex: 0 0 30%;
+  min-height: 0;
+
+  .script-results-body {
+    flex: 1 1 auto;
+    min-height: 0;
+  }
+
+  .script-messages,
+  .script-out {
+    flex: 1 1 auto;
+    max-height: none;
+    min-height: 0;
+  }
 }
