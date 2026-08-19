@@ -102,8 +102,9 @@ pub struct MqttOutput {
     /// and won't fail on its own. `None` before the first connect.
     alive: Option<Arc<AtomicBool>>,
     /// Paces reconnect attempts once `alive` says the connection is gone —
-    /// see `emit`. `init` never consults it: a pipeline that can't reach its
-    /// broker at startup still fails to build, same as always.
+    /// see `emit`. `init` never consults it, and does not need to: an output
+    /// that can't reach its broker at startup is retried by the run loop
+    /// instead, on this same schedule — see `PipelineRuntime::init_outputs`.
     gate: Gate,
 }
 

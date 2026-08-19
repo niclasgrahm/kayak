@@ -241,6 +241,10 @@ pub struct CollectingOutput {
     /// When set, every `emit` fails — used to check that a broken output does
     /// not tear the pipeline down.
     fail_emit: bool,
+    /// How many more `init` calls fail before one succeeds. `usize::MAX` for
+    /// an output that never initialises — a database that is simply not
+    /// running, which is the case the run loop's retry exists for.
+    fail_init: usize,
 }
 
 impl CollectingOutput {
@@ -251,6 +255,7 @@ impl CollectingOutput {
             init_calls: Arc::new(Mutex::new(0)),
             finish_calls: Arc::new(Mutex::new(0)),
             fail_emit: false,
+            fail_init: 0,
         }
     }
 
@@ -258,6 +263,18 @@ impl CollectingOutput {
     pub fn failing() -> Self {
         Self {
             fail_emit: true,
+            ..Self::new()
+        }
+    }
+
+    /// An output whose first `attempts` `init` calls fail and whose next one
+    /// succeeds — a destination that is down when the pipeline starts and
+    /// comes back while it is waiting. `usize::MAX` for one that never comes
+    /// back.
+    #[must_use]
+    pub fn failing_init(attempts: usize) -> Self {
+        Self {
+            fail_init: attempts,
             ..Self::new()
         }
     }
@@ -299,7 +316,17 @@ impl OutputDestination for CollectingOutput {
     }
 
     async fn init(&mut self) -> Result<()> {
-        *lock(&self.init_calls) += 1;
+        let attempt = {
+            let mut calls = lock(&self.init_calls);
+            *calls += 1;
+            *calls
+        };
+        if self.fail_init > 0 {
+            self.fail_init = self.fail_init.saturating_sub(1);
+            return Err(anyhow!(
+                "collecting output could not initialise (attempt {attempt})"
+            ));
+        }
         Ok(())
     }
 

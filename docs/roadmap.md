@@ -422,11 +422,18 @@ which is why they weren't just fixed.
       its own `verb` (and refuses the bodyless methods), so the two components
       now read the same field differently — which is the argument for settling
       this rather than leaving it.
-- [ ] **dead pipelines stay in the map.** When a run loop exits (e.g. its input
-      errored), the `PipelineHandle` stays in `AppState`, so `GET /api/pipelines`
-      lists a pipeline that isn't running. `join_handle` is never inspected.
-      Needs a real lifecycle/status concept — running / stopped / failed —
-      probably surfaced in the UI cards too.
+- [x] **dead pipelines stay in the map.** (fixed 2026-08-19: `RunStatus` —
+      starting / running / stopped / failed — is set by the run loop, carried on
+      `PipelineDto` and shown as a badge on the card. The handle deliberately
+      *stays* in the map: removing it would take the card, its config and its
+      history with it, and "this pipeline is over" is exactly what someone needs
+      to be able to see. The commonest cause of a dead pipeline went at the same
+      time — an output that can't initialise is now retried rather than ending
+      the run loop, see `PipelineRuntime::init_outputs`.)
+      Still open on the same theme: nothing **restarts** a pipeline whose input
+      died. An input's own reconnect covers a broker going away, so what is left
+      is the input that fails for good, and a restart button on the card is
+      probably the honest answer rather than an automatic one.
 - [x] **file output has a hardcoded path.** (fixed 2026-08-07: it now takes a
       `file` connection, a `path` under it, a `format` and a `rotate` policy,
       and is sandboxed by `--data-dir`. See "file output" above.)

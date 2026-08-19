@@ -367,6 +367,33 @@ textarea {
     }
   }
 
+  // A pipeline whose run loop is not running. Only rendered when there is
+  // something to say — see the `<Show>` in `Card` — so this is allowed to be
+  // loud: the whole point is that a dead pipeline should not look like a quiet
+  // one. Uppercase and small rather than coloured text at title size, so it
+  // reads as a state and not as part of the id.
+  .card-status {
+    flex: none;
+    font-size: 9px;
+    font-weight: 700;
+    letter-spacing: 0.06em;
+    text-transform: uppercase;
+    padding: 2px 5px;
+    border-radius: 3px;
+    color: var(--error);
+    background: var(--error-bg);
+    border: 1px solid var(--error);
+
+    // Waiting for a destination to come back is not a failure — nothing is
+    // wrong that the pipeline isn't already handling, and it usually clears
+    // itself. Amber, and the same amber the chart's outbound series uses.
+    &.starting {
+      color: var(--stat-out);
+      background: transparent;
+      border-color: var(--stat-out);
+    }
+  }
+
   // Upper right, and understated in the same way the resize handle is: it sits
   // on every card in both modes, so it has to stay out of the way until wanted.
   .card-maximize {

@@ -1,4 +1,5 @@
 use crate::BuildCtx;
+use crate::backoff::Backoff;
 use crate::config::BuildInputConfig;
 use crate::events::{Watchers, publish};
 use crate::history::History;
@@ -15,7 +16,7 @@ use anyhow::Context;
 use futures_util::stream::{FuturesUnordered, StreamExt};
 use anyhow::Result;
 use kayak_core::config::Config;
-use kayak_core::Stage;
+use kayak_core::{RunStatus, Stage};
 use serde::Serialize;
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
@@ -41,6 +42,17 @@ pub struct Pipeline {
     /// hours when nobody was watching.
     #[serde(skip)]
     pub counters: crate::history::Counters,
+    /// Where the run loop has got to — see [`RunStatus`], and
+    /// [`PipelineRuntime::init_outputs`] for the state that made this worth
+    /// having.
+    ///
+    /// A `Mutex` rather than an atomic despite living beside three of them:
+    /// this is written three times in a pipeline's whole life and read only
+    /// when the API is asked, so the `u8` encoding an atomic would need is
+    /// cost with no reader to pay it back. It is a leaf lock, never held
+    /// across an `.await`.
+    #[serde(skip)]
+    status: Mutex<RunStatus>,
 }
 
 // impl Pipeline {
@@ -52,10 +64,15 @@ pub struct Pipeline {
 //         }
 //     }
 
+/// The borrowed spelling of [`kayak_core::PipelineDto`] — what
+/// `GET /api/pipelines` serializes. The two shapes are the same on the wire
+/// and `the_pipeline_view_is_the_documented_dto` in `tests/api.rs` is what
+/// says so.
 #[derive(Serialize)]
 pub struct PipelineView<'a> {
     id: &'a PipelineId,
     config: &'a Config,
+    status: RunStatus,
 }
 
 async fn next_input_message(input: &mut Box<dyn InputSource>) -> Result<Delivery> {
@@ -407,25 +424,86 @@ impl PipelineRuntime {
         self
     }
 
-    /// Initialise every output, or fail the run.
+    /// Initialise every output, waiting out whatever is stopping one.
     ///
-    /// An output that can't be initialised is fatal: it would never accept a
-    /// batch, and a pipeline half-writing its outputs is worse than one that
-    /// says why it didn't start.
-    async fn init_outputs(&mut self) -> anyhow::Result<()> {
-        for index in 0..self.outputs.len() {
-            let Err(e) = self.outputs[index].init().await else {
-                continue;
-            };
-            self.shared.counters.add_error();
-            remember_failure(&self.history, &self.shared.id, Stage::Output, Some(index), &e, 1);
-            // no `seq`: this is before the first pass, not part of one
-            publish(&self.events, || {
-                UiEvent::error(self.shared.id.clone(), Stage::Output, &e).component(index)
-            });
-            return Err(e);
+    /// The invariant is unchanged and is the reason this runs before the loop
+    /// rather than inside it: an output that has not initialised never sees a
+    /// batch, because there is no pass until every one of them is ready. What
+    /// changed is what happens *while* one is unreachable. This used to
+    /// return the error, which ended `run` before the loop was ever entered —
+    /// and since nothing removes the handle when a run loop exits, a
+    /// `postgres` output pointed at a database that simply wasn't up yet left
+    /// a pipeline registered, dead, and with nothing in the process that
+    /// would ever bring it back. Restarting the server was the only cure.
+    ///
+    /// So a failed `init` is now retried on the same [`Backoff`] every input
+    /// and every output already reconnects on, and the pipeline comes up on
+    /// its own the moment the far end answers. Not reading the input in the
+    /// meantime is the right backpressure: there is nowhere to put a message
+    /// yet.
+    ///
+    /// **Retrying is deliberately not conditional on the kind of failure.** A
+    /// wrong password and a downed host are the same `Err` to most drivers,
+    /// and guessing wrong is expensive in one direction only — a
+    /// misclassified outage is a pipeline that never comes back, while a
+    /// misclassified config error costs one connect attempt every thirty
+    /// seconds. A permanent failure is legible without the runtime having to
+    /// rule on it: it arrives as a single [`crate::history::ErrorSignature`]
+    /// whose count climbs, and "password authentication failed, 240 times
+    /// since 02:14" reads as fatal to anyone looking at the card.
+    ///
+    /// Returns `false` if the pipeline was cancelled while waiting.
+    async fn init_outputs(&mut self) -> bool {
+        let mut backoff = Backoff::new();
+        // Resumed at, never restarted from: the outputs before this one are
+        // connected already, and calling `init` on them again would open a
+        // second connection and leak the first.
+        let mut index = 0;
+        while index < self.outputs.len() {
+            match self.outputs[index].init().await {
+                Ok(()) => {
+                    if backoff.is_failing() {
+                        debug!(
+                            "[{}]\t output {index} initialised after {} failed attempts",
+                            self.shared.id,
+                            backoff.attempts()
+                        );
+                        backoff.succeeded();
+                    }
+                    index += 1;
+                    continue;
+                }
+                Err(e) => {
+                    error!(
+                        "[{}]\t output {index} failed to initialise, retrying: {e:?}",
+                        self.shared.id
+                    );
+                    self.shared.counters.add_error();
+                    remember_failure(
+                        &self.history,
+                        &self.shared.id,
+                        Stage::Output,
+                        Some(index),
+                        &e,
+                        1,
+                    );
+                    // no `seq`: this is before the first pass, not part of one
+                    publish(&self.events, || {
+                        UiEvent::error(self.shared.id.clone(), Stage::Output, &e).component(index)
+                    });
+                }
+            }
+            // Paced by the backoff rather than by [`UiThrottle`]: here the
+            // attempts *are* the events, and they are already at most one
+            // every 250ms climbing to one every 30s. Cancellable, because
+            // waiting out a database that is never coming back must not hold
+            // up a delete or a shutdown for thirty seconds.
+            select! {
+                () = self.shared.cancellation_token.cancelled() => return false,
+                () = tokio::time::sleep(backoff.failed()) => {}
+            }
         }
-        Ok(())
+        true
     }
 
     /// Give every output its one chance to land an unfinished part.
@@ -612,7 +690,14 @@ impl PipelineRuntime {
 
     /// Run until the input errors or the pipeline is cancelled.
     pub async fn run(mut self) -> anyhow::Result<()> {
-        self.init_outputs().await?;
+        if !self.init_outputs().await {
+            // Cancelled before the loop was ever entered, so there is nothing
+            // to finish: no batch was emitted, and no output opens a part
+            // before its first one — see `outputs::file`'s `init`.
+            self.shared.set_status(RunStatus::Stopped);
+            return Ok(());
+        }
+        self.shared.set_status(RunStatus::Running);
         // Which pass through the loop we are on. Every event a pass produces
         // carries it, which is what lets the UI show one batch's journey — in,
         // transforms, out — as one thing rather than as unrelated lines that
@@ -771,7 +856,20 @@ impl PipelineRuntime {
                 ack.ack();
             }
         }
+        // Which of the two ways out this was, decided by the same question
+        // the error arm above asks — "was *I* cancelled". A loop that ended
+        // any other way ended because its last input died, and that is the
+        // state worth being able to see from outside: the pipeline is over,
+        // and nothing in the process will restart it.
+        let ended = if self.shared.cancellation_token.is_cancelled() {
+            RunStatus::Stopped
+        } else {
+            RunStatus::Failed
+        };
         self.finish_outputs().await;
+        // After `finish_outputs`, so the status changes when the run loop is
+        // actually done rather than while an output is still landing a part.
+        self.shared.set_status(ended);
         Ok(())
     }
 }
@@ -789,6 +887,33 @@ impl Pipeline {
             config,
             downstream_senders: Mutex::new(Vec::new()),
             counters: crate::history::Counters::default(),
+            // Built, not yet spawned — and `Starting` rather than `Running`
+            // because the run loop is what earns the promotion, in `run()`,
+            // once every output has initialised.
+            status: Mutex::new(RunStatus::Starting),
+        })
+    }
+
+    /// Where this pipeline's run loop has got to.
+    #[must_use]
+    pub fn status(&self) -> RunStatus {
+        *self.lock_status()
+    }
+
+    /// Move it. Only the run loop calls this — the status is a report of what
+    /// that task is doing, and something else writing it would be a claim
+    /// rather than an observation.
+    fn set_status(&self, status: RunStatus) {
+        *self.lock_status() = status;
+    }
+
+    /// A poisoned lock here only means a task panicked while reading or
+    /// writing one enum; recover rather than propagate, exactly as
+    /// [`Pipeline::lock_senders`] does.
+    fn lock_status(&self) -> std::sync::MutexGuard<'_, RunStatus> {
+        self.status.lock().unwrap_or_else(|poisoned| {
+            tracing::warn!("[{}]\t status lock was poisoned; recovering", self.id);
+            poisoned.into_inner()
         })
     }
 
@@ -855,6 +980,7 @@ impl Pipeline {
         PipelineView {
             id: &self.id,
             config: &self.config,
+            status: self.status(),
         }
     }
 }

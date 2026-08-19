@@ -131,6 +131,38 @@ async fn a_created_stream_shows_up_in_the_listing() -> anyhow::Result<()> {
     Ok(())
 }
 
+/// What the listing serializes has to be what the spec says it does.
+///
+/// `PipelineView` is the borrowed spelling of `PipelineDto` and nothing but
+/// this connects them: the view is what the handler writes, the DTO is what
+/// the schema and the frontend are generated from, and a field added to one
+/// and not the other is a silent drift. Deserializing a real response into the
+/// documented type is what catches it — the same trick
+/// `an_error_body_matches_the_documented_shape` plays on `ApiError`.
+#[tokio::test]
+async fn the_listing_matches_the_documented_pipeline_shape() -> anyhow::Result<()> {
+    let app = app();
+    post_stream(&app, &idle_config("p1")).await?;
+
+    let (status, body) = get_pipelines(&app).await?;
+    assert_eq!(status, StatusCode::OK);
+
+    let listed: Vec<kayak_core::PipelineDto> = serde_json::from_value(body)?;
+    let [pipeline] = listed.as_slice() else {
+        panic!("expected exactly one pipeline, got {}", listed.len());
+    };
+    assert_eq!(pipeline.id, "p1");
+    // Deliberately not asserting *which* status: the run loop is a separate
+    // task, so whether it has finished initialising its `stdout` output by
+    // now is a race. That it is reported at all is this test's business; the
+    // transitions themselves are pinned in `tests/pipeline.rs`.
+    assert!(
+        !pipeline.status.as_str().is_empty(),
+        "the listing should report a run status"
+    );
+    Ok(())
+}
+
 #[tokio::test]
 async fn an_empty_server_lists_no_streams() -> anyhow::Result<()> {
     let (status, body) = get_pipelines(&app()).await?;

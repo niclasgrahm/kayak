@@ -5,7 +5,7 @@ use kayak_core::script::{DryRunRequest, DryRunResponse};
 use kayak_core::state::{BucketContents, BucketSummary};
 use kayak_core::{
     AuthDto, ConfigFormat, Connections, EdgeEnd, LayoutFile, PipelineDto, PipelineId, PortLayout,
-    Side, UiEvent, config::Config,
+    RunStatus, Side, UiEvent, config::Config,
 };
 use leptos::prelude::*;
 use leptos_meta::*;
@@ -1478,6 +1478,7 @@ pub fn CanvasPage() -> impl IntoView {
                                                 <Card
                                                     pipeline_id=s.id.clone()
                                                     config=s.config.clone()
+                                                    status=s.status
                                                 />
                                             </For>
 
@@ -5923,7 +5924,7 @@ fn FailureHistory(
 }
 
 #[component]
-pub fn Card(pipeline_id: PipelineId, config: Config) -> impl IntoView {
+pub fn Card(pipeline_id: PipelineId, config: Config, status: RunStatus) -> impl IntoView {
     let state = expect_context::<AppState>();
     let canvas = state.canvas_state;
     let messages = RwSignal::new(log::Log::default());
@@ -6256,6 +6257,30 @@ pub fn Card(pipeline_id: PipelineId, config: Config) -> impl IntoView {
                 }
             >
                 <span class="card-title">{pipeline_id.clone()}</span>
+                // Only when there is something to say. A pipeline that is
+                // running is the overwhelming majority and a badge reading
+                // "running" on every card would be nine words of chrome
+                // saying nothing — while a pipeline whose run loop has ended
+                // looks, without this, exactly like a quiet one.
+                <Show when=move || !status.is_running()>
+                    <span
+                        class="card-status"
+                        class:starting=move || status == RunStatus::Starting
+                        title=match status {
+                            RunStatus::Starting => {
+                                "an output is not ready yet — retrying, and the pipeline will \
+                                 start on its own once it connects"
+                            }
+                            RunStatus::Stopped => "this pipeline's run loop was stopped",
+                            _ => {
+                                "this pipeline's run loop has ended — its input died, and \
+                                 nothing will come out of it until it is rebuilt"
+                            }
+                        }
+                    >
+                        {status.as_str()}
+                    </span>
+                </Show>
                 // Not behind the edit-mode `<Show>`: filling the screen with a
                 // card is a way of reading it, and read-only wants it most.
                 <button

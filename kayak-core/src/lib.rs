@@ -25,8 +25,8 @@ pub use history::{ErrorSignature, HistoryBucket, PipelineHistory, Resolution};
 pub use layout::{EdgeEnd, LayoutFile, PipelineLayout, PortLayout, Side};
 pub use state::{PipelineState, StateBucketConfig, StateBuckets};
 
-/// One pipeline as the API reports it: the id it is running under, and the
-/// config it was built from.
+/// One pipeline as the API reports it: the id it is running under, the config
+/// it was built from, and whether its run loop is still alive.
 ///
 /// The same wire shape the run loop's `PipelineView` serializes to — this is
 /// the owned spelling of it, and the one the schema is generated from.
@@ -34,6 +34,70 @@ pub use state::{PipelineState, StateBucketConfig, StateBuckets};
 pub struct PipelineDto {
     pub id: String,
     pub config: Config,
+    /// Where the run loop has got to. `#[serde(default)]` for the reason
+    /// `UiEvent::ts` has one: a body from a server that predates the field
+    /// reads as [`RunStatus::Running`], which is what every reader assumed
+    /// before there was anything else it could be.
+    #[serde(default)]
+    pub status: RunStatus,
+}
+
+/// Where a pipeline's run loop has got to.
+///
+/// A pipeline is a spawned task, and until this existed nothing could say
+/// whether that task was still alive: a run loop that had ended left its
+/// handle in the map looking exactly like a running one — same card, same
+/// config, same everything, and no messages ever again. That is the zombie
+/// this names.
+///
+/// Deliberately four states and not a `bool`. "Not running" has three causes
+/// that want different reactions: one is waiting for a database to come back
+/// and needs nothing done, one is a graph being torn down, and one is a
+/// pipeline that is over.
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, Default, PartialEq, Eq, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum RunStatus {
+    /// Spawned, with an output still being initialised. A pipeline whose
+    /// database is not up yet sits here — retrying on a backoff — rather than
+    /// dying, and leaves on its own the moment the far end answers.
+    Starting,
+    /// Initialised and in the loop. The only state in which messages move.
+    #[default]
+    Running,
+    /// The loop ended because it was cancelled: a delete, a revert or a
+    /// shutdown. Rarely seen, because the handle is normally dropped with it.
+    Stopped,
+    /// The loop ended on its own — the last input died. Nothing will come out
+    /// of this pipeline again until something rebuilds it.
+    Failed,
+}
+
+impl RunStatus {
+    /// The wire spelling, for anything that needs it as text — a badge, a log
+    /// line. Same string `serde` produces.
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Starting => "starting",
+            Self::Running => "running",
+            Self::Stopped => "stopped",
+            Self::Failed => "failed",
+        }
+    }
+
+    /// Whether this is the state a healthy pipeline is in. What the UI hangs
+    /// "say something" off, so that a state added later is shown rather than
+    /// silently treated as fine.
+    #[must_use]
+    pub fn is_running(self) -> bool {
+        matches!(self, Self::Running)
+    }
+}
+
+impl std::fmt::Display for RunStatus {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
 }
 
 /// What `POST /api/pipelines/{id}/messages` takes: one message, or an array of
@@ -429,8 +493,8 @@ impl UiEvent {
 #[cfg(test)]
 mod tests {
     use super::{
-        AuthDto, BatchPreview, EventPayload, MAX_MESSAGE_BYTES, MESSAGES_PER_BATCH, Stage, UiEvent,
-        truncate,
+        AuthDto, BatchPreview, EventPayload, MAX_MESSAGE_BYTES, MESSAGES_PER_BATCH, PipelineDto,
+        RunStatus, Stage, UiEvent, truncate,
     };
     use serde_json::json;
     use std::sync::Arc;
@@ -452,6 +516,39 @@ mod tests {
             );
             assert_eq!(stage.as_str(), spelling);
         }
+    }
+
+    #[test]
+    fn run_status_round_trips_through_its_wire_spelling() {
+        for (status, spelling) in [
+            (RunStatus::Starting, "starting"),
+            (RunStatus::Running, "running"),
+            (RunStatus::Stopped, "stopped"),
+            (RunStatus::Failed, "failed"),
+        ] {
+            assert_eq!(serde_json::to_value(status).ok(), Some(json!(spelling)));
+            assert_eq!(
+                serde_json::from_value::<RunStatus>(json!(spelling)).ok(),
+                Some(status)
+            );
+            assert_eq!(status.as_str(), spelling);
+        }
+    }
+
+    /// A pipeline body from a server that predates the field reads as running
+    /// — the state every reader assumed when there was nothing else it could
+    /// be. See [`PipelineDto::status`].
+    #[test]
+    fn a_pipeline_without_a_status_reads_as_running() {
+        let dto: PipelineDto = match serde_json::from_value(json!({
+            "id": "witty-crab",
+            "config": {"inputs": [], "transforms": [], "outputs": []},
+        })) {
+            Ok(dto) => dto,
+            Err(e) => panic!("deserializing a status-less pipeline: {e}"),
+        };
+        assert_eq!(dto.status, RunStatus::Running);
+        assert!(dto.status.is_running());
     }
 
     #[test]

@@ -4480,7 +4480,7 @@ An OpenAPI 3.1 document. See https://spec.openapis.org/oas/v3.1.0
 
 ## `PipelineDto` {#schema-pipelinedto}
 
-One pipeline as the API reports it: the id it is running under, and the config it was built from.
+One pipeline as the API reports it: the id it is running under, the config it was built from, and whether its run loop is still alive.
 
 The same wire shape the run loop's `PipelineView` serializes to — this is the owned spelling of it, and the one the schema is generated from.
 
@@ -6856,6 +6856,31 @@ The same wire shape the run loop's `PipelineView` serializes to — this is the 
       },
       "type": "object"
     },
+    "RunStatus": {
+      "description": "Where a pipeline's run loop has got to.\n\nA pipeline is a spawned task, and until this existed nothing could say\nwhether that task was still alive: a run loop that had ended left its\nhandle in the map looking exactly like a running one — same card, same\nconfig, same everything, and no messages ever again. That is the zombie\nthis names.\n\nDeliberately four states and not a `bool`. \"Not running\" has three causes\nthat want different reactions: one is waiting for a database to come back\nand needs nothing done, one is a graph being torn down, and one is a\npipeline that is over.",
+      "oneOf": [
+        {
+          "const": "starting",
+          "description": "Spawned, with an output still being initialised. A pipeline whose\ndatabase is not up yet sits here — retrying on a backoff — rather than\ndying, and leaves on its own the moment the far end answers.",
+          "type": "string"
+        },
+        {
+          "const": "running",
+          "description": "Initialised and in the loop. The only state in which messages move.",
+          "type": "string"
+        },
+        {
+          "const": "stopped",
+          "description": "The loop ended because it was cancelled: a delete, a revert or a\nshutdown. Rarely seen, because the handle is normally dropped with it.",
+          "type": "string"
+        },
+        {
+          "const": "failed",
+          "description": "The loop ended on its own — the last input died. Nothing will come out\nof this pipeline again until something rebuilds it.",
+          "type": "string"
+        }
+      ]
+    },
     "S3OutputConfig": {
       "description": "Writes each batch to objects under a prefix in an S3-compatible bucket.\n\nThe same writer as the `file` output — the same part naming, the same\nformats, the same rotation policy — pointed at a bucket instead of a\ndirectory. What differs is that an object store has no append: a part is\nbuffered in memory and uploaded whole when it rotates, so `rotate` is\n**required** here and is what decides both how often objects appear and how\nmuch a running pipeline holds.",
       "properties": {
@@ -7157,13 +7182,18 @@ The same wire shape the run loop's `PipelineView` serializes to — this is the 
     }
   },
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "description": "One pipeline as the API reports it: the id it is running under, and the\nconfig it was built from.\n\nThe same wire shape the run loop's `PipelineView` serializes to — this is\nthe owned spelling of it, and the one the schema is generated from.",
+  "description": "One pipeline as the API reports it: the id it is running under, the config\nit was built from, and whether its run loop is still alive.\n\nThe same wire shape the run loop's `PipelineView` serializes to — this is\nthe owned spelling of it, and the one the schema is generated from.",
   "properties": {
     "config": {
       "$ref": "#/$defs/Config"
     },
     "id": {
       "type": "string"
+    },
+    "status": {
+      "$ref": "#/$defs/RunStatus",
+      "default": "running",
+      "description": "Where the run loop has got to. `#[serde(default)]` for the reason\n`UiEvent::ts` has one: a body from a server that predates the field\nreads as [`RunStatus::Running`], which is what every reader assumed\nbefore there was anything else it could be."
     }
   },
   "required": [
