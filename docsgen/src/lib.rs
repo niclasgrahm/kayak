@@ -33,6 +33,7 @@ use kayak_core::api_docs::{ApiDoc, Body, TAGS, endpoints, schemas};
 use kayak_core::docs::{
     ComponentDoc, Family, FieldDoc, FieldType, StateDoc, all_components, state_docs,
 };
+use kayak_core::script::{ScriptScope, builtins};
 use serde_json::{Value, json};
 
 /// Where generated partials live, relative to the site root.
@@ -91,6 +92,11 @@ pub fn files() -> Vec<GeneratedFile> {
     out.push(GeneratedFile {
         path: format!("{GENERATED}/state.md"),
         contents: partial(&state_sections(&state_docs())),
+    });
+
+    out.push(GeneratedFile {
+        path: format!("{GENERATED}/script-builtins.md"),
+        contents: partial(&script_builtins()),
     });
 
     let api = endpoints();
@@ -306,6 +312,34 @@ fn state_sections(docs: &[StateDoc]) -> String {
         }
         out.push_str(&field_table(&doc.fields));
         out.push_str(&nested(&doc.fields));
+    }
+    out
+}
+
+// -------------------------------------------------------------- script host
+
+/// What a script is given, out of `kayak_core::script::builtins` — the same
+/// declaration the editor's reference panel and completion list are built from,
+/// and the one `builtins_are_the_functions_the_engine_has` pins against the
+/// engine's registrations.
+///
+/// Generated for the reason every other table here is: this one was written by
+/// hand and had already drifted from the code by a row. The prose around it on
+/// the page is still written — why `field` is not called `get`, what `throw`
+/// does — because none of that is in a declaration.
+fn script_builtins() -> String {
+    let mut out = String::from("| | |\n|---|---|\n");
+    for builtin in builtins() {
+        let scope = match builtin.scope {
+            Some(ScriptScope::Message) => " *(`message` scope)*",
+            Some(ScriptScope::Batch) => " *(`batch` scope)*",
+            None => "",
+        };
+        out.push_str(&format!(
+            "| `{}` | {}{scope} |\n",
+            builtin.signature,
+            cell(builtin.summary)
+        ));
     }
     out
 }

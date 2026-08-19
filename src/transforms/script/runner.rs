@@ -1058,4 +1058,83 @@ mod tests {
         assert_eq!(runner.warnings(), vec!["the stream does not carry `unit`"]);
         Ok(())
     }
+
+    /// **The editor's answer to "what can I call" is
+    /// [`kayak_core::script::builtins`], and this is the only thing that keeps
+    /// it true.** It fails in both directions on purpose: a function registered
+    /// here and not declared there is undiscoverable — coloured as an unknown
+    /// identifier, missing from the reference panel, never completed — and a
+    /// function declared there and not registered here is worse, because the
+    /// editor offers a call that fails at runtime.
+    ///
+    /// The engine is built with state bound, since `remember` and `recall` are
+    /// registered either way (unbound they fail with the message that says what
+    /// to add) and both spellings are what a script may write.
+    #[test]
+    fn builtins_are_the_functions_the_engine_has() {
+        use kayak_core::script::{BuiltinKind, builtins};
+
+        let engine = build_engine(
+            1000,
+            &Arc::new(Mutex::new(Vec::new())),
+            &Arc::new(Mutex::new(HashSet::new())),
+            Bindings::default(),
+        );
+        // `gen_fn_signatures` renders each registration as `name(arg: Type)`;
+        // the name is all this is about, since the arities are the component's
+        // business and the declaration describes one call shape per name.
+        let mut registered: Vec<String> = engine
+            .gen_fn_signatures(false)
+            .into_iter()
+            .filter_map(|signature| {
+                signature
+                    .split('(')
+                    .next()
+                    .map(|name| name.rsplit("::").next().unwrap_or(name).trim().to_string())
+            })
+            .collect();
+        registered.sort();
+        registered.dedup();
+
+        let mut declared: Vec<String> = builtins()
+            .iter()
+            .filter(|builtin| builtin.kind == BuiltinKind::Function)
+            .map(|builtin| builtin.name.to_string())
+            .collect();
+        declared.sort();
+
+        assert_eq!(
+            registered, declared,
+            "the engine's functions and `kayak_core::script::builtins()` have drifted — \
+             registered: {registered:?}, declared: {declared:?}"
+        );
+    }
+
+    /// The other half of the surface: `msg` and `batch` are pushed into the
+    /// scope rather than registered, so the test above cannot see them. What
+    /// says they exist is a script that reads one and emits it.
+    #[test]
+    fn the_declared_bindings_are_the_ones_a_script_is_handed() -> Result<(), ScriptError> {
+        use kayak_core::script::{BuiltinKind, builtins};
+
+        for binding in builtins()
+            .iter()
+            .filter(|builtin| builtin.kind == BuiltinKind::Binding)
+        {
+            // A binding with no scope would be one that exists in both, which
+            // neither of these is; `the_bindings_are_scoped_and_the_functions_
+            // are_not` in core is what says so, and there is nothing useful to
+            // run for one here.
+            let Some(scope) = binding.scope else { continue };
+            let code = format!("emit({});", binding.name);
+            let out = run(&code, scope, &[json!({"n": 1})])?;
+            assert_eq!(
+                out.len(),
+                1,
+                "`{}` should be in scope in a {scope:?} script",
+                binding.name
+            );
+        }
+        Ok(())
+    }
 }

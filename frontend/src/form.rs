@@ -196,6 +196,44 @@ pub fn fields_of(doc: &ComponentDoc, variant: Option<&str>) -> Vec<FieldDoc> {
         .unwrap_or_default()
 }
 
+/// How a script's editor runs it: the `scope` and `max_operations` filled in
+/// beside the code, read out of the same flat draft map everything else lives
+/// in.
+///
+/// **Why this exists at all**: the editor's dry run has to be configured the
+/// way the transform will be, or it answers a question nobody asked. A script
+/// written against `batch` and tried under `message` fails on `batch` being
+/// undefined — an error about the editor rather than about the script — and one
+/// with a raised budget would be stopped by the default here and reported as a
+/// runaway loop.
+///
+/// `at` is the path of the *code* field, which is two levels down: `code` sits
+/// inside the `source` union, and `scope` is a sibling of `source`. So the
+/// component's own prefix is `at` with two segments taken off, and everything
+/// is read relative to that rather than from a hardcoded `"scope"` — the same
+/// field editor renders a script nested anywhere the schema puts one.
+#[must_use]
+pub fn script_settings(
+    values: &HashMap<String, String>,
+    at: &str,
+) -> (kayak_core::script::ScriptScope, Option<u64>) {
+    let component = at
+        .rsplit_once('.')
+        .and_then(|(rest, _)| rest.rsplit_once('.').map(|(rest, _)| rest))
+        .unwrap_or("");
+    let read = |name: &str| values.get(&path(component, name)).map(String::as_str);
+    // Anything unreadable is the default, never an error: this is a form
+    // somebody is part-way through, and refusing to run the script because the
+    // budget box holds "10_" would take the editor away exactly when it is
+    // being used.
+    let scope = match read("scope") {
+        Some("batch") => kayak_core::script::ScriptScope::Batch,
+        _ => kayak_core::script::ScriptScope::Message,
+    };
+    let max_operations = read("max_operations").and_then(|text| text.trim().parse().ok());
+    (scope, max_operations)
+}
+
 /// Where one field's text lives in a draft: its name, prefixed by the path of
 /// whatever it is nested inside.
 ///
@@ -1983,5 +2021,44 @@ mod tests {
             };
             values.insert(at, sample);
         }
+    }
+
+    /// The editor's dry run has to be configured the way the transform will be
+    /// — see [`script_settings`]. Reading the settings relative to the code's
+    /// own path is what makes that true for a script nested anywhere.
+    #[test]
+    fn a_scripts_settings_are_read_from_beside_its_code() {
+        let mut values = HashMap::new();
+        values.insert("source.type".to_string(), "inline".to_string());
+        values.insert("source.code".to_string(), "emit(msg);".to_string());
+
+        // nothing filled in is the transform's own defaults, not an error
+        assert_eq!(
+            script_settings(&values, "source.code"),
+            (kayak_core::script::ScriptScope::Message, None)
+        );
+
+        values.insert("scope".to_string(), "batch".to_string());
+        values.insert("max_operations".to_string(), "50000".to_string());
+        assert_eq!(
+            script_settings(&values, "source.code"),
+            (kayak_core::script::ScriptScope::Batch, Some(50_000))
+        );
+
+        // a half-typed budget is the default rather than a refusal to run
+        values.insert("max_operations".to_string(), "50_".to_string());
+        assert_eq!(script_settings(&values, "source.code").1, None);
+    }
+
+    /// A path with fewer than two segments in front of it cannot be a script
+    /// inside a union, and reading past the start of it would be a panic.
+    #[test]
+    fn script_settings_survive_a_path_with_no_room_above_it() {
+        let mut values = HashMap::new();
+        values.insert("scope".to_string(), "batch".to_string());
+        assert_eq!(
+            script_settings(&values, "code").0,
+            kayak_core::script::ScriptScope::Batch
+        );
     }
 }
