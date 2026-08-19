@@ -3606,13 +3606,38 @@ fn SamplePanel() -> impl IntoView {
     }
 }
 
+/// The panel while the request is out.
+///
+/// It counts, and it says what it is counting towards. A sample waits on a
+/// real stream, so several seconds of nothing is the *expected* case rather
+/// than a sign of trouble — and a pane that sat there saying "waiting" with no
+/// sign of life is one people press the button again from. The two bounds are
+/// the server's own constants, so what the panel promises and what the
+/// endpoint does cannot drift apart.
+#[component]
+fn WaitingForSample() -> impl IntoView {
+    let seconds = RwSignal::new(0u32);
+    // cleaned up when the panel stops showing this arm, which is what
+    // `use_interval_fn` does on unmount
+    let _ = leptos_use::use_interval_fn(move || seconds.update(|s| *s += 1), 1000);
+    let limit = kayak_core::sample::DEFAULT_TIMEOUT_MS / 1000;
+    view! {
+        <div class="empty">
+            {move || {
+                format!(
+                    "waiting for up to {} messages… {}s of {limit}s",
+                    kayak_core::sample::DEFAULT_MAX_MESSAGES,
+                    seconds.get(),
+                )
+            }}
+        </div>
+    }
+}
+
 /// What the panel holds, by what the sample came back as.
 fn sample_body(state: SampleState) -> AnyView {
     match state {
-        SampleState::Fetching => view! {
-            <div class="empty">"waiting for a message…"</div>
-        }
-        .into_any(),
+        SampleState::Fetching => view! { <WaitingForSample /> }.into_any(),
         SampleState::Failed(message) => view! {
             <div class="form-error">{message}</div>
         }

@@ -1276,49 +1276,57 @@ textarea {
     .log-message:hover .log-message-bar .clear {
       opacity: 1;
     }
-
-    // `pre-wrap`, not `pre`: a card is 18 grid cells wide and a payload with a
-    // long string in it would otherwise scroll sideways to be read at all. The
-    // indent is its own span so a wrapped line still starts under its key.
-    .log-json {
-      margin: 0;
-      padding: 2px 8px 4px;
-      font: inherit;
-      white-space: pre-wrap;
-      word-break: break-word;
-      color: var(--text);
-
-      // not JSON — a truncated payload, or an error's text. Dimmed, because
-      // there is no structure in it to look at.
-      &.plain {
-        color: var(--text-dim);
-      }
-    }
-
-    .json-indent {
-      white-space: pre;
-    }
-    .json-punct {
-      color: var(--text-dim);
-    }
-    .json-key {
-      color: var(--json-key);
-    }
-    .json-str {
-      color: var(--json-str);
-    }
-    .json-num {
-      color: var(--json-num);
-    }
-    .json-literal {
-      color: var(--json-literal);
-    }
   }
 
   // Inside an open pass, the box lines up with the rows it belongs to.
   .log-pass-entries .log-expanded {
     margin-left: 18px;
   }
+}
+
+// How a JSON message is laid out and coloured, wherever one is shown.
+//
+// Top-level rather than nested under the log, because `MessageBody` renders
+// one in two places now: an expanded log row on a card, and the sample panel
+// beside the add-pipeline form. A payload should be read the same way in both
+// — the colours are what makes a key findable at a glance — so the rules
+// belong to the markup rather than to whichever pane happens to hold it.
+//
+// `pre-wrap`, not `pre`: a card is 18 grid cells wide and a payload with a
+// long string in it would otherwise scroll sideways to be read at all. The
+// indent is its own span so a wrapped line still starts under its key.
+.log-json {
+  margin: 0;
+  padding: 2px 8px 4px;
+  font: inherit;
+  white-space: pre-wrap;
+  word-break: break-word;
+  color: var(--text);
+
+  // not JSON — a truncated payload, or an error's text. Dimmed, because
+  // there is no structure in it to look at.
+  &.plain {
+    color: var(--text-dim);
+  }
+}
+
+.json-indent {
+  white-space: pre;
+}
+.json-punct {
+  color: var(--text-dim);
+}
+.json-key {
+  color: var(--json-key);
+}
+.json-str {
+  color: var(--json-str);
+}
+.json-num {
+  color: var(--json-num);
+}
+.json-literal {
+  color: var(--json-literal);
 }
 
 .log-jump {

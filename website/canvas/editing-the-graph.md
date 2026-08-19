@@ -65,9 +65,18 @@ look.
 pipeline would, takes a few real messages from it and shows them in a panel
 beside the form. Nothing is created: there is no pipeline afterwards, and
 nothing is acknowledged to the broker — a sample has not delivered anything
-anywhere. It waits a few seconds and then answers with what arrived, which is
-sometimes nothing: none of these inputs can replay what was published before
-the sample started, so a quiet subject samples empty and says so.
+anywhere.
+
+It stops at **whichever bound it reaches first: five messages, or five
+seconds**, and the panel counts while it waits. That is why a source ticking
+once a second gives you four — the first message arrives a second after the
+input is built, and the fifth would land just as the window closes. A quiet
+subject samples empty and says so: none of these inputs can replay what was
+published before the sample started.
+
+The whole sample arrives at once, when the request answers. Watching them
+trickle in would mean a streaming response, which is a different endpoint
+shape — see the roadmap.
 
 **Sampling is not free for every kind of input, and the ones where it isn't say
 what they did.** A kafka sample reads under a throwaway consumer group, so it

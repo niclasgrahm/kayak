@@ -23,6 +23,16 @@ re-derive. See the [docs site](../website/) for how the finished parts behave, a
       Tracking the values themselves would put a round trip on every
       keystroke, so it needs a debounce and a rule for what a half-typed
       transform means.
+- [ ] **a sample arrives all at once.** `POST /api/inputs/sample` answers when
+      it has enough messages or has waited long enough, so a source ticking
+      once a second shows nothing for several seconds and then four messages
+      together. The panel counts while it waits, which is a plaster rather
+      than a fix. Streaming them needs a response shape the browser can read
+      incrementally: SSE is a `GET`, and the request body here is a whole
+      input config, so it is either a streaming `POST` read through a
+      `ReadableStream` or a two-step "start a sample, then subscribe to it"
+      with server-side state and a lifetime to manage. Both also need a cancel
+      story for closing the modal mid-sample.
 - [ ] **nothing samples an `http` input.** It is refused, because sampling it
       would mean claiming the endpoint of the pipeline that owns it. The
       honest version is a *listen* rather than a fetch: register a temporary
