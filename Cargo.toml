@@ -3,7 +3,7 @@ members = ["kayak-core", "frontend", "kayak-bench", "docsgen"]
 
 [package]
 name = "kayak"
-version = "0.1.1"
+version = "0.1.2"
 edition = "2024"
 # The server and everything compiled into it. See LICENSE, and licensing.md
 # for why this side is copyleft and kayak-core is not.
