@@ -1,6 +1,6 @@
 [package]
 name = "kayak-core"
-version = "0.1.1"
+version = "0.1.2"
 edition = "2024"
 # Permissive on purpose, and the one crate that is: it is the shared
 # vocabulary anything talking to kayak needs, so copyleft here would be a
