@@ -7,6 +7,12 @@ secrets.json
 # what `just dev` passes as --data-dir: pipeline data written by file outputs.
 # It is output, not a fixture, and a dev run can fill it without limit.
 /dev_data
+# somewhere for the config files a dev session writes. `save as…` in the UI puts
+# a config in the server's working directory, which is the repo root, so trying
+# the save path leaves `config-something.json` (and its `.layout.json`, and its
+# `.connections.json`) lying beside the real ones. The sample lives in
+# example_config/ and is committed; anything here is a session's leftovers.
+/scratch
 .playwright-mcp/
 # the doc site's build output and dependencies. Everything *generated from the
 # Rust source* under website/reference/generated is committed on purpose — it
