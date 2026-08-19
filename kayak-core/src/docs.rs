@@ -125,6 +125,32 @@ pub enum FieldType {
     Json,
 }
 
+impl FieldType {
+    /// Whether this field's control brings a *block* of its own with it —
+    /// rows, or the fields of a nested object — rather than being a single box
+    /// on the row's control column.
+    ///
+    /// The form asks because those two want different room. A box belongs
+    /// beside its label; a block of further rows does not fit in the half of a
+    /// row that is left over, and putting it there is what once shifted every
+    /// level of nesting further right and squeezed the labels inside it down
+    /// to an ellipsis. A block is laid out under the row instead, across the
+    /// whole width, so nesting costs one indent rather than half the space
+    /// that is left.
+    ///
+    /// A union has both: the tag dropdown is the row's control, and the
+    /// variant's fields are the block under it. An object with no fields has
+    /// nothing to lay out and is not one.
+    #[must_use]
+    pub fn has_block(&self) -> bool {
+        match self {
+            Self::Object(fields) => !fields.is_empty(),
+            Self::List(_) | Self::Union(_) => true,
+            _ => false,
+        }
+    }
+}
+
 /// A tagged union as a form can render it: pick the tag, then fill in whatever
 /// that variant asks for.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -759,6 +785,59 @@ mod tests {
         match all_components().into_iter().find(|c| c.kind == kind) {
             Some(c) => c,
             None => panic!("no component documented for '{kind}'"),
+        }
+    }
+
+    /// The distinction the form lays a field out by: a box on the row, or a
+    /// block under it. Getting this wrong doesn't fail to compile — it puts a
+    /// list of rows in the half of a row that is left over — so it is pinned
+    /// here rather than left to the rendering.
+    #[test]
+    fn only_the_field_types_with_fields_of_their_own_bring_a_block() {
+        let element = Box::new(FieldDoc {
+            name: String::new(),
+            type_name: "text".into(),
+            field_type: FieldType::Text,
+            description: None,
+            required: true,
+        });
+        let field = FieldDoc {
+            name: "size".into(),
+            type_name: "integer".into(),
+            field_type: FieldType::Integer,
+            description: None,
+            required: false,
+        };
+
+        assert!(FieldType::List(element).has_block());
+        assert!(FieldType::Object(vec![field.clone()]).has_block());
+        assert!(
+            FieldType::Union(UnionDoc {
+                tag: "type".into(),
+                variants: vec![VariantDoc {
+                    name: "static".into(),
+                    fields: vec![field],
+                }],
+            })
+            .has_block()
+        );
+
+        // nothing to lay out, so nothing to lay out under the row
+        assert!(!FieldType::Object(Vec::new()).has_block());
+
+        for field_type in [
+            FieldType::Text,
+            FieldType::Integer,
+            FieldType::Number,
+            FieldType::Boolean,
+            FieldType::Enum(vec!["a".into()]),
+            FieldType::PipelineId,
+            FieldType::Connection("kafka".into()),
+            FieldType::MessageField,
+            FieldType::Script("rhai".into()),
+            FieldType::Json,
+        ] {
+            assert!(!field_type.has_block(), "{field_type:?} is not a block");
         }
     }
 

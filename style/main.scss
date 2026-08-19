@@ -2153,7 +2153,10 @@ textarea {
 }
 
 .modal {
-  width: 520px;
+  // wide enough that a nested field's own boxes still have room for a label
+  // beside them: a mapping inside a list inside a component is three levels
+  // in, and the labels are what say which box is which
+  width: 620px;
   max-width: 100%;
   max-height: 100%;
   background: var(--bg-panel);
@@ -2269,6 +2272,7 @@ textarea {
 .form-list-actions {
   display: flex;
   gap: 6px;
+  margin-top: 2px;
 
   > .button {
     flex: 1;
@@ -2322,9 +2326,15 @@ textarea {
 
 // A label / control pair, on the inspector's grid so the modal's rows line up
 // with the ones on the cards.
+//
+// The label column is a fixed width rather than a percentage: a nested block
+// is indented, so a percentage took its share of what was *left* at every
+// level and the innermost labels — the ones naming a mapping's `value` and
+// `as` — were the first to be cut to an ellipsis. A fixed column shrinks by
+// the indent alone.
 .form-row {
   display: grid;
-  grid-template-columns: 40% 1fr;
+  grid-template-columns: 140px 1fr;
   gap: 6px;
   align-items: baseline;
   padding: 2px 0;
@@ -2332,9 +2342,22 @@ textarea {
   > label {
     color: var(--text-dim);
     font-size: 11px;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
+    // a long name wraps rather than being truncated: the name is how the box
+    // is told apart from the one under it, so it is the last thing to give way
+    overflow-wrap: break-word;
+  }
+
+  // A field that is nothing but a block of its own rows, and a list row, each
+  // have their label somewhere other than the column: over the block, and in
+  // the row's header. Either way there is nothing to sit beside, so the
+  // control column takes the whole width.
+  &.heading,
+  &.unlabelled {
+    grid-template-columns: 1fr;
+  }
+
+  &.heading > label {
+    color: var(--text);
   }
 
   .required-marker {
@@ -2383,42 +2406,80 @@ textarea {
 }
 
 // The fields *of* a field: a rotation's triggers, or whichever fields the
-// buffer kind that was just picked asks for. They sit in the control column of
-// the row that owns them, and the rule down the left is what says so.
-.form-nested {
+// buffer kind that was just picked asks for. They sit *under* the row that
+// owns them rather than in its control column — see [`FieldType::has_block`]
+// — and the rule down the left is what says which row they belong to.
+.form-nested,
+.form-list {
   border-left: 1px solid var(--border);
-  margin-top: 4px;
-  padding-left: 8px;
-
-  .form-row {
-    grid-template-columns: 45% 1fr;
-  }
+  margin: 2px 0 6px;
+  padding-left: 10px;
 }
 
-// A field with no fixed number of boxes: a reducer's aggregations. Rows sit in
-// the control column of the row that owns them, each with its own remove, and
-// the "+ add" underneath is the only thing that changes how many there are.
+// A field with no fixed number of boxes: a reducer's aggregations, a map's
+// mappings. Each row is a block of its own with a numbered header, because a
+// row is several fields and the eye needs to be told where one ends; the "+
+// add" underneath is the only thing that changes how many there are.
 .form-list {
   .form-list-row {
+    border: 1px solid var(--border);
+    border-radius: 2px;
+    background: var(--bg-canvas);
+    padding: 4px 6px 6px;
+    margin-bottom: 6px;
+  }
+
+  .form-list-row-header {
     display: flex;
-    align-items: flex-start;
-    gap: 4px;
+    align-items: center;
+    justify-content: space-between;
+    gap: 6px;
+    margin-bottom: 2px;
+  }
+
+  // A row that is a single box needs no header of its own: the number, the box
+  // and the remove read as one line. `display: contents` on the header is what
+  // lets the three sit in one flex row while the markup stays the same shape
+  // for both kinds of row.
+  .form-list-row.inline {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    padding: 3px 6px;
+
+    .form-list-row-header {
+      display: contents;
+    }
 
     .form-list-body {
       flex: 1;
       min-width: 0;
+      order: 1;
     }
 
-    // the label of a row is its number, which needs none of the width a field
-    // name does
+    .icon-button {
+      order: 2;
+    }
+
     .form-row {
-      grid-template-columns: 18px 1fr;
+      padding: 0;
     }
   }
 
-  > .button {
-    margin-top: 4px;
-    width: 100%;
+  // the row's number: a marker, not a field name, so it is small and dim and
+  // never in the column the labels are in
+  .form-list-index {
+    color: var(--text-dim);
+    font-family: var(--font-mono);
+    font-size: 10px;
+  }
+
+  // a block inside a row is already inside a box, so it needs no second rule
+  // down its left — the nesting is legible from the box
+  .form-list-body > .form-nested {
+    border-left: none;
+    padding-left: 0;
+    margin-bottom: 0;
   }
 }
 
