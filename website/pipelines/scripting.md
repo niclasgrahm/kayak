@@ -258,6 +258,13 @@ describes it. A name belonging to the other scope — `batch` in a per-message
 script — is described but never offered, because completing it would write a
 call that fails at runtime.
 
+**Switching scope is in the toolbar**, beside the code, as well as in the
+`scope` row under the editor — they are the same field and either follows the
+other. It is worth having twice because it decides whether `msg` or `batch` is
+a name at all, and because the full-screen editor covers the form. A box still
+holding the starter follows the switch; anything you have typed is left exactly
+as it is, and the editor reports what the other scope makes of it.
+
 **`expand` gives it the screen.** The form is a column of narrow controls and a
 script is the one field that is not a line; the full-screen editor is the same
 box with the reference beside it and the messages under it. Escape closes it,

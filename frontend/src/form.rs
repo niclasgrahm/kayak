@@ -217,11 +217,7 @@ pub fn script_settings(
     values: &HashMap<String, String>,
     at: &str,
 ) -> (kayak_core::script::ScriptScope, Option<u64>) {
-    let component = at
-        .rsplit_once('.')
-        .and_then(|(rest, _)| rest.rsplit_once('.').map(|(rest, _)| rest))
-        .unwrap_or("");
-    let read = |name: &str| values.get(&path(component, name)).map(String::as_str);
+    let read = |name: &str| values.get(&script_sibling(at, name)).map(String::as_str);
     // Anything unreadable is the default, never an error: this is a form
     // somebody is part-way through, and refusing to run the script because the
     // budget box holds "10_" would take the editor away exactly when it is
@@ -232,6 +228,70 @@ pub fn script_settings(
     };
     let max_operations = read("max_operations").and_then(|text| text.trim().parse().ok());
     (scope, max_operations)
+}
+
+/// Where a field beside a script's `source` lives, given the path of the code
+/// itself.
+///
+/// `code` sits inside the `source` union and `scope` is a sibling of `source`,
+/// so the component's own prefix is `at` with two segments taken off. Spelled
+/// once here rather than at each call site, because the toolbar over the editor
+/// *writes* `scope` as well as reading it, and the two have to agree about
+/// where it lives or the control edits a key nothing reads.
+#[must_use]
+pub fn script_sibling(at: &str, name: &str) -> String {
+    let component = at
+        .rsplit_once('.')
+        .and_then(|(rest, _)| rest.rsplit_once('.').map(|(rest, _)| rest))
+        .unwrap_or("");
+    path(component, name)
+}
+
+/// What an empty script editor starts as.
+///
+/// A starter rather than a blank box, and it is the identity transform: it
+/// compiles, it runs, and running it shows the messages going through
+/// unchanged — so the loop the editor is built around is already turning
+/// before anything has been typed. A blank box starts by being *invalid*
+/// (`POST /api/scripts/dry-run` refuses an empty script, rightly: a transform
+/// that does nothing is better left out than left blank), which is a poor first
+/// thing to say to somebody who has just opened it.
+///
+/// Written into the draft rather than shown as a placeholder, because it is
+/// meant to be edited — a placeholder would vanish at the first keystroke and
+/// leave the box empty again.
+#[must_use]
+pub fn starter(scope: kayak_core::script::ScriptScope) -> &'static str {
+    match scope {
+        kayak_core::script::ScriptScope::Message => "emit(msg);",
+        kayak_core::script::ScriptScope::Batch => "emit(batch);",
+    }
+}
+
+/// The starter for `to`, but **only if nothing has been written yet** — the box
+/// still holding the starter for `from`, or holding nothing at all.
+///
+/// Switching scope makes the other starter the wrong one twice over: `msg` is
+/// not even a name in `batch` scope, and `emit(msg)` there fails with "every
+/// emitted value is a whole batch" if it were. Neither is a good first thing to
+/// meet after changing a dropdown, so an untouched box follows the switch.
+///
+/// It is deliberately an exact match against the starter and not a heuristic:
+/// this rewrites somebody's code, and the only version of that which is
+/// certainly safe is the one where the code is still ours. Anything typed —
+/// even a space — keeps what is in the box, and the editor reports the runtime
+/// error instead, which is the honest answer for a script that really is
+/// written for the other scope.
+#[must_use]
+pub fn restarted_for_scope(
+    source: &str,
+    from: kayak_core::script::ScriptScope,
+    to: kayak_core::script::ScriptScope,
+) -> Option<&'static str> {
+    if from == to {
+        return None;
+    }
+    (source.trim().is_empty() || source.trim() == starter(from)).then(|| starter(to))
 }
 
 /// Where one field's text lives in a draft: its name, prefixed by the path of
@@ -1991,8 +2051,9 @@ mod tests {
                 | FieldType::Connection(_)
                 | FieldType::MessageField => "x".to_string(),
                 // a script that parses and emits its message — the smallest
-                // thing that is actually a working transform
-                FieldType::Script(_) => "emit(msg);".to_string(),
+                // thing that is actually a working transform, and the same
+                // text the editor starts an empty box with
+                FieldType::Script(_) => starter(kayak_core::script::ScriptScope::Message).to_string(),
                 FieldType::Integer => "1".to_string(),
                 FieldType::Number => "1.5".to_string(),
                 FieldType::Boolean => "true".to_string(),
@@ -2060,5 +2121,53 @@ mod tests {
             script_settings(&values, "code").0,
             kayak_core::script::ScriptScope::Batch
         );
+    }
+
+
+    /// The toolbar over the editor writes `scope` as well as reading it, so
+    /// both have to agree about where it lives — a control editing a key
+    /// nothing reads looks exactly like a control that does nothing.
+    #[test]
+    fn a_scripts_siblings_are_found_from_the_path_of_its_code() {
+        assert_eq!(script_sibling("source.code", "scope"), "scope");
+        assert_eq!(script_sibling("code", "scope"), "scope");
+        assert_eq!(
+            script_sibling("wrapper.source.code", "max_operations"),
+            "wrapper.max_operations"
+        );
+    }
+
+    /// Switching scope rewrites the box, which is only ever safe while the
+    /// code is still ours.
+    #[test]
+    fn switching_scope_carries_an_untouched_starter_over() {
+        use kayak_core::script::ScriptScope::{Batch, Message};
+
+        assert_eq!(
+            restarted_for_scope("emit(msg);", Message, Batch),
+            Some("emit(batch);")
+        );
+        assert_eq!(
+            restarted_for_scope("emit(batch);", Batch, Message),
+            Some("emit(msg);")
+        );
+        // whitespace around it is still an untouched box
+        assert_eq!(
+            restarted_for_scope("  emit(msg);\n", Message, Batch),
+            Some("emit(batch);")
+        );
+        // and so is an empty one, which is what a box gets when its text has
+        // been selected and deleted
+        assert_eq!(restarted_for_scope("", Message, Batch), Some("emit(batch);"));
+    }
+
+    #[test]
+    fn switching_scope_never_touches_something_somebody_wrote() {
+        use kayak_core::script::ScriptScope::{Batch, Message};
+
+        assert_eq!(restarted_for_scope("emit(msg); // mine", Message, Batch), None);
+        assert_eq!(restarted_for_scope("let x = 1;", Message, Batch), None);
+        // and a switch that is not one changes nothing, whatever is in the box
+        assert_eq!(restarted_for_scope("emit(msg);", Message, Message), None);
     }
 }

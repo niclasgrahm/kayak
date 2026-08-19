@@ -2731,13 +2731,54 @@ textarea {
   flex: 1 1 auto;
 }
 
-// What the script is handed, not a control for choosing it: the scope is a
-// field of the component, and a second place to set it would be two answers to
-// one question.
+// The component's `scope`, set from here as well as from the form row under
+// the editor. Styled as the label it mostly is — no border until it is pointed
+// at — because it is read far more often than it is changed.
 .script-scope {
+  appearance: none;
+  background: none;
+  border: 1px solid transparent;
+  border-radius: 2px;
+  padding: 1px 4px;
   color: var(--rhai-host);
   font-family: var(--font-mono);
   font-size: 11px;
+  cursor: pointer;
+
+  &:hover,
+  &:focus {
+    border-color: var(--border);
+    background: var(--bg-hover);
+    outline: none;
+  }
+
+  // the popup is the browser's, and it inherits none of the above
+  > option {
+    background: var(--bg-panel);
+    color: var(--text);
+  }
+}
+
+// The chevron the select cannot draw for itself. On the wrapper rather than the
+// control because `appearance: none` also takes the arrow away, and a select
+// has no `::after` of its own to put one back.
+.script-scope-picker {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+
+  > .script-scope {
+    padding-right: 14px;
+  }
+
+  &::after {
+    content: "▾";
+    position: absolute;
+    right: 4px;
+    color: var(--text-dim);
+    font-size: 9px;
+    pointer-events: none;
+  }
 }
 
 .script-toolbar-button {

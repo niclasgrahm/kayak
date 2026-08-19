@@ -4124,8 +4124,21 @@ fn FieldEditor(
             // what is shown and what is stored the same thing. Optional fields
             // keep theirs for good — it is how a field gets unset again.
             let blank = !field.required || unset;
+            let chosen = at.clone();
             view! {
-                <select class="select" on:change=write>
+                // The one box in this form that follows the draft rather than
+                // only writing to it, and for the same reason the pipeline-id
+                // dropdown does: something else can set it. The script
+                // editor's toolbar writes `scope`, and a dropdown still
+                // showing `message` under an editor that says `batch` is the
+                // form disagreeing with itself. Safe here where it is not for
+                // a text box — a select has no caret and no half-typed value
+                // to destroy.
+                <select
+                    class="select"
+                    prop:value=move || values.with(|v| v.get(&chosen).cloned().unwrap_or_default())
+                    on:change=write
+                >
                     <Show when=move || blank>
                         <option value="" selected=unset></option>
                     </Show>
@@ -7398,26 +7411,6 @@ const MEASURE_COLUMNS: f64 = 10.0;
 /// What the messages box starts as, before anything has been sampled.
 const EXAMPLE_MESSAGES: &str = "[{ \"value\": 1 }]";
 
-/// What an empty editor starts as.
-///
-/// A starter rather than a blank box, and it is the identity transform: it
-/// compiles, it runs, and running it shows the messages going through
-/// unchanged — so the loop this editor is built around is already turning
-/// before anything has been typed. A blank box starts by being *invalid*
-/// (`POST /api/scripts/dry-run` refuses an empty script, rightly: a transform
-/// that does nothing is better left out than left blank), which is a poor first
-/// thing to say to somebody who has just opened it.
-///
-/// Written into the draft rather than shown as a placeholder, because it is
-/// meant to be edited — a placeholder would vanish at the first keystroke and
-/// leave the box empty again.
-fn starter(scope: kayak_core::script::ScriptScope) -> &'static str {
-    match scope {
-        kayak_core::script::ScriptScope::Message => "emit(msg);",
-        kayak_core::script::ScriptScope::Batch => "emit(batch);",
-    }
-}
-
 /// The control a [`FieldType::Script`] field renders as.
 ///
 /// A script is the one component whose configuration can be wrong in a way its
@@ -7466,7 +7459,7 @@ fn ScriptEditor(
     // in an effect afterwards would reach the draft and the highlighter and
     // leave the box somebody types into empty.
     let initial = if initial.trim().is_empty() {
-        starter(values.with_untracked(|values| form::script_settings(values, &at).0)).to_string()
+        form::starter(values.with_untracked(|values| form::script_settings(values, &at).0)).to_string()
     } else {
         initial
     };
@@ -7552,6 +7545,46 @@ fn ScriptEditor(
         recheck.run(());
     });
 
+    // Setting the scope from the toolbar, which is the *same* draft key the
+    // form row below the editor writes — one value, two places to set it, the
+    // way any form has. It is here as well as there because the full-screen
+    // editor covers the form, and because the scope decides whether `msg` or
+    // `batch` is a name at all: sending somebody back to a dropdown behind an
+    // overlay to find that out is the wrong shape for the question.
+    let set_scope = Callback::new(move |chosen: String| {
+        let was = session.scope.get_untracked();
+        let now = if chosen == "batch" {
+            kayak_core::script::ScriptScope::Batch
+        } else {
+            kayak_core::script::ScriptScope::Message
+        };
+        let restarted = form::restarted_for_scope(&session.source.get_untracked(), was, now);
+        values.update(|values| {
+            values.insert(form::script_sibling(&at.get_value(), "scope"), chosen);
+            if let Some(code) = restarted {
+                values.insert(at.get_value(), code.to_string());
+            }
+        });
+        // The box is uncontrolled, so this is what puts the new starter on
+        // screen: `ScriptSurface`'s reconciling effect follows `source`.
+        if let Some(code) = restarted {
+            session.source.set(code.to_string());
+        }
+    });
+
+    // Whatever set it — this toolbar or the form row under the editor — the
+    // answer on screen is about the old scope until it is asked again. A
+    // `batch` script checked as a `message` one fails on `batch` being
+    // undefined, which is an error about the editor wearing the script's
+    // clothes.
+    Effect::new(move |seen: Option<kayak_core::script::ScriptScope>| {
+        let scope = session.scope.get();
+        if seen.is_some_and(|seen| seen != scope) {
+            recheck.run(());
+        }
+        scope
+    });
+
     // Both float over one surface at coordinates measured on it, so neither
     // means anything on the other one. Cleared as the surfaces swap rather
     // than left to be replaced by the next pointer move — the overlay opens
@@ -7579,6 +7612,7 @@ fn ScriptEditor(
                     session=session
                     inline=true
                     expand=Callback::new(move |()| show_full_screen(true))
+                    set_scope=set_scope
                 />
                 <ScriptSurface
                     session=session
@@ -7601,6 +7635,7 @@ fn ScriptEditor(
                             session=session
                             inline=false
                             expand=Callback::new(move |()| show_full_screen(true))
+                            set_scope=set_scope
                         />
                         <button class="icon-button" type="button" title="close" on:click=close>
                             "✕"
@@ -7638,19 +7673,35 @@ fn ScriptToolbar(
     /// `expanded`, because opening it is three things at once — see
     /// `show_full_screen`.
     expand: Callback<()>,
+    /// Set the component's `scope`. A callback because it also carries an
+    /// untouched starter over to the other scope, which needs the draft.
+    set_scope: Callback<String>,
 ) -> impl IntoView {
     view! {
         <div class="script-toolbar">
-            // Not a control: the scope is a field of the component, and a
-            // second place to set it would be two sources of truth for what
-            // the script is handed. It is *shown* because it decides whether
-            // `msg` or `batch` is the name that exists, which is the first
-            // thing anyone needs to know about a script they are reading.
-            <span class="script-scope" title="set by the component's `scope` field">
-                {move || match session.scope.get() {
-                    kayak_core::script::ScriptScope::Message => "per message · msg",
-                    kayak_core::script::ScriptScope::Batch => "per batch · batch",
-                }}
+            // The component's own `scope` field, set from here as well as
+            // from the form row: it decides whether `msg` or `batch` is a name
+            // at all, so it is the first thing anyone needs about a script
+            // they are reading *or* writing. Unlike the boxes in this form it
+            // reads its value back — a select has no caret to lose, and the
+            // two controls have to agree.
+            // Wrapped for the chevron: an `appearance: none` select has no
+            // arrow of its own, and without one this reads as a label — which
+            // is the whole failure it exists to fix. The plain answer to "can
+            // I write this over the batch" has to be visible from here.
+            <span class="script-scope-picker">
+                <select
+                    class="script-scope"
+                    title="the component's `scope` field — what one run of the script is handed"
+                    prop:value=move || match session.scope.get() {
+                        kayak_core::script::ScriptScope::Message => "message",
+                        kayak_core::script::ScriptScope::Batch => "batch",
+                    }
+                    on:change=move |ev| set_scope.run(event_target_value(&ev))
+                >
+                    <option value="message">"per message · msg"</option>
+                    <option value="batch">"per batch · batch"</option>
+                </select>
             </span>
             <span class="script-toolbar-gap" />
             <button
@@ -7718,6 +7769,20 @@ fn ScriptSurface(
         commit(text, None);
         offer_completions(session, editor, false);
     };
+
+    // The box is uncontrolled, so something that changes `source` without
+    // going through it — the starter following a scope switch — has to be put
+    // there. Guarded on the two differing, which they do only for exactly
+    // those changes: a keystroke sets `source` *from* the box, so typing runs
+    // this effect and writes nothing.
+    Effect::new(move |_| {
+        let text = session.source.get();
+        if let Some(area) = editor.get()
+            && area.value() != text
+        {
+            area.set_value(&text);
+        }
+    });
 
     // Accepting a completion rewrites the whole box and puts the caret back
     // inside it, which is why it goes through `set_value` rather than through
@@ -8172,16 +8237,23 @@ fn ScriptResults(session: ScriptSession, recheck: Callback<()>) -> impl IntoView
         recheck.run(());
     };
 
+    // What went in, what came out, and — only where it means something — the
+    // difference. `dropped` is a *per-message* reading and is only offered in
+    // `message` scope: a `batch` script that turns five readings into one
+    // total has dropped nothing, it has folded, and "4 dropped" there says the
+    // script is broken when it is doing exactly its job. Even in message scope
+    // it is a net figure rather than a count of messages that emitted nothing,
+    // which is why the pane underneath is what settles it.
     let summary = move || match session.answer.get() {
         Some(Answer::Ran {
             inputs, batches, ..
         }) => {
             let out: usize = batches.iter().map(Vec::len).sum();
-            let dropped = inputs.saturating_sub(out);
-            let tail = if dropped > 0 && batches.len() <= 1 {
-                format!(" · {dropped} dropped")
-            } else if batches.len() > 1 {
+            let folding = session.scope.get() == kayak_core::script::ScriptScope::Batch;
+            let tail = if batches.len() > 1 {
                 format!(" · {} batches", batches.len())
+            } else if !folding && out < inputs {
+                format!(" · {} dropped", inputs - out)
             } else {
                 String::new()
             };
