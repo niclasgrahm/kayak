@@ -1276,49 +1276,57 @@ textarea {
     .log-message:hover .log-message-bar .clear {
       opacity: 1;
     }
-
-    // `pre-wrap`, not `pre`: a card is 18 grid cells wide and a payload with a
-    // long string in it would otherwise scroll sideways to be read at all. The
-    // indent is its own span so a wrapped line still starts under its key.
-    .log-json {
-      margin: 0;
-      padding: 2px 8px 4px;
-      font: inherit;
-      white-space: pre-wrap;
-      word-break: break-word;
-      color: var(--text);
-
-      // not JSON — a truncated payload, or an error's text. Dimmed, because
-      // there is no structure in it to look at.
-      &.plain {
-        color: var(--text-dim);
-      }
-    }
-
-    .json-indent {
-      white-space: pre;
-    }
-    .json-punct {
-      color: var(--text-dim);
-    }
-    .json-key {
-      color: var(--json-key);
-    }
-    .json-str {
-      color: var(--json-str);
-    }
-    .json-num {
-      color: var(--json-num);
-    }
-    .json-literal {
-      color: var(--json-literal);
-    }
   }
 
   // Inside an open pass, the box lines up with the rows it belongs to.
   .log-pass-entries .log-expanded {
     margin-left: 18px;
   }
+}
+
+// How a JSON message is laid out and coloured, wherever one is shown.
+//
+// Top-level rather than nested under the log, because `MessageBody` renders
+// one in two places now: an expanded log row on a card, and the sample panel
+// beside the add-pipeline form. A payload should be read the same way in both
+// — the colours are what makes a key findable at a glance — so the rules
+// belong to the markup rather than to whichever pane happens to hold it.
+//
+// `pre-wrap`, not `pre`: a card is 18 grid cells wide and a payload with a
+// long string in it would otherwise scroll sideways to be read at all. The
+// indent is its own span so a wrapped line still starts under its key.
+.log-json {
+  margin: 0;
+  padding: 2px 8px 4px;
+  font: inherit;
+  white-space: pre-wrap;
+  word-break: break-word;
+  color: var(--text);
+
+  // not JSON — a truncated payload, or an error's text. Dimmed, because
+  // there is no structure in it to look at.
+  &.plain {
+    color: var(--text-dim);
+  }
+}
+
+.json-indent {
+  white-space: pre;
+}
+.json-punct {
+  color: var(--text-dim);
+}
+.json-key {
+  color: var(--json-key);
+}
+.json-str {
+  color: var(--json-str);
+}
+.json-num {
+  color: var(--json-num);
+}
+.json-literal {
+  color: var(--json-literal);
 }
 
 .log-jump {
@@ -2193,6 +2201,96 @@ textarea {
   padding: 10px;
   overflow-y: auto;
   min-height: 0;
+}
+
+// The form and, when something has been sampled, the messages beside it. A row
+// rather than the panel living inside the modal body: the form is a column of
+// narrow controls and a message is a block of JSON, so stacking them would push
+// whatever is being configured off the screen exactly when it is being checked.
+.modal-with-panel {
+  display: flex;
+  align-items: stretch;
+  justify-content: center;
+  gap: 12px;
+  max-width: 100%;
+  max-height: 100%;
+  min-height: 0;
+}
+
+.sample-panel {
+  width: 420px;
+  // it may vanish entirely — the form must not resize when it does, which is
+  // what the fixed width above is for — but it must also survive a narrow
+  // window rather than pushing the form off the edge
+  min-width: 0;
+  flex-shrink: 1;
+  background: var(--bg-panel);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  box-shadow: 0 12px 40px rgba(0, 0, 0, 0.6);
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+
+  > header {
+    background: var(--bg-titlebar);
+    border-bottom: 1px solid var(--border);
+    padding: 6px 6px 6px 10px;
+    display: flex;
+    align-items: center;
+
+    .modal-title {
+      margin-right: auto;
+    }
+  }
+}
+
+.sample-body {
+  padding: 10px;
+  overflow: auto;
+  min-height: 0;
+  // messages are read here, so the usual canvas-wide `user-select: none` is
+  // turned back on — the same list `.log-body` is on, and for the same reason
+  user-select: text;
+
+  .form-hint,
+  .form-error {
+    margin-bottom: 6px;
+  }
+
+  .log-json {
+    margin-bottom: 8px;
+  }
+}
+
+// The buttons under a list of rows: "+ add", and "fill from sample" once
+// something has been sampled. In a row so the second one doesn't push the
+// first onto a line of its own when it appears.
+.form-list-actions {
+  display: flex;
+  gap: 6px;
+
+  > .button {
+    flex: 1;
+  }
+}
+
+// The heading over one transform's worth of the panel. A rule above it, so a
+// long chain reads as a sequence of steps rather than as one wall of JSON.
+.sample-stage {
+  color: var(--text-dim);
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  border-top: 1px solid var(--border);
+  margin: 10px 0 6px;
+  padding-top: 8px;
+}
+
+.sample-count {
+  color: var(--text-dim);
+  font-size: 11px;
+  margin-bottom: 6px;
 }
 
 .button {

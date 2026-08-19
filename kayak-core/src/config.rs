@@ -880,11 +880,13 @@ pub enum StringFilterOperatorKind {
 pub enum FilterKind {
     Numeric {
         /// the field to filter on
+        #[schemars(extend("x-message-field" = true))]
         field: String,
         operator: NumericFilterOperatorKind,
         value: f64,
     },
     String {
+        #[schemars(extend("x-message-field" = true))]
         field: String,
         operator: StringFilterOperatorKind,
         value: String,
@@ -1007,6 +1009,7 @@ pub struct Aggregation {
     /// the field to aggregate. Required by every function except `count`, which
     /// counts messages when it is left out.
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(extend("x-message-field" = true))]
     pub field: Option<String>,
 }
 

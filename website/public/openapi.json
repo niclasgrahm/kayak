@@ -28,7 +28,8 @@
             "type": [
               "string",
               "null"
-            ]
+            ],
+            "x-message-field": true
           },
           "function": {
             "$ref": "#/components/schemas/ReduceFnKind",
@@ -484,7 +485,8 @@
             "type": [
               "string",
               "null"
-            ]
+            ],
+            "x-message-field": true
           },
           "message": {
             "description": "store the whole message in this column instead of one of its fields.\nOnly for a `json` column, and not together with `field`.",
@@ -1432,6 +1434,21 @@
           }
         ]
       },
+      "FailurePhase": {
+        "description": "Where a chain went wrong, when it did.",
+        "oneOf": [
+          {
+            "const": "build",
+            "description": "The transform could not be built — the same failure creating the\npipeline would have given, which is most of the value of building the\nreal thing.",
+            "type": "string"
+          },
+          {
+            "const": "apply",
+            "description": "It was built and failed on a message. A running pipeline would drop\nthat batch and carry on; a dry run stops, because what happened at the\npoint of failure is the thing being asked about.",
+            "type": "string"
+          }
+        ]
+      },
       "Family": {
         "description": "Which plugin point a component plugs into. Also the grouping the docs\nsidebar uses, which is why it's ordered the way a pipeline reads.\n\nA connection isn't a stage of a pipeline, but it is configured the same way\n— a tagged struct with doc-commented fields — so it documents itself and\ngenerates its form through exactly this machinery.",
         "enum": [
@@ -1522,6 +1539,11 @@
               "connection"
             ],
             "type": "object"
+          },
+          {
+            "const": "message_field",
+            "description": "The name of a field *in the messages* — a column's `field`, a filter's\ncomparison, an aggregation's source. A string on the wire like\n[`FieldType::PipelineId`], and a separate type for the same reason:\nwhat the control should be is not derivable from the wire type.\n\nUnlike the two dropdowns above this one is a **box with suggestions**,\nnever a closed list. The suggestions come from a sample of real\nmessages ([`crate::schema::infer`]), and a sample is a handful of\nmessages rather than a schema — a stream that carries `error_code` only\nwhen something breaks would otherwise have no way to say so.",
+            "type": "string"
           },
           {
             "additionalProperties": false,
@@ -1665,7 +1687,8 @@
                 "properties": {
                   "field": {
                     "description": "the field to filter on",
-                    "type": "string"
+                    "type": "string",
+                    "x-message-field": true
                   },
                   "operator": {
                     "$ref": "#/components/schemas/NumericFilterOperatorKind"
@@ -1693,7 +1716,8 @@
               "String": {
                 "properties": {
                   "field": {
-                    "type": "string"
+                    "type": "string",
+                    "x-message-field": true
                   },
                   "operator": {
                     "$ref": "#/components/schemas/StringFilterOperatorKind"
@@ -3228,6 +3252,120 @@
         "title": "pipeline",
         "type": "object"
       },
+      "PipelineDryRunRequest": {
+        "description": "Run a draft's transforms over some messages.",
+        "properties": {
+          "buckets": {
+            "additionalProperties": {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            "description": "what that bucket should already hold, keyed as the pipeline keys it.\nThe warm-up a stateful chain would otherwise have to be talked through.",
+            "type": "object"
+          },
+          "messages": {
+            "description": "the messages to put in, as one batch — which is what a `buffer` or a\n`reduce` will treat them as. A sample from `POST /api/inputs/sample` is\nwhat the UI puts here.",
+            "items": true,
+            "type": "array"
+          },
+          "state": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/PipelineState"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "the pipeline's `state` block, if its transforms need one. The bucket it\nnames is created for this request alone."
+          },
+          "transforms": {
+            "default": [],
+            "description": "the transforms, in order, exactly as they would be written in the\npipeline. An empty list is allowed and answers the trivial question.",
+            "items": {
+              "$ref": "#/components/schemas/TransformConfig"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "messages"
+        ],
+        "title": "pipeline dry run request",
+        "type": "object"
+      },
+      "PipelineDryRunResponse": {
+        "description": "What the chain did.",
+        "oneOf": [
+          {
+            "properties": {
+              "buckets": {
+                "additionalProperties": {
+                  "additionalProperties": true,
+                  "type": "object"
+                },
+                "description": "what the private buckets ended up holding, so a `remember` is\nvisible rather than being a side effect nobody can see.",
+                "type": "object"
+              },
+              "outcome": {
+                "const": "ran",
+                "type": "string"
+              },
+              "stages": {
+                "description": "one entry per transform, in order.",
+                "items": {
+                  "$ref": "#/components/schemas/StageResult"
+                },
+                "type": "array"
+              }
+            },
+            "required": [
+              "outcome",
+              "stages"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "at": {
+                "description": "which transform failed, by position.",
+                "format": "uint",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "kind": {
+                "type": "string"
+              },
+              "message": {
+                "type": "string"
+              },
+              "outcome": {
+                "const": "failed",
+                "type": "string"
+              },
+              "phase": {
+                "$ref": "#/components/schemas/FailurePhase"
+              },
+              "stages": {
+                "description": "the stages that completed before it. Kept, rather than thrown away\nwith the failure: how far the messages got is half of what says\n*why* the failing transform failed.",
+                "items": {
+                  "$ref": "#/components/schemas/StageResult"
+                },
+                "type": "array"
+              }
+            },
+            "required": [
+              "outcome",
+              "at",
+              "kind",
+              "phase",
+              "message"
+            ],
+            "type": "object"
+          }
+        ],
+        "title": "pipeline dry run response"
+      },
       "PipelineDto": {
         "description": "One pipeline as the API reports it: the id it is running under, the config\nit was built from, and whether its run loop is still alive.\n\nThe same wire shape the run loop's `PipelineView` serializes to — this is\nthe owned spelling of it, and the one the schema is generated from.",
         "properties": {
@@ -3847,6 +3985,111 @@
         "title": "s3",
         "type": "object"
       },
+      "SampleRequest": {
+        "description": "Take a few messages from an input, without creating a pipeline.",
+        "properties": {
+          "input": {
+            "$ref": "#/components/schemas/InputConfig",
+            "description": "the input to read from, exactly as it would be written in a pipeline —\nincluding its `envelope`, so the metadata fields the messages will\nreally carry are in the sample too."
+          },
+          "max_messages": {
+            "description": "how many messages to take. Defaults to [`DEFAULT_MAX_MESSAGES`], capped\nat [`MAX_MESSAGES`].",
+            "format": "uint",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "timeout_ms": {
+            "description": "how long to wait for them, in milliseconds. Defaults to\n[`DEFAULT_TIMEOUT_MS`], capped at [`MAX_TIMEOUT_MS`]. The wait ends as\nsoon as enough messages have arrived.",
+            "format": "uint64",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "input"
+        ],
+        "title": "sample request",
+        "type": "object"
+      },
+      "SampleResponse": {
+        "description": "What a sample found.\n\nNote there is no separate \"nothing arrived\" arm: an empty `messages` is\nexactly that, and it is an ordinary answer rather than a failure. A stream\nnobody is publishing to is a real state of the world, and one the user\noften needs to be shown rather than protected from.",
+        "oneOf": [
+          {
+            "properties": {
+              "messages": {
+                "description": "the messages, exactly as the pipeline's first transform would have\nseen them.",
+                "items": true,
+                "type": "array"
+              },
+              "notes": {
+                "description": "what the sample did differently from the pipeline it is standing in\nfor — a throwaway consumer group, an ignored buffer. Empty when it\ndid nothing differently.",
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              "outcome": {
+                "const": "sampled",
+                "type": "string"
+              },
+              "waited_ms": {
+                "description": "how long it waited, in milliseconds.",
+                "format": "uint64",
+                "minimum": 0,
+                "type": "integer"
+              }
+            },
+            "required": [
+              "outcome",
+              "messages",
+              "waited_ms"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "message": {
+                "type": "string"
+              },
+              "outcome": {
+                "const": "failed",
+                "type": "string"
+              },
+              "stage": {
+                "$ref": "#/components/schemas/SampleStage"
+              }
+            },
+            "required": [
+              "outcome",
+              "stage",
+              "message"
+            ],
+            "type": "object"
+          }
+        ],
+        "title": "sample response"
+      },
+      "SampleStage": {
+        "description": "Where a sample went wrong, when it did.",
+        "oneOf": [
+          {
+            "const": "build",
+            "description": "The input could not be built at all — a connection that isn't\nconfigured, a secret that doesn't resolve. The same failure creating\nthe pipeline would have given, which is the point of building the real\nthing.",
+            "type": "string"
+          },
+          {
+            "const": "read",
+            "description": "It was built, and reading from it failed — the broker refused the\nsubscription, the host is unreachable.",
+            "type": "string"
+          }
+        ]
+      },
       "SaveConfigRequest": {
         "description": "What `POST /api/config/save` takes: a bare file name, saved beside the\nconfig the server was started from. Not a path — see `persist::save_path`.",
         "properties": {
@@ -4038,6 +4281,43 @@
           "output"
         ],
         "type": "string"
+      },
+      "StageResult": {
+        "description": "What one transform in the chain did.",
+        "properties": {
+          "batches": {
+            "description": "what it handed on, one entry per batch. Several batches is a\n`splitter`; none is a `filter` that dropped everything, or a `buffer`\nstill holding what it was given.",
+            "items": {
+              "items": true,
+              "type": "array"
+            },
+            "type": "array"
+          },
+          "index": {
+            "description": "its position in `transforms`.",
+            "format": "uint",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "kind": {
+            "description": "which transform it is (`filter`, `reduce`, ...), so the answer can be\nread without counting down the list.",
+            "type": "string"
+          },
+          "on_flush": {
+            "description": "what it handed on when the chain was drained at the end, if anything.\n\nKept apart from `batches` because the difference is the interesting\npart: a running pipeline releases these on a timer or a gate rather\nthan when the messages arrive, so a dry run that folded the two\ntogether would make a `buffer` look like it passes everything straight\nthrough.",
+            "items": {
+              "items": true,
+              "type": "array"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "index",
+          "kind",
+          "batches"
+        ],
+        "type": "object"
       },
       "StdoutOutputConfig": {
         "description": "Prints each batch to the server's stdout. Useful while building a pipeline\nup; takes no settings.",
@@ -4867,6 +5147,88 @@
         "x-kayak-access": "public"
       }
     },
+    "/api/inputs/sample": {
+      "post": {
+        "description": "Configuring a stream you cannot see is guesswork, and every field reference downstream — a column's `field`, a filter's comparison — is a name someone had to already know. This builds the input in the body exactly as a pipeline would, takes up to `max_messages` from it within `timeout_ms`, and drops it.\n\nThe **real** input, including its `envelope`, so the metadata fields the messages will actually carry are in the sample too. Its `buffer` is the one thing ignored: a buffer's job is to make the pipeline wait, which is not what a sample is for. Anything the sample did differently comes back in `notes`.\n\n**Sampling is not free for every kind of input, and the ones where it isn't say so.** A kafka sample runs under a throwaway consumer group, so it neither rebalances the pipeline's group nor commits on its behalf; an mqtt sample connects under a client id of its own, because a broker disconnects the older client holding one. An `http` input is refused outright with a 400 — it is posted to rather than read from, so there is nothing to fetch.\n\n**No messages is a 200 with an empty list.** A subject nobody is publishing to is a real state of the world and the answer to the question asked; none of these inputs can replay what was published before the sample started.",
+        "operationId": "sampleInput",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SampleRequest"
+              }
+            }
+          },
+          "description": "The input to read from, and how much to take.",
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SampleResponse"
+                }
+              }
+            },
+            "description": "The sample was taken — `outcome` says whether it produced messages or failed on the way."
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "The request itself was wrong: malformed JSON, an input that isn't a kind of input, or one that cannot be sampled at all."
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "No credentials, or credentials that were not recognised."
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "Signed in, but without the `admin` role this endpoint needs."
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "Something went wrong on the server. The body says what."
+          }
+        },
+        "security": [
+          {
+            "basicAuth": []
+          },
+          {
+            "cookieAuth": []
+          }
+        ],
+        "summary": "Fetch a few real messages from an input, without creating a pipeline",
+        "tags": [
+          "pipelines"
+        ],
+        "x-kayak-access": "admin"
+      }
+    },
     "/api/layout": {
       "get": {
         "description": "Served separately from `/api/pipelines` because it is a different kind of thing: that is what the server is running, this is how someone chose to look at it. A client that ignores this endpoint gets an automatically laid out graph, which is the point.\n\nOnly pipelines someone has actually moved appear.",
@@ -5133,6 +5495,88 @@
           }
         ],
         "summary": "Build and start a pipeline",
+        "tags": [
+          "pipelines"
+        ],
+        "x-kayak-access": "admin"
+      }
+    },
+    "/api/pipelines/dry-run": {
+      "post": {
+        "description": "What a `map` writes, what a `filter` drops, what a `reduce` collapses a batch to — questions the config cannot answer and one real message can. This builds the transforms in the body exactly as a pipeline would and puts the messages down the chain, reporting **what each stage handed on**.\n\nPer stage and as a list of batches, because that is where the answer usually is: a `splitter` hands on several batches, a `filter` that dropped everything hands on none, and a `buffer` hands on nothing because it is still holding what it was given. What a transform only releases when the chain is drained is reported separately, as `on_flush`, so a buffer doesn't look like it passes everything straight through. A transform that is *still* holding what it was given hands on nothing at all, and the chain says so rather than pretending the messages came through: a dry run has no tick to give a window that has thirty seconds left on it.\n\n**There are no outputs and there cannot be.** A dry run that emitted would be a pipeline; everything up to the outputs is a question about the data, and the outputs are the part that changes somebody else's system.\n\n**State is never live**, exactly as for a script dry run: the buckets are private to the request, seeded from `buckets` in the body, returned in the response and thrown away with it.\n\nA transform that cannot be built, or that fails on a message, is a 200 whose `outcome` is `failed` — the request was carried out and where it broke is the answer. The stages that completed first come back with it.",
+        "operationId": "dryRunPipeline",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/PipelineDryRunRequest"
+              }
+            }
+          },
+          "description": "The messages, and the transforms to put them through.",
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PipelineDryRunResponse"
+                }
+              }
+            },
+            "description": "The chain ran, or it broke on the way — the `outcome` field says which."
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "The request itself was wrong: malformed JSON, or a transform that isn't a kind of transform."
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "No credentials, or credentials that were not recognised."
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "Signed in, but without the `admin` role this endpoint needs."
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "Something went wrong on the server. The body says what."
+          }
+        },
+        "security": [
+          {
+            "basicAuth": []
+          },
+          {
+            "cookieAuth": []
+          }
+        ],
+        "summary": "Run a draft's transforms over some messages, without creating a pipeline",
         "tags": [
           "pipelines"
         ],

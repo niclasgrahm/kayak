@@ -312,6 +312,11 @@ One component: everything `/docs` shows about it.
           "type": "object"
         },
         {
+          "const": "message_field",
+          "description": "The name of a field *in the messages* — a column's `field`, a filter's\ncomparison, an aggregation's source. A string on the wire like\n[`FieldType::PipelineId`], and a separate type for the same reason:\nwhat the control should be is not derivable from the wire type.\n\nUnlike the two dropdowns above this one is a **box with suggestions**,\nnever a closed list. The suggestions come from a sample of real\nmessages ([`crate::schema::infer`]), and a sample is a handful of\nmessages rather than a schema — a stream that carries `error_code` only\nwhen something breaks would otherwise have no way to say so.",
+          "type": "string"
+        },
+        {
           "additionalProperties": false,
           "description": "A value that is one of several shapes, tagged by one of its own\nproperties — an input's `buffer`, which is `{\"type\": \"static\", \"size\":\n10}` or `{\"type\": \"tumbling\", \"window_seconds\": 30}`.\n\nThis is the field-level twin of [`ComponentDoc::variants`], and it is\nwhat makes a form conditional: which fields a value has depends on which\nvariant was picked, so the tag is chosen first and the rest of the form\nfollows from it.",
           "properties": {
@@ -518,7 +523,8 @@ One pipeline: every input is merged into one stream, that stream runs through th
           "type": [
             "string",
             "null"
-          ]
+          ],
+          "x-message-field": true
         },
         "function": {
           "$ref": "#/$defs/ReduceFnKind",
@@ -803,7 +809,8 @@ One pipeline: every input is merged into one stream, that stream runs through th
           "type": [
             "string",
             "null"
-          ]
+          ],
+          "x-message-field": true
         },
         "message": {
           "description": "store the whole message in this column instead of one of its fields.\nOnly for a `json` column, and not together with `field`.",
@@ -1188,7 +1195,8 @@ One pipeline: every input is merged into one stream, that stream runs through th
               "properties": {
                 "field": {
                   "description": "the field to filter on",
-                  "type": "string"
+                  "type": "string",
+                  "x-message-field": true
                 },
                 "operator": {
                   "$ref": "#/$defs/NumericFilterOperatorKind"
@@ -1216,7 +1224,8 @@ One pipeline: every input is merged into one stream, that stream runs through th
             "String": {
               "properties": {
                 "field": {
-                  "type": "string"
+                  "type": "string",
+                  "x-message-field": true
                 },
                 "operator": {
                   "$ref": "#/$defs/StringFilterOperatorKind"
@@ -4478,6 +4487,1410 @@ An OpenAPI 3.1 document. See https://spec.openapis.org/oas/v3.1.0
 
 :::
 
+## `PipelineDryRunRequest` {#schema-pipelinedryrunrequest}
+
+Run a draft's transforms over some messages.
+
+::: details schema
+
+```json
+{
+  "$defs": {
+    "Aggregation": {
+      "description": "One thing to compute over a group, and what to call it in the result.",
+      "properties": {
+        "as": {
+          "description": "the field the emitted message carries this answer under. Two\naggregations may not share one, and none may collide with a `group_by`\nfield.",
+          "type": "string"
+        },
+        "field": {
+          "description": "the field to aggregate. Required by every function except `count`, which\ncounts messages when it is left out.",
+          "type": [
+            "string",
+            "null"
+          ],
+          "x-message-field": true
+        },
+        "function": {
+          "$ref": "#/$defs/ReduceFnKind",
+          "description": "how to combine the values"
+        }
+      },
+      "required": [
+        "function",
+        "as"
+      ],
+      "title": "aggregation",
+      "type": "object"
+    },
+    "ArithmeticOperator": {
+      "description": "What an [`Mapping::Arithmetic`] does with its two operands.",
+      "oneOf": [
+        {
+          "const": "add",
+          "description": "left + right",
+          "type": "string"
+        },
+        {
+          "const": "subtract",
+          "description": "left − right",
+          "type": "string"
+        },
+        {
+          "const": "multiply",
+          "description": "left × right",
+          "type": "string"
+        },
+        {
+          "const": "divide",
+          "description": "left ÷ right. A literal zero on the right is refused when the pipeline\nis built; a *field* that turns out to be zero fails the batch.",
+          "type": "string"
+        }
+      ]
+    },
+    "BufferGateConfig": {
+      "description": "A condition on a state bucket, as a release trigger for the `buffer`\ntransform.\n\nThe conditions are tested against the bucket entry rendered as an object —\nthe names `remember` wrote under are its fields — so `field` is a dotted\npath exactly as it is everywhere else, and several conditions mean *all of\nthem*, exactly as they do on `remember`'s `when`.\n\nNote what this is not: it is a gate on the whole buffer, not a test applied\nto each held message. When it opens, everything held is handed on.",
+      "properties": {
+        "bucket": {
+          "description": "which bucket to watch. Defaults to the one this pipeline's `state`\nnames; a pipeline with no `state` of its own has to name it here.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "conditions": {
+          "description": "what has to be true of that key for the buffer to be released. All of\nthem, and at least one — a gate with no conditions would be a buffer\nthat releases on every write to the bucket.",
+          "items": {
+            "$ref": "#/$defs/Condition"
+          },
+          "type": "array"
+        },
+        "key": {
+          "description": "which key in that bucket to read. A literal key, not a field path —\nthis is one gate for the whole buffer, so there is no message to take a\nkey from. Leave it out for the bucket-wide value, which is what\n`remember` writes when its pipeline's `state` has no `key`.",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "conditions"
+      ],
+      "title": "buffer gate",
+      "type": "object"
+    },
+    "BufferTransformConfig": {
+      "description": "Holds messages back and hands them on when a *trigger* says to.\n\nThere are three triggers and they compose: a message count, a length of\ntime, and a condition on a state bucket. Any of them is enough on its own —\nwhichever comes first ends the wait, the same rule the input-level `batch`\nbuffer follows. A buffer with no trigger at all fails to build.\n\n`size` is the one that has always been here and it behaves exactly as it\ndid: messages are handed on in batches of exactly that many, as they fill.\nThe other two release **everything currently held** as a single batch,\nhowever much that is — which is the useful reading of \"the run is finished,\nsend what you have\".\n\nDistinct from the `buffer` option on an input: that one batches what an\ninput produces, before any transform has seen it. This one sits in the\nchain, so it batches what the transforms in front of it produced — after a\n`filter` has thinned the stream, or a `recall` has enriched it.",
+      "properties": {
+        "max_messages": {
+          "description": "never hold more than this many messages: reaching it releases them all,\nwhatever the triggers say, and says so in the log once. Required unless\n`size` is set, because `size` is its own bound — a buffer waiting on a\ncondition that never comes true is otherwise a memory leak that grows\nat the rate of the stream.",
+          "format": "uint",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "seconds": {
+          "description": "release everything held this many seconds after the *first* held\nmessage. The window opens when a message is held rather than when the\nlast batch went out, so this is a bound on how long a message waits and\nnot a cadence — an idle buffer holds nothing and no clock is running.",
+          "format": "uint",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "size": {
+          "description": "hand messages on in batches of exactly this many, as they fill. On its\nown this is a buffer that only ever counts, and is what this transform\nhas always done.",
+          "format": "uint",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "until": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/BufferGateConfig"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "release everything held when a state bucket says so. This is the\ntrigger a *different* pipeline can pull: buckets are global, so one\npipeline can mark a run complete and this one hands on what it gathered\nwhile the run was going."
+        }
+      },
+      "title": "buffer",
+      "type": "object"
+    },
+    "CastType": {
+      "description": "What a [`Mapping::Cast`] converts a value to.\n\nA closed set of *logical* shapes, and a deliberately smaller one than the\ncolumn mapping's `ColumnType` even though the two overlap. `integer` and\n`bigint` are one thing here, because JSON has one integer; `decimal` is\nabsent, because a `serde_json` number cannot hold one distinctly from a\nfloat and a cast that claimed to would be a lie. `json` means something else\nagain — in a column it is \"store whatever this is\", here it is \"this string\ncontains JSON, parse it\", which is the common case of a payload that arrived\ndouble-encoded.",
+      "oneOf": [
+        {
+          "const": "text",
+          "description": "A string. A number or a boolean is written the way JSON writes it; an\nobject or an array is an error.",
+          "type": "string"
+        },
+        {
+          "const": "integer",
+          "description": "A whole number. A string is parsed; a number with a fractional part is\nan error rather than a rounding, since which way to round is not\nsomething a config file said.",
+          "type": "string"
+        },
+        {
+          "const": "float",
+          "description": "A number. A string is parsed.",
+          "type": "string"
+        },
+        {
+          "const": "boolean",
+          "description": "True or false. The strings `true`/`false` (in any case) and the numbers\n1/0 are accepted; nothing else is.",
+          "type": "string"
+        },
+        {
+          "const": "timestamp",
+          "description": "A timestamp, written out as RFC 3339. A string is parsed and\nre-rendered, so a mixture of offsets arrives downstream in one spelling;\na number is read as **seconds** since the epoch, fractions included —\nthe same reading the column mapping makes.",
+          "type": "string"
+        },
+        {
+          "const": "date",
+          "description": "A calendar date, written out as `2026-08-10`. A string may be a plain\ndate or a full timestamp, of which the date is taken.",
+          "type": "string"
+        },
+        {
+          "const": "uuid",
+          "description": "A UUID, lower-cased. Only a string in the canonical hyphenated form is\naccepted — this validates, it does not invent.",
+          "type": "string"
+        },
+        {
+          "const": "json",
+          "description": "The JSON a string contains, parsed. This is the one cast whose input\nmust be a string: it is for a payload that arrived encoded inside\nanother one.",
+          "type": "string"
+        }
+      ]
+    },
+    "ConcatPart": {
+      "description": "One piece of a [`Mapping::Concat`].",
+      "oneOf": [
+        {
+          "description": "A value read out of the message. A string is taken as it is; a number or\na boolean is written the way JSON writes it. An object or an array is an\nerror — there is no one right way to flatten one into a key.",
+          "properties": {
+            "field": {
+              "description": "the field to read",
+              "type": "string"
+            },
+            "type": {
+              "const": "field",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "field"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "Literal text — the separator, a prefix, a suffix.",
+          "properties": {
+            "type": {
+              "const": "value",
+              "type": "string"
+            },
+            "value": {
+              "description": "the text",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "value"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "Condition": {
+      "description": "One test a message either passes or doesn't.\n\nThe same comparisons the `filter` transform makes, spelled as a tagged union\nso that a *list* of them can be configured and rendered as a form. Several\nconditions are read as \"all of these\" — there is no `or` and no nesting,\nbecause the moment either exists this is an expression language with a\nsyntax to design, and everything so far has been reachable without one.",
+      "oneOf": [
+        {
+          "description": "Compares a field to a number. A message whose field is missing or isn't\na number does not match.",
+          "properties": {
+            "field": {
+              "description": "the field to test — a dotted path, like anywhere else",
+              "type": "string"
+            },
+            "operator": {
+              "$ref": "#/$defs/NumericFilterOperatorKind"
+            },
+            "type": {
+              "const": "numeric",
+              "type": "string"
+            },
+            "value": {
+              "format": "double",
+              "type": "number"
+            }
+          },
+          "required": [
+            "type",
+            "field",
+            "operator",
+            "value"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "Compares a field to a string, the same way.",
+          "properties": {
+            "field": {
+              "description": "the field to test — a dotted path, like anywhere else",
+              "type": "string"
+            },
+            "operator": {
+              "$ref": "#/$defs/StringFilterOperatorKind"
+            },
+            "type": {
+              "const": "string",
+              "type": "string"
+            },
+            "value": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "field",
+            "operator",
+            "value"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "FilterTransformConfig": {
+      "description": "Drops messages that don't match a condition, and drops the whole batch if\nnone of them do. Pick either the `Numeric` or the `String` form — the fields\ndiffer because the comparisons do.",
+      "oneOf": [
+        {
+          "properties": {
+            "Numeric": {
+              "properties": {
+                "field": {
+                  "description": "the field to filter on",
+                  "type": "string",
+                  "x-message-field": true
+                },
+                "operator": {
+                  "$ref": "#/$defs/NumericFilterOperatorKind"
+                },
+                "value": {
+                  "format": "double",
+                  "type": "number"
+                }
+              },
+              "required": [
+                "field",
+                "operator",
+                "value"
+              ],
+              "type": "object"
+            }
+          },
+          "required": [
+            "Numeric"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "String": {
+              "properties": {
+                "field": {
+                  "type": "string",
+                  "x-message-field": true
+                },
+                "operator": {
+                  "$ref": "#/$defs/StringFilterOperatorKind"
+                },
+                "value": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "field",
+                "operator",
+                "value"
+              ],
+              "type": "object"
+            }
+          },
+          "required": [
+            "String"
+          ],
+          "type": "object"
+        }
+      ],
+      "title": "filter",
+      "type": "object"
+    },
+    "HttpTransformConfig": {
+      "description": "Posts the batch to an http endpoint as a JSON array and replaces it with the\nJSON array in the response — so the service on the other end is the\ntransform.",
+      "properties": {
+        "url": {
+          "description": "endpoint to send the batch to",
+          "type": "string"
+        },
+        "verb": {
+          "$ref": "#/$defs/HttpVerb",
+          "description": "http method. Accepted but not honoured yet: every request is a POST."
+        }
+      },
+      "required": [
+        "url",
+        "verb"
+      ],
+      "title": "http",
+      "type": "object"
+    },
+    "HttpVerb": {
+      "description": "The http method an http transform sends with.\n\nA closed set rather than a `String` because it is one: a request is made\nwith one of these or it is not made at all, and typing the name of a method\ninto a box is a way of finding that out one round trip later than necessary.",
+      "enum": [
+        "GET",
+        "POST",
+        "PUT",
+        "PATCH",
+        "DELETE"
+      ],
+      "type": "string"
+    },
+    "KeepPolicy": {
+      "description": "Whether a `map` passes through the fields it wasn't told about.",
+      "oneOf": [
+        {
+          "const": "all",
+          "description": "The message is passed through and the mappings are laid over it. The\ndefault, because it is the one that doesn't quietly discard data: a map\nthat renamed one field would otherwise throw the rest of the message\naway.",
+          "type": "string"
+        },
+        {
+          "const": "mapped",
+          "description": "Only the fields the mappings wrote come out — a projection. This is what\nprepares a message for an output with a shape of its own (a `postgres`\ntable, an `s3` part), and it is also what sweeps up the intermediate\nfields a chained arithmetic leaves behind.",
+          "type": "string"
+        }
+      ]
+    },
+    "Literal": {
+      "description": "A literal value written by a `constant`, or standing in for a field that\nisn't there.\n\nSpelled as a tagged union rather than as a bare JSON value because an\nuntyped `Value` field reflects as a box to hand-write JSON into, and one of\nthose in a form is a field the user has to already know the answer for.\nTagging it means the form asks which kind of value and then offers the right\ncontrol.",
+      "oneOf": [
+        {
+          "description": "A string.",
+          "properties": {
+            "type": {
+              "const": "text",
+              "type": "string"
+            },
+            "value": {
+              "description": "the text",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "value"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "A number.",
+          "properties": {
+            "type": {
+              "const": "number",
+              "type": "string"
+            },
+            "value": {
+              "description": "the number",
+              "format": "double",
+              "type": "number"
+            }
+          },
+          "required": [
+            "type",
+            "value"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "True or false.",
+          "properties": {
+            "type": {
+              "const": "boolean",
+              "type": "string"
+            },
+            "value": {
+              "description": "the flag",
+              "type": "boolean"
+            }
+          },
+          "required": [
+            "type",
+            "value"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "JSON null — an explicit \"nothing\", as against leaving the field out.",
+          "properties": {
+            "type": {
+              "const": "null",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "MapMissingPolicy": {
+      "description": "What `map` does about a message that doesn't carry a field a mapping reads.\n\nIt has its own set rather than sharing the reducer's `MissingFieldPolicy` or\n`recall`'s `RecallMissingPolicy` for one specific reason: `skip` already\nmeans two different things in those two (\"leave this message out of this\naggregation\" and \"drop the message\"), and a third reading of the same word\nwould make the config file unreadable. So the arm that leaves the target\nfield unwritten is called `omit`, and there is deliberately no arm that\ndrops the message — that is what `filter` is for.",
+      "oneOf": [
+        {
+          "const": "error",
+          "description": "Fail the pipeline. The default, on the reducer's argument: a mapping\nthat silently produced nothing is wrong in a way nothing downstream can\nsee. Say `omit`, or give that one mapping a `default`, to mean it.",
+          "type": "string"
+        },
+        {
+          "const": "omit",
+          "description": "Leave the target field unwritten, as though the mapping weren't there.",
+          "type": "string"
+        },
+        {
+          "const": "null",
+          "description": "Write the target field as `null`.",
+          "type": "string"
+        }
+      ]
+    },
+    "MapTransformConfig": {
+      "description": "Rewrites the shape of every message: renames, promotions, constants, casts\nand projections, applied in order.\n\nEach entry in `mappings` reads fields from the message and writes one field\nback, and **later entries see what earlier ones wrote** — so an intermediate\nvalue is just a mapping whose target a later mapping reads (and, under\n`keep: all`, a `drop` takes away again).\n\nReads are dotted paths, like everywhere else. Writes are too: an `as` of\n`sensor.id` puts the value inside a `sensor` object, creating it if it isn't\nthere.\n\nThe message is passed through unchanged, with the mappings laid over it,\nunless `keep` says otherwise. One message always comes out — this never\ndrops one, and never makes two. Reach for `filter` or `splitter` for those.",
+      "properties": {
+        "keep": {
+          "$ref": "#/$defs/KeepPolicy",
+          "description": "whether fields nothing mapped survive"
+        },
+        "mappings": {
+          "description": "what to write, in the order it is written. At least one, and no two may\nwrite the same field.",
+          "items": {
+            "$ref": "#/$defs/Mapping"
+          },
+          "type": "array"
+        },
+        "on_missing": {
+          "$ref": "#/$defs/MapMissingPolicy",
+          "description": "what to do about a message missing a field a mapping reads. A `default`\non the mapping itself is answered first, and is the better way to say\nthat one particular field is expected to be absent."
+        }
+      },
+      "required": [
+        "mappings"
+      ],
+      "title": "map",
+      "type": "object"
+    },
+    "Mapping": {
+      "description": "One field written onto the message, and where its value comes from.\n\nA tagged union rather than one struct with a great many optional fields, for\nthe reason `Condition` gives: a list of these has to render as a form, and a\npile of boxes of which four are relevant offers no way to say which four.\nHere the tag is picked first and the rest of the row follows from it.",
+      "oneOf": [
+        {
+          "description": "Takes a value from one field and writes it to another — a rename, or a\npromotion of something out of a nested object (`_meta.subject` →\n`subject`).",
+          "properties": {
+            "as": {
+              "description": "the field to write. Left out, it is `from`'s last segment, which is\nthe reading that makes promoting a nested value the short spelling.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "default": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/Literal"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "what to write when `from` isn't there, instead of applying\n`on_missing`"
+            },
+            "from": {
+              "description": "the field to read — a dotted path, like anywhere else",
+              "type": "string"
+            },
+            "type": {
+              "const": "copy",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "from"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "Writes a fixed value — the environment, the site, the name of the feed.",
+          "properties": {
+            "as": {
+              "description": "the field to write it to",
+              "type": "string"
+            },
+            "type": {
+              "const": "constant",
+              "type": "string"
+            },
+            "value": {
+              "$ref": "#/$defs/Literal",
+              "description": "the value to write"
+            }
+          },
+          "required": [
+            "type",
+            "value",
+            "as"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "Writes the first of several fields that the message actually carries.\n\nThis is what merging two sources that spell one thing differently comes\nto, and it needs no expression language to say.",
+          "properties": {
+            "as": {
+              "description": "the field to write the first value found to",
+              "type": "string"
+            },
+            "default": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/Literal"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "what to write when none of them is there"
+            },
+            "from": {
+              "description": "the fields to try, in order. At least two — with one, this is a\n`copy`.",
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "type": {
+              "const": "coalesce",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "from",
+            "as"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "Converts a value from one JSON shape to another — the string `\"12.5\"` to\nthe number `12.5`, an epoch second to a timestamp, a string of embedded\nJSON to the thing it describes.\n\nThis is the one place in kayak where coercion is legal, and that is the\ndivision of labour: a `postgres` column mapping *checks* a value and\nnever converts it, so a stream that needs converting says so once, here,\nrather than at each of three outputs.",
+          "properties": {
+            "as": {
+              "description": "the field to write. Left out, it is `from`'s last segment — so\ncasting a field in place is `{\"from\": \"value\", \"to\": \"float\"}`.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "default": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/Literal"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "what to write when `from` isn't there. A value that *is* there and\nwon't convert is an error either way — that is a stream that isn't\nwhat the config says it is, not a missing field."
+            },
+            "from": {
+              "description": "the field to read",
+              "type": "string"
+            },
+            "to": {
+              "$ref": "#/$defs/CastType",
+              "description": "what to convert it to"
+            },
+            "type": {
+              "const": "cast",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "from",
+            "to"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "Joins fields and literal text into one string.\n\nMostly earns its place because `group_by` takes a list of fields and has\nno composite key: building `site/machine` as a field is the only way to\ngroup on the pair.",
+          "properties": {
+            "as": {
+              "description": "the field to write the joined string to",
+              "type": "string"
+            },
+            "parts": {
+              "description": "the pieces, in order. At least one.",
+              "items": {
+                "$ref": "#/$defs/ConcatPart"
+              },
+              "type": "array"
+            },
+            "type": {
+              "const": "concat",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "parts",
+            "as"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "One arithmetic operation on two numbers, each of them a field or a\nliteral.\n\nOne operation, deliberately: `(f - 32) / 1.8` is two of these through an\nintermediate field, and the fact that three or four steps read badly is\ninformation rather than a defect — it is where this stops being\nconfiguration.",
+          "properties": {
+            "as": {
+              "description": "the field to write the answer to",
+              "type": "string"
+            },
+            "left": {
+              "$ref": "#/$defs/Operand",
+              "description": "the left-hand operand"
+            },
+            "operator": {
+              "$ref": "#/$defs/ArithmeticOperator",
+              "description": "what to do with them"
+            },
+            "right": {
+              "$ref": "#/$defs/Operand",
+              "description": "the right-hand operand"
+            },
+            "type": {
+              "const": "arithmetic",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "left",
+            "operator",
+            "right",
+            "as"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "Takes fields off the message.\n\nThe counterpart of the in-band envelope: metadata that a `group_by`\nneeded is rarely metadata an output wants, and this is what takes it\nback off before the message leaves. Removing a field that isn't there is\nnot an error — `on_missing` doesn't apply.",
+          "properties": {
+            "from": {
+              "description": "the fields to remove. At least one.",
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "type": {
+              "const": "drop",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "from"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "MissingFieldPolicy": {
+      "description": "What to do about a message that doesn't carry a field being aggregated or\ngrouped by. A field present but `null` counts as missing — it is the same\nfact said two ways.",
+      "oneOf": [
+        {
+          "const": "error",
+          "description": "Fail the pipeline. The default, because a sum over \"whichever messages\nhappened to have the field\" is wrong in a way nothing downstream can see.",
+          "type": "string"
+        },
+        {
+          "const": "skip",
+          "description": "Leave that message out of that one aggregation. An aggregation left with\nno values at all reports `null` (or `0`, for the counts).",
+          "type": "string"
+        }
+      ]
+    },
+    "NumericFilterOperatorKind": {
+      "description": "How a number is compared to the one in the config.",
+      "enum": [
+        "greater_than",
+        "less_than",
+        "equal_to"
+      ],
+      "type": "string"
+    },
+    "Operand": {
+      "description": "One side of an [`Mapping::Arithmetic`]: a field to read, or a fixed number.",
+      "oneOf": [
+        {
+          "description": "A number read out of the message.",
+          "properties": {
+            "field": {
+              "description": "the field to read — it has to hold a number",
+              "type": "string"
+            },
+            "type": {
+              "const": "field",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "field"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "A number written here in the config.",
+          "properties": {
+            "type": {
+              "const": "value",
+              "type": "string"
+            },
+            "value": {
+              "description": "the number",
+              "format": "double",
+              "type": "number"
+            }
+          },
+          "required": [
+            "type",
+            "value"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "PipelineState": {
+      "description": "A pipeline's binding to a bucket: which one, and what its messages are keyed\nby.\n\nThe key lives here rather than on the bucket because it is a property of\n*this stream* — the same machine id arrives as `_meta.machine_id` from a\nnats subscription and as `machine_id` after a reducer has flattened it, and\nboth are correct. The cost is that two pipelines sharing a bucket can key it\ndifferently with nothing to catch them, which is the sharp edge of sharing\nand is documented rather than prevented.",
+      "properties": {
+        "bucket": {
+          "description": "name of the bucket this pipeline reads and writes — one of the ones\ndeclared under `state` at the top of the config. A pipeline naming a\nbucket that isn't declared fails to build.",
+          "type": "string"
+        },
+        "key": {
+          "description": "the field whose value identifies the thing being remembered, e.g.\n`_meta.machine_id`. A dotted path like anywhere else.\n\nLeave it out for one bucket-wide value — which is the right answer for\nsomething there is only ever one of, and the wrong one for anything\nper-device.",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "bucket"
+      ],
+      "title": "pipeline state",
+      "type": "object"
+    },
+    "RecallMissingPolicy": {
+      "description": "What `recall` does when the bucket has nothing for a message's key.\n\nIt has its own set rather than sharing the reducer's [`MissingFieldPolicy`]\nbecause the right default is the opposite one: every stateful pipeline has a\nwarm-up in which nothing has been remembered yet, so `error` would fail\nevery pipeline on startup, and it is `null` that has no counterpart there.",
+      "oneOf": [
+        {
+          "const": "skip",
+          "description": "Drop the message. The default: a reading that can't be attributed to the\nthing it is about is usually noise, and passing it on unattributed makes\na reducer downstream lump every such message into one bogus group.",
+          "type": "string"
+        },
+        {
+          "const": "null",
+          "description": "Pass the message on with the missing names as `null`.",
+          "type": "string"
+        },
+        {
+          "const": "error",
+          "description": "Fail the pipeline. Only right when the bucket is filled by something\nthat has certainly run first.",
+          "type": "string"
+        }
+      ]
+    },
+    "RecallTransformConfig": {
+      "description": "Writes values from the pipeline's state bucket onto every message, under the\nnames they were remembered by.\n\nThis is how a slow-moving fact — the unit being produced, the recipe in\nforce — reaches the fast stream that has to be attributed to it. The values\nland as top-level fields, so a `reducer` downstream can group by them\nwithout knowing where they came from.\n\nNeeds a `state` on the pipeline; it fails to build without one.",
+      "properties": {
+        "on_missing": {
+          "$ref": "#/$defs/RecallMissingPolicy",
+          "description": "what to do about a message whose key has nothing remembered under it yet"
+        },
+        "recall": {
+          "description": "the names to read out of the bucket, as `remember` wrote them. Each one\nis written onto the message under the same name.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "recall"
+      ],
+      "title": "recall",
+      "type": "object"
+    },
+    "ReduceFnKind": {
+      "description": "How the values of one field are combined into a single answer.",
+      "oneOf": [
+        {
+          "const": "sum",
+          "description": "The total. Numbers only.",
+          "type": "string"
+        },
+        {
+          "const": "avg",
+          "description": "The arithmetic mean. Numbers only.",
+          "type": "string"
+        },
+        {
+          "const": "min",
+          "description": "The smallest value. Numbers compare as numbers and strings\nalphabetically, which is what makes `min` over an ISO timestamp the\nearliest one.",
+          "type": "string"
+        },
+        {
+          "const": "max",
+          "description": "The largest value, comparing as `min` does.",
+          "type": "string"
+        },
+        {
+          "const": "count",
+          "description": "How many messages there were. The one function that needs no `field` —\ngiven one, it counts the messages that carry it instead.",
+          "type": "string"
+        },
+        {
+          "const": "count_distinct",
+          "description": "How many *different* values there were, compared by their JSON form.",
+          "type": "string"
+        },
+        {
+          "const": "first",
+          "description": "The value from the first message of the group, whatever type it is.",
+          "type": "string"
+        },
+        {
+          "const": "last",
+          "description": "The value from the last message of the group.",
+          "type": "string"
+        },
+        {
+          "const": "collect",
+          "description": "Every value, as an array, in the order they arrived.",
+          "type": "string"
+        },
+        {
+          "const": "median",
+          "description": "The middle value, or the mean of the middle two. Numbers only.",
+          "type": "string"
+        },
+        {
+          "const": "stddev",
+          "description": "The population standard deviation. Numbers only.",
+          "type": "string"
+        }
+      ]
+    },
+    "ReduceTransformConfig": {
+      "description": "Reduces a batch to one message per group, carrying whatever was asked for\nabout it. Pair it with a buffer, or it will only ever see one message at a\ntime.\n\nWith no `group_by` the whole batch is one group and one message comes out;\nwith one, a message comes out per distinct combination of those fields, in\nthe order the groups were first seen. The emitted message carries the\ngrouping fields under their own names alongside the aggregations.\n\nEach aggregation is a `function`, the `field` to apply it to and the `as`\nname the answer is written under — `{\"function\": \"avg\", \"field\": \"value\",\n\"as\": \"mean\"}`. `count` is the one function that needs no `field`: without\none it counts the messages in the group, with one it counts the messages\nthat carried it.",
+      "properties": {
+        "aggregations": {
+          "description": "what to compute. At least one, and each needs a distinct `as`.",
+          "items": {
+            "$ref": "#/$defs/Aggregation"
+          },
+          "type": "array"
+        },
+        "group_by": {
+          "description": "the fields whose combination defines a group. Omit it to reduce the\nwhole batch at once.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "on_missing": {
+          "$ref": "#/$defs/MissingFieldPolicy",
+          "description": "what to do about a message missing one of the fields above"
+        }
+      },
+      "required": [
+        "aggregations"
+      ],
+      "title": "reducer",
+      "type": "object"
+    },
+    "RememberTransformConfig": {
+      "description": "Writes values from matching messages into the pipeline's state bucket,\nkeyed by whatever the pipeline's `state.key` names.\n\nThe message itself is **passed on unchanged** — this is a tap on the stream,\nnot a filter. A transform called `remember` that quietly swallowed what it\nremembered would be a surprise, and the message is usually still wanted.\n\nNeeds a `state` on the pipeline; it fails to build without one.",
+      "properties": {
+        "remember": {
+          "description": "what to take from a matching message. At least one, each with a distinct\n`as`.",
+          "items": {
+            "$ref": "#/$defs/Remembered"
+          },
+          "type": "array"
+        },
+        "when": {
+          "description": "which messages to remember from — all of these have to match. Leave it\nout to remember from every message, which is right for a stream carrying\none kind of thing and wrong for one carrying several.",
+          "items": {
+            "$ref": "#/$defs/Condition"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "remember"
+      ],
+      "title": "remember",
+      "type": "object"
+    },
+    "Remembered": {
+      "description": "One thing to put in the pipeline's state bucket, and what to call it there.",
+      "properties": {
+        "as": {
+          "description": "the name to remember it under, which is the name `recall` asks for it\nby. Two entries may not share one.",
+          "type": "string"
+        },
+        "field": {
+          "description": "the field to take the value from",
+          "type": "string"
+        }
+      },
+      "required": [
+        "field",
+        "as"
+      ],
+      "type": "object"
+    },
+    "ScriptScope": {
+      "description": "Whether a script is handed one message or the whole batch.\n\n`message` is the default and is what nearly everything wants: the budget is\nthen spent per message rather than per batch, the batch structure is\npreserved without the script having to rebuild it, and a script that emits\nnothing for one message has dropped exactly that message.\n\n`batch` is the escape hatch, and it is needed for the things that are about\nthe batch itself — deduplicating within it, repartitioning it, or computing\nsomething across it that `reduce` has no function for.",
+      "oneOf": [
+        {
+          "const": "message",
+          "description": "The script runs once per message, with the message in `msg`.",
+          "type": "string"
+        },
+        {
+          "const": "batch",
+          "description": "The script runs once per batch, with the messages in `batch` as an\narray. Emitting an array emits a batch of those messages.",
+          "type": "string"
+        }
+      ]
+    },
+    "ScriptSource": {
+      "description": "Where the script's text comes from.\n\nTwo spellings because the three ways someone writes a pipeline want\ndifferent things. Inline is what the HTTP API and the UI can carry — a\nscript in a file is a reference the browser cannot edit and a generated\nconfig has nowhere to put — and YAML renders it as a literal block, so it\nreads as code rather than as an escaped string. A file is what an editor can\nsyntax-highlight, a formatter can format and a test can exercise on its own,\nwhich is what the file-first workflow wants.\n\nInline is the canonical form: a `file` is resolved when the pipeline is\nbuilt and the config keeps the reference, so saving never inlines someone's\nfile out of existence.",
+      "oneOf": [
+        {
+          "description": "The script's text, in the config itself. Prefer a YAML config for this —\na literal block keeps it readable, where JSON has to escape every\nnewline.",
+          "properties": {
+            "code": {
+              "description": "the rhai source",
+              "type": "string",
+              "x-script": "rhai"
+            },
+            "type": {
+              "const": "inline",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "code"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "A path to a `.rhai` file, relative to the directory the config file is\nin — the same place the connections and layout files live.\n\nThe file is read when the pipeline is built — as are any modules it\n`import`s, which resolve against the same directory — so editing one\ntakes a revert to pick up. A server running without a config file has\nno directory to resolve against and refuses this; inline scripts still\nwork there, though their imports are refused for the same reason.",
+          "properties": {
+            "path": {
+              "description": "the path, relative to the config file's directory. It may not climb\nout of that directory.",
+              "type": "string"
+            },
+            "type": {
+              "const": "file",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "path"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "ScriptTransformConfig": {
+      "description": "Runs a [rhai](https://rhai.rs) script over each message, or over the batch\nas a whole, and emits whatever the script asks for.\n\nA script reaches the message as `msg`, and emits with `emit(value)` — zero\ntimes to drop it, once to replace it, many times to split it. That covers\n`filter`, `map` and `splitter` in one, which is the point: what a script is\nfor is the case none of those three reach.\n\nThe script is **compiled when the pipeline is built**, so a syntax error is\na pipeline that refuses to start rather than one that fails every batch\nforever — the same rule the reducer's build-time checks follow. What cannot\nbe checked until a message arrives (a field that isn't there, a type that\nwon't convert) fails that batch and shows up on the card.\n\nEvery script runs under an **operation budget**. That is not a tuning knob\nwith a safe default, it is what makes this component safe to have: the\nscript runs synchronously inside the run loop's task, so a script that loops\nforever would wedge a worker thread rather than merely breaking its own\npipeline.\n\nA script may **`import`** other rhai files — shared helpers, written once —\nby a literal path relative to the config file's directory, which it may not\nclimb out of; the `.rhai` extension is implied. Imports resolve when the\npipeline is built, so a broken one refuses to start rather than failing\nbatches, and a running script never touches the filesystem.",
+      "properties": {
+        "max_operations": {
+          "description": "how many rhai operations one run of the script may take before it is\nstopped and the batch failed. Leave it out for the default, which is\ngenerous for anything that isn't looping by mistake; raise it for a\nscript that legitimately walks a large array.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "scope": {
+          "$ref": "#/$defs/ScriptScope",
+          "description": "whether the script sees one message at a time or the whole batch"
+        },
+        "source": {
+          "$ref": "#/$defs/ScriptSource",
+          "description": "the script itself, written inline or kept in a file beside the config"
+        }
+      },
+      "required": [
+        "source"
+      ],
+      "title": "script",
+      "type": "object"
+    },
+    "SplitterTransformConfig": {
+      "description": "Cuts one batch into several smaller ones — the opposite of `buffer`.\n\nNote the current limitation: messages left over after the last whole chunk\nare dropped, so 4 messages with `out_size: 3` emit one batch, not two.",
+      "properties": {
+        "out_size": {
+          "description": "how many messages go in each emitted batch",
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "out_size"
+      ],
+      "title": "splitter",
+      "type": "object"
+    },
+    "StringFilterOperatorKind": {
+      "description": "How a string is compared to the one in the config.",
+      "enum": [
+        "equal_to",
+        "contains"
+      ],
+      "type": "string"
+    },
+    "TransformConfig": {
+      "oneOf": [
+        {
+          "$ref": "#/$defs/BufferTransformConfig",
+          "properties": {
+            "type": {
+              "const": "buffer",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type"
+          ],
+          "type": "object"
+        },
+        {
+          "$ref": "#/$defs/HttpTransformConfig",
+          "properties": {
+            "type": {
+              "const": "http",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type"
+          ],
+          "type": "object"
+        },
+        {
+          "$ref": "#/$defs/SplitterTransformConfig",
+          "properties": {
+            "type": {
+              "const": "splitter",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type"
+          ],
+          "type": "object"
+        },
+        {
+          "$ref": "#/$defs/ReduceTransformConfig",
+          "properties": {
+            "type": {
+              "const": "reducer",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type"
+          ],
+          "type": "object"
+        },
+        {
+          "$ref": "#/$defs/FilterTransformConfig",
+          "properties": {
+            "type": {
+              "const": "filter",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type"
+          ],
+          "type": "object"
+        },
+        {
+          "$ref": "#/$defs/RememberTransformConfig",
+          "properties": {
+            "type": {
+              "const": "remember",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type"
+          ],
+          "type": "object"
+        },
+        {
+          "$ref": "#/$defs/RecallTransformConfig",
+          "properties": {
+            "type": {
+              "const": "recall",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type"
+          ],
+          "type": "object"
+        },
+        {
+          "$ref": "#/$defs/MapTransformConfig",
+          "properties": {
+            "type": {
+              "const": "map",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type"
+          ],
+          "type": "object"
+        },
+        {
+          "$ref": "#/$defs/ScriptTransformConfig",
+          "properties": {
+            "type": {
+              "const": "script",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type"
+          ],
+          "type": "object"
+        }
+      ],
+      "type": "object"
+    }
+  },
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "description": "Run a draft's transforms over some messages.",
+  "properties": {
+    "buckets": {
+      "additionalProperties": {
+        "additionalProperties": true,
+        "type": "object"
+      },
+      "description": "what that bucket should already hold, keyed as the pipeline keys it.\nThe warm-up a stateful chain would otherwise have to be talked through.",
+      "type": "object"
+    },
+    "messages": {
+      "description": "the messages to put in, as one batch — which is what a `buffer` or a\n`reduce` will treat them as. A sample from `POST /api/inputs/sample` is\nwhat the UI puts here.",
+      "items": true,
+      "type": "array"
+    },
+    "state": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/PipelineState"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "description": "the pipeline's `state` block, if its transforms need one. The bucket it\nnames is created for this request alone."
+    },
+    "transforms": {
+      "default": [],
+      "description": "the transforms, in order, exactly as they would be written in the\npipeline. An empty list is allowed and answers the trivial question.",
+      "items": {
+        "$ref": "#/$defs/TransformConfig"
+      },
+      "type": "array"
+    }
+  },
+  "required": [
+    "messages"
+  ],
+  "title": "pipeline dry run request",
+  "type": "object"
+}
+```
+
+:::
+
+## `PipelineDryRunResponse` {#schema-pipelinedryrunresponse}
+
+What the chain did.
+
+::: details schema
+
+```json
+{
+  "$defs": {
+    "FailurePhase": {
+      "description": "Where a chain went wrong, when it did.",
+      "oneOf": [
+        {
+          "const": "build",
+          "description": "The transform could not be built — the same failure creating the\npipeline would have given, which is most of the value of building the\nreal thing.",
+          "type": "string"
+        },
+        {
+          "const": "apply",
+          "description": "It was built and failed on a message. A running pipeline would drop\nthat batch and carry on; a dry run stops, because what happened at the\npoint of failure is the thing being asked about.",
+          "type": "string"
+        }
+      ]
+    },
+    "StageResult": {
+      "description": "What one transform in the chain did.",
+      "properties": {
+        "batches": {
+          "description": "what it handed on, one entry per batch. Several batches is a\n`splitter`; none is a `filter` that dropped everything, or a `buffer`\nstill holding what it was given.",
+          "items": {
+            "items": true,
+            "type": "array"
+          },
+          "type": "array"
+        },
+        "index": {
+          "description": "its position in `transforms`.",
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "kind": {
+          "description": "which transform it is (`filter`, `reduce`, ...), so the answer can be\nread without counting down the list.",
+          "type": "string"
+        },
+        "on_flush": {
+          "description": "what it handed on when the chain was drained at the end, if anything.\n\nKept apart from `batches` because the difference is the interesting\npart: a running pipeline releases these on a timer or a gate rather\nthan when the messages arrive, so a dry run that folded the two\ntogether would make a `buffer` look like it passes everything straight\nthrough.",
+          "items": {
+            "items": true,
+            "type": "array"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "index",
+        "kind",
+        "batches"
+      ],
+      "type": "object"
+    }
+  },
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "description": "What the chain did.",
+  "oneOf": [
+    {
+      "properties": {
+        "buckets": {
+          "additionalProperties": {
+            "additionalProperties": true,
+            "type": "object"
+          },
+          "description": "what the private buckets ended up holding, so a `remember` is\nvisible rather than being a side effect nobody can see.",
+          "type": "object"
+        },
+        "outcome": {
+          "const": "ran",
+          "type": "string"
+        },
+        "stages": {
+          "description": "one entry per transform, in order.",
+          "items": {
+            "$ref": "#/$defs/StageResult"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "outcome",
+        "stages"
+      ],
+      "type": "object"
+    },
+    {
+      "properties": {
+        "at": {
+          "description": "which transform failed, by position.",
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "kind": {
+          "type": "string"
+        },
+        "message": {
+          "type": "string"
+        },
+        "outcome": {
+          "const": "failed",
+          "type": "string"
+        },
+        "phase": {
+          "$ref": "#/$defs/FailurePhase"
+        },
+        "stages": {
+          "description": "the stages that completed before it. Kept, rather than thrown away\nwith the failure: how far the messages got is half of what says\n*why* the failing transform failed.",
+          "items": {
+            "$ref": "#/$defs/StageResult"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "outcome",
+        "at",
+        "kind",
+        "phase",
+        "message"
+      ],
+      "type": "object"
+    }
+  ],
+  "title": "pipeline dry run response"
+}
+```
+
+:::
+
 ## `PipelineDto` {#schema-pipelinedto}
 
 One pipeline as the API reports it: the id it is running under, the config it was built from, and whether its run loop is still alive.
@@ -4516,7 +5929,8 @@ The same wire shape the run loop's `PipelineView` serializes to — this is the 
           "type": [
             "string",
             "null"
-          ]
+          ],
+          "x-message-field": true
         },
         "function": {
           "$ref": "#/$defs/ReduceFnKind",
@@ -4801,7 +6215,8 @@ The same wire shape the run loop's `PipelineView` serializes to — this is the 
           "type": [
             "string",
             "null"
-          ]
+          ],
+          "x-message-field": true
         },
         "message": {
           "description": "store the whole message in this column instead of one of its fields.\nOnly for a `json` column, and not together with `field`.",
@@ -5235,7 +6650,8 @@ The same wire shape the run loop's `PipelineView` serializes to — this is the 
               "properties": {
                 "field": {
                   "description": "the field to filter on",
-                  "type": "string"
+                  "type": "string",
+                  "x-message-field": true
                 },
                 "operator": {
                   "$ref": "#/$defs/NumericFilterOperatorKind"
@@ -5263,7 +6679,8 @@ The same wire shape the run loop's `PipelineView` serializes to — this is the 
             "String": {
               "properties": {
                 "field": {
-                  "type": "string"
+                  "type": "string",
+                  "x-message-field": true
                 },
                 "operator": {
                   "$ref": "#/$defs/StringFilterOperatorKind"
@@ -7368,6 +8785,866 @@ What `GET /api/pipelines/{id}/history` answers with.
   ],
   "title": "PipelineHistory",
   "type": "object"
+}
+```
+
+:::
+
+## `SampleRequest` {#schema-samplerequest}
+
+Take a few messages from an input, without creating a pipeline.
+
+::: details schema
+
+```json
+{
+  "$defs": {
+    "AckMode": {
+      "description": "When an input acknowledges a message to its broker — see \"acknowledgement\nmodes\" in the guide for the reasoning and, importantly, its current scope.",
+      "oneOf": [
+        {
+          "const": "on_receipt",
+          "description": "Acknowledge as soon as the message arrives, before any transform or\noutput has touched it. The default, and the behaviour every input has\nalways had — a crash between receipt and output can lose the message.",
+          "type": "string"
+        },
+        {
+          "const": "on_delivery",
+          "description": "Acknowledge once the message has left *this* pipeline: every output\nthis pipeline owns has returned, successfully or not, and every\ndownstream pipeline fed from here has accepted it into its inbox. A\nfailing output does not hold up the acknowledgement — see the\narchitecture notes on why that is the current line, not a permanent\none. Not yet propagated any further than this pipeline: a downstream\npipeline's own outputs are not waited on.",
+          "type": "string"
+        }
+      ]
+    },
+    "BufferConfig": {
+      "description": "How an input's messages are gathered into batches before the transforms see\nthem.\n\nAll three shapes are the same two limits with different halves left off — a\ncount, a time, or both, whichever is reached first. **A buffer never emits an\nempty batch**: the clock starts when the first message of a batch arrives,\nnot when the window was asked for, so an input that goes quiet emits nothing\nrather than a tick of nothing.\n\n`size` is a floor rather than a ceiling, the same rule a file output's\n`max_rows` follows: an arriving batch is never split, so an input already\nproducing batches of its own (`max_batch` on kafka and nats) can overshoot.",
+      "oneOf": [
+        {
+          "description": "Wait for a number of messages, however long that takes.",
+          "properties": {
+            "size": {
+              "description": "how many messages to gather before the batch is handed on",
+              "format": "uint",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "type": {
+              "const": "static",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "size"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "Wait for a length of time, however few messages that gathers — but at\nleast one. The window opens when the first message arrives.",
+          "properties": {
+            "type": {
+              "const": "tumbling",
+              "type": "string"
+            },
+            "window_seconds": {
+              "description": "how long to gather messages for, measured from the first one",
+              "format": "uint",
+              "minimum": 0,
+              "type": "integer"
+            }
+          },
+          "required": [
+            "type",
+            "window_seconds"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "Both limits: whichever is reached first ends the batch. The usual\nchoice for a stream whose rate varies, since it bounds the batch size\nwhen the input is busy and the latency when it is quiet.",
+          "properties": {
+            "size": {
+              "description": "how many messages end the batch immediately",
+              "format": "uint",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "type": {
+              "const": "batch",
+              "type": "string"
+            },
+            "window_seconds": {
+              "description": "how long to wait for them, measured from the first message in the\nbatch",
+              "format": "uint",
+              "minimum": 0,
+              "type": "integer"
+            }
+          },
+          "required": [
+            "type",
+            "size",
+            "window_seconds"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "DummyConfig": {
+      "description": "Emits one generated message on a fixed interval — a heartbeat for testing a\npipeline without a real source attached.\n\nEvery message carries a `value` and the `current_time` it was emitted at.\nWhat the `value` holds is the `payload` field's business: a number sampled\nfrom a sine wave, so a chart of it has a shape, or a random sentence, so a\ntext transform has something to chew on.",
+      "properties": {
+        "amplitude": {
+          "description": "peak of the sine wave — it swings between `-amplitude` and `+amplitude`.\nNumeric payloads only; defaults to 1.",
+          "format": "double",
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "duration": {
+          "description": "seconds between messages",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "payload": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/DummyPayload"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "what each message's `value` holds: a `number` sampled from a sine wave,\nor a random sentence as `text`. Defaults to `number`."
+        },
+        "period": {
+          "description": "seconds for one full turn of the sine wave. Numeric payloads only;\ndefaults to 60. Sampling is by wall clock rather than by message count,\nso the wave keeps its period whatever `duration` is.",
+          "format": "double",
+          "type": [
+            "number",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "duration"
+      ],
+      "title": "dummy",
+      "type": "object"
+    },
+    "DummyPayload": {
+      "description": "What a dummy input puts in each message's `value`.",
+      "oneOf": [
+        {
+          "const": "number",
+          "description": "a number sampled from a sine wave",
+          "type": "string"
+        },
+        {
+          "const": "text",
+          "description": "a random sentence",
+          "type": "string"
+        }
+      ]
+    },
+    "EnvelopeConfig": {
+      "description": "Whether — and how — an input attaches metadata about where a message came\nfrom.\n\nThe metadata itself is documented per input under \"metadata\" on this page:\nthe subject a nats message arrived on, the topic, partition and offset of a\nkafka record, and so on, plus the pipeline and input kind that read it. It\nis attached **in band**, as ordinary fields on the message, so every\ntransform can filter, group and aggregate on it exactly as it does on the\npayload's own fields — `\"group_by\": [\"_meta.subject\"]` needs nothing new.\n\nLeaving this out is the default and means what it always meant: the message\nis passed on exactly as it arrived. Attaching metadata changes the shape of\nevery message from this input, which is not something to do to a running\nconfig without being asked.",
+      "oneOf": [
+        {
+          "description": "Add the metadata as one more field on the message. The payload's own\nfields stay exactly where they were, so nothing downstream has to\nchange.\n\nOnly works on a payload that is a JSON *object*: a message that is a\nbare number or string has nowhere to put the field, and is skipped with\na warning rather than taking the pipeline down. Use `wrap` for those.",
+          "properties": {
+            "meta": {
+              "description": "the field the metadata object is written to. Defaults to `_meta`.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "type": {
+              "const": "merge",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "Put the whole payload under a field of its own, beside the metadata —\n`{\"value\": <what arrived>, \"_meta\": {…}}`.\n\nWorks whatever the payload is, which is what a source of bare readings\n(a `1`, a `\"recipe-a\"`) needs. The cost is that every field reference\ndownstream now goes through the payload field: `value.temperature`\nrather than `temperature`.",
+          "properties": {
+            "meta": {
+              "description": "the field the metadata object is written to. Defaults to `_meta`.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "payload": {
+              "description": "the field the original payload is written to. Defaults to `value`.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "type": {
+              "const": "wrap",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "HttpAuthConfig": {
+      "description": "A credential carried in a header — checked by the `http` input on a post to\na pipeline's endpoint, and presented by the `http` output on a request it\nsends.\n\nOne type for both directions because it is one fact: a fixed string in a\nnamed header. The two halves read it differently — the input compares what\narrived against this, the output sets it — and only the input has the rule\nabout `ALLOWED_HEADERS`, since only the input can write a header into the\nmessages.\n\nThis is the **data plane's** own credential and has nothing to do with the\naccounts in the settings file: those are people signing in to look at and\nedit the graph, this is one system pushing data into one pipeline. A machine\nposting readings should not need an account that can rewrite the config, and\na person with such an account should not thereby be able to post readings.\n\nThe token is a fixed string the sender repeats on every request, which makes\nit **only as private as the transport**. kayak speaks plain HTTP; putting\nTLS in front of it is the deployment's job, and without that the token is\nreadable by anything on the path. It is the same trade every log-ingest API\nmakes, and worth making deliberately rather than by accident.",
+      "oneOf": [
+        {
+          "description": "A token in the standard `Authorization` header, as\n`Authorization: Bearer <token>`. The one to reach for unless the system\non the other end can't use that header.",
+          "properties": {
+            "token": {
+              "$ref": "#/$defs/Secret",
+              "description": "the token. A `${NAME}` reference, so the config file holds the name\nand the secret store holds the value."
+            },
+            "type": {
+              "const": "bearer",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "token"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "A fixed value in a header of your choosing — for webhook senders and\nreceivers that can't use `Authorization` but can carry a header of their\nown, which is most of them.",
+          "properties": {
+            "name": {
+              "description": "the header's name, matched case-insensitively on the way in. On an\n`http` input it may not be one of the headers an `envelope` passes\nthrough, since that would write the credential into the messages.",
+              "type": "string"
+            },
+            "type": {
+              "const": "header",
+              "type": "string"
+            },
+            "value": {
+              "$ref": "#/$defs/Secret",
+              "description": "the exact value that header must have. A `${NAME}` reference, as\nabove."
+            }
+          },
+          "required": [
+            "type",
+            "name",
+            "value"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "HttpInputConfig": {
+      "description": "Accepts messages posted to this pipeline's own endpoint,\n`POST /api/pipelines/{id}/messages` — the pipeline is the receiving end of\nan http API rather than something that reaches out to a broker.\n\nThe endpoint is derived from the pipeline's id and appears as soon as the\npipeline is running; nothing is configured about it here. The body is one\nJSON message or an array of them, and an array arrives as one batch. A\npipeline can only have one of these — two would share an endpoint, and which\nof them a request went to would be a coin toss — so a second one fails to\nbuild.",
+      "properties": {
+        "auth": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/HttpAuthConfig"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "what a post must present to be accepted. Absent — the default — means\nthe endpoint takes anything that reaches it, which is what every\npipeline with an `http` input has always done."
+        },
+        "capacity": {
+          "description": "how many posted batches may queue up ahead of the pipeline before it\nstarts refusing them with a `503`. Defaults to 1024. The queue is what\nlets a burst through; refusing past it is deliberate, since the\nalternative is holding a request open until the pipeline catches up.",
+          "format": "uint",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        }
+      },
+      "title": "http",
+      "type": "object"
+    },
+    "InputConfig": {
+      "oneOf": [
+        {
+          "$ref": "#/$defs/DummyConfig",
+          "properties": {
+            "type": {
+              "const": "dummy",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type"
+          ],
+          "type": "object"
+        },
+        {
+          "$ref": "#/$defs/HttpInputConfig",
+          "properties": {
+            "type": {
+              "const": "http",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type"
+          ],
+          "type": "object"
+        },
+        {
+          "$ref": "#/$defs/KafkaConfig",
+          "properties": {
+            "type": {
+              "const": "kafka",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type"
+          ],
+          "type": "object"
+        },
+        {
+          "$ref": "#/$defs/NatsConfig",
+          "properties": {
+            "type": {
+              "const": "nats",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type"
+          ],
+          "type": "object"
+        },
+        {
+          "$ref": "#/$defs/PipelineConfig",
+          "properties": {
+            "type": {
+              "const": "pipeline",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type"
+          ],
+          "type": "object"
+        },
+        {
+          "$ref": "#/$defs/MqttConfig",
+          "properties": {
+            "type": {
+              "const": "mqtt",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type"
+          ],
+          "type": "object"
+        },
+        {
+          "$ref": "#/$defs/RedisConfig",
+          "properties": {
+            "type": {
+              "const": "redis",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type"
+          ],
+          "type": "object"
+        },
+        {
+          "$ref": "#/$defs/OpcuaConfig",
+          "properties": {
+            "type": {
+              "const": "opcua",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type"
+          ],
+          "type": "object"
+        }
+      ],
+      "properties": {
+        "ack": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/AckMode"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "when this input tells its broker a message is done with. Available on\nevery input kind in the schema, but only honoured by ones with a\nbroker-side notion of \"received\" vs \"delivered\" of their own (`kafka`,\nfor now) — an input with nothing to acknowledge refuses to build rather\nthan silently treating this as `on_receipt`. Defaults to `on_receipt`,\nwhich is what every input has always done. See \"acknowledgement modes\"\nin the guide."
+        },
+        "buffer": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/BufferConfig"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "batch messages from this input before the transforms see them — by\ncount (`static`), by time (`tumbling`) or by whichever comes first\n(`batch`). Never emits an empty batch. Available on every input kind.\nNot to be confused with the `buffer` transform."
+        },
+        "envelope": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/EnvelopeConfig"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "attach metadata about where each message came from — the subject, topic,\npartition and so on listed under \"metadata\" below. Available on every\ninput kind. Omit it and messages are passed on exactly as they arrive."
+        }
+      },
+      "type": "object"
+    },
+    "KafkaConfig": {
+      "description": "Consumes JSON messages from a kafka topic, each emitted as a batch of one.\n\nA payload that isn't JSON is skipped with a warning rather than taking the\npipeline down, same as the nats input. The consumer connects on the first\nread and joins a consumer group, so kafka remembers where this pipeline got\nto between restarts.",
+      "properties": {
+        "connection": {
+          "description": "name of the kafka connection to consume from — see \"connections\" in the\nreadme. The brokers are declared once, in the connections file, rather\nthan repeated in every pipeline reading from the same cluster.",
+          "type": "string",
+          "x-connection": "kafka"
+        },
+        "group": {
+          "description": "consumer group id. Kafka tracks the read position per group, so two\npipelines sharing a group split the topic between them, and two with\ndifferent groups each get every message.",
+          "type": "string"
+        },
+        "max_batch": {
+          "description": "most messages to put in one batch. Defaults to 1 — one message per\nbatch, which is what this input has always done.\n\nRaising it only ever coalesces records that had *already arrived*: the\ninput still returns as soon as it has one, so an idle topic is no slower\nthan it was. It is worth raising when a consumer is catching up on a\nbacklog, where one-message batches make the run loop, the transforms and\nevery downstream pipeline do their per-batch work a hundred times over.",
+          "format": "uint",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "start_at": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/KafkaStartAt"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "where to start when the group has no committed position yet: `earliest`\nreplays the topic from the beginning, `latest` only sees new messages.\nDefaults to `latest`."
+        },
+        "topic": {
+          "description": "the topic to consume from",
+          "type": "string"
+        }
+      },
+      "required": [
+        "connection",
+        "topic",
+        "group"
+      ],
+      "title": "kafka",
+      "type": "object"
+    },
+    "KafkaStartAt": {
+      "description": "Where a new consumer group starts reading.",
+      "enum": [
+        "earliest",
+        "latest"
+      ],
+      "type": "string"
+    },
+    "MqttConfig": {
+      "description": "Subscribes to an mqtt topic — or a topic *filter*, since mqtt's `+` and `#`\nwildcards are valid here. Each message is parsed as JSON and emitted as a\nbatch of one; a payload that isn't JSON is skipped with a warning rather\nthan taking the pipeline down, the same rule every other input follows.\n\nThe connection is opened on the first read, and a stable client id is\nderived from the pipeline's id and this topic — not configurable, since\nnothing about it is a choice this pipeline needs to make and getting it\nwrong (two inputs sharing one id) silently drops one of them.",
+      "properties": {
+        "connection": {
+          "description": "name of the mqtt connection to subscribe on — see \"connections\" in the\nreadme. The broker it points at is declared once, in the connections\nfile, rather than repeated in every pipeline that uses it.",
+          "type": "string",
+          "x-connection": "mqtt"
+        },
+        "max_batch": {
+          "description": "most messages to put in one batch. Defaults to 1 — one message per\nbatch, which is what this input has always done.\n\nRaising it only ever coalesces messages that had *already arrived*: the\ninput still returns as soon as it has one, so a quiet topic is no\nslower than it was.",
+          "format": "uint",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "qos": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/MqttQos"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "the quality of service to subscribe with. Defaults to `at_most_once`.\n`ack: on_delivery` needs at least `at_least_once` here — a QoS-0\nsubscription has nothing for it to acknowledge."
+        },
+        "topic": {
+          "description": "the topic, or topic filter, to subscribe to",
+          "type": "string"
+        }
+      },
+      "required": [
+        "connection",
+        "topic"
+      ],
+      "title": "mqtt",
+      "type": "object"
+    },
+    "MqttQos": {
+      "description": "The delivery guarantee to ask for on an mqtt subscribe or publish, spelled\nthe way mqtt itself names them rather than as the bare numbers `0`/`1`/`2`.",
+      "oneOf": [
+        {
+          "const": "at_most_once",
+          "description": "fire and forget — the broker never resends and there is no ack of any\nkind. The default.",
+          "type": "string"
+        },
+        {
+          "const": "at_least_once",
+          "description": "the broker resends until acknowledged, so a message may arrive more\nthan once. Required for an input's `ack: on_delivery` to mean anything\n— see \"acknowledgement modes\" in the guide.",
+          "type": "string"
+        },
+        {
+          "const": "exactly_once",
+          "description": "the broker's four-part handshake that guarantees exactly one delivery.\nThe most expensive of the three; reach for `at_least_once` unless a\nduplicate would actually be wrong.",
+          "type": "string"
+        }
+      ]
+    },
+    "NatsConfig": {
+      "description": "Subscribes to a nats subject. Each message is parsed as JSON and emitted as\na batch of one; a payload that isn't JSON is skipped with a warning rather\nthan taking the pipeline down. The connection is opened on the first read.",
+      "properties": {
+        "connection": {
+          "description": "name of the nats connection to subscribe on — see \"connections\" in the\nreadme. The server it points at is declared once, in the connections\nfile, rather than repeated in every pipeline that uses it.",
+          "type": "string",
+          "x-connection": "nats"
+        },
+        "max_batch": {
+          "description": "most messages to put in one batch. Defaults to 1 — one message per\nbatch, which is what this input has always done.\n\nRaising it only ever coalesces messages that had *already arrived*: the\ninput still returns as soon as it has one, so a quiet subject is no\nslower than it was.",
+          "format": "uint",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "subject": {
+          "description": "the subject to subscribe to",
+          "type": "string"
+        }
+      },
+      "required": [
+        "connection",
+        "subject"
+      ],
+      "title": "nats",
+      "type": "object"
+    },
+    "OpcuaBrowseConfig": {
+      "description": "Everything under a node in the server's address space, found by browsing it\nwhen the pipeline starts.\n\nThe convenient half of naming nodes, and the one with a cost worth knowing:\nwhat this pipeline reads is then decided by the server's address space *at\nthe moment the pipeline starts*, so a tag added to the machine tomorrow is\npicked up by a restart and a tag removed silently stops arriving. An\nexplicit `nodes` list is the one that says in the config file exactly what\nis being read. The two combine — browse a folder and name the handful of\ntags elsewhere that belong with it.",
+      "properties": {
+        "depth": {
+          "description": "how many levels below the root to follow. Defaults to 3, and there is\ndeliberately no spelling for \"all of them\": a browse of a plant server's\nwhole address space is thousands of nodes, and the pipeline that asked\nfor it would find that out by subscribing to them.",
+          "format": "uint",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "root": {
+          "description": "id of the node to browse under, in the same notation as `node_id` —\ntypically a folder, e.g. `ns=2;s=Machine1`. Every *variable* found\nbeneath it is subscribed to; folders and objects are followed, not\nsubscribed.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "root"
+      ],
+      "title": "opcua browse",
+      "type": "object"
+    },
+    "OpcuaConfig": {
+      "description": "Subscribes to variables on an OPC UA server, one message per value change.\n\nThe server pushes: this creates a subscription with a monitored item per\nnode and is told when a value changes, rather than reading them round-robin\non a timer. `publish_interval_ms` is how often the server may send, not how\noften it samples — a tag that doesn't move produces no messages at all.\n\nEach message is one reading, and carries the tag as well as the value:\n\n```json\n{\n  \"node\": \"ns=2;s=Machine1.Temperature\",\n  \"name\": \"temperature\",\n  \"value\": 21.5,\n  \"status\": \"Good\",\n  \"source_timestamp\": \"2026-01-01T12:00:00.123Z\",\n  \"server_timestamp\": \"2026-01-01T12:00:00.130Z\"\n}\n```\n\n`status` is the reading's own quality and is **always present** — a sensor\nthat has failed reports `Bad...` with a `null` value rather than going\nquiet, and a pipeline that acted on those as if they were readings would be\nacting on nothing. `source_timestamp` is when the *device* says the value\nwas produced, which is the one to reduce or partition by; the envelope's\n`received_at` is when kayak read it, and on a slow link those are not the\nsame instant.\n\nThe nodes are named by `nodes`, or found by `browse`, or both — one of them\nis required, since an input with nothing to monitor would sit silent\nforever. A node named twice is subscribed to once.",
+      "properties": {
+        "browse": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/OpcuaBrowseConfig"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "a node to browse, subscribing to every variable found under it."
+        },
+        "connection": {
+          "description": "name of the opcua connection to subscribe on — see \"connections\" in the\nreadme. The server it points at is declared once, in the connections\nfile, rather than repeated in every pipeline that uses it.",
+          "type": "string",
+          "x-connection": "opcua"
+        },
+        "deadband": {
+          "description": "how far a value must move before the server reports it, in the value's\nown units. Absent reports every change, however small — which on an\nanalogue signal is every sample, since the last digit is always moving.\n\nThis is applied by the *server*, so it saves the network and this\npipeline alike. It only applies to numeric nodes; a string or a boolean\nis reported on every change whatever this says.",
+          "format": "double",
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "max_batch": {
+          "description": "most messages to put in one batch. Defaults to 1 — one message per\nbatch, which is what every other input does unless asked otherwise.\n\nWorth raising here more than elsewhere: one publish from the server\ncarries every node that changed in the interval, so a subscription to\ntwo hundred tags at 1 Hz is two hundred batches a second through the run\nloop unless they are allowed to travel together. Raising it only ever\ncoalesces changes that had *already arrived*.",
+          "format": "uint",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "nodes": {
+          "description": "the nodes to subscribe to, named one by one.",
+          "items": {
+            "$ref": "#/$defs/OpcuaNodeConfig"
+          },
+          "type": "array"
+        },
+        "publish_interval_ms": {
+          "description": "how often the server may send a batch of changes, in milliseconds.\nDefaults to 1000. This bounds how long a change waits, not how often\nanything is measured.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "queue_size": {
+          "description": "how many samples the server may hold for a node between publishes.\nDefaults to 1, which means a value that changes twice in one interval is\nreported once — the latest. Raise it, together with\n`sampling_interval_ms`, when every sample matters rather than the\ncurrent value.",
+          "format": "uint32",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "sampling_interval_ms": {
+          "description": "how often the server should *look* at each node, in milliseconds.\nAbsent asks the server to sample at the publishing interval, which is\nwhat it does by default; a smaller value here is what fills a queue with\nintermediate readings between two publishes.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "connection"
+      ],
+      "title": "opcua",
+      "type": "object"
+    },
+    "OpcuaNodeConfig": {
+      "description": "One node an `opcua` input subscribes to, and what the messages call it.",
+      "properties": {
+        "name": {
+          "description": "what the messages from this node call it. Defaults to the node id\nitself, which is exact and unreadable; naming the tag here is what makes\nthe rest of the pipeline — a `group_by`, a column mapping — legible.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "node_id": {
+          "description": "the node's id, in OPC UA's own notation — `ns=2;s=Machine1.Temperature`\nfor a string identifier, `ns=2;i=1042` for a numeric one, `g=` for a\nguid and `b=` for an opaque one. A node id with no `ns=` is in\nnamespace 0, the server's own.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "node_id"
+      ],
+      "title": "opcua node",
+      "type": "object"
+    },
+    "PipelineConfig": {
+      "description": "Takes another pipeline's output as its input. This is what makes the\npipelines a graph: several pipelines can read from the same upstream, and it\nfans out to all of them. The upstream must already exist when this pipeline\nis created, so declare it earlier in the config file.",
+      "properties": {
+        "upstream": {
+          "description": "id of the pipeline to read from",
+          "type": "string",
+          "x-pipeline-id": true
+        }
+      },
+      "required": [
+        "upstream"
+      ],
+      "title": "pipeline",
+      "type": "object"
+    },
+    "RedisConfig": {
+      "description": "Subscribes to a redis channel. Each message is parsed as JSON and emitted\nas a batch of one; a payload that isn't JSON is skipped with a warning\nrather than taking the pipeline down. The connection is opened on the\nfirst read.\n\nPlain `SUBSCRIBE`, not `PSUBSCRIBE` — a channel name is exact, the same\nchoice the nats input makes for a subject with no wildcard. Redis pub/sub\nhas no broker-side redelivery of any kind: an unsubscribed client simply\nmisses whatever was published while it was gone, and there is nothing an\nack could hold open — the same limitation `NatsConfig` has, for the same\nreason.",
+      "properties": {
+        "channel": {
+          "description": "the channel to subscribe to",
+          "type": "string"
+        },
+        "connection": {
+          "description": "name of the redis connection to subscribe on — see \"connections\" in\nthe readme. The server it points at is declared once, in the\nconnections file, rather than repeated in every pipeline that uses it.",
+          "type": "string",
+          "x-connection": "redis"
+        },
+        "max_batch": {
+          "description": "most messages to put in one batch. Defaults to 1 — one message per\nbatch, which is what this input has always done.\n\nRaising it only ever coalesces messages that had *already arrived*: the\ninput still returns as soon as it has one, so a quiet channel is no\nslower than it was.",
+          "format": "uint",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "connection",
+        "channel"
+      ],
+      "title": "redis",
+      "type": "object"
+    },
+    "Secret": {
+      "description": "A config value that may *reference* secrets rather than contain them.\n\nOn the wire it is an ordinary JSON string, but `${NAME}` placeholders in it\nare replaced with real values when the pipeline is built, against whatever\nsecret store the server was started with:\n\n```json\n{ \"type\": \"nats\", \"urls\": \"nats://app:${NATS_PASSWORD}@broker:4222\" }\n```\n\nThe unresolved form is the only one this type ever holds. That is what makes\nit safe to commit, safe to hand back from `GET /api/pipelines` and safe to show\nin the UI — a resolved value exists only inside the built runtime component,\nnever in a `Config`. Resolution deliberately lives in the root crate: this\ncrate compiles to wasm for the frontend, which must not be able to hold a\nresolved secret at all.\n\nA value with no `${...}` in it is passed through untouched, so fields that\nhold nothing sensitive need no special handling.",
+      "type": "string"
+    }
+  },
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "description": "Take a few messages from an input, without creating a pipeline.",
+  "properties": {
+    "input": {
+      "$ref": "#/$defs/InputConfig",
+      "description": "the input to read from, exactly as it would be written in a pipeline —\nincluding its `envelope`, so the metadata fields the messages will\nreally carry are in the sample too."
+    },
+    "max_messages": {
+      "description": "how many messages to take. Defaults to [`DEFAULT_MAX_MESSAGES`], capped\nat [`MAX_MESSAGES`].",
+      "format": "uint",
+      "minimum": 0,
+      "type": [
+        "integer",
+        "null"
+      ]
+    },
+    "timeout_ms": {
+      "description": "how long to wait for them, in milliseconds. Defaults to\n[`DEFAULT_TIMEOUT_MS`], capped at [`MAX_TIMEOUT_MS`]. The wait ends as\nsoon as enough messages have arrived.",
+      "format": "uint64",
+      "minimum": 0,
+      "type": [
+        "integer",
+        "null"
+      ]
+    }
+  },
+  "required": [
+    "input"
+  ],
+  "title": "sample request",
+  "type": "object"
+}
+```
+
+:::
+
+## `SampleResponse` {#schema-sampleresponse}
+
+What a sample found.
+
+Note there is no separate "nothing arrived" arm: an empty `messages` is exactly that, and it is an ordinary answer rather than a failure. A stream nobody is publishing to is a real state of the world, and one the user often needs to be shown rather than protected from.
+
+::: details schema
+
+```json
+{
+  "$defs": {
+    "SampleStage": {
+      "description": "Where a sample went wrong, when it did.",
+      "oneOf": [
+        {
+          "const": "build",
+          "description": "The input could not be built at all — a connection that isn't\nconfigured, a secret that doesn't resolve. The same failure creating\nthe pipeline would have given, which is the point of building the real\nthing.",
+          "type": "string"
+        },
+        {
+          "const": "read",
+          "description": "It was built, and reading from it failed — the broker refused the\nsubscription, the host is unreachable.",
+          "type": "string"
+        }
+      ]
+    }
+  },
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "description": "What a sample found.\n\nNote there is no separate \"nothing arrived\" arm: an empty `messages` is\nexactly that, and it is an ordinary answer rather than a failure. A stream\nnobody is publishing to is a real state of the world, and one the user\noften needs to be shown rather than protected from.",
+  "oneOf": [
+    {
+      "properties": {
+        "messages": {
+          "description": "the messages, exactly as the pipeline's first transform would have\nseen them.",
+          "items": true,
+          "type": "array"
+        },
+        "notes": {
+          "description": "what the sample did differently from the pipeline it is standing in\nfor — a throwaway consumer group, an ignored buffer. Empty when it\ndid nothing differently.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "outcome": {
+          "const": "sampled",
+          "type": "string"
+        },
+        "waited_ms": {
+          "description": "how long it waited, in milliseconds.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "outcome",
+        "messages",
+        "waited_ms"
+      ],
+      "type": "object"
+    },
+    {
+      "properties": {
+        "message": {
+          "type": "string"
+        },
+        "outcome": {
+          "const": "failed",
+          "type": "string"
+        },
+        "stage": {
+          "$ref": "#/$defs/SampleStage"
+        }
+      },
+      "required": [
+        "outcome",
+        "stage",
+        "message"
+      ],
+      "type": "object"
+    }
+  ],
+  "title": "sample response"
 }
 ```
 

@@ -7,6 +7,42 @@ re-derive. See the [docs site](../website/) for how the finished parts behave, a
 
 ## currently working on
 
+- [x] **see the actual data while building a pipeline**
+      (done 2026-08-19, in three pieces: `kayak_core::schema::infer` reads the
+      fields back off a handful of messages and `FieldType::MessageField`
+      offers them in every box that names one; `POST /api/inputs/sample`
+      fetches those messages from a draft input, with a per-kind declaration
+      of what sampling costs the running system; and
+      `POST /api/pipelines/dry-run` puts them down the draft's transforms so
+      the suggestions are right *at each point in the chain*. See "seeing the
+      data while you build" on the site.)
+- [ ] **a value edit does not re-run the chain.** Adding, removing or
+      re-kinding a component does (which is what makes adding an output after
+      the fetch work), but retyping a `map`'s target field leaves the boxes
+      behind it offering the old shape until something is sampled again.
+      Tracking the values themselves would put a round trip on every
+      keystroke, so it needs a debounce and a rule for what a half-typed
+      transform means.
+- [ ] **a sample arrives all at once.** `POST /api/inputs/sample` answers when
+      it has enough messages or has waited long enough, so a source ticking
+      once a second shows nothing for several seconds and then four messages
+      together. The panel counts while it waits, which is a plaster rather
+      than a fix. Streaming them needs a response shape the browser can read
+      incrementally: SSE is a `GET`, and the request body here is a whole
+      input config, so it is either a streaming `POST` read through a
+      `ReadableStream` or a two-step "start a sample, then subscribe to it"
+      with server-side state and a lifetime to manage. Both also need a cancel
+      story for closing the modal mid-sample.
+- [ ] **nothing samples an `http` input.** It is refused, because sampling it
+      would mean claiming the endpoint of the pipeline that owns it. The
+      honest version is a *listen* rather than a fetch: register a temporary
+      inbox under a path of its own and show what is posted to it while the
+      modal is open.
+- [ ] **a dry run has no tick**, so a `buffer` waiting on its window hands on
+      nothing and everything behind it shows empty. Truthful, and unhelpful
+      for exactly the transform whose behaviour is hardest to picture. Fixing
+      it properly means letting the request drive a clock, which is a bigger
+      change to `Transform::wakeup`'s contract than it looks.
 - [x] expose a standardised http api specification
       (done 2026-08-07: OpenAPI 3.1 at `/api/openapi.json`, rendered at
       `/api/reference`, plus an "http api" tab on `/docs` — all three off the

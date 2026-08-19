@@ -115,6 +115,7 @@ pub struct ColumnMapping {
     pub column_type: ColumnType,
     /// the field to read, as a dotted path. Defaults to the column's name.
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(extend("x-message-field" = true))]
     pub field: Option<String>,
     /// store the whole message in this column instead of one of its fields.
     /// Only for a `json` column, and not together with `field`.

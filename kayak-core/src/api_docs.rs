@@ -31,6 +31,8 @@ use crate::connections::{Connections, CreateConnectionRequest};
 use crate::docs::ComponentDoc;
 use crate::history::PipelineHistory;
 use crate::layout::LayoutFile;
+use crate::dry_run::{PipelineDryRunRequest, PipelineDryRunResponse};
+use crate::sample::{SampleRequest, SampleResponse};
 use crate::script::{DryRunRequest, DryRunResponse};
 use crate::server_config::Role;
 use crate::state::{BucketContents, BucketSummary};
@@ -106,6 +108,8 @@ pub enum Operation {
     ListConnections,
     GetPipelineHistory,
     DryRunScript,
+    SampleInput,
+    DryRunPipeline,
     ListStateBuckets,
     GetStateBucket,
     CreateConnection,
@@ -137,6 +141,8 @@ impl Operation {
             Self::ListConnections => "listConnections",
             Self::GetPipelineHistory => "getPipelineHistory",
             Self::DryRunScript => "dryRunScript",
+            Self::SampleInput => "sampleInput",
+            Self::DryRunPipeline => "dryRunPipeline",
             Self::ListStateBuckets => "listStateBuckets",
             Self::GetStateBucket => "getStateBucket",
             Self::CreateConnection => "createConnection",
@@ -786,6 +792,113 @@ pub fn endpoints() -> Vec<ApiDoc> {
             ],
         },
         ApiDoc {
+            path: "/api/inputs/sample",
+            method: Method::Post,
+            operation: Operation::SampleInput,
+            summary: "Fetch a few real messages from an input, without creating a pipeline",
+            description: "Configuring a stream you cannot see is guesswork, and every field \
+                          reference downstream — a column's `field`, a filter's comparison — \
+                          is a name someone had to already know. This builds the input in \
+                          the body exactly as a pipeline would, takes up to `max_messages` \
+                          from it within `timeout_ms`, and drops it.\n\n\
+                          The **real** input, including its `envelope`, so the metadata \
+                          fields the messages will actually carry are in the sample too. \
+                          Its `buffer` is the one thing ignored: a buffer's job is to make \
+                          the pipeline wait, which is not what a sample is for. Anything \
+                          the sample did differently comes back in `notes`.\n\n\
+                          **Sampling is not free for every kind of input, and the ones \
+                          where it isn't say so.** A kafka sample runs under a throwaway \
+                          consumer group, so it neither rebalances the pipeline's group \
+                          nor commits on its behalf; an mqtt sample connects under a \
+                          client id of its own, because a broker disconnects the older \
+                          client holding one. An `http` input is refused outright with a \
+                          400 — it is posted to rather than read from, so there is nothing \
+                          to fetch.\n\n\
+                          **No messages is a 200 with an empty list.** A subject nobody \
+                          is publishing to is a real state of the world and the answer to \
+                          the question asked; none of these inputs can replay what was \
+                          published before the sample started.",
+            tag: Tag::Pipelines,
+            access: Access::Admin,
+            params: vec![],
+            query: vec![],
+            request: Some(RequestDoc {
+                body: Body::Json("SampleRequest"),
+                description: "The input to read from, and how much to take.",
+            }),
+            responses: vec![
+                ResponseDoc {
+                    status: 200,
+                    description: "The sample was taken — `outcome` says whether it \
+                                  produced messages or failed on the way.",
+                    body: Body::Json("SampleResponse"),
+                },
+                ResponseDoc {
+                    status: 400,
+                    description: "The request itself was wrong: malformed JSON, an input \
+                                  that isn't a kind of input, or one that cannot be \
+                                  sampled at all.",
+                    body: Body::Json("ApiError"),
+                },
+                server_error(),
+            ],
+        },
+        ApiDoc {
+            path: "/api/pipelines/dry-run",
+            method: Method::Post,
+            operation: Operation::DryRunPipeline,
+            summary: "Run a draft's transforms over some messages, without creating a pipeline",
+            description: "What a `map` writes, what a `filter` drops, what a `reduce` collapses \
+                          a batch to — questions the config cannot answer and one real message \
+                          can. This builds the transforms in the body exactly as a pipeline \
+                          would and puts the messages down the chain, reporting **what each \
+                          stage handed on**.\n\n\
+                          Per stage and as a list of batches, because that is where the answer \
+                          usually is: a `splitter` hands on several batches, a `filter` that \
+                          dropped everything hands on none, and a `buffer` hands on nothing \
+                          because it is still holding what it was given. What a transform only \
+                          releases when the chain is drained is reported separately, as \
+                          `on_flush`, so a buffer doesn't look like it passes everything \
+                          straight through. A transform that is *still* holding what it was given \
+                          hands on nothing at all, and the chain says so rather than \
+                          pretending the messages came through: a dry run has no tick to \
+                          give a window that has thirty seconds left on it.\n\n\
+                          **There are no outputs and there cannot be.** A dry run that emitted \
+                          would be a pipeline; everything up to the outputs is a question about \
+                          the data, and the outputs are the part that changes somebody else's \
+                          system.\n\n\
+                          **State is never live**, exactly as for a script dry run: the buckets \
+                          are private to the request, seeded from `buckets` in the body, \
+                          returned in the response and thrown away with it.\n\n\
+                          A transform that cannot be built, or that fails on a message, is a \
+                          200 whose `outcome` is `failed` — the request was carried out and \
+                          where it broke is the answer. The stages that completed first come \
+                          back with it.",
+            tag: Tag::Pipelines,
+            access: Access::Admin,
+            params: vec![],
+            query: vec![],
+            request: Some(RequestDoc {
+                body: Body::Json("PipelineDryRunRequest"),
+                description: "The messages, and the transforms to put them through.",
+            }),
+            responses: vec![
+                ResponseDoc {
+                    status: 200,
+                    description: "The chain ran, or it broke on the way — the `outcome` field \
+                                  says which.",
+                    body: Body::Json("PipelineDryRunResponse"),
+                },
+                ResponseDoc {
+                    status: 400,
+                    description: "The request itself was wrong: malformed JSON, or a transform \
+                                  that isn't a kind of transform.",
+                    body: Body::Json("ApiError"),
+                },
+                server_error(),
+            ],
+        },
+        ApiDoc {
             path: "/api/state",
             method: Method::Get,
             operation: Operation::ListStateBuckets,
@@ -1333,6 +1446,16 @@ pub fn schemas() -> BTreeMap<&'static str, Value> {
     schemas.insert("UiEvent", of(schema_for!(UiEvent)));
     schemas.insert("DryRunRequest", of(schema_for!(DryRunRequest)));
     schemas.insert("DryRunResponse", of(schema_for!(DryRunResponse)));
+    schemas.insert(
+        "PipelineDryRunRequest",
+        of(schema_for!(PipelineDryRunRequest)),
+    );
+    schemas.insert(
+        "PipelineDryRunResponse",
+        of(schema_for!(PipelineDryRunResponse)),
+    );
+    schemas.insert("SampleRequest", of(schema_for!(SampleRequest)));
+    schemas.insert("SampleResponse", of(schema_for!(SampleResponse)));
     schemas.insert("ApiError", of(schema_for!(ApiError)));
     schemas.insert("LoginRequest", of(schema_for!(LoginRequest)));
     schemas.insert("TokenLoginRequest", of(schema_for!(TokenLoginRequest)));
@@ -1560,6 +1683,16 @@ mod tests {
                 // capability `createPipeline` already grants. Never lower this
                 // to `read`.
                 ("dryRunScript", "admin"),
+                // Sampling opens a connection to somebody's broker with the
+                // server's own credentials and reads what is on it. That is a
+                // capability, not a view of the graph — the same one
+                // `createPipeline` grants, one message at a time. Never lower
+                // this to `read`.
+                ("sampleInput", "admin"),
+                // Same capability as the script dry run: it builds and runs
+                // real transforms, including one that can reach an http
+                // endpoint. Never lower this to `read`.
+                ("dryRunPipeline", "admin"),
                 ("listStateBuckets", "read"),
                 ("getStateBucket", "read"),
                 ("createConnection", "admin"),

@@ -670,13 +670,24 @@ impl PipelineRuntime {
                 }
             }
             let senders = self.shared.downstream_senders();
+            let mut gone = false;
             for tx in &senders {
                 if let Err(e) = tx.send(Arc::clone(b)).await {
                     debug!(
                         "[{}]\t dropping batch for a downstream that went away: {}",
                         self.shared.id, e
                     );
+                    gone = true;
                 }
+            }
+            // A receiver that has been dropped never comes back, so keeping
+            // its sender means failing to send to it once per batch for the
+            // life of the pipeline. Pruned here, on the failure, rather than
+            // by asking every sender whether it is closed on every pass —
+            // that question costs something on a hot path where the answer is
+            // almost always no.
+            if gone {
+                self.shared.prune_downstream();
             }
         }
         // Every output and every downstream handoff for this pass has now
@@ -975,6 +986,21 @@ impl Pipeline {
 
     pub fn subscribe(&self, tx: mpsc::Sender<Arc<MessageBatch>>) {
         self.lock_senders().push(tx);
+    }
+
+    /// How many downstreams this pipeline is currently handing batches to.
+    #[must_use]
+    pub fn downstream_count(&self) -> usize {
+        self.lock_senders().len()
+    }
+
+    /// Forgets the downstreams whose receivers are gone.
+    ///
+    /// Called from the run loop when a send actually fails — a deleted
+    /// pipeline, or a sample of a `pipeline` input that has finished reading —
+    /// so nothing here is paid for on a pass where every downstream is alive.
+    fn prune_downstream(&self) {
+        self.lock_senders().retain(|tx| !tx.is_closed());
     }
     pub fn view(&self) -> PipelineView<'_> {
         PipelineView {

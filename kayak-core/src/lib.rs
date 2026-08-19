@@ -9,11 +9,14 @@ pub mod columns;
 pub mod config;
 pub mod connections;
 pub mod docs;
+pub mod dry_run;
 pub mod format;
 pub mod history;
 pub mod layout;
 pub mod mapping;
 pub mod metadata;
+pub mod sample;
+pub mod schema;
 pub mod script;
 pub mod server_config;
 pub mod state;
@@ -23,6 +26,7 @@ pub use connections::{ConnectionId, ConnectionKind, Connections};
 pub use format::ConfigFormat;
 pub use history::{ErrorSignature, HistoryBucket, PipelineHistory, Resolution};
 pub use layout::{EdgeEnd, LayoutFile, PipelineLayout, PortLayout, Side};
+pub use schema::{InferredField, InferredType, MessageSchema, TextFormat};
 pub use state::{PipelineState, StateBucketConfig, StateBuckets};
 
 /// One pipeline as the API reports it: the id it is running under, the config

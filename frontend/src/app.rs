@@ -1,6 +1,7 @@
 use kayak_core::api_docs::{ApiDoc, endpoints};
 use kayak_core::docs::{Family, FieldType, all_components};
 use kayak_core::history::ErrorSignature;
+use kayak_core::schema::MessageSchema;
 use kayak_core::script::{DryRunRequest, DryRunResponse};
 use kayak_core::state::{BucketContents, BucketSummary};
 use kayak_core::{
@@ -3007,6 +3008,47 @@ fn AddPipelineModal() -> impl IntoView {
 
     let id = RwSignal::new(String::new());
     let drafts = RwSignal::new(Vec::<DraftSignals>::new());
+    // What sampling the input found, by draft position. Empty until something
+    // is sampled; see [`SampleSchemas`].
+    let schemas = SampleSchemas(RwSignal::new(Vec::<MessageSchema>::new()));
+    provide_context(schemas);
+    // What the panel beside the form is showing. Provided here rather than
+    // held by the component that fills it, because the button that fetches and
+    // the panel that shows are two levels apart.
+    let sample = SampleTarget(RwSignal::new(Option::<SampleView>::None));
+    provide_context(sample);
+
+    // Re-run the chain whenever the draft's *shape* changes, so a component
+    // added after the sample is not left out of it.
+    //
+    // Adding the output after fetching the messages is the ordinary order —
+    // you look at the data and then decide where to put it — and without this
+    // that output is the one component with no field suggestions, because the
+    // chain ran when it did not exist. Removing or re-kinding one is the same
+    // problem in reverse: the schemas are keyed by draft position, so
+    // everything after the change is about a different component.
+    //
+    // What it tracks is deliberately narrow: the list, and each draft's kind
+    // and variant. Not `values` — that would put a round trip on every
+    // keystroke — and not the sample itself, which is read untracked precisely
+    // because running the chain writes to it.
+    Effect::new(move |_| {
+        let signals = drafts.get();
+        let _shape: Vec<(String, Option<String>)> = signals
+            .iter()
+            .map(|draft| (draft.kind.get(), draft.variant.get()))
+            .collect();
+        let Some(view) = sample.0.get_untracked() else {
+            return;
+        };
+        let SampleState::Sampled { messages, .. } = view.state else {
+            return;
+        };
+        let at = view.index;
+        leptos::task::spawn_local(async move {
+            run_chain(at, messages, drafts, docs, sample, Some(schemas)).await;
+        });
+    });
     let errors = RwSignal::new(Vec::<form::FormError>::new());
     // the server's own answer, which says things the form can't know — a
     // duplicate id, an upstream that doesn't exist
@@ -3105,7 +3147,11 @@ fn AddPipelineModal() -> impl IntoView {
         // clicking the backdrop is the same as cancelling; clicking the panel
         // must not be, hence the stopped propagation below
         <div class="modal-backdrop" on:click=move |_| close()>
-            <div class="modal" on:click=move |ev| ev.stop_propagation()>
+            // the form and the sample side by side: the panel is a sibling of
+            // the modal box rather than part of it, so it can be as wide as a
+            // message needs without the form's controls stretching to match
+            <div class="modal-with-panel" on:click=move |ev| ev.stop_propagation()>
+            <div class="modal">
                 <header>
                     <span class="modal-title">"add pipeline"</span>
                     <button class="icon-button" title="close" on:click=move |_| close()>
@@ -3191,6 +3237,8 @@ fn AddPipelineModal() -> impl IntoView {
                     </button>
                 </footer>
             </div>
+            <SamplePanel />
+            </div>
         </div>
     }
 }
@@ -3251,6 +3299,429 @@ fn StageEditor(
     }
 }
 
+/// What a sample of real messages showed at each component of the draft, by
+/// that component's position in the flat draft list — the same index
+/// [`form::FormError`] keys a field error by.
+///
+/// Ambient rather than a prop for the reason [`AppState`] is ambient in the
+/// navbar: it is threaded through [`FieldEditor`], which renders *itself* for a
+/// nested field, so a prop would have to be carried through every level of
+/// that recursion to reach a `field` box three deep in a column mapping.
+///
+/// Empty until something samples the input, which is the state every form
+/// starts in and the one it stays in for a stream nobody has fetched from: an
+/// empty list of suggestions renders as an ordinary text box, which is exactly
+/// what a message-field box was before any of this existed.
+#[derive(Clone, Copy)]
+struct SampleSchemas(RwSignal<Vec<MessageSchema>>);
+
+impl SampleSchemas {
+    /// What the component at `index` sees, if anything has been sampled.
+    fn at(self, index: usize) -> Option<MessageSchema> {
+        self.0.with(|schemas| schemas.get(index).cloned())
+    }
+
+    /// Records what the component at `index` sees, growing the list if the
+    /// components before it have not been sampled.
+    fn set_at(self, index: usize, schema: MessageSchema) {
+        self.0.update(|schemas| {
+            if schemas.len() <= index {
+                schemas.resize(index + 1, MessageSchema::default());
+            }
+            schemas[index] = schema;
+        });
+    }
+
+    /// Forgets everything. Called when the draft is rearranged: the entries
+    /// are keyed by position, so a removed component makes every schema after
+    /// it a statement about a different component.
+    fn clear(self) {
+        self.0.set(Vec::new());
+    }
+
+    /// The id of the `<datalist>` holding that component's field names.
+    /// Per component rather than one for the form: what a transform sees is
+    /// what the transforms in front of it left behind, so the answer differs
+    /// down the chain.
+    fn list_id(index: usize) -> String {
+        format!("message-fields-{index}")
+    }
+}
+
+/// What the panel beside the form is showing, if anything.
+///
+/// One at a time and keyed by the component it came from: two inputs are two
+/// streams, and a panel showing both merged would say something about a
+/// message shape that no message has.
+#[derive(Clone, Copy)]
+struct SampleTarget(RwSignal<Option<SampleView>>);
+
+impl SampleTarget {
+    fn show(self, index: usize, kind: &str, state: SampleState) {
+        self.0.set(Some(SampleView {
+            index,
+            kind: kind.to_string(),
+            state,
+            stages: Vec::new(),
+            chain_note: None,
+        }));
+    }
+
+    /// Puts what the chain did under the messages the input produced, if the
+    /// panel is still showing the component that was sampled. It may not be:
+    /// a dry run is a second round trip, and the kind may have been changed
+    /// while it was out.
+    fn show_chain(self, index: usize, stages: Vec<StageView>, note: Option<String>) {
+        self.0.update(|open| {
+            if let Some(view) = open.as_mut().filter(|view| view.index == index) {
+                view.stages = stages;
+                view.chain_note = note;
+            }
+        });
+    }
+
+    /// Closes the panel if it is showing this component — what changing a
+    /// component's kind or taking it out has to do, since what it holds is
+    /// then about something that no longer exists.
+    fn forget(self, index: usize) {
+        if self.0.with_untracked(|open| open.as_ref().is_some_and(|v| v.index == index)) {
+            self.0.set(None);
+        }
+    }
+}
+
+#[derive(Clone)]
+struct SampleView {
+    index: usize,
+    kind: String,
+    state: SampleState,
+    /// What each transform in the draft did to those messages, once the dry
+    /// run has answered. Empty while it is out, and for a draft with no
+    /// transforms — which is the same picture, correctly.
+    stages: Vec<StageView>,
+    /// Why there are no stages, when there is a reason worth giving: a
+    /// transform that isn't filled in yet, or a chain that broke.
+    chain_note: Option<String>,
+}
+
+/// One transform's worth of the panel: what it handed on.
+#[derive(Clone)]
+struct StageView {
+    title: String,
+    messages: Vec<serde_json::Value>,
+    /// Set when the stage handed on nothing, saying which kind of nothing it
+    /// was — dropped, or still held.
+    empty: Option<String>,
+}
+
+#[derive(Clone)]
+enum SampleState {
+    /// The request is out. A state of its own because sampling waits on a real
+    /// stream — several seconds of nothing is the *expected* case for a quiet
+    /// subject, and a button that looked idle through it would be pressed
+    /// again.
+    Fetching,
+    Sampled {
+        messages: Vec<serde_json::Value>,
+        notes: Vec<String>,
+    },
+    /// The input could not be built, or reading it failed. Not an error dialog:
+    /// it belongs in the panel, next to where the messages would have been,
+    /// because it is the answer to the same question.
+    Failed(String),
+}
+
+/// Puts the sampled messages through the draft's transforms and records what
+/// every component of the draft ends up seeing.
+///
+/// The second half of the sample and the reason it is worth taking: an input's
+/// fields are only the fields the *first* transform sees, and a column mapping
+/// three stages later is written against something else entirely. Running the
+/// chain is the only way to know what that something else is.
+///
+/// The schemas are recorded by what each component **sees**, not by what it
+/// produces: a transform is configured against its input, so the box asking
+/// for a field name should offer the fields that will reach it. Which is also
+/// why every output gets the last stage's answer.
+async fn run_chain(
+    sampled_at: usize,
+    messages: Vec<serde_json::Value>,
+    drafts: RwSignal<Vec<DraftSignals>>,
+    docs: StoredValue<Vec<kayak_core::docs::ComponentDoc>>,
+    target: SampleTarget,
+    schemas: Option<SampleSchemas>,
+) {
+    let snapshots: Vec<form::ComponentDraft> = drafts
+        .get_untracked()
+        .into_iter()
+        .map(DraftSignals::snapshot)
+        .collect();
+    let chain = match docs.with_value(|docs| form::transform_chain(&snapshots, docs)) {
+        Ok(chain) => chain,
+        // The ordinary state of a form someone is still filling in, so it is a
+        // note rather than an error: the messages above it are still the
+        // answer to what was asked.
+        Err(unbuildable) => {
+            let which = unbuildable
+                .iter()
+                .map(|at| snapshots.get(*at).map_or("?", |d| d.kind.as_str()))
+                .collect::<Vec<_>>()
+                .join(", ");
+            target.show_chain(
+                sampled_at,
+                Vec::new(),
+                Some(format!("not run: {which} is not filled in yet")),
+            );
+            return;
+        }
+    };
+
+    let transforms = match serde_json::from_value(serde_json::Value::Array(
+        chain.iter().map(|(_, value)| value.clone()).collect(),
+    )) {
+        Ok(transforms) => transforms,
+        Err(err) => {
+            target.show_chain(sampled_at, Vec::new(), Some(err.to_string()));
+            return;
+        }
+    };
+
+    let answer = ApiClient {
+        base: String::new(),
+    }
+    .dry_run_pipeline(&kayak_core::dry_run::PipelineDryRunRequest {
+        messages: messages.clone(),
+        transforms,
+        state: None,
+        buckets: std::collections::BTreeMap::new(),
+    })
+    .await;
+
+    let (results, note) = match answer {
+        Ok(kayak_core::dry_run::PipelineDryRunResponse::Ran { stages, .. }) => (stages, None),
+        Ok(kayak_core::dry_run::PipelineDryRunResponse::Failed {
+            stages,
+            kind,
+            message,
+            ..
+        }) => (stages, Some(format!("{kind} failed: {message}"))),
+        Err(err) => {
+            target.show_chain(sampled_at, Vec::new(), Some(err.to_string()));
+            return;
+        }
+    };
+
+    // What arrives at the next component, threaded down the draft. It starts
+    // as the sample, which is exactly what the first transform is handed.
+    let mut arriving = messages;
+    let mut views = Vec::with_capacity(results.len());
+    for (position, stage) in results.iter().enumerate() {
+        if let (Some(schemas), Some((at, _))) = (schemas, chain.get(position)) {
+            schemas.set_at(*at, kayak_core::schema::infer(&arriving));
+        }
+        arriving = stage.messages();
+        views.push(StageView {
+            title: format!("{} · {}", position + 1, stage.kind),
+            empty: arriving
+                .is_empty()
+                .then(|| "handed on nothing".to_string()),
+            messages: arriving.clone(),
+        });
+    }
+    // Every output sees what came out of the last transform — or the sample
+    // itself, for a pipeline that transforms nothing.
+    if let Some(schemas) = schemas {
+        let final_schema = kayak_core::schema::infer(&arriving);
+        for (at, draft) in snapshots.iter().enumerate() {
+            if draft.family == Family::Output {
+                schemas.set_at(at, final_schema.clone());
+            }
+        }
+    }
+    target.show_chain(sampled_at, views, note);
+}
+
+/// The panel beside the add-pipeline form: what the input being configured is
+/// actually carrying.
+///
+/// It sits *outside* the modal's own box rather than inside its body, and that
+/// is the point of it: the form is a column of narrow controls and a message
+/// is a block of JSON, so putting one under the other would push whatever is
+/// being configured off the screen at the moment it is being checked.
+#[component]
+fn SamplePanel() -> impl IntoView {
+    let target = use_context::<SampleTarget>();
+    move || {
+        let view = target?.0.get()?;
+        Some(view! {
+            <aside class="sample-panel">
+                <header>
+                    <span class="modal-title">{format!("sample · {}", view.kind)}</span>
+                    <button
+                        class="icon-button"
+                        title="close"
+                        on:click=move |_| {
+                            if let Some(target) = target {
+                                target.0.set(None);
+                            }
+                        }
+                    >
+                        "×"
+                    </button>
+                </header>
+                <div class="sample-body">
+                    {sample_body(view.state)}
+                    {view
+                        .chain_note
+                        .map(|note| view! { <div class="form-hint">{note}</div> })}
+                    {view
+                        .stages
+                        .into_iter()
+                        .map(|stage| {
+                            view! {
+                                <div class="sample-stage">{stage.title}</div>
+                                {match stage.empty {
+                                    // said rather than left blank: a stage with
+                                    // nothing under it is indistinguishable
+                                    // from one that hasn't been drawn
+                                    Some(why) => view! { <div class="empty">{why}</div> }.into_any(),
+                                    None => {
+                                        stage
+                                            .messages
+                                            .into_iter()
+                                            .map(|message| {
+                                                let rendered = pretty::render(&message.to_string());
+                                                view! { <MessageBody message=rendered /> }
+                                            })
+                                            .collect_view()
+                                            .into_any()
+                                    }
+                                }}
+                            }
+                        })
+                        .collect_view()}
+                </div>
+            </aside>
+        })
+    }
+}
+
+/// The panel while the request is out.
+///
+/// It counts, and it says what it is counting towards. A sample waits on a
+/// real stream, so several seconds of nothing is the *expected* case rather
+/// than a sign of trouble — and a pane that sat there saying "waiting" with no
+/// sign of life is one people press the button again from. The two bounds are
+/// the server's own constants, so what the panel promises and what the
+/// endpoint does cannot drift apart.
+#[component]
+fn WaitingForSample() -> impl IntoView {
+    let seconds = RwSignal::new(0u32);
+    // cleaned up when the panel stops showing this arm, which is what
+    // `use_interval_fn` does on unmount
+    let _ = leptos_use::use_interval_fn(move || seconds.update(|s| *s += 1), 1000);
+    let limit = kayak_core::sample::DEFAULT_TIMEOUT_MS / 1000;
+    view! {
+        <div class="empty">
+            {move || {
+                format!(
+                    "waiting for up to {} messages… {}s of {limit}s",
+                    kayak_core::sample::DEFAULT_MAX_MESSAGES,
+                    seconds.get(),
+                )
+            }}
+        </div>
+    }
+}
+
+/// What the panel holds, by what the sample came back as.
+fn sample_body(state: SampleState) -> AnyView {
+    match state {
+        SampleState::Fetching => view! { <WaitingForSample /> }.into_any(),
+        SampleState::Failed(message) => view! {
+            <div class="form-error">{message}</div>
+        }
+        .into_any(),
+        // Nothing arriving is an answer, and the panel says which answer it is:
+        // the stream is quiet, not the button broken. None of these inputs can
+        // replay what was published before the sample started, which is the
+        // part a user has no way to guess.
+        SampleState::Sampled { messages, notes } if messages.is_empty() => view! {
+            <div class="empty">"nothing arrived. A sample only sees messages published while it waits."</div>
+            {notes_view(notes)}
+        }
+        .into_any(),
+        SampleState::Sampled { messages, notes } => view! {
+            {notes_view(notes)}
+            <div class="sample-count">
+                {if messages.len() == 1 {
+                    "1 message".to_string()
+                } else {
+                    format!("{} messages", messages.len())
+                }}
+            </div>
+            {messages
+                .into_iter()
+                .map(|message| {
+                    // through the log's renderer, so a payload looks the same
+                    // here as it will on the card once this pipeline is running
+                    let rendered = pretty::render(&message.to_string());
+                    view! { <MessageBody message=rendered /> }
+                })
+                .collect_view()}
+        }
+        .into_any(),
+    }
+}
+
+/// What the sample did differently from the pipeline it stands in for, from
+/// the server's own `notes` — never rephrased here, so what the endpoint says
+/// and what the panel says cannot drift apart.
+fn notes_view(notes: Vec<String>) -> AnyView {
+    notes
+        .into_iter()
+        .map(|note| view! { <div class="form-hint">{note}</div> })
+        .collect_view()
+        .into_any()
+}
+
+/// The suggestions behind one component's message-field boxes.
+///
+/// A `<datalist>` and not a `<select>`, which is the whole design of this
+/// control: a sample is a handful of messages, so a field it did not happen to
+/// carry is still a field, and the box has to accept one. The list only makes
+/// the common case a click instead of a retype.
+#[component]
+fn MessageFieldOptions(index: usize) -> impl IntoView {
+    let schemas = use_context::<SampleSchemas>();
+    move || {
+        let schema = schemas?.at(index)?;
+        Some(view! {
+            <datalist id=SampleSchemas::list_id(index)>
+                {schema
+                    .fields
+                    .iter()
+                    .map(|field| {
+                        // the label carries what the sample knew: the type, and
+                        // a value to recognise the field by. A field the sample
+                        // disagreed about says so rather than picking one.
+                        let mut label = field
+                            .types
+                            .iter()
+                            .map(|t| t.as_str())
+                            .collect::<Vec<_>>()
+                            .join(" | ");
+                        if let Some(example) = &field.example {
+                            label.push_str(&format!(" · {example}"));
+                        }
+                        view! { <option value=field.path.clone() label=label></option> }
+                    })
+                    .collect_view()}
+            </datalist>
+        })
+    }
+}
+
 /// One component: which kind it is, and the fields that kind has.
 #[component]
 fn ComponentEditor(
@@ -3269,6 +3740,10 @@ fn ComponentEditor(
     let family = draft.family;
     let doc =
         move || docs.with_value(|docs| form::doc_for(docs, family, &draft.kind.get()).cloned());
+    // Ambient like the field suggestions and for the same reason: only the
+    // add-pipeline form has a panel to show a sample in, and the connection
+    // form reuses this component without one.
+    let sample_target = use_context::<SampleTarget>();
 
     // Changing the kind changes which fields exist, so whatever was typed into
     // the old ones has nowhere to go. Clearing is the honest option: keeping
@@ -3282,6 +3757,10 @@ fn ComponentEditor(
         draft.values.set(HashMap::new());
         draft.variant.set(variant);
         draft.kind.set(kind);
+        // whatever was sampled came out of the component this no longer is
+        if let Some(target) = sample_target {
+            target.forget(index);
+        }
     };
 
     // by position, not by identity: the list is rebuilt whenever it changes, so
@@ -3292,10 +3771,102 @@ fn ComponentEditor(
                 d.remove(index);
             }
         });
+        // both are keyed by position, so a removal moves every entry after
+        // this one onto a different component
+        if let Some(target) = sample_target {
+            target.forget(index);
+        }
+        if let Some(schemas) = use_context::<SampleSchemas>() {
+            schemas.clear();
+        }
+    };
+
+    // Fetch a few real messages from this input, without creating anything.
+    // The same validation the submit does, on this component alone: an input
+    // that can't be built into a config can't be sampled either, and the
+    // boxes light up exactly as they would on submit.
+    let fetch = move |_: leptos::ev::MouseEvent| {
+        let (Some(target), Some(doc)) = (sample_target, doc()) else {
+            return;
+        };
+        let snapshot = draft.snapshot();
+        match form::component_json(&doc, &snapshot) {
+            Err(found) => {
+                errors.update(|errors| {
+                    errors.retain(|error| !form::is_field_error_for(error, index));
+                    errors.extend(found.into_iter().map(|(field, message)| {
+                        form::FormError::Field {
+                            component: index,
+                            field,
+                            message,
+                        }
+                    }));
+                });
+            }
+            Ok(body) => {
+                errors.update(|errors| {
+                    errors.retain(|error| !form::is_field_error_for(error, index));
+                });
+                let kind = snapshot.kind.clone();
+                let input = match serde_json::from_value(body) {
+                    Ok(input) => input,
+                    // the form built something the config types don't accept.
+                    // Shown in the panel rather than swallowed: it is a real
+                    // answer about this input, and one worth a bug report.
+                    Err(err) => {
+                        target.show(index, &kind, SampleState::Failed(err.to_string()));
+                        return;
+                    }
+                };
+                target.show(index, &kind, SampleState::Fetching);
+                let schemas = use_context::<SampleSchemas>();
+                leptos::task::spawn_local(async move {
+                    let request = kayak_core::sample::SampleRequest {
+                        input,
+                        max_messages: None,
+                        timeout_ms: None,
+                    };
+                    let answer = ApiClient {
+                        base: String::new(),
+                    }
+                    .sample_input(&request)
+                    .await;
+                    let state = match answer {
+                        Ok(kayak_core::sample::SampleResponse::Sampled {
+                            messages, notes, ..
+                        }) => {
+                            if let Some(schemas) = schemas {
+                                schemas.set_at(index, kayak_core::schema::infer(&messages));
+                            }
+                            SampleState::Sampled {
+                                messages: messages.clone(),
+                                notes,
+                            }
+                        }
+                        Ok(kayak_core::sample::SampleResponse::Failed { message, .. }) => {
+                            SampleState::Failed(message)
+                        }
+                        Err(err) => SampleState::Failed(err.to_string()),
+                    };
+                    let sampled = match &state {
+                        SampleState::Sampled { messages, .. } => Some(messages.clone()),
+                        _ => None,
+                    };
+                    target.show(index, &kind, state);
+                    // and straight on to what the rest of the draft does with
+                    // them: a second round trip, so the messages are on screen
+                    // while it is out
+                    if let Some(messages) = sampled {
+                        run_chain(index, messages, drafts, docs, target, schemas).await;
+                    }
+                });
+            }
+        }
     };
 
     view! {
         <div class="component-editor">
+            <MessageFieldOptions index=index />
             <div class="component-header">
                 <select class="select" on:change=choose_kind>
                     {move || {
@@ -3316,6 +3887,48 @@ fn ComponentEditor(
                         })
                     }}
                 </select>
+                // Only an input has anything to fetch, and only the form with
+                // a panel beside it has anywhere to put it. A kind that cannot
+                // be sampled keeps the button and disables it, carrying the
+                // reason: "there is nothing here" would read as a bug, and the
+                // reason says what to do instead.
+                {move || {
+                    let target = sample_target?;
+                    if family != Family::Input {
+                        return None;
+                    }
+                    let sampling = kayak_core::sample::for_input(&draft.kind.get())?;
+                    let refused = !sampling.allowed();
+                    let title = sampling
+                        .note()
+                        .map_or_else(
+                            || "fetch a few real messages from this input".to_string(),
+                            ToString::to_string,
+                        );
+                    let fetching = move || {
+                        target
+                            .0
+                            .with(|open| {
+                                open.as_ref()
+                                    .is_some_and(|view| {
+                                        view.index == index
+                                            && matches!(view.state, SampleState::Fetching)
+                                    })
+                            })
+                    };
+                    Some(
+                        view! {
+                            <button
+                                class="button"
+                                title=title
+                                disabled=move || refused || fetching()
+                                on:click=fetch
+                            >
+                                {move || if fetching() { "fetching…" } else { "fetch messages" }}
+                            </button>
+                        },
+                    )
+                }}
                 <Show when=move || removable>
                     <button class="icon-button danger" title="remove" on:click=remove>
                         "×"
@@ -3417,6 +4030,9 @@ fn FieldEditor(
     connections: Signal<Vec<(String, String)>>,
 ) -> AnyView {
     let name = form::path(&prefix, &field.name);
+    // what a sample found at this component, for the message-field boxes and
+    // for the list button that fills a whole mapping in from it
+    let schemas = use_context::<SampleSchemas>();
     // read once, on purpose: the control is uncontrolled from here on, so that
     // typing into it doesn't rebuild it
     let initial = values.with_untracked(|v| v.get(&name).cloned().unwrap_or_default());
@@ -3588,6 +4204,11 @@ fn FieldEditor(
         // local signal so a keystroke inside a row can't reach it.
         FieldType::List(element) => {
             let element = (**element).clone();
+            // kept back for the "fill from sample" button below, which needs
+            // the element to know what a row is made of and the path to write
+            // the rows at
+            let fillable = element.clone();
+            let fill_at = at.clone();
             let at = at.clone();
             let rows = RwSignal::new(values.with_untracked(|v| form::list_len(v, &at)));
             let add = {
@@ -3647,9 +4268,43 @@ fn FieldEditor(
                             })
                             .collect_view()
                     }}
-                    <button class="button" on:click=add>
-                        "+ add"
-                    </button>
+                    <div class="form-list-actions">
+                        <button class="button" on:click=add>
+                            "+ add"
+                        </button>
+                        // Only for a list whose rows map a *message* field, and
+                        // only once something has been sampled: with nothing to
+                        // fill from, a button that filled in nothing would read
+                        // as broken. See [`form::fill_from_sample`] for what it
+                        // will and won't decide for you.
+                        {move || {
+                            let schema = schemas?.at(index)?;
+                            if schema.fields.is_empty() || !form::can_fill_from_sample(&fillable) {
+                                return None;
+                            }
+                            let fill_at = fill_at.clone();
+                            let element = fillable.clone();
+                            let fill = move |_: leptos::ev::MouseEvent| {
+                                let len = values
+                                    .try_update(|v| {
+                                        form::fill_from_sample(v, &fill_at, &element, &schema)
+                                    })
+                                    .unwrap_or_default();
+                                rows.set(len);
+                            };
+                            Some(
+                                view! {
+                                    <button
+                                        class="button"
+                                        title="add a row per field the sampled messages carried"
+                                        on:click=fill
+                                    >
+                                        "fill from sample"
+                                    </button>
+                                },
+                            )
+                        }}
+                    </div>
                 </div>
             }
             .into_any()
@@ -3767,6 +4422,20 @@ fn FieldEditor(
             }
             .into_any()
         }
+        // A field of the *messages*, so a box with a list rather than a
+        // dropdown: what a sample carried is a suggestion, never the set of
+        // legal answers. See [`SampleSchemas`]. With nothing sampled the list
+        // is empty and this is the plain text box it has always been.
+        FieldType::MessageField => view! {
+            <input
+                class="text-input"
+                list=SampleSchemas::list_id(index)
+                value=initial.clone()
+                placeholder="field path"
+                on:input=write
+            />
+        }
+        .into_any(),
         // Code, so not a one-line box: a syntax-highlighted editor with a
         // gutter, and a pane that runs it. See [`ScriptEditor`].
         FieldType::Script(_) => view! {

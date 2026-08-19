@@ -1,10 +1,12 @@
 pub mod auth;
 pub mod connection;
 pub mod docs;
+pub mod dry_run;
 pub mod history;
 pub mod layout;
 pub mod openapi;
 pub mod pipeline;
+pub mod sample;
 pub mod script;
 pub mod settings;
 pub mod state;

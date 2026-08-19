@@ -1,5 +1,7 @@
 use gloo_net::http::Request;
+use kayak_core::dry_run::{PipelineDryRunRequest, PipelineDryRunResponse};
 use kayak_core::history::{PipelineHistory, Resolution};
+use kayak_core::sample::{SampleRequest, SampleResponse};
 use kayak_core::script::{DryRunRequest, DryRunResponse};
 use kayak_core::state::{BucketContents, BucketSummary};
 use kayak_core::{
@@ -87,6 +89,40 @@ impl ApiClient {
             return Err(rejection(resp).await);
         }
         Ok(resp.json::<DryRunResponse>().await?)
+    }
+
+    /// Fetch a few real messages from an input, without creating a pipeline.
+    ///
+    /// Two-level like the dry run above and for the same reason: an input
+    /// that cannot be built is a 200 whose `outcome` says so, because the
+    /// failure *is* the answer and belongs beside the messages rather than in
+    /// a request error. The outer `ApiError` is the request going wrong —
+    /// including a refusal, for an input that cannot be sampled at all.
+    pub async fn sample_input(&self, request: &SampleRequest) -> Result<SampleResponse, ApiError> {
+        let resp = Request::post(&format!("{}/api/inputs/sample", self.base))
+            .json(request)?
+            .send()
+            .await?;
+        if !resp.ok() {
+            return Err(rejection(resp).await);
+        }
+        Ok(resp.json::<SampleResponse>().await?)
+    }
+
+    /// Put some messages through a draft's transforms, without creating a
+    /// pipeline. Two-level for the reason the two above are.
+    pub async fn dry_run_pipeline(
+        &self,
+        request: &PipelineDryRunRequest,
+    ) -> Result<PipelineDryRunResponse, ApiError> {
+        let resp = Request::post(&format!("{}/api/pipelines/dry-run", self.base))
+            .json(request)?
+            .send()
+            .await?;
+        if !resp.ok() {
+            return Err(rejection(resp).await);
+        }
+        Ok(resp.json::<PipelineDryRunResponse>().await?)
     }
 
     pub async fn delete_pipeline(&self, id: &str) -> Result<(), ApiError> {
