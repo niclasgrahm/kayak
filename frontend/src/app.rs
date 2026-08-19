@@ -3012,6 +3012,10 @@ fn AddPipelineModal() -> impl IntoView {
     // is sampled; see [`SampleSchemas`].
     let schemas = SampleSchemas(RwSignal::new(Vec::<MessageSchema>::new()));
     provide_context(schemas);
+    // The messages themselves, beside the shapes of them — what the script
+    // editor runs against. See [`SampleInputs`].
+    let inputs = SampleInputs(RwSignal::new(Vec::<Vec<serde_json::Value>>::new()));
+    provide_context(inputs);
     // What the panel beside the form is showing. Provided here rather than
     // held by the component that fills it, because the button that fetches and
     // the panel that shows are two levels apart.
@@ -3046,7 +3050,7 @@ fn AddPipelineModal() -> impl IntoView {
         };
         let at = view.index;
         leptos::task::spawn_local(async move {
-            run_chain(at, messages, drafts, docs, sample, Some(schemas)).await;
+            run_chain(at, messages, drafts, docs, sample, Some(schemas), Some(inputs)).await;
         });
     });
     let errors = RwSignal::new(Vec::<form::FormError>::new());
@@ -3348,6 +3352,45 @@ impl SampleSchemas {
     }
 }
 
+/// The messages that reach each component of the draft, by that component's
+/// position — the same key [`SampleSchemas`] uses, and filled in the same pass.
+///
+/// The schemas are what a *field box* needs (a list of names to offer); this is
+/// what the script editor needs, which is the messages themselves. A script is
+/// the one component whose configuration cannot be checked by looking at it, so
+/// the only useful thing to show its author is what their code does to the data
+/// that will actually reach it — and that data is already in hand by the time
+/// the chain has run.
+///
+/// Empty until something is sampled, which is why the editor keeps a messages
+/// box of its own: a script written before anything was fetched still has to be
+/// runnable against something typed by hand.
+#[derive(Clone, Copy)]
+struct SampleInputs(RwSignal<Vec<Vec<serde_json::Value>>>);
+
+impl SampleInputs {
+    /// What arrives at the component at `index`, if the chain has been run.
+    fn at(self, index: usize) -> Option<Vec<serde_json::Value>> {
+        self.0.with(|inputs| inputs.get(index).cloned())
+    }
+
+    fn set_at(self, index: usize, messages: Vec<serde_json::Value>) {
+        self.0.update(|inputs| {
+            if inputs.len() <= index {
+                inputs.resize(index + 1, Vec::new());
+            }
+            inputs[index] = messages;
+        });
+    }
+
+    /// Forgets everything, for the reason [`SampleSchemas::clear`] does: the
+    /// entries are keyed by position, so a rearranged draft makes every one of
+    /// them a statement about a different component.
+    fn clear(self) {
+        self.0.set(Vec::new());
+    }
+}
+
 /// What the panel beside the form is showing, if anything.
 ///
 /// One at a time and keyed by the component it came from: two inputs are two
@@ -3450,6 +3493,7 @@ async fn run_chain(
     docs: StoredValue<Vec<kayak_core::docs::ComponentDoc>>,
     target: SampleTarget,
     schemas: Option<SampleSchemas>,
+    inputs: Option<SampleInputs>,
 ) {
     let snapshots: Vec<form::ComponentDraft> = drafts
         .get_untracked()
@@ -3516,8 +3560,13 @@ async fn run_chain(
     let mut arriving = messages;
     let mut views = Vec::with_capacity(results.len());
     for (position, stage) in results.iter().enumerate() {
-        if let (Some(schemas), Some((at, _))) = (schemas, chain.get(position)) {
-            schemas.set_at(*at, kayak_core::schema::infer(&arriving));
+        if let Some((at, _)) = chain.get(position) {
+            if let Some(schemas) = schemas {
+                schemas.set_at(*at, kayak_core::schema::infer(&arriving));
+            }
+            if let Some(inputs) = inputs {
+                inputs.set_at(*at, arriving.clone());
+            }
         }
         arriving = stage.messages();
         views.push(StageView {
@@ -3530,12 +3579,16 @@ async fn run_chain(
     }
     // Every output sees what came out of the last transform — or the sample
     // itself, for a pipeline that transforms nothing.
-    if let Some(schemas) = schemas {
-        let final_schema = kayak_core::schema::infer(&arriving);
-        for (at, draft) in snapshots.iter().enumerate() {
-            if draft.family == Family::Output {
-                schemas.set_at(at, final_schema.clone());
-            }
+    let final_schema = kayak_core::schema::infer(&arriving);
+    for (at, draft) in snapshots.iter().enumerate() {
+        if draft.family != Family::Output {
+            continue;
+        }
+        if let Some(schemas) = schemas {
+            schemas.set_at(at, final_schema.clone());
+        }
+        if let Some(inputs) = inputs {
+            inputs.set_at(at, arriving.clone());
         }
     }
     target.show_chain(sampled_at, views, note);
@@ -3779,6 +3832,9 @@ fn ComponentEditor(
         if let Some(schemas) = use_context::<SampleSchemas>() {
             schemas.clear();
         }
+        if let Some(inputs) = use_context::<SampleInputs>() {
+            inputs.clear();
+        }
     };
 
     // Fetch a few real messages from this input, without creating anything.
@@ -3820,6 +3876,7 @@ fn ComponentEditor(
                 };
                 target.show(index, &kind, SampleState::Fetching);
                 let schemas = use_context::<SampleSchemas>();
+                let sample_inputs = use_context::<SampleInputs>();
                 leptos::task::spawn_local(async move {
                     let request = kayak_core::sample::SampleRequest {
                         input,
@@ -3857,7 +3914,7 @@ fn ComponentEditor(
                     // them: a second round trip, so the messages are on screen
                     // while it is out
                     if let Some(messages) = sampled {
-                        run_chain(index, messages, drafts, docs, target, schemas).await;
+                        run_chain(index, messages, drafts, docs, target, schemas, sample_inputs).await;
                     }
                 });
             }
@@ -4078,8 +4135,21 @@ fn FieldEditor(
             // what is shown and what is stored the same thing. Optional fields
             // keep theirs for good — it is how a field gets unset again.
             let blank = !field.required || unset;
+            let chosen = at.clone();
             view! {
-                <select class="select" on:change=write>
+                // The one box in this form that follows the draft rather than
+                // only writing to it, and for the same reason the pipeline-id
+                // dropdown does: something else can set it. The script
+                // editor's toolbar writes `scope`, and a dropdown still
+                // showing `message` under an editor that says `batch` is the
+                // form disagreeing with itself. Safe here where it is not for
+                // a text box — a select has no caret and no half-typed value
+                // to destroy.
+                <select
+                    class="select"
+                    prop:value=move || values.with(|v| v.get(&chosen).cloned().unwrap_or_default())
+                    on:change=write
+                >
                     <Show when=move || blank>
                         <option value="" selected=unset></option>
                     </Show>
@@ -7233,26 +7303,193 @@ pub fn Card(pipeline_id: PipelineId, config: Config, status: RunStatus) -> impl 
     }
 }
 
+/// Everything one script editor is doing, shared by the two places it is
+/// drawn from.
+///
+/// The editor exists twice — once in the form row and once in the full-screen
+/// overlay — and only ever *mounted* once: expanding unmounts the inline
+/// surface and the overlay builds one of its own. That is what makes a single
+/// bag of signals the right shape here rather than props: the text, the
+/// server's last answer, the messages being run against and which completion is
+/// selected all have to survive that swap, and none of them belong to either
+/// surface.
+///
+/// Unmounting rather than hiding is also what keeps the box **uncontrolled**,
+/// which is the rule every other control in this form follows. A `<textarea>`
+/// whose value was written on every keystroke would be rebuilt under whoever
+/// was typing into it; instead its value is set once when it is built, and
+/// `source` is what everything else reads. The two only have to be reconciled
+/// when a surface is created, and that is exactly when it happens.
+#[derive(Clone, Copy)]
+struct ScriptSession {
+    /// The text, as of the last keystroke. What the highlighter, the caret
+    /// arithmetic and the dry run all read.
+    source: RwSignal<String>,
+    /// Which of the two scopes the *component* is configured for, read from
+    /// the draft beside the code. The editor is wrong in a way that looks like
+    /// a bug in the script if it guesses this — see [`form::script_settings`].
+    scope: Memo<kayak_core::script::ScriptScope>,
+    /// The budget the component is configured with, threaded through for the
+    /// same reason.
+    max_operations: Memo<Option<u64>>,
+    /// What the server last said about this script. `None` before the first
+    /// answer has come back, which is the state a freshly opened form is in.
+    answer: RwSignal<Option<Answer>>,
+    /// Whether a request is out. A state of its own so the strip can say
+    /// "checking" rather than going blank between answers — the old one stays
+    /// on screen until it is replaced.
+    checking: RwSignal<bool>,
+    /// Which request the answer on screen belongs to. A dry run is a round
+    /// trip and the source moves on while it is out, so an answer that is not
+    /// about the latest text is dropped rather than shown against it.
+    generation: RwSignal<u64>,
+    /// The messages the script is run over, as text — this is a scratch pad,
+    /// so what is in it may well not be JSON yet.
+    messages: RwSignal<String>,
+    /// Whether that box has been edited by hand. The sample stops writing into
+    /// it once it has: a fetch that overwrote somebody's pasted-in awkward
+    /// message would throw away the case they were debugging.
+    edited: RwSignal<bool>,
+    /// Whether the messages came from a sample rather than from the default,
+    /// which is the difference between "your data" and "an example".
+    seeded: RwSignal<bool>,
+    /// The completion popup, when it is open.
+    popup: RwSignal<Option<Popup>>,
+    /// What the pointer is resting on, when it is a name kayak provides.
+    hint: RwSignal<Option<Hint>>,
+    /// Whether the reference list is showing.
+    reference: RwSignal<bool>,
+    /// Whether the full-screen editor is open.
+    expanded: RwSignal<bool>,
+    /// Whether the results are showing. Shut in the form row, where the modal
+    /// has plenty to show already, and opened by expanding.
+    results: RwSignal<bool>,
+    /// Where this component sits in the draft, which is the key the sample is
+    /// recorded under — see [`SampleSchemas`] and [`SampleInputs`].
+    index: usize,
+}
+
+/// What came back from the last dry run.
+///
+/// One type for all three outcomes because they occupy the same strip and are
+/// the answer to the same question: is this script all right, and what does it
+/// do. A request that never reached the server is in here for the same reason —
+/// "the server did not answer" belongs where the answer would have been.
+#[derive(Clone, Debug)]
+enum Answer {
+    /// The script ran. `inputs` is how many messages went in, kept beside the
+    /// output because the interesting number is nearly always the difference.
+    Ran {
+        inputs: usize,
+        batches: Vec<Vec<serde_json::Value>>,
+        warnings: Vec<String>,
+    },
+    /// The script did not compile, or a run of it failed. `line` is what the
+    /// gutter marks.
+    Failed {
+        stage: kayak_core::script::DryRunStage,
+        message: String,
+        line: Option<usize>,
+        column: Option<usize>,
+    },
+    /// Nothing was asked, or the asking failed: the messages box does not hold
+    /// a JSON array, or the request did not come back. Not a script error, and
+    /// deliberately worded so it cannot be read as one.
+    Unasked(String),
+}
+
+impl Answer {
+    /// The line to mark in the gutter, if this answer belongs to one.
+    fn line(&self) -> Option<usize> {
+        match self {
+            Self::Failed { line, .. } => *line,
+            _ => None,
+        }
+    }
+
+    fn is_failure(&self) -> bool {
+        matches!(self, Self::Failed { .. } | Self::Unasked(_))
+    }
+}
+
+/// The completion popup's state: what is on offer, which row is selected, and
+/// where it is drawn.
+#[derive(Clone, Debug)]
+struct Popup {
+    items: Vec<crate::rhai::Completion>,
+    selected: usize,
+    /// What was being typed when it opened, which is what accepting replaces.
+    typed: crate::rhai::Typed,
+    /// The caret it belongs to, which is where it is drawn under.
+    at: crate::rhai::Caret,
+}
+
+/// What the pointer is resting on: one of kayak's own names, described.
+#[derive(Clone, Debug)]
+struct Hint {
+    signature: String,
+    summary: String,
+    /// Set when the name exists but not in the scope this component is
+    /// configured for. The hint says so rather than the popup silently leaving
+    /// it out — somebody reading a script that uses `batch` under `message`
+    /// scope is looking at exactly the mistake this sentence explains.
+    wrong_scope: Option<String>,
+    at: crate::rhai::Caret,
+}
+
+/// How long after the last keystroke the script is sent to be checked.
+///
+/// The whole feedback loop hangs off this number. Shorter and a pause in the
+/// middle of typing a word costs a round trip that says "unexpected end of
+/// input"; longer and the answer stops feeling like it is about what is on
+/// screen. It is deliberately one number for both jobs — the syntax check and
+/// the run are the same request, because a dry run over the messages already
+/// compiles the script and a second request to learn the same thing would be
+/// pure cost.
+const CHECK_DELAY_MS: f64 = 400.0;
+
+/// How many characters wide the hidden measuring block is. Only the hover hint
+/// needs it: the popup is placed in `ch` units, which *is* the character width
+/// by definition on a monospaced font, while turning a pointer position back
+/// into a column has to be done in pixels.
+const MEASURE_COLUMNS: f64 = 10.0;
+
+/// What the messages box starts as, before anything has been sampled.
+const EXAMPLE_MESSAGES: &str = "[{ \"value\": 1 }]";
+
 /// The control a [`FieldType::Script`] field renders as.
 ///
-/// Three things stacked in one box — a line gutter, the highlighted source, and
-/// the textarea somebody actually types into — plus a pane that runs the script
-/// against real messages. The layering is the part worth understanding:
+/// A script is the one component whose configuration can be wrong in a way its
+/// *shape* cannot express: every other control in this form either builds or
+/// says which box is wrong, while this one holds code, and the only way to find
+/// out what code does is to run it. So the editor is built around one loop —
+/// type, and see both what the compiler says and what the data does — with
+/// everything else arranged around keeping that loop short:
 ///
-/// **The `<textarea>` is on top and transparent, and the highlighted spans sit
-/// behind it.** There is no way to colour text inside a textarea, and a
+/// - **The check and the run are one request**, on a debounce after the last
+///   keystroke. It goes through `POST /api/scripts/dry-run` rather than running
+///   rhai in the browser: rhai does compile to wasm and the frontend is already
+///   wasm, but that would be a second interpreter at a second version with a
+///   second set of features, and a script that passes here and fails on the
+///   server is the worst failure this feature can have.
+/// - **The messages it runs over are the pipeline's own**, seeded from the
+///   sample the modal already takes and put through the transforms in front of
+///   this one — so what is on screen is this script's effect on the data that
+///   will actually reach it. See [`SampleInputs`].
+/// - **What is available is on the page**, in the reference list and in the
+///   completion popup, both generated from [`kayak_core::script::builtins`].
+///   The old editor coloured those names and said nothing about them, which
+///   left "what can I call" answerable only by reading the docs site.
+///
+/// The layering of the box itself is the part worth understanding, and it is
+/// unchanged: the `<textarea>` is on top and transparent, and the highlighted
+/// spans sit behind it. There is no way to colour text inside a textarea, and a
 /// `contenteditable` div is the other approach — one that reimplements
 /// selection, undo and IME badly. So the box keeps the browser's own text
 /// editing whole, and the colour comes from a `<pre>` underneath holding
 /// character-for-character the same text. That is why
 /// [`crate::rhai::highlight`] must reproduce its input exactly: a dropped space
 /// slides the colours out from under the caret.
-///
-/// **The textarea is still uncontrolled**, the same rule every other box in
-/// this form follows — its value is set once, and rebuilding it while somebody
-/// types would destroy what they were typing. The overlay is a separate signal
-/// that `on:input` writes, so the colours update on every keystroke without the
-/// textarea being touched at all.
 #[component]
 fn ScriptEditor(
     /// The path this field sits at, which is what the draft is keyed by.
@@ -7263,35 +7500,428 @@ fn ScriptEditor(
     errors: RwSignal<Vec<form::FormError>>,
     index: usize,
 ) -> impl IntoView {
-    // What the overlay renders. Separate from the draft map so a keystroke
-    // touches one signal rather than the whole form's.
-    let source = RwSignal::new(initial.clone());
-    let editor = NodeRef::<leptos::html::Textarea>::new();
-
-    let write_at = at.clone();
-    let cleared = at.clone();
-    let write = move |ev: leptos::ev::Event| {
-        let value = event_target_value(&ev);
-        values.update(|v| {
-            v.insert(write_at.clone(), value.clone());
-        });
-        errors.update(|errors| form::clear_field_error(errors, index, &cleared));
-        source.set(value);
+    // The starter has to be in hand *before* the session is built: the
+    // textarea takes its value once, when it is created, so a starter written
+    // in an effect afterwards would reach the draft and the highlighter and
+    // leave the box somebody types into empty.
+    let initial = if initial.trim().is_empty() {
+        form::starter(values.with_untracked(|values| form::script_settings(values, &at).0)).to_string()
+    } else {
+        initial
+    };
+    let settings_at = at.clone();
+    // Held rather than moved: both surfaces need it and only one exists at a
+    // time, so it is cloned when a surface is built rather than once here.
+    let at = StoredValue::new(at);
+    let session = ScriptSession {
+        source: RwSignal::new(initial.clone()),
+        // Memos rather than reads of `values`: that map is written on every
+        // keystroke of the script itself, and everything downstream of the
+        // scope — the completion list, the request — would otherwise be redone
+        // per character.
+        scope: Memo::new({
+            let at = settings_at.clone();
+            move |_| values.with(|values| form::script_settings(values, &at).0)
+        }),
+        max_operations: Memo::new({
+            let at = settings_at.clone();
+            move |_| values.with(|values| form::script_settings(values, &at).1)
+        }),
+        answer: RwSignal::new(None),
+        checking: RwSignal::new(false),
+        generation: RwSignal::new(0),
+        messages: RwSignal::new(EXAMPLE_MESSAGES.to_string()),
+        edited: RwSignal::new(false),
+        seeded: RwSignal::new(false),
+        popup: RwSignal::new(None),
+        hint: RwSignal::new(None),
+        reference: RwSignal::new(false),
+        expanded: RwSignal::new(false),
+        results: RwSignal::new(false),
+        index,
     };
 
-    // Tab is a character here, not a way out of the field. That is a real
-    // accessibility trade — it takes the keyboard exit away — so shift-tab is
-    // left alone as the way out, and escape still closes the modal.
-    let indent = move |ev: leptos::ev::KeyboardEvent| {
-        if ev.key() != "Tab" || ev.shift_key() {
+    // The debounce is what makes the loop feel like an editor rather than a
+    // form: one request settles after typing stops, and it answers both
+    // questions at once. It is a callback passed down rather than a field of
+    // the session because building it needs the session, which would be a
+    // circle.
+    let debounced = leptos_use::use_debounce_fn(
+        move || run_check(session),
+        CHECK_DELAY_MS,
+    );
+    let recheck = Callback::new(move |()| {
+        debounced();
+    });
+
+    // The messages this component will actually be handed, once something has
+    // been sampled. Untracked inside the effect below except for the one read
+    // that drives it, so a re-run of the chain reseeds the box and nothing
+    // else does.
+    let sampled = use_context::<SampleInputs>();
+    Effect::new(move |_| {
+        let Some(messages) = sampled.and_then(|inputs| inputs.at(index)) else {
+            return;
+        };
+        if messages.is_empty() || session.edited.get_untracked() {
+            return;
+        }
+        let Ok(text) = serde_json::to_string_pretty(&messages) else {
+            return;
+        };
+        session.messages.set(text);
+        session.seeded.set(true);
+        recheck.run(());
+    });
+
+    // The starter, and the first check: both once, when the editor is built.
+    // A script that arrived broken — from a seeded draft, or from a form that
+    // was reopened — says so without waiting for a keystroke.
+    Effect::new(move |ran: Option<()>| {
+        if ran.is_some() {
+            return;
+        }
+        // The starter is already in the box; this is what puts it in the
+        // draft, so creating the pipeline without touching the editor makes
+        // the transform the box says it is.
+        let code = session.source.get_untracked();
+        values.update(|values| {
+            values.entry(at.get_value()).or_insert(code);
+        });
+        recheck.run(());
+    });
+
+    // Setting the scope from the toolbar, which is the *same* draft key the
+    // form row below the editor writes — one value, two places to set it, the
+    // way any form has. It is here as well as there because the full-screen
+    // editor covers the form, and because the scope decides whether `msg` or
+    // `batch` is a name at all: sending somebody back to a dropdown behind an
+    // overlay to find that out is the wrong shape for the question.
+    let set_scope = Callback::new(move |chosen: String| {
+        let was = session.scope.get_untracked();
+        let now = if chosen == "batch" {
+            kayak_core::script::ScriptScope::Batch
+        } else {
+            kayak_core::script::ScriptScope::Message
+        };
+        let restarted = form::restarted_for_scope(&session.source.get_untracked(), was, now);
+        values.update(|values| {
+            values.insert(form::script_sibling(&at.get_value(), "scope"), chosen);
+            if let Some(code) = restarted {
+                values.insert(at.get_value(), code.to_string());
+            }
+        });
+        // The box is uncontrolled, so this is what puts the new starter on
+        // screen: `ScriptSurface`'s reconciling effect follows `source`.
+        if let Some(code) = restarted {
+            session.source.set(code.to_string());
+        }
+    });
+
+    // Whatever set it — this toolbar or the form row under the editor — the
+    // answer on screen is about the old scope until it is asked again. A
+    // `batch` script checked as a `message` one fails on `batch` being
+    // undefined, which is an error about the editor wearing the script's
+    // clothes.
+    Effect::new(move |seen: Option<kayak_core::script::ScriptScope>| {
+        let scope = session.scope.get();
+        if seen.is_some_and(|seen| seen != scope) {
+            recheck.run(());
+        }
+        scope
+    });
+
+    // Both float over one surface at coordinates measured on it, so neither
+    // means anything on the other one. Cleared as the surfaces swap rather
+    // than left to be replaced by the next pointer move — the overlay opens
+    // with the pointer nowhere near the box.
+    let show_full_screen = move |full: bool| {
+        session.popup.set(None);
+        session.hint.set(None);
+        session.expanded.set(full);
+        // The results are the reason for the room, so opening the overlay
+        // opens them. Collapsing leaves them as they are: it is a state
+        // somebody may have asked for by then.
+        if full {
+            session.results.set(true);
+        }
+    };
+    let close = move |_| show_full_screen(false);
+
+    view! {
+        <div class="script-editor">
+            // Unmounted rather than hidden while the overlay is open: the box
+            // is uncontrolled, so the way its text is reconciled with `source`
+            // is by being built again. See [`ScriptSession`].
+            <Show when=move || !session.expanded.get()>
+                <ScriptToolbar
+                    session=session
+                    inline=true
+                    expand=Callback::new(move |()| show_full_screen(true))
+                    set_scope=set_scope
+                />
+                <ScriptSurface
+                    session=session
+                    at=at.get_value()
+                    values=values
+                    errors=errors
+                    recheck=recheck
+                />
+                <ScriptProblems session=session />
+                <Show when=move || session.reference.get()>
+                    <ScriptReference session=session />
+                </Show>
+                <ScriptResults session=session recheck=recheck />
+            </Show>
+            <Show when=move || session.expanded.get()>
+                <div class="script-overlay">
+                    <header class="script-overlay-head">
+                        <span class="modal-title">"script"</span>
+                        <ScriptToolbar
+                            session=session
+                            inline=false
+                            expand=Callback::new(move |()| show_full_screen(true))
+                            set_scope=set_scope
+                        />
+                        <button class="icon-button" type="button" title="close" on:click=close>
+                            "✕"
+                        </button>
+                    </header>
+                    <div class="script-overlay-body">
+                        <div class="script-overlay-code">
+                            <ScriptSurface
+                                session=session
+                                at=at.get_value()
+                                values=values
+                                errors=errors
+                                recheck=recheck
+                            />
+                            <ScriptProblems session=session />
+                        </div>
+                        <Show when=move || session.reference.get()>
+                            <ScriptReference session=session />
+                        </Show>
+                    </div>
+                    <ScriptResults session=session recheck=recheck />
+                </div>
+            </Show>
+        </div>
+    }
+}
+
+/// The strip over the box: what the script is being run as, and the two things
+/// that can be opened.
+#[component]
+fn ScriptToolbar(
+    session: ScriptSession,
+    inline: bool,
+    /// Open the full-screen editor. A callback rather than a write to
+    /// `expanded`, because opening it is three things at once — see
+    /// `show_full_screen`.
+    expand: Callback<()>,
+    /// Set the component's `scope`. A callback because it also carries an
+    /// untouched starter over to the other scope, which needs the draft.
+    set_scope: Callback<String>,
+) -> impl IntoView {
+    view! {
+        <div class="script-toolbar">
+            // The component's own `scope` field, set from here as well as
+            // from the form row: it decides whether `msg` or `batch` is a name
+            // at all, so it is the first thing anyone needs about a script
+            // they are reading *or* writing. Unlike the boxes in this form it
+            // reads its value back — a select has no caret to lose, and the
+            // two controls have to agree.
+            // Wrapped for the chevron: an `appearance: none` select has no
+            // arrow of its own, and without one this reads as a label — which
+            // is the whole failure it exists to fix. The plain answer to "can
+            // I write this over the batch" has to be visible from here.
+            <span class="script-scope-picker">
+                <select
+                    class="script-scope"
+                    title="the component's `scope` field — what one run of the script is handed"
+                    prop:value=move || match session.scope.get() {
+                        kayak_core::script::ScriptScope::Message => "message",
+                        kayak_core::script::ScriptScope::Batch => "batch",
+                    }
+                    on:change=move |ev| set_scope.run(event_target_value(&ev))
+                >
+                    <option value="message">"per message · msg"</option>
+                    <option value="batch">"per batch · batch"</option>
+                </select>
+            </span>
+            <span class="script-toolbar-gap" />
+            <button
+                class=move || {
+                    if session.reference.get() {
+                        "script-toolbar-button active"
+                    } else {
+                        "script-toolbar-button"
+                    }
+                }
+                type="button"
+                title="what a script can call"
+                on:click=move |_| session.reference.update(|open| *open = !*open)
+            >
+                "reference"
+            </button>
+            <Show when=move || inline>
+                <button
+                    class="script-toolbar-button"
+                    type="button"
+                    title="edit full screen"
+                    on:click=move |_| expand.run(())
+                >
+                    "⤢ expand"
+                </button>
+            </Show>
+        </div>
+    }
+}
+
+/// The box itself: a gutter, the coloured text, the textarea over it, and the
+/// two things that float above it — the completion popup and the hint.
+#[component]
+fn ScriptSurface(
+    session: ScriptSession,
+    at: String,
+    values: RwSignal<HashMap<String, String>>,
+    errors: RwSignal<Vec<form::FormError>>,
+    /// Ask the server again, on the debounce. Passed down rather than reached
+    /// for, so there is one of them per editor however many surfaces it has.
+    recheck: Callback<()>,
+) -> impl IntoView {
+    let editor = NodeRef::<leptos::html::Textarea>::new();
+    let measure = NodeRef::<leptos::html::Pre>::new();
+    let at = StoredValue::new(at);
+
+    // Everything that changes the text goes through here, so there is one
+    // place that keeps the draft, the overlay and the error list in step.
+    let commit = move |text: String, caret: Option<usize>| {
+        values.update(|values| {
+            values.insert(at.get_value(), text.clone());
+        });
+        errors.update(|errors| form::clear_field_error(errors, session.index, &at.get_value()));
+        session.source.set(text);
+        if let (Some(area), Some(caret)) = (editor.get_untracked(), caret) {
+            let caret = caret as u32;
+            let _ = area.set_selection_start(Some(caret));
+            let _ = area.set_selection_end(Some(caret));
+        }
+        recheck.run(());
+    };
+
+    let write = move |ev: leptos::ev::Event| {
+        let text = event_target_value(&ev);
+        commit(text, None);
+        offer_completions(session, editor, false);
+    };
+
+    // The box is uncontrolled, so something that changes `source` without
+    // going through it — the starter following a scope switch — has to be put
+    // there. Guarded on the two differing, which they do only for exactly
+    // those changes: a keystroke sets `source` *from* the box, so typing runs
+    // this effect and writes nothing.
+    Effect::new(move |_| {
+        let text = session.source.get();
+        if let Some(area) = editor.get()
+            && area.value() != text
+        {
+            area.set_value(&text);
+        }
+    });
+
+    // Accepting a completion rewrites the whole box and puts the caret back
+    // inside it, which is why it goes through `set_value` rather than through
+    // a signal: the textarea is uncontrolled.
+    let accept = move || {
+        let Some(popup) = session.popup.get_untracked() else {
+            return;
+        };
+        let Some(completion) = popup.items.get(popup.selected) else {
+            return;
+        };
+        let source = session.source.get_untracked();
+        let (text, caret) = crate::rhai::apply_completion(&source, &popup.typed, completion);
+        if let Some(area) = editor.get_untracked() {
+            area.set_value(&text);
+        }
+        session.popup.set(None);
+        commit(text, Some(caret));
+    };
+
+    let keydown = move |ev: leptos::ev::KeyboardEvent| {
+        let key = ev.key();
+
+        // The popup owns the keyboard while it is open, and only for the keys
+        // it has an answer for: everything else falls through to the box, so
+        // typing never stops to consult it.
+        if session.popup.with_untracked(Option::is_some) {
+            match key.as_str() {
+                "ArrowDown" | "ArrowUp" => {
+                    ev.prevent_default();
+                    session.popup.update(|popup| {
+                        if let Some(popup) = popup {
+                            let last = popup.items.len().saturating_sub(1);
+                            popup.selected = if key == "ArrowDown" {
+                                if popup.selected >= last { 0 } else { popup.selected + 1 }
+                            } else if popup.selected == 0 {
+                                last
+                            } else {
+                                popup.selected - 1
+                            };
+                        }
+                    });
+                    return;
+                }
+                "Enter" | "Tab" => {
+                    ev.prevent_default();
+                    accept();
+                    return;
+                }
+                "Escape" => {
+                    // Stopped rather than left to bubble: escape with a popup
+                    // open means "put that away", and letting it through would
+                    // close the modal and take the draft with it.
+                    ev.prevent_default();
+                    ev.stop_propagation();
+                    session.popup.set(None);
+                    return;
+                }
+                _ => {}
+            }
+        }
+
+        // Ctrl-space is the way to ask for the list without a prefix to filter
+        // it by, which is how somebody who does not know what exists finds out.
+        if key == " " && (ev.ctrl_key() || ev.meta_key()) {
+            ev.prevent_default();
+            offer_completions(session, editor, true);
+            return;
+        }
+
+        if key == "Escape" && session.expanded.get_untracked() {
+            ev.prevent_default();
+            ev.stop_propagation();
+            session.popup.set(None);
+            session.hint.set(None);
+            session.expanded.set(false);
+            return;
+        }
+
+        // Tab is a character here, not a way out of the field. That is a real
+        // accessibility trade — it takes the keyboard exit away — so shift-tab
+        // is left alone as the way out, and escape still closes the modal.
+        if key != "Tab" || ev.shift_key() {
             return;
         }
         ev.prevent_default();
-        let Some(area) = editor.get() else { return };
+        let Some(area) = editor.get_untracked() else {
+            return;
+        };
         let text = area.value();
         let start = area.selection_start().ok().flatten().unwrap_or(0) as usize;
         let end = area.selection_end().ok().flatten().unwrap_or(0) as usize;
-        // byte offsets from a textarea are UTF-16 code units; clamp through
+        // offsets from a textarea are UTF-16 code units; clamp through
         // char_indices so a multi-byte character can't split the string
         let split = |at: usize| {
             text.char_indices()
@@ -7305,205 +7935,639 @@ fn ScriptEditor(
         next.push_str(&text[end..]);
         area.set_value(&next);
         let caret = text[..start].chars().count() + 2;
-        let _ = area.set_selection_start(Some(caret as u32));
-        let _ = area.set_selection_end(Some(caret as u32));
-        values.update(|v| {
-            v.insert(at.clone(), next.clone());
-        });
-        source.set(next);
+        commit(next, Some(caret));
+    };
+
+    // A caret that has moved away from the word the popup was opened for makes
+    // the popup a statement about somewhere else, so it closes. Cheaper and
+    // more predictable than re-deriving the list from the new position, which
+    // would reopen it after an arrow key.
+    let moved = move |_| {
+        if session.popup.with_untracked(Option::is_some) {
+            session.popup.set(None);
+        }
+    };
+
+    // The hint is the one thing that needs the box's geometry in pixels: the
+    // coloured spans are *behind* a transparent textarea, so nothing can be
+    // hovered directly and the position has to be turned back into a cell.
+    // The font is monospaced, which makes that arithmetic rather than a hit
+    // test — see [`crate::rhai::caret_from_pixels`].
+    let hover = move |ev: leptos::ev::MouseEvent| {
+        let Some((char_width, line_height)) = cell_size(measure) else {
+            return;
+        };
+        let x = f64::from(ev.offset_x()) - PADDING_X;
+        let y = f64::from(ev.offset_y()) - PADDING_Y;
+        let hint = crate::rhai::caret_from_pixels(x, y, char_width, line_height)
+            .and_then(|at| {
+                let word = crate::rhai::word_at(&session.source.get_untracked(), at)?;
+                Some((at, kayak_core::script::builtin(&word)?))
+            })
+            .map(|(at, builtin)| Hint {
+                signature: builtin.signature.to_string(),
+                summary: builtin.summary.to_string(),
+                wrong_scope: (!builtin.in_scope(session.scope.get_untracked())).then(|| {
+                    match builtin.scope {
+                        Some(kayak_core::script::ScriptScope::Batch) => {
+                            "only in `batch` scope".to_string()
+                        }
+                        _ => "only in `message` scope".to_string(),
+                    }
+                }),
+                at,
+            });
+        // Written every time rather than only on a change: the signal is read
+        // by one small element, and comparing two `Option<Hint>`s per pointer
+        // move is not cheaper than replacing one.
+        session.hint.set(hint);
     };
 
     view! {
-        <div class="script-editor">
-            <div class="script-surface">
-                <div class="script-gutter" aria-hidden="true">
+        <div class=move || {
+            if session.answer.get().is_some_and(|answer| answer.is_failure()) {
+                "script-surface failed"
+            } else {
+                "script-surface"
+            }
+        }>
+            <div class="script-gutter" aria-hidden="true">
+                {move || {
+                    let failed = session.answer.get().and_then(|answer| answer.line());
+                    let count = session.source.get().lines().count().max(1);
+                    (1..=count)
+                        .map(|n| {
+                            let marked = failed == Some(n);
+                            let class = if marked {
+                                "script-gutter-line failed"
+                            } else {
+                                "script-gutter-line"
+                            };
+                            view! {
+                                <div class=class>
+                                    {if marked { "▸".to_string() } else { n.to_string() }}
+                                </div>
+                            }
+                        })
+                        .collect_view()
+                }}
+            </div>
+            <div class="script-code">
+                // aria-hidden because the textarea over it carries the same
+                // text and is the thing a screen reader should read; two
+                // copies would be read twice
+                <pre class="script-highlight" aria-hidden="true">
                     {move || {
-                        let count = source.get().lines().count().max(1);
-                        (1..=count)
-                            .map(|n| view! { <div>{n}</div> })
+                        let failed = session.answer.get().and_then(|answer| answer.line());
+                        crate::rhai::highlight(&session.source.get())
+                            .into_iter()
+                            .enumerate()
+                            .map(|(n, line)| {
+                                let class = if failed == Some(n + 1) {
+                                    "script-line failed"
+                                } else {
+                                    "script-line"
+                                };
+                                view! {
+                                    <div class=class>
+                                        {line
+                                            .into_iter()
+                                            .map(|span| {
+                                                view! {
+                                                    <span class=span.kind.class()>{span.text}</span>
+                                                }
+                                            })
+                                            .collect_view()}
+                                    </div>
+                                }
+                            })
                             .collect_view()
                     }}
-                </div>
-                <div class="script-code">
-                    // aria-hidden because the textarea over it carries the same
-                    // text and is the thing a screen reader should read; two
-                    // copies would be read twice
-                    <pre class="script-highlight" aria-hidden="true">
-                        {move || {
-                            crate::rhai::highlight(&source.get())
-                                .into_iter()
-                                .map(|line| {
-                                    view! {
-                                        <div class="script-line">
-                                            {line
-                                                .into_iter()
-                                                .map(|span| {
-                                                    view! {
-                                                        <span class=span.kind.class()>{span.text}</span>
-                                                    }
-                                                })
-                                                .collect_view()}
-                                        </div>
-                                    }
-                                })
-                                .collect_view()
-                        }}
-                    </pre>
-                    <textarea
-                        node_ref=editor
-                        class="script-input"
-                        spellcheck="false"
-                        autocapitalize="off"
-                        aria-label="rhai script"
-                        prop:value=initial
-                        on:input=write
-                        on:keydown=indent
-                    />
-                </div>
+                </pre>
+                // Two lines of ten characters, laid out with the code's own
+                // metrics and never shown: its width is ten cells and its
+                // height two lines. See [`cell_size`].
+                <pre class="script-measure" node_ref=measure aria-hidden="true">
+                    "0000000000\n0"
+                </pre>
+                <textarea
+                    node_ref=editor
+                    class="script-input"
+                    spellcheck="false"
+                    autocapitalize="off"
+                    autocomplete="off"
+                    aria-label="rhai script"
+                    prop:value=session.source.get_untracked()
+                    on:input=write
+                    on:keydown=keydown
+                    on:click=moved
+                    on:mousemove=hover
+                    on:mouseleave=move |_| session.hint.set(None)
+                    on:blur=move |_| session.popup.set(None)
+                />
+                <ScriptPopup session=session accept=Callback::new(move |()| accept()) />
+                <ScriptHint session=session />
             </div>
-            <TryIt source=source />
         </div>
     }
 }
 
-/// The pane under the script editor: run this script over some messages and see
-/// what comes out.
+/// The completion popup, drawn under the caret.
 ///
-/// This is what makes writing a script in the UI viable at all. Every other
-/// component in this form is declarative — a filled-in form either builds or
-/// says which box is wrong — while a script is code, and the only way to find
-/// out what code does is to run it. Without this the loop is "create the
-/// pipeline, watch the card, delete the pipeline".
-///
-/// It goes through `POST /api/scripts/dry-run` rather than running rhai in the
-/// browser. rhai does compile to wasm and the frontend is already wasm, so it
-/// was available — but that would be a second interpreter at a second version
-/// with a second set of features, and a script that passes here and fails on
-/// the server is the worst failure this feature can have.
+/// Placed in `ch` units rather than measured pixels: on a monospaced font one
+/// `ch` *is* one character cell, so a column is a column with nothing to keep
+/// in sync. It sits inside the code area, which is inside the one scroll
+/// container both layers share, so it travels with the text it belongs to.
 #[component]
-fn TryIt(source: RwSignal<String>) -> impl IntoView {
-    // The messages to run over, as text: this is a scratch pad, so what is in
-    // it is whatever somebody pasted out of a card's log — which may well not
-    // be valid JSON yet.
-    let messages = RwSignal::new("[{\"value\": 1}]".to_string());
-    let outcome = RwSignal::new(None::<Result<DryRunResponse, String>>);
-    let running = RwSignal::new(false);
-    let open = RwSignal::new(false);
+fn ScriptPopup(session: ScriptSession, accept: Callback<()>) -> impl IntoView {
+    move || {
+        let popup = session.popup.get()?;
+        let style = format!(
+            "left: calc(var(--script-pad-x) + {}ch); top: calc(var(--script-pad-y) + {} * var(--script-line-height));",
+            popup.at.column, popup.at.line + 1
+        );
+        Some(view! {
+            <ul class="script-popup" style=style>
+                {popup
+                    .items
+                    .iter()
+                    .enumerate()
+                    .map(|(n, item)| {
+                        let class = if n == popup.selected {
+                            "script-popup-row selected"
+                        } else {
+                            "script-popup-row"
+                        };
+                        view! {
+                            <li class=class>
+                                // mousedown rather than click, with the default
+                                // stopped: a click would blur the textarea
+                                // first, which closes the popup out from under
+                                // the pointer.
+                                <button
+                                    type="button"
+                                    on:mousedown=move |ev| {
+                                        ev.prevent_default();
+                                        session
+                                            .popup
+                                            .update(|popup| {
+                                                if let Some(popup) = popup {
+                                                    popup.selected = n;
+                                                }
+                                            });
+                                        accept.run(());
+                                    }
+                                >
+                                    <span class=item.kind.class()>{item.label.clone()}</span>
+                                    <span class="script-popup-detail">{item.detail.clone()}</span>
+                                    <span class="script-popup-kind">{item.kind.label()}</span>
+                                </button>
+                            </li>
+                        }
+                    })
+                    .collect_view()}
+            </ul>
+        })
+    }
+}
 
-    let run = move |_| {
-        let parsed = serde_json::from_str::<Vec<serde_json::Value>>(&messages.get_untracked());
-        let messages = match parsed {
-            Ok(messages) => messages,
-            // Caught here rather than sent, because the server would answer
-            // this with a deserialization error about the whole request body
-            // and the fault is in one box of it.
-            Err(err) => {
-                outcome.set(Some(Err(format!("the messages are not a JSON array: {err}"))));
-                return;
+/// What the pointer is resting on, when it is one of kayak's own names.
+#[component]
+fn ScriptHint(session: ScriptSession) -> impl IntoView {
+    move || {
+        let hint = session.hint.get()?;
+        let style = format!(
+            "left: calc(var(--script-pad-x) + {}ch); top: calc(var(--script-pad-y) + {} * var(--script-line-height));",
+            hint.at.column, hint.at.line + 1
+        );
+        Some(view! {
+            <div class="script-hint" style=style>
+                <code>{hint.signature}</code>
+                <span>{hint.summary}</span>
+                {hint
+                    .wrong_scope
+                    .map(|note| view! { <span class="script-hint-warn">{note}</span> })}
+            </div>
+        })
+    }
+}
+
+/// The strip under the box: what the server last said.
+///
+/// It is the whole of the syntax feedback and it is deliberately one line: a
+/// compile error names a line, the gutter marks it, and the sentence explains
+/// it. Silent when the script is fine — a permanent green tick would be one
+/// more thing on a form that already has plenty.
+#[component]
+fn ScriptProblems(session: ScriptSession) -> impl IntoView {
+    move || {
+        let answer = session.answer.get();
+        let checking = session.checking.get();
+        match answer {
+            Some(Answer::Failed {
+                stage,
+                message,
+                line,
+                column,
+            }) => {
+                let stage = match stage {
+                    kayak_core::script::DryRunStage::Compile => "does not compile",
+                    kayak_core::script::DryRunStage::Runtime => "failed while running",
+                };
+                let at = match (line, column) {
+                    (Some(line), Some(column)) => format!("line {line}, column {column} · "),
+                    (Some(line), None) => format!("line {line} · "),
+                    _ => String::new(),
+                };
+                Some(
+                    view! {
+                        <div class="script-problem">
+                            <span class="script-problem-where">{at}{stage}</span>
+                            <span class="script-problem-message">{message}</span>
+                        </div>
+                    }
+                    .into_any(),
+                )
             }
-        };
-        let request = DryRunRequest {
-            source: kayak_core::script::ScriptSource::Inline {
-                code: source.get_untracked(),
-            },
-            scope: kayak_core::script::ScriptScope::Message,
-            max_operations: None,
-            messages,
-            state: std::collections::BTreeMap::new(),
-        };
-        running.set(true);
-        leptos::task::spawn_local(async move {
-            let client = ApiClient {
-                base: String::new(),
+            Some(Answer::Unasked(message)) => Some(
+                view! { <div class="script-problem unasked">{message}</div> }.into_any(),
+            ),
+            // Nothing wrong, so nothing said — except while a check is out and
+            // there has never been an answer, which is the one moment silence
+            // would read as "checked, and fine".
+            _ => checking
+                .then(|| view! { <div class="script-problem checking">"checking…"</div> }.into_any()),
+        }
+    }
+}
+
+/// Everything a script can call, described.
+///
+/// Generated from [`kayak_core::script::builtins`], which is also what the
+/// engine's registrations are pinned against — so this list cannot be a
+/// description of a surface the server does not have. Out-of-scope names are
+/// shown, greyed, with the scope they belong to: leaving them out would make
+/// `batch` look like something that does not exist rather than something this
+/// component is not configured for.
+#[component]
+fn ScriptReference(session: ScriptSession) -> impl IntoView {
+    view! {
+        <aside class="script-reference">
+            <h4>"what a script is given"</h4>
+            <ul>
+                {move || {
+                    let scope = session.scope.get();
+                    kayak_core::script::builtins()
+                        .iter()
+                        .map(|builtin| {
+                            let out = !builtin.in_scope(scope);
+                            let class = if out {
+                                "script-reference-row out-of-scope"
+                            } else {
+                                "script-reference-row"
+                            };
+                            view! {
+                                <li class=class>
+                                    <code class="rhai-host">{builtin.signature}</code>
+                                    <Show when=move || out>
+                                        <span class="script-reference-scope">
+                                            {match builtin.scope {
+                                                Some(kayak_core::script::ScriptScope::Batch) => {
+                                                    "batch scope only"
+                                                }
+                                                _ => "message scope only",
+                                            }}
+                                        </span>
+                                    </Show>
+                                    <p class="script-reference-summary">{builtin.summary}</p>
+                                    <p class="script-reference-detail">{builtin.detail}</p>
+                                </li>
+                            }
+                        })
+                        .collect_view()
+                }}
+            </ul>
+        </aside>
+    }
+}
+
+/// What the script does to the messages: what went in on the left, what came
+/// out on the right.
+///
+/// The two are columns rather than rows, and that is an honesty constraint
+/// rather than a layout choice: a script may emit none, one or many messages
+/// for each one it is handed, and the dry run reports the batch it produced
+/// rather than an answer per message. Drawing arrows between the two would be
+/// inventing an attribution the server did not make — so the counts are given
+/// instead, which is where the surprise usually is anyway.
+#[component]
+fn ScriptResults(session: ScriptSession, recheck: Callback<()>) -> impl IntoView {
+    let messages = NodeRef::<leptos::html::Textarea>::new();
+
+    // The box is uncontrolled like the code one, so a sample seeding it has to
+    // be pushed into the DOM. It is only mounted while the pane is open, which
+    // is why the signal is the source of truth and this is the catch-up.
+    Effect::new(move |_| {
+        let text = session.messages.get();
+        if let Some(area) = messages.get()
+            && area.value() != text
+        {
+            area.set_value(&text);
+        }
+    });
+
+    let edit = move |ev: leptos::ev::Event| {
+        session.messages.set(event_target_value(&ev));
+        session.edited.set(true);
+        session.seeded.set(false);
+        recheck.run(());
+    };
+
+    // What went in, what came out, and — only where it means something — the
+    // difference. `dropped` is a *per-message* reading and is only offered in
+    // `message` scope: a `batch` script that turns five readings into one
+    // total has dropped nothing, it has folded, and "4 dropped" there says the
+    // script is broken when it is doing exactly its job. Even in message scope
+    // it is a net figure rather than a count of messages that emitted nothing,
+    // which is why the pane underneath is what settles it.
+    let summary = move || match session.answer.get() {
+        Some(Answer::Ran {
+            inputs, batches, ..
+        }) => {
+            let out: usize = batches.iter().map(Vec::len).sum();
+            let folding = session.scope.get() == kayak_core::script::ScriptScope::Batch;
+            let tail = if batches.len() > 1 {
+                format!(" · {} batches", batches.len())
+            } else if !folding && out < inputs {
+                format!(" · {} dropped", inputs - out)
+            } else {
+                String::new()
             };
-            let result = client
-                .dry_run_script(&request)
-                .await
-                .map_err(|err| err.to_string());
-            outcome.set(Some(result));
-            running.set(false);
-        });
+            format!("{inputs} in → {out} out{tail}")
+        }
+        _ => "run".to_string(),
     };
 
     view! {
-        <div class="try-it">
+        <div class="script-results">
             <button
-                class="try-it-toggle"
+                class="script-results-toggle"
                 type="button"
-                on:click=move |_| open.update(|o| *o = !*o)
+                on:click=move |_| session.results.update(|open| *open = !*open)
             >
-                {move || if open.get() { "▾ try it" } else { "▸ try it" }}
+                {move || if session.results.get() { "▾ " } else { "▸ " }}
+                {summary}
             </button>
-            <Show when=move || open.get()>
-                <div class="try-it-body">
-                    <label class="try-it-label">"messages"</label>
-                    <textarea
-                        class="try-it-input"
-                        spellcheck="false"
-                        prop:value=messages.get_untracked()
-                        on:input=move |ev| messages.set(event_target_value(&ev))
-                    />
-                    <button class="button" type="button" on:click=run disabled=move || running.get()>
-                        {move || if running.get() { "running…" } else { "run" }}
-                    </button>
-                    {move || outcome.get().map(|result| match result {
-                        Err(message) => view! {
-                            <div class="try-it-error">{message}</div>
-                        }
-                        .into_any(),
-                        Ok(DryRunResponse::Failed { stage, message, line, column }) => {
-                            let where_ = match (line, column) {
-                                (Some(line), Some(column)) => {
-                                    format!(" (line {line}, column {column})")
+            <Show when=move || session.results.get()>
+                <div class="script-results-body">
+                    <div class="script-pane">
+                        <label class="script-pane-head">
+                            "in"
+                            <Show when=move || session.seeded.get()>
+                                <span
+                                    class="script-pane-note"
+                                    title="the messages this component will be handed, from the sample"
+                                >
+                                    "from the sample"
+                                </span>
+                            </Show>
+                        </label>
+                        <textarea
+                            node_ref=messages
+                            class="script-messages"
+                            spellcheck="false"
+                            prop:value=session.messages.get_untracked()
+                            on:input=edit
+                        />
+                    </div>
+                    <div class="script-pane">
+                        <label class="script-pane-head">"out"</label>
+                        <div class="script-out">
+                            {move || match session.answer.get() {
+                                Some(Answer::Ran { batches, warnings, .. }) => {
+                                    let messages: Vec<serde_json::Value> = batches
+                                        .into_iter()
+                                        .flatten()
+                                        .collect();
+                                    view! {
+                                        {warnings
+                                            .into_iter()
+                                            .map(|text| {
+                                                view! { <div class="script-warning">{text}</div> }
+                                            })
+                                            .collect_view()}
+                                        // Not an error: a script that emits
+                                        // nothing is a working filter, and
+                                        // saying so is the point of showing this
+                                        // at all.
+                                        {messages
+                                            .is_empty()
+                                            .then(|| {
+                                                view! {
+                                                    <div class="script-out-empty">
+                                                        "nothing emitted — every message was dropped"
+                                                    </div>
+                                                }
+                                            })}
+                                        {messages
+                                            .into_iter()
+                                            .map(|message| {
+                                                let text = serde_json::to_string(&message)
+                                                    .unwrap_or_default();
+                                                view! {
+                                                    <MessageBody message=pretty::render(&text) />
+                                                }
+                                            })
+                                            .collect_view()}
+                                    }
+                                        .into_any()
                                 }
-                                (Some(line), None) => format!(" (line {line})"),
-                                _ => String::new(),
-                            };
-                            let stage = match stage {
-                                kayak_core::script::DryRunStage::Compile => "does not compile",
-                                kayak_core::script::DryRunStage::Runtime => "failed while running",
-                            };
-                            view! {
-                                <div class="try-it-error">
-                                    <strong>{stage}</strong>
-                                    ": "
-                                    {message}
-                                    {where_}
-                                </div>
-                            }
-                            .into_any()
-                        }
-                        Ok(DryRunResponse::Emitted { batches, warnings, .. }) => {
-                            let total: usize = batches.iter().map(Vec::len).sum();
-                            view! {
-                                <div class="try-it-result">
-                                    <div class="try-it-summary">
-                                        {format!(
-                                            "{total} message{} in {} batch{}",
-                                            if total == 1 { "" } else { "s" },
-                                            batches.len(),
-                                            if batches.len() == 1 { "" } else { "es" },
-                                        )}
-                                    </div>
-                                    {warnings
-                                        .into_iter()
-                                        .map(|text| view! { <div class="try-it-warning">{text}</div> })
-                                        .collect_view()}
-                                    {batches
-                                        .into_iter()
-                                        .map(|batch| {
-                                            let text = serde_json::to_string_pretty(&batch)
-                                                .unwrap_or_default();
-                                            view! { <pre class="try-it-batch">{text}</pre> }
-                                        })
-                                        .collect_view()}
-                                </div>
-                            }
-                            .into_any()
-                        }
-                    })}
+                                // The failure is already on the strip over the
+                                // box, where it belongs — this side says why
+                                // there is nothing here rather than repeating
+                                // it.
+                                Some(_) => {
+                                    view! {
+                                        <div class="script-out-empty">"nothing ran"</div>
+                                    }
+                                        .into_any()
+                                }
+                                None => view! { <div class="script-out-empty">"…"</div> }.into_any(),
+                            }}
+                        </div>
+                    </div>
                 </div>
             </Show>
         </div>
     }
+}
+
+/// Padding inside the code box, in pixels, mirroring `--script-pad-*` in the
+/// stylesheet.
+///
+/// Duplicated in Rust because turning a pointer position into a cell is
+/// arithmetic that has to start at the text's top left corner, and the two
+/// numbers are small, fixed and beside each other in both files. Change one,
+/// change the other — the same rule `GRID` and the canvas background follow.
+const PADDING_X: f64 = 8.0;
+const PADDING_Y: f64 = 6.0;
+
+/// One character cell: how wide and how tall, measured off the hidden block in
+/// the code area rather than assumed.
+///
+/// Measured rather than computed from the font size because a `ch` is the
+/// font's own advance and nothing in Rust knows it — and because the fallback
+/// font differs by platform, so a constant would be right on one machine.
+fn cell_size(measure: NodeRef<leptos::html::Pre>) -> Option<(f64, f64)> {
+    let rect = measure.get_untracked()?.get_bounding_client_rect();
+    let (width, height) = (rect.width() / MEASURE_COLUMNS, rect.height() / 2.0);
+    (width > 0.0 && height > 0.0).then_some((width, height))
+}
+
+/// Work out what could come next at the caret and open the popup on it.
+///
+/// `forced` is ctrl-space: without it the list only opens when there is
+/// something to go on — a prefix of at least one character, or a dot just
+/// typed. A popup that appeared on every keystroke would cover the line below
+/// the one being written.
+fn offer_completions(
+    session: ScriptSession,
+    editor: NodeRef<leptos::html::Textarea>,
+    forced: bool,
+) {
+    let Some(area) = editor.get_untracked() else {
+        return;
+    };
+    let source = session.source.get_untracked();
+    let offset = area.selection_start().ok().flatten().unwrap_or(0) as usize;
+    let typed = crate::rhai::typing_at(&source, offset);
+    if !forced && typed.prefix.is_empty() && typed.chain.is_empty() {
+        session.popup.set(None);
+        return;
+    }
+
+    let fields = use_context::<SampleSchemas>()
+        .and_then(|schemas| schemas.at(session.index))
+        .map(|schema| {
+            schema
+                .fields
+                .iter()
+                .map(|field| {
+                    let types = field
+                        .types
+                        .iter()
+                        .map(|t| t.as_str())
+                        .collect::<Vec<_>>()
+                        .join(" | ");
+                    (field.path.clone(), types)
+                })
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+
+    let items = crate::rhai::completions(&typed, session.scope.get_untracked(), &fields);
+    if items.is_empty() {
+        session.popup.set(None);
+        return;
+    }
+    let at = crate::rhai::caret_at(&source, typed.start);
+    session.popup.set(Some(Popup {
+        items,
+        selected: 0,
+        typed,
+        at,
+    }));
+}
+
+/// Ask the server what this script does.
+///
+/// One request answers both questions the editor asks — whether it compiles,
+/// and what it does to the messages — because a dry run compiles the script on
+/// the way to running it. A second request for the syntax alone would double
+/// the traffic to learn something already in hand.
+///
+/// Two rules here earn their keep. **A messages box that is not a JSON array
+/// still gets the syntax check**, against an empty batch: the box is a scratch
+/// pad, so it is half-edited most of the time, and taking the compiler away
+/// while somebody fixes a comma is losing the more useful of the two answers.
+/// And **an answer that is not about the latest text is dropped** — a dry run
+/// is a round trip and the source moves on while it is out, so a slow reply
+/// would otherwise mark a line that has since been fixed.
+fn run_check(session: ScriptSession) {
+    // An empty box has nothing to check and the endpoint refuses one, so
+    // asking would put "an inline script is empty" where a compiler error
+    // goes. What an empty script field is is a required field nobody has
+    // filled in yet, and the form already says so on submit.
+    if session.source.get_untracked().trim().is_empty() {
+        session.answer.set(None);
+        session.checking.set(false);
+        return;
+    }
+    let text = session.messages.get_untracked();
+    let (messages, unasked) = if text.trim().is_empty() {
+        (Vec::new(), None)
+    } else {
+        match serde_json::from_str::<Vec<serde_json::Value>>(&text) {
+            Ok(messages) => (messages, None),
+            Err(err) => (
+                Vec::new(),
+                Some(format!("the messages are not a JSON array: {err}")),
+            ),
+        }
+    };
+
+    let request = DryRunRequest {
+        source: kayak_core::script::ScriptSource::Inline {
+            code: session.source.get_untracked(),
+        },
+        scope: session.scope.get_untracked(),
+        max_operations: session.max_operations.get_untracked(),
+        messages,
+        state: std::collections::BTreeMap::new(),
+    };
+
+    let generation = session.generation.get_untracked() + 1;
+    session.generation.set(generation);
+    session.checking.set(true);
+    let inputs = request.messages.len();
+    leptos::task::spawn_local(async move {
+        let result = ApiClient {
+            base: String::new(),
+        }
+        .dry_run_script(&request)
+        .await;
+        if session.generation.get_untracked() != generation {
+            return;
+        }
+        session.checking.set(false);
+        let answer = match result {
+            Ok(DryRunResponse::Emitted {
+                batches, warnings, ..
+            }) => match unasked {
+                // It compiled, and there was nothing to run it over. The
+                // messages box is what needs fixing, and saying so where the
+                // script's errors go is right — it is the same strip and the
+                // same question.
+                Some(note) => Answer::Unasked(note),
+                None => Answer::Ran {
+                    inputs,
+                    batches,
+                    warnings,
+                },
+            },
+            Ok(DryRunResponse::Failed {
+                stage,
+                message,
+                line,
+                column,
+            }) => Answer::Failed {
+                stage,
+                message,
+                line,
+                column,
+            },
+            Err(err) => Answer::Unasked(err.to_string()),
+        };
+        session.answer.set(Some(answer));
+    });
 }

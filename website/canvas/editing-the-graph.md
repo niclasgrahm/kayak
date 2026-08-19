@@ -124,6 +124,12 @@ produced. They are suggestions and never a closed list: a sample is a handful
 of messages, so a field that only appears when something breaks is still a
 field you can type.
 
+**And it feeds the script editor.** A [`script`](/pipelines/scripting)
+transform is the one component whose configuration cannot be checked by looking
+at it, so what the sample reaches it with is put straight into the editor's
+messages box and the script is run over it as you type. See
+[writing one in the ui](/pipelines/scripting#writing-one-in-the-ui).
+
 Both halves are ordinary endpoints — `POST /api/inputs/sample` and
 `POST /api/pipelines/dry-run` — so the same thing is available to anything
 else that wants it.

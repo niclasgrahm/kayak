@@ -118,6 +118,13 @@ rhai = { version = "1.25.1", features = ["sync"] }
 jsonwebtoken = { version = "11.0.0", default-features = false, features = ["aws_lc_rs", "use_pem"] }
 
 [dev-dependencies]
+# The same rhai the runtime uses, with the feature that lets a test read the
+# engine's registered functions back. `builtins_are_the_functions_the_engine_has`
+# is what it is for: `kayak_core::script::builtins()` is the editor's whole
+# answer to "what can I call", and nothing else would notice it drifting from
+# what `build_engine` registers. A dev-dependency rather than a feature on the
+# real one so the server binary doesn't carry the metadata tables for it.
+rhai = { version = "1.25.1", features = ["sync", "metadata"] }
 # lets the integration tests call the axum router in-process, with no socket
 http-body-util = "0.1"
 tower = { version = "0.5", features = ["util"] }

@@ -16,6 +16,27 @@ re-derive. See the [docs site](../website/) for how the finished parts behave, a
       `POST /api/pipelines/dry-run` puts them down the draft's transforms so
       the suggestions are right *at each point in the chain*. See "seeing the
       data while you build" on the site.)
+- [x] **a script editor worth writing a script in**
+      (done 2026-08-19: syntax errors on a debounce as you type, marked in the
+      gutter and explained under the box; a completion popup and a reference
+      panel and a hover hint, all three generated from
+      `kayak_core::script::builtins()` — which a test pins against what the
+      engine registers, in both directions; the messages the sample says will
+      actually reach the component, run through the script as you type; and a
+      full-screen editor for when the form's column is not enough room. See
+      "the script editor" in CLAUDE.md.)
+- [ ] **the dry run does not say which message became which.** A script may
+      emit none, one or many messages per message, and the response is the
+      batch it produced — so the editor shows in and out as two columns and a
+      count rather than pairing them up. Per-message attribution means the
+      endpoint reporting it (an emission list per input message in `message`
+      scope), which is a change to the response shape rather than to the
+      editor.
+- [ ] **a `file`-sourced script cannot be edited in the UI.** The editor is
+      the `inline` variant's control; a `file` source shows the path and
+      nothing else. Reading it would need an endpoint that serves a script out
+      of the config directory, and writing it one that writes there — a second
+      write path beside `save_config_as`, with the same boundary rules.
 - [ ] **a value edit does not re-run the chain.** Adding, removing or
       re-kinding a component does (which is what makes adding an output after
       the fetch work), but retyping a `map`'s target field leaves the boxes

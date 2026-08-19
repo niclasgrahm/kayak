@@ -1301,6 +1301,96 @@ Known and on the roadmap: a *value* edit inside a transform doesn't re-run it,
 so retyping a `map`'s target field leaves the boxes behind it offering the old
 shape until something is sampled again.
 
+### The script editor
+
+`script` is the one component whose configuration can be wrong in a way the
+config's *shape* cannot express — every other control in the form either builds
+or says which box is wrong, and this one holds code. So the editor is built
+around one loop (type; see what the compiler says and what the data does), and
+everything in it is arranged around keeping that loop short.
+
+Three files: `kayak-core/src/script.rs` declares the host surface,
+`frontend/src/rhai.rs` is the pure half (highlighting, and what is under the
+caret), `frontend/src/app.rs` holds `ScriptSession` and the components. Six
+things are load-bearing:
+
+- **`kayak_core::script::builtins()` is the one declaration of what a script can
+  reach**, and everything reads it: the highlighter's `Kind::Host`, the
+  completion list, the reference panel, the hover hint, and the doc site's table
+  (`docsgen`'s `script-builtins.md` partial). It used to be a `const HOST` in
+  the frontend beside the `register_fn` calls on the server, which is a drift
+  that is quiet in the direction that matters — a function added to the engine
+  is simply undiscoverable. `builtins_are_the_functions_the_engine_has` in
+  `runner.rs` pins the two **in both directions**, using rhai's `metadata`
+  feature — added as a **dev-dependency** so the server binary doesn't carry the
+  metadata tables for a test.
+- **The syntax check and the test run are one request**, debounced
+  (`CHECK_DELAY_MS`) after the last keystroke, through `POST
+  /api/scripts/dry-run` — because a dry run compiles the script on the way to
+  running it, so a second request for the syntax alone would be pure cost. It
+  goes to the server rather than to rhai-in-wasm (which is available, the
+  frontend being wasm already) because a second interpreter at a second version
+  is a script that passes in the editor and fails in the pipeline: the worst
+  thing this feature could do. Answers carry a `generation` and a stale one is
+  dropped, or a slow reply would mark a line that has since been fixed.
+- **The dry run is configured the way the transform will be.** `scope` and
+  `max_operations` are read out of the draft beside the code
+  (`form::script_settings`, over `form::script_sibling`, which walks *up* from
+  the code's path rather than naming `"scope"`, so a script nested anywhere
+  still works). Guessing `message` for a `batch` script reports `batch` as
+  undefined — an error about the editor, dressed as an error about the script.
+  The toolbar **sets** `scope` as well as showing it, through the same draft
+  key the form row writes: one value, two places to set it, the way any form
+  has. It is there because the full-screen editor covers the form, and because
+  the scope decides whether `msg` or `batch` is a name at all — sending
+  somebody back to a dropdown behind an overlay to find that out is the wrong
+  shape for the question. Two consequences: the enum control in `FieldEditor`
+  now reads its value back (`prop:value`, safe for a `<select>` where it would
+  not be for a text box, and the same thing the pipeline-id dropdown does), and
+  an effect on `session.scope` re-checks however the scope was set. An
+  **untouched** starter follows the switch — `form::restarted_for_scope`, an
+  exact match against the other starter, because this rewrites somebody's code
+  and the only certainly safe version is the one where the code is still ours.
+- **The messages are the pipeline's own.** `SampleInputs` is the twin of
+  `SampleSchemas` — same key (draft position), same pass in `run_chain` — and
+  holds the messages *arriving* at each component rather than their shape. The
+  editor seeds its box from it, and stops as soon as the box is hand-edited: a
+  fetch that overwrote somebody's pasted-in awkward message would throw away the
+  case they were debugging.
+- **In and out are columns, never rows.** A script may emit none, one or many
+  messages per message it is handed, and the dry run reports the batch it
+  produced rather than an answer per message — so arrows between the two would
+  be an attribution the server never made. The counts carry it instead
+  (`4 in → 2 out · 2 dropped`), which is where the surprise usually is. The
+  `dropped` clause is **`message` scope only**: a `batch` script turning five
+  readings into one total has folded rather than dropped, and the word there
+  says the script is broken when it is doing its job.
+- **The popup and the hint are placed in `ch`**, which on a monospaced font *is*
+  the character cell, so a column is a column with nothing to keep in sync. Only
+  the hover *hit test* needs pixels — the coloured spans are behind a
+  transparent textarea, so nothing can be hovered directly — and that measures
+  a hidden `.script-measure` block rather than assuming a font size.
+  `--script-line-height`/`--script-pad-*` in the stylesheet and
+  `PADDING_X`/`PADDING_Y` in `app.rs` are one fact spelled twice; change one,
+  change the other.
+
+Two smaller decisions. An empty box is given a **starter**
+(`form::starter` — `emit(msg);`, or `emit(batch);`) *before* the session is
+built, because the textarea takes its
+value once — a starter written in an effect afterwards reaches the draft and the
+highlighter and leaves the box empty. And `run_check` refuses to ask about an
+empty script at all, since the endpoint rightly 400s on one and "an inline
+script is empty" is a poor first thing to say to somebody who has just opened
+the editor.
+
+The full-screen editor **unmounts the inline surface** rather than hiding it,
+which is what keeps the box uncontrolled: the two are reconciled with `source`
+by being built, and that happens exactly when a surface is created. Like a
+maximized card it goes no further than the browser tab. A binding from the other
+scope is **described but never offered** — completing `batch` into a per-message
+script writes a call that fails at runtime, while colouring it as an unknown
+identifier would suggest the fix is to define it.
+
 ### The component reference (`/docs`)
 
 Generated, never hand-written. `kayak-core/src/docs.rs` reflects over `schema_for!(InputKind)` etc. and produces `ComponentDoc`s — kind, family, description, fields (name, type, required) and, for enum-shaped configs like `filter`, variants. **The doc comments on the config structs are the docs**, and a component with no doc comment fails a unit test. Two consumers: the Leptos `/docs` page renders it, `GET /api/docs` serves it as JSON.

@@ -106,18 +106,14 @@ script will see one message at a time.
 
 ## what a script is given
 
-| | |
-|---|---|
-| `msg` | the message, in `message` scope |
-| `batch` | the messages, as an array, in `batch` scope |
-| `emit(value)` | emit a message (or, in `batch` scope, a batch) |
-| `field(msg, "a.b")` | read a [field path](/pipelines/message-metadata), with the same rules every other transform follows |
-| `recall(key)` | what the pipeline's bucket holds under `key`, or `()` |
-| `remember(key, #{ ... })` | write into the pipeline's bucket |
-| `now()` | the time as an RFC 3339 string |
-| `now_millis()` | the time as a millisecond epoch |
-| `warn(text)` | a log line, reported once per distinct text |
-| `throw "reason"` | fail this batch, with `reason` on the card |
+<!--@include: ../reference/generated/script-builtins.md-->
+
+`throw "reason"` is rhai's own, and fails the batch with `reason` on the card.
+
+This table is generated from the same declaration the editor's reference panel
+and its completion list are built from, and a test pins that declaration against
+what the engine actually registers — so a function that exists is on this page,
+in the popup and in the panel, or it is in none of them.
 
 `msg.a.b` is ordinary rhai indexing and is what most scripts will use.
 `field(msg, "a.b")` is for the paths that cannot spell — the ones whose segments
@@ -229,8 +225,50 @@ naming something unreadable.
 State is never live here. The run gets a private bucket, seeded from `state` in
 the body and thrown away afterwards, and what it holds at the end comes back in
 the response — so a stateful script can be exercised without touching what the
-server is running. In the UI, the same endpoint is behind the **try it** pane
-under the script editor.
+server is running.
+
+## writing one in the ui
+
+The same endpoint is what the script editor in the add-pipeline form runs on,
+and it is what makes writing a script there viable at all: every other control
+in that form either builds or says which box is wrong, while this one holds
+code, and the only way to find out what code does is to run it.
+
+**The check and the run are one request, on a debounce after you stop typing.**
+A script that does not compile marks its line in the gutter and says why in the
+strip underneath; one that does compile is run over the messages beside it and
+the result appears as you type. Both come from the server rather than from a
+copy of rhai in the browser — a script that passes in the editor and fails in
+the pipeline is the worst thing this could do, so there is exactly one
+interpreter.
+
+**The messages it runs over are your own.** [Fetching a
+sample](/canvas/editing-the-graph#seeing-the-data-while-you-build) for the input
+seeds the box with the messages
+that reach *this* component — the sample put through the transforms in front of
+it — so what is on screen is this script's effect on the data that will actually
+arrive. Editing that box by hand stops the sample writing to it, so a pasted-in
+awkward message stays where you put it. The summary over the two panes is where
+the surprise usually is: `4 in → 2 out · 2 dropped` is a filter working.
+
+**What you can call is on the page.** `reference` opens the list above, with the
+same descriptions; typing a name offers it as a completion, and so does `msg.`,
+which offers the fields the sample carried. Hovering a name kayak provides
+describes it. A name belonging to the other scope — `batch` in a per-message
+script — is described but never offered, because completing it would write a
+call that fails at runtime.
+
+**Switching scope is in the toolbar**, beside the code, as well as in the
+`scope` row under the editor — they are the same field and either follows the
+other. It is worth having twice because it decides whether `msg` or `batch` is
+a name at all, and because the full-screen editor covers the form. A box still
+holding the starter follows the switch; anything you have typed is left exactly
+as it is, and the editor reports what the other scope makes of it.
+
+**`expand` gives it the screen.** The form is a column of narrow controls and a
+script is the one field that is not a line; the full-screen editor is the same
+box with the reference beside it and the messages under it. Escape closes it,
+and what you typed is in both.
 
 ## the sandbox
 

@@ -143,6 +143,187 @@ impl ScriptScope {
     }
 }
 
+// ── what a script is given ──────────────────────────────────────────────────
+
+/// Whether a name is something a script *calls* or something it is *handed*.
+///
+/// The distinction is the one the editor draws in its reference panel, and it
+/// is the only thing about a builtin that changes how it is offered: a function
+/// completes with its bracket open, a binding completes as the bare word.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum BuiltinKind {
+    /// A function kayak registered on the engine — `emit`, `recall`, `now`.
+    Function,
+    /// A value pushed into the script's scope before it runs — `msg`, `batch`.
+    Binding,
+}
+
+/// One name kayak puts in a script's scope, and what it is for.
+///
+/// See [`builtins`] for why this list lives here rather than in either of the
+/// two crates that read it.
+#[derive(Clone, Copy, Debug)]
+pub struct Builtin {
+    /// The bare name, which is what the highlighter matches and what a
+    /// completion is filtered by.
+    pub name: &'static str,
+    /// How it is written at a call site — `emit(value)`, `msg`. Shown in the
+    /// reference panel and in the hint over a name.
+    pub signature: &'static str,
+    /// Whether it is called or handed over.
+    pub kind: BuiltinKind,
+    /// The scope it exists in, or `None` for one that exists in both. This is
+    /// the only reason a builtin is ever *hidden*: `msg` in a `batch`-scoped
+    /// script is not a name that resolves to something else, it is a name that
+    /// is not there, and offering it would be the editor telling a lie the
+    /// engine then corrects at runtime.
+    pub scope: Option<ScriptScope>,
+    /// One line, which is what a completion row and a hover hint can hold.
+    pub summary: &'static str,
+    /// The paragraph under it in the reference panel — the part that says the
+    /// thing a signature cannot.
+    pub detail: &'static str,
+}
+
+impl Builtin {
+    /// What accepting a completion puts in the box, and where the caret then
+    /// goes — the text, and the offset from its start.
+    ///
+    /// A function completes with its brackets already open and the caret
+    /// between them, because the next thing anyone types is the argument.
+    #[must_use]
+    pub fn completion(&self) -> (String, usize) {
+        match self.kind {
+            BuiltinKind::Function => (format!("{}()", self.name), self.name.len() + 1),
+            BuiltinKind::Binding => (self.name.to_string(), self.name.len()),
+        }
+    }
+
+    /// Whether this name exists in a script of that scope.
+    #[must_use]
+    pub fn in_scope(&self, scope: ScriptScope) -> bool {
+        self.scope.is_none_or(|only| only == scope)
+    }
+}
+
+/// Everything a script can reach that it did not define itself.
+///
+/// **This is the one declaration of the host surface, and both halves of the
+/// product read it.** The editor colours these names apart from ordinary
+/// identifiers, offers them as completions, describes them in its reference
+/// panel and hints them under the caret; the runner registers them. The two
+/// used to be separate lists — a `const HOST: &[&str]` in the frontend beside
+/// the `register_fn` calls on the server — and the failure that arrangement has
+/// is quiet in the direction that matters: a function added to the engine is
+/// simply undiscoverable, so the editor's answer to "what can I call" is wrong
+/// with nothing on fire.
+///
+/// It lives in core because that is the crate both can see, and it is `const`
+/// data rather than reflection because there is nothing to reflect over —
+/// `Engine::register_fn` records a name and a callable, and reading it back
+/// takes rhai's `metadata` feature. `builtins_are_the_functions_the_engine_has`
+/// in `kayak::transforms::script::runner` is what keeps the two in step
+/// instead, and it fails in **both** directions.
+#[must_use]
+pub fn builtins() -> &'static [Builtin] {
+    &[
+        Builtin {
+            name: "msg",
+            signature: "msg",
+            kind: BuiltinKind::Binding,
+            scope: Some(ScriptScope::Message),
+            summary: "the message this run was handed",
+            detail: "An object map, indexed as rhai indexes one: `msg.temperature`, \
+                     `msg[\"temperature\"]`, `msg.readings[0]`. Changing it changes nothing on \
+                     its own — what leaves the transform is what you `emit`.",
+        },
+        Builtin {
+            name: "batch",
+            signature: "batch",
+            kind: BuiltinKind::Binding,
+            scope: Some(ScriptScope::Batch),
+            summary: "every message of the batch, as an array",
+            detail: "Only in `batch` scope, where the script runs once for the whole batch \
+                     rather than once per message. `batch.len` is how many there are.",
+        },
+        Builtin {
+            name: "emit",
+            signature: "emit(value)",
+            kind: BuiltinKind::Function,
+            scope: None,
+            summary: "hand a value on to the rest of the pipeline",
+            detail: "Call it none, one or many times: none drops the message, one replaces it, \
+                     several split it. In `batch` scope every emitted value is a whole batch and \
+                     has to be an array — `emit([msg])`, not `emit(msg)`.",
+        },
+        Builtin {
+            name: "field",
+            signature: "field(message, path)",
+            kind: BuiltinKind::Function,
+            scope: None,
+            summary: "read a dotted field path, as every other transform reads one",
+            detail: "`field(msg, \"sensor.id\")` — the same paths a `filter`, a `reduce` or a \
+                     `map` addresses, including the rule that an exact key beats a path. Ordinary \
+                     rhai indexing is what most scripts want; this is for the paths it cannot \
+                     spell: ones assembled at runtime, and the literal dotted keys an `envelope` \
+                     writes. A path that isn't there reads as `()`.",
+        },
+        Builtin {
+            name: "recall",
+            signature: "recall(key)",
+            kind: BuiltinKind::Function,
+            scope: None,
+            summary: "read what was remembered under a key",
+            detail: "An object map of the values remembered under that key, or `()` when nothing \
+                     has been — so a warm-up check is `if recall(k) == ()`. Needs the pipeline to \
+                     declare a `state` bucket; without one the call fails and says so.",
+        },
+        Builtin {
+            name: "remember",
+            signature: "remember(key, values)",
+            kind: BuiltinKind::Function,
+            scope: None,
+            summary: "write values into the pipeline's state bucket",
+            detail: "`remember(msg.machine, #{ recipe: msg.recipe })`. The bucket is bounded and \
+                     entries expire, both declared where the bucket is. Needs a `state` bucket on \
+                     the pipeline, like `recall`.",
+        },
+        Builtin {
+            name: "now",
+            signature: "now()",
+            kind: BuiltinKind::Function,
+            scope: None,
+            summary: "the current time, RFC 3339",
+            detail: "A string rather than a timestamp object, because what a message can carry is \
+                     a string and this is nearly always written straight into a field.",
+        },
+        Builtin {
+            name: "now_millis",
+            signature: "now_millis()",
+            kind: BuiltinKind::Function,
+            scope: None,
+            summary: "the current time, in milliseconds since the epoch",
+            detail: "The number to reach for when the field is arithmetic rather than a label.",
+        },
+        Builtin {
+            name: "warn",
+            signature: "warn(text)",
+            kind: BuiltinKind::Function,
+            scope: None,
+            summary: "put a line in the server's log without failing the batch",
+            detail: "Distinct texts only, and a bounded number of them per run: a warning is for \
+                     the shape of the data being off, and one line per message would bury the \
+                     log. Failing the batch is `throw` instead.",
+        },
+    ]
+}
+
+/// The builtin by that exact name, whatever scope it belongs to.
+#[must_use]
+pub fn builtin(name: &str) -> Option<&'static Builtin> {
+    builtins().iter().find(|builtin| builtin.name == name)
+}
+
 // ── the dry run ─────────────────────────────────────────────────────────────
 
 /// What `POST /api/scripts/dry-run` takes.
@@ -242,4 +423,78 @@ pub enum DryRunStage {
     /// The script parsed and this run of it failed. A pipeline with this script
     /// starts, and fails the batches that hit it.
     Runtime,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Both the reference panel and the hover hint render every field of a
+    /// builtin, so a blank one is a gap on screen rather than a missing test
+    /// fixture. Cheap to keep, and the only thing standing between a hurried
+    /// addition and an empty row.
+    #[test]
+    fn every_builtin_says_what_it_is() {
+        for builtin in builtins() {
+            assert!(!builtin.name.is_empty(), "a builtin with no name");
+            assert!(
+                builtin.signature.starts_with(builtin.name),
+                "{}'s signature should start with its name: {}",
+                builtin.name,
+                builtin.signature
+            );
+            assert!(!builtin.summary.is_empty(), "{} has no summary", builtin.name);
+            assert!(!builtin.detail.is_empty(), "{} has no detail", builtin.name);
+        }
+    }
+
+    #[test]
+    fn names_are_unique_and_findable() {
+        let mut names: Vec<&str> = builtins().iter().map(|b| b.name).collect();
+        let count = names.len();
+        names.sort_unstable();
+        names.dedup();
+        assert_eq!(names.len(), count, "two builtins share a name");
+        for name in names {
+            assert!(builtin(name).is_some(), "{name} is not findable by name");
+        }
+        assert!(builtin("not_a_builtin").is_none());
+    }
+
+    /// The editor hides a binding that belongs to the other scope, so the
+    /// scoping has to be exactly the runner's: `msg` exists per message and
+    /// `batch` exists per batch, and every function exists in both.
+    #[test]
+    fn the_bindings_are_scoped_and_the_functions_are_not() {
+        let msg = builtin("msg").expect("msg");
+        assert!(msg.in_scope(ScriptScope::Message));
+        assert!(!msg.in_scope(ScriptScope::Batch));
+
+        let batch = builtin("batch").expect("batch");
+        assert!(batch.in_scope(ScriptScope::Batch));
+        assert!(!batch.in_scope(ScriptScope::Message));
+
+        for builtin in builtins().iter().filter(|b| b.kind == BuiltinKind::Function) {
+            assert!(
+                builtin.in_scope(ScriptScope::Message) && builtin.in_scope(ScriptScope::Batch),
+                "{} should exist in both scopes",
+                builtin.name
+            );
+        }
+    }
+
+    /// Accepting a function completion has to leave the caret *inside* the
+    /// brackets — a completion that puts it after them means deleting two
+    /// characters before typing the argument, which is worse than typing the
+    /// name out.
+    #[test]
+    fn a_function_completes_with_its_brackets_open() {
+        let (text, caret) = builtin("emit").expect("emit").completion();
+        assert_eq!(text, "emit()");
+        assert_eq!(&text[..caret], "emit(");
+
+        let (text, caret) = builtin("msg").expect("msg").completion();
+        assert_eq!(text, "msg");
+        assert_eq!(caret, text.len());
+    }
 }
