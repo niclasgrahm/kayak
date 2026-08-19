@@ -1290,8 +1290,16 @@ stores the same data twice), and **never writes nullability** — a sample canno
 prove a field is always present, and a `NOT NULL` column on that evidence fails
 at 3am.
 
-Known and on the roadmap: the sample is never refreshed, so editing a transform
-afterwards leaves the boxes behind it offering the old shape.
+The chain is re-run whenever the draft's **shape** changes — the component
+list, and each draft's kind and variant — which is what makes adding an output
+*after* fetching work at all: the schemas are keyed by draft position, so a
+component added later has no entry until something puts one there. The effect
+deliberately does **not** track `values` (a round trip per keystroke) and reads
+the sample **untracked**, since running the chain writes to it.
+
+Known and on the roadmap: a *value* edit inside a transform doesn't re-run it,
+so retyping a `map`'s target field leaves the boxes behind it offering the old
+shape until something is sampled again.
 
 ### The component reference (`/docs`)
 

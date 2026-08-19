@@ -3015,7 +3015,40 @@ fn AddPipelineModal() -> impl IntoView {
     // What the panel beside the form is showing. Provided here rather than
     // held by the component that fills it, because the button that fetches and
     // the panel that shows are two levels apart.
-    provide_context(SampleTarget(RwSignal::new(Option::<SampleView>::None)));
+    let sample = SampleTarget(RwSignal::new(Option::<SampleView>::None));
+    provide_context(sample);
+
+    // Re-run the chain whenever the draft's *shape* changes, so a component
+    // added after the sample is not left out of it.
+    //
+    // Adding the output after fetching the messages is the ordinary order —
+    // you look at the data and then decide where to put it — and without this
+    // that output is the one component with no field suggestions, because the
+    // chain ran when it did not exist. Removing or re-kinding one is the same
+    // problem in reverse: the schemas are keyed by draft position, so
+    // everything after the change is about a different component.
+    //
+    // What it tracks is deliberately narrow: the list, and each draft's kind
+    // and variant. Not `values` — that would put a round trip on every
+    // keystroke — and not the sample itself, which is read untracked precisely
+    // because running the chain writes to it.
+    Effect::new(move |_| {
+        let signals = drafts.get();
+        let _shape: Vec<(String, Option<String>)> = signals
+            .iter()
+            .map(|draft| (draft.kind.get(), draft.variant.get()))
+            .collect();
+        let Some(view) = sample.0.get_untracked() else {
+            return;
+        };
+        let SampleState::Sampled { messages, .. } = view.state else {
+            return;
+        };
+        let at = view.index;
+        leptos::task::spawn_local(async move {
+            run_chain(at, messages, drafts, docs, sample, Some(schemas)).await;
+        });
+    });
     let errors = RwSignal::new(Vec::<form::FormError>::new());
     // the server's own answer, which says things the form can't know — a
     // duplicate id, an upstream that doesn't exist

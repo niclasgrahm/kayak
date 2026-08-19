@@ -16,12 +16,13 @@ re-derive. See the [docs site](../website/) for how the finished parts behave, a
       `POST /api/pipelines/dry-run` puts them down the draft's transforms so
       the suggestions are right *at each point in the chain*. See "seeing the
       data while you build" on the site.)
-- [ ] **the sample is taken once and never refreshed.** The field suggestions
-      are as of the fetch, so editing a transform afterwards leaves the boxes
-      behind it offering the old shape until something is sampled again. A
-      re-run on a chain edit is the obvious fix and needs a debounce and a
-      rule for what a half-typed transform means — which is why it isn't in
-      the first version.
+- [ ] **a value edit does not re-run the chain.** Adding, removing or
+      re-kinding a component does (which is what makes adding an output after
+      the fetch work), but retyping a `map`'s target field leaves the boxes
+      behind it offering the old shape until something is sampled again.
+      Tracking the values themselves would put a round trip on every
+      keystroke, so it needs a debounce and a rule for what a half-typed
+      transform means.
 - [ ] **nothing samples an `http` input.** It is refused, because sampling it
       would mean claiming the endpoint of the pipeline that owns it. The
       honest version is a *listen* rather than a fetch: register a temporary
