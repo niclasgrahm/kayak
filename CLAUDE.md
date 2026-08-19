@@ -1335,6 +1335,24 @@ after it down (`form::remove_list_element`) and drop that list's messages, since
 they are about boxes that have moved. Like the union's tag, the row count is a
 control that reads its value back, and for the same reason.
 
+**How a nested field is laid out is decided by `FieldType::has_block`**, and
+the rule it encodes is worth keeping: a field that brings rows or fields of its
+own with it is rendered *under* its row, across the whole width, never in the
+control column beside its label. Nesting in the column compounded — each level
+took a share of what was left — so a mapping three levels in had its labels cut
+to `v…` and `a…` while its boxes drifted right. Since the block is full width,
+the label column can be a fixed 140px rather than a percentage, and a level of
+nesting costs one indent. A field that is *only* a block (an object, a list)
+puts its label over the block as a heading (`.form-row.heading`); a union keeps
+the tag dropdown on the row and its variant's fields in the block.
+
+A list row is a **box with a numbered header** carrying its own remove, counted
+from one — the number used to be the label of the row's first field, in the
+column the field names live in. A row that is a single box (a `group_by` field
+name) is laid out inline instead: number, box, remove on one line
+(`.form-list-row.inline`, whose `display: contents` header is what lets one
+markup shape serve both).
+
 Known gap: `/docs` renders one flat table per component, so a list element's or
 a nested object's own fields aren't shown there — `aggregations` reads as "list
 of aggregation" and the reducer's doc comment carries the shape. `rotate` has

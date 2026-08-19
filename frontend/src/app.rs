@@ -4028,6 +4028,11 @@ fn FieldEditor(
     errors: RwSignal<Vec<form::FormError>>,
     pipelines: Signal<Vec<String>>,
     connections: Signal<Vec<(String, String)>>,
+    /// A list row's name is its position, which the row's own header already
+    /// says — so the row asks for the label to be left off rather than
+    /// repeating a number in the column field names live in.
+    #[prop(optional)]
+    unlabelled: bool,
 ) -> AnyView {
     let name = form::path(&prefix, &field.name);
     // what a sample found at this component, for the message-field boxes and
@@ -4056,6 +4061,12 @@ fn FieldEditor(
     // A closed set of values is a dropdown; everything else is a box. The
     // placeholder carries the rendered type, which for a structured field is
     // the only hint that it wants JSON.
+    //
+    // A field with fields of its own ([`FieldType::has_block`]) produces a
+    // second half: a block laid out *under* the row across the whole width,
+    // rather than inside the control column. A union has both — the tag is the
+    // control, its variant's fields are the block.
+    let mut block: Option<AnyView> = None;
     let control = match &field.field_type {
         FieldType::Enum(options) => {
             let unset = initial.is_empty();
@@ -4182,18 +4193,22 @@ fn FieldEditor(
             }
             .into_any()
         }
-        // A value with fields of its own: the fields, laid out in place under
-        // this one's name. Nothing conditional about it — every one of them is
-        // always there — so it is the union arm below without the choice.
-        FieldType::Object(fields) => nested(
-            fields.clone(),
-            at.clone(),
-            index,
-            values,
-            errors,
-            pipelines,
-            connections,
-        ),
+        // A value with fields of its own: the fields, laid out under this one's
+        // name. Nothing conditional about it — every one of them is always
+        // there — so it is the union arm below without the choice, and with no
+        // control on the row at all.
+        FieldType::Object(fields) => {
+            block = Some(nested(
+                fields.clone(),
+                at.clone(),
+                index,
+                values,
+                errors,
+                pipelines,
+                connections,
+            ));
+            ().into_any()
+        }
         // The one field with no fixed number of boxes. Rows are added and taken
         // away, and each of them is whatever the element type asks for — an
         // aggregation's three boxes, or one box for a field name — so nothing
@@ -4221,7 +4236,11 @@ fn FieldEditor(
                 }
             };
             let list_at = at.clone();
-            view! {
+            // A row that is one box — a `group_by` field name — is laid out as
+            // one line: number, box, remove. Only a row with fields of its own
+            // is worth a header and a box of its own to hold them apart.
+            let inline = !element.field_type.has_block();
+            block = Some(view! {
                 <div class="form-list">
                     {move || {
                         let count = rows.get();
@@ -4243,8 +4262,25 @@ fn FieldEditor(
                                         });
                                     rows.set(left);
                                 };
+                                // The row's number is its own header rather
+                                // than the label of its first box: a list of
+                                // three-field rows read as a column of "0",
+                                // "1", "2" with the fields that matter pushed
+                                // sideways and truncated. Counted from one,
+                                // because a row is a thing on a screen here
+                                // and not an index anybody types.
                                 view! {
-                                    <div class="form-list-row">
+                                    <div class="form-list-row" class:inline=inline>
+                                        <div class="form-list-row-header">
+                                            <span class="form-list-index">{row + 1}</span>
+                                            <button
+                                                class="icon-button danger"
+                                                title="remove"
+                                                on:click=remove
+                                            >
+                                                "×"
+                                            </button>
+                                        </div>
                                         <div class="form-list-body">
                                             <FieldEditor
                                                 field=field
@@ -4254,15 +4290,9 @@ fn FieldEditor(
                                                 errors=errors
                                                 pipelines=pipelines
                                                 connections=connections
+                                                unlabelled=true
                                             />
                                         </div>
-                                        <button
-                                            class="icon-button danger"
-                                            title="remove"
-                                            on:click=remove
-                                        >
-                                            "×"
-                                        </button>
                                     </div>
                                 }
                             })
@@ -4307,7 +4337,8 @@ fn FieldEditor(
                     </div>
                 </div>
             }
-            .into_any()
+            .into_any());
+            ().into_any()
         }
         // The conditional one. Which boxes belong here is not known until the
         // tag is picked, so the tag is a dropdown and the rest of the form is
@@ -4347,6 +4378,33 @@ fn FieldEditor(
                 chosen.set(value);
             };
             let prefix = at.clone();
+            // whichever variant is picked, under the row rather than in the
+            // half of it the tag dropdown leaves over
+            block = Some(
+                view! {
+                    {
+                        let variants = variants.clone();
+                        move || {
+                            let picked = chosen.get();
+                            variants
+                                .iter()
+                                .find(|variant| variant.name == picked)
+                                .map(|variant| {
+                                    nested(
+                                        variant.fields.clone(),
+                                        prefix.clone(),
+                                        index,
+                                        values,
+                                        errors,
+                                        pipelines,
+                                        connections,
+                                    )
+                                })
+                        }
+                    }
+                }
+                .into_any(),
+            );
             view! {
                 <select class="select" class:invalid=move || tag_error.get().is_some() on:change=pick>
                     <Show when=move || blank>
@@ -4369,27 +4427,6 @@ fn FieldEditor(
                     }
                 </select>
                 {move || tag_error.get().map(|message| view! { <div class="form-error">{message}</div> })}
-                {
-                    let variants = variants.clone();
-                    let prefix = prefix.clone();
-                    move || {
-                        let picked = chosen.get();
-                        variants
-                            .iter()
-                            .find(|variant| variant.name == picked)
-                            .map(|variant| {
-                                nested(
-                                    variant.fields.clone(),
-                                    prefix.clone(),
-                                    index,
-                                    values,
-                                    errors,
-                                    pipelines,
-                                    connections,
-                                )
-                            })
-                    }
-                }
             }
             .into_any()
         }
@@ -4453,22 +4490,31 @@ fn FieldEditor(
         .into_any(),
     };
 
-    view! {
-        <div class="form-row">
+    // A field that is *only* a block — an object, a list — has nothing to put
+    // beside its label, so the label becomes a heading over the block rather
+    // than a column beside an empty one.
+    let heading = block.is_some() && !matches!(field.field_type, FieldType::Union(_));
+    let required = field.required;
+    let label = (!unlabelled).then(|| {
+        view! {
             <label title=field.description.clone().unwrap_or_default()>
                 {field.name.clone()}
-                <Show when={
-                    let required = field.required;
-                    move || required
-                }>
+                <Show when=move || required>
                     <span class="required-marker" title="required">"*"</span>
                 </Show>
             </label>
+        }
+    });
+
+    view! {
+        <div class="form-row" class:unlabelled=unlabelled class:heading=heading>
+            {label}
             <div class="form-control" class:invalid=move || error.get().is_some()>
                 {control}
                 {move || error.get().map(|message| view! { <div class="form-error">{message}</div> })}
             </div>
         </div>
+        {block}
     }
     .into_any()
 }
