@@ -59,14 +59,26 @@ dev: kill-dev-server secrets
 dev-blank: kill-dev-server
   cargo leptos watch
 
-# Also blank, but not empty-handed: the secrets, the data dir and the server
-# config are all passed, so a pipeline built from scratch in the UI can name a
-# sample connection and write a file without the server being restarted first.
-# `dev-blank` above is the one for the first-run experience itself.
+# An empty graph, no login, and every connection the sample uses. For building
+# a pipeline in the UI from nothing and having somewhere real to point it: bring
+# the services up with `docker compose up` first, and the dropdowns are then
+# full of connections that actually connect.
+#
+# Two deliberate differences from `dev`. There is **no `--server-config`**, so
+# the server authenticates nobody — this is the recipe for when the login is in
+# the way rather than the thing being worked on. And `--connections` is named
+# explicitly rather than derived: the file is normally found beside the config
+# file, and there is no config file here, so the flag is what makes it
+# reachable. It is the same file `dev` loads, which is what the flag is for —
+# nothing is duplicated to keep in step.
+#
+# Nothing is written unless you save. With no `--config` there is nowhere to
+# save *to* until you use "save as", and from that save on the file it created
+# is what `revert` reloads.
 
-# blank instance on :6767 with the sample's secrets and connections available
+# an empty graph on :6767 with no login, but with all the sample connections
 dev-bare: kill-dev-server secrets
-  cargo leptos watch --  --secrets {{example}}/secrets.json --data-dir {{data}} --server-config {{example}}/server.yaml
+  cargo leptos watch -- --connections {{example}}/config.connections.json --secrets {{example}}/secrets.json --data-dir {{data}}
 
 # The same graph in its other spelling, and deliberately *without* a
 # `--server-config`: it is what this recipe is for (the YAML config path) plus

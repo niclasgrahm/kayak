@@ -102,3 +102,11 @@ otherwise a file created months ago fails the next `just dev` with an unresolved
 `${NAME}`. Values already in your file are never overwritten, since one of them
 may be a real credential. `just dev-yaml` is the same graph in its
 other spelling.
+
+`just dev-bare` is the third one: an **empty** graph, no login, and every
+connection the sample declares. It is for building a pipeline in the UI from
+nothing while still having somewhere real to point it — bring the services up
+with `docker compose up` and the connection dropdowns are full of connections
+that actually connect. It names `--connections` explicitly, since there is no
+config file for the usual derived path to hang off, and it is the same file the
+other two load.
