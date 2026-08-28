@@ -29,6 +29,15 @@ export default defineConfig({
   appearance: 'force-dark',
   head: [
     ['meta', { name: 'theme-color', content: '#1d2129' }],
+    // The product's two faces — everything the interface says in the sans,
+    // everything the system says in the mono. The site and the landing page
+    // both set them; without the link they fall back to system fonts.
+    ['link', { rel: 'preconnect', href: 'https://fonts.googleapis.com' }],
+    ['link', { rel: 'preconnect', href: 'https://fonts.gstatic.com', crossorigin: '' }],
+    ['link', {
+      rel: 'stylesheet',
+      href: 'https://fonts.googleapis.com/css2?family=Noto+Sans:wght@400;600;700;800&family=JetBrains+Mono:wght@400;600&display=swap',
+    }],
     ['meta', { property: 'og:title', content: 'kayak' }],
     ['meta', {
       property: 'og:description',
