@@ -1,7 +1,10 @@
 # landing/
 
-Input material for generating kayak's landing page. Nothing here is part of the
-build or the test suite; it exists to be handed to a design tool.
+Input material for kayak's landing page. Nothing here is part of the build or
+the test suite; it exists to be handed to a design tool.
+
+The page itself is `website/.vitepress/theme/Landing.vue` — the doc site's home,
+served at the root of propell.dev/kayak — and was written from these files.
 
 | | |
 | --- | --- |

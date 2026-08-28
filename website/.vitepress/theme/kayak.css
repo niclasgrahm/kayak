@@ -353,3 +353,10 @@ button {
 .vp-doc td:first-child {
   max-width: 28ch;
 }
+
+/* The landing page has no sidebar and no outline, so all vitepress' local nav
+   would show on a phone is a "return to top" strip pinned over the tour's
+   step tabs. `pageClass` in index.md's frontmatter is what scopes this. */
+.landing-page .VPLocalNav {
+  display: none;
+}

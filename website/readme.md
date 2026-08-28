@@ -13,6 +13,7 @@ just docs-build   # production build into .vitepress/dist
 
 | | |
 | --- | --- |
+| `index.md`, `.vitepress/theme/Landing.vue` | the landing page. `index.md` is one line mounting the component; the copy, the pipeline-card replica and the scroll-pinned tour are all in the `.vue` file. Written from `landing/`. |
 | `getting-started.md`, `canvas/`, `pipelines/`, `io/`, `operating/`, `contributing/` | the prose. This is the guide that used to be `docs/guide.md`, one page per section. |
 | `reference/*.md` | prose *about* a family of components, ending in an `<!--@include: -->` of the generated tables. |
 | `reference/generated/`, `public/openapi.json`, `.vitepress/generated/sidebar.json` | **generated — do not edit.** Written by `cargo run -p kayak-docsgen`. |
