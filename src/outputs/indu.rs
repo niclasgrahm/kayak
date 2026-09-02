@@ -148,7 +148,7 @@ pub struct InduOutput {
 }
 
 /// One reading, as Indu's wire format spells it.
-fn reading(stream: String, at: &str, value: f64, unit: Option<&str>) -> Value {
+fn reading(stream: &str, at: &str, value: f64, unit: Option<&str>) -> Value {
     let mut row = json!({ "stream": stream, "at": at, "value": value });
     if let Some(unit) = unit
         && let Some(object) = row.as_object_mut()
@@ -200,7 +200,7 @@ impl InduOutput {
     /// message that lacks a series' value or a placeholder's field.
     fn rows(&self, batch: &MessageBatch, now: &str) -> Vec<Value> {
         let mut rows = Vec::with_capacity(batch.len() * self.series.len());
-        for message in batch.iter() {
+        for message in batch {
             let Some(at) = timestamp(self.at.as_deref(), message, now) else {
                 continue;
             };
@@ -211,7 +211,7 @@ impl InduOutput {
                 let Some(stream) = render(&entry.stream, message) else {
                     continue;
                 };
-                rows.push(reading(stream, &at, value, entry.unit.as_deref()));
+                rows.push(reading(&stream, &at, value, entry.unit.as_deref()));
             }
         }
         rows
@@ -343,6 +343,14 @@ mod tests {
 
     fn ok<T, E: std::fmt::Display>(result: std::result::Result<T, E>) -> T {
         result.unwrap_or_else(|e| panic!("the test could not get this far: {e}"))
+    }
+
+    /// The error a call was expected to produce.
+    fn failure<T>(result: Result<T>, expected: &str) -> anyhow::Error {
+        match result {
+            Ok(_) => panic!("{expected}, but the call succeeded"),
+            Err(err) => err,
+        }
     }
 
     fn connections(url: &str, key: &str) -> Arc<Connections> {
@@ -584,10 +592,7 @@ mod tests {
             "machine": "press-3", "at": "2026-09-02T10:00:00Z",
             "oee": 0.83, "stats": {"availability": 0.9}
         }))];
-        let err = output
-            .emit(Arc::new(batch))
-            .await
-            .expect_err("a 207 is a failure");
+        let err = failure(output.emit(Arc::new(batch)).await, "a 207 is a failure");
         let text = format!("{err:#}");
         assert!(text.contains("1 row(s) refused"), "{text}");
         assert!(text.contains("unknown_stream"), "{text}");
@@ -605,14 +610,11 @@ mod tests {
         let batch = Arc::new(vec![Arc::new(json!({
             "machine": "press-3", "at": "2026-09-02T10:00:00Z", "oee": 0.83
         }))]);
-        let err = output
-            .emit(Arc::clone(&batch))
-            .await
-            .expect_err("a 401 is a failure");
+        let err = failure(output.emit(Arc::clone(&batch)).await, "a 401 is a failure");
         assert!(format!("{err:#}").contains("401"), "{err:#}");
 
         // The next batch is held back without a request.
-        let err = output.emit(batch).await.expect_err("held by the gate");
+        let err = failure(output.emit(batch).await, "held by the gate");
         assert!(format!("{err:#}").contains("still failing"), "{err:#}");
         assert_eq!(ok(endpoint.received.lock()).len(), 1);
     }

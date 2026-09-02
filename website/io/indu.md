@@ -2,9 +2,9 @@
 
 Indu Cloud is the industrial data platform kayak was built beside: devices,
 sensors, an org tree, a historian, alerts. kayak reaches it through one
-connection and two components — the `indu` **output** writes a pipeline's
-results back into the platform as *streams*, series that are not sensors, and
-the `indu` **input** (coming) reads sensors and streams out of it.
+connection and two components — the `indu` **input** reads sensors and streams
+out of the platform live, and the `indu` **output** writes a pipeline's results
+back into it as *streams*, series that are not sensors.
 
 ## the connection
 
@@ -26,6 +26,60 @@ every other credential. A connection rather than fields on the components, for
 the reason every other server-backed component has one: the origin and the key
 are *what the platform is*, and every `indu` input and output in the graph
 names the same one.
+
+## the input
+
+```yaml
+inputs:
+  - type: indu
+    connection: indu
+    sensors:
+      - press-3/temperature
+      - press-3/pressure
+    streams:
+      - press-3/oee
+    backfill: true
+```
+
+A live subscription over the platform's server-sent-events endpoint, one
+message per reading:
+
+```json
+{"kind": "sensor", "name": "press-3/temperature", "device": "press-3",
+ "sensor": "temperature", "label": "Temperature", "unit": "°C",
+ "sensor_id": "…", "device_id": "…",
+ "at": "2026-09-02T10:00:00+00:00", "ts": 1788343200000, "value": 71.2}
+
+{"kind": "stream", "name": "press-3/oee", "label": "press-3/oee", "unit": "%",
+ "stream_id": "…", "at": "…", "ts": 1788343201000, "value": 0.83}
+```
+
+- **`sensors`** — `<device>/<sensor>`: the device's id, a slash, the
+  sensor's id, both as the platform names them. Not UUIDs — the names a
+  person knows, and the names on the platform's own screens. The split is at
+  the first slash.
+- **`streams`** — by the name a stream was written under (its `external_id`),
+  or, for a stream the platform computes itself, its display name.
+- **`backfill`** — start each series from its latest value, so a pipeline
+  restarted at 03:00 has a value for every machine at 03:00 rather than at
+  the next reading. On by default.
+- **`max_batch`** — most readings in one batch; one unless said otherwise,
+  and never a wait for more.
+
+The names are resolved through the platform's API on the first read, under
+the connection's key. A name that cannot be found — a typo, a stream nobody
+has written yet, a sensor the key may not see — is reported on the card with
+every missing name listed, and looked for again after a pause, the way a
+broker that is down is: the usual case is a stream another pipeline is about
+to create, and a pipeline that refused to start over it would have to be
+started again by hand.
+
+A dropped connection reconnects with kayak's backoff, one error on the card
+per outage. Readings the platform dropped because this connection could not
+keep up arrive as an error too — `indu dropped 12 readings…` — rather than
+as a silent gap: the historian has them, the pipeline does not. `_meta.event`
+under an `envelope` says which platform event carried a message, `reading`
+or `stream_reading`.
 
 ## the output
 

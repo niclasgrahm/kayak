@@ -75,7 +75,10 @@ pub fn for_input(kind: &str) -> Option<Vec<MetaFieldDoc>> {
             ),
         ],
         "kafka" => vec![
-            MetaFieldDoc::new("connection", "name of the connection it was consumed through"),
+            MetaFieldDoc::new(
+                "connection",
+                "name of the connection it was consumed through",
+            ),
             MetaFieldDoc::new("topic", "topic the record came from"),
             MetaFieldDoc::new("partition", "partition within that topic"),
             MetaFieldDoc::new(
@@ -107,6 +110,14 @@ pub fn for_input(kind: &str) -> Option<Vec<MetaFieldDoc>> {
                 "the reply subject, when the publisher set one, else `null`",
             ),
             MetaFieldDoc::new("headers", "nats headers, as an object of arrays"),
+        ],
+        "indu" => vec![
+            MetaFieldDoc::new("connection", "name of the connection it was read through"),
+            MetaFieldDoc::new(
+                "event",
+                "which platform event carried it: `reading` for a sensor, \
+                 `stream_reading` for a stream",
+            ),
         ],
         "mqtt" => vec![
             MetaFieldDoc::new("connection", "name of the connection it was received on"),

@@ -21,7 +21,15 @@ history, not here.
   output serves every machine a pipeline reduces over; an unknown stream is
   created on the platform on first sight. A `207` is a failure naming the
   refused row, and each batch carries an idempotency key. See "indu" on the
-  site. The matching input is next.
+  site.
+- **An `indu` input.** The other direction: kayak reads sensors and streams
+  out of Indu Cloud live, over the platform's server-sent-events endpoint,
+  under the same connection. Sensors are named `<device>/<sensor>` and
+  streams by the name they were written under, resolved on the first read;
+  every reading is one message carrying the name, the ids, the unit and the
+  time. A dropped connection reconnects with backoff, readings the platform
+  dropped are an error on the card, and `backfill` starts each series from
+  its latest value. kayak's first SSE input.
 
 ## 0.1.2 — 2026-08-19
 

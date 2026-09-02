@@ -86,7 +86,10 @@ petname = "3.0.0"
 # `query` is what the clickhouse output builds its request with: the statement
 # travels in the query string of the HTTP interface, so it has to be encoded by
 # something that is not string concatenation.
-reqwest = { version = "0.13.4", features = ["json", "query"]}
+# `stream` is what the indu input reads server-sent events with: a response
+# body consumed as it arrives rather than after it ends, which for a
+# subscription is never.
+reqwest = { version = "0.13.4", features = ["json", "query", "stream"]}
 # The frontend's static files, compiled into the binary behind `embed-assets`
 # so that a release is one artifact rather than a binary and a directory. See
 # `src/site.rs` for why it is a feature and not the default; `debug-embed`

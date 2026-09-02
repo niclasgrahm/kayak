@@ -11,6 +11,7 @@ pub mod ack;
 pub mod dummy;
 pub mod envelope;
 pub mod http;
+pub mod indu;
 pub mod kafka;
 pub mod mqtt;
 pub mod nats;

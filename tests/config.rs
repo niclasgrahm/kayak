@@ -52,6 +52,16 @@ fn input_samples() -> Vec<(&'static str, Value)> {
             "nats",
             json!({"type": "nats", "connection": "local-nats", "subject": "test.subject"}),
         ),
+        (
+            "indu",
+            json!({
+                "type": "indu",
+                "connection": "indu",
+                "sensors": ["press-3/temperature"],
+                "streams": ["press-3/oee"],
+                "backfill": false
+            }),
+        ),
         ("pipeline", json!({"type": "pipeline", "upstream": "p1"})),
         (
             "kafka",
@@ -226,15 +236,9 @@ fn output_samples() -> Vec<(&'static str, Value)> {
         ),
         (
             "indu",
-            json!({
-                "type": "indu",
-                "connection": "indu",
-                "series": [
-                    {"stream": "{machine}/oee", "value": "oee", "unit": "%"},
-                    {"stream": "{machine}/availability", "value": "availability"}
-                ],
-                "at": "_meta.received_at"
-            }),
+            json!({"type": "indu", "connection": "indu", "at": "_meta.received_at",
+                "series": [{"stream": "{machine}/oee", "value": "oee", "unit": "%"},
+                           {"stream": "{machine}/availability", "value": "availability"}]}),
         ),
         (
             "kafka",
