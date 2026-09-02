@@ -271,6 +271,37 @@ impl ClickhouseConnection {
     }
 }
 
+/// An Indu Cloud deployment: where its API and ingest endpoints are, and the
+/// API key this kayak speaks to it with.
+///
+/// One connection serves both directions: the `indu` output writes streams
+/// through `/ingest/v1/streams`, and the `indu` input reads sensors and
+/// streams through `/api/v1`. The key is minted on the Indu side (its `/keys`
+/// page, or `indud apps register --kind kayak`), bound to a role there, and
+/// arrives here as a `${NAME}` reference like every other credential.
+#[derive(Clone, Debug, Deserialize, Serialize, JsonSchema, PartialEq, Eq)]
+#[schemars(title = "indu")]
+pub struct InduConnection {
+    /// the deployment's origin, e.g. `https://app.acme.indu.cloud`. The ingest
+    /// endpoint is reached under it as `/ingest/v1/…`; a deployment that serves
+    /// ingest on a separate host names it in `ingest_url`.
+    pub url: String,
+    /// where `/ingest/v1/…` lives when it is not under `url` — the single-server
+    /// install serves ingest on its own host, e.g. `https://ingest.acme.indu.cloud`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ingest_url: Option<String>,
+    /// the API key, `indu.ak.…`, as a `${NAME}` reference — see "secrets".
+    pub api_key: Secret,
+}
+
+impl InduConnection {
+    /// The origin ingest requests go to: `ingest_url` when set, else `url`.
+    #[must_use]
+    pub fn ingest_origin(&self) -> &str {
+        self.ingest_url.as_deref().unwrap_or(&self.url)
+    }
+}
+
 /// Every kind of system a connection can describe.
 ///
 /// Tagged the same way the component enums are, so a connection reads like the
@@ -289,6 +320,7 @@ pub enum ConnectionKind {
     Mqtt(MqttConnection),
     Redis(RedisConnection),
     Opcua(OpcuaConnection),
+    Indu(InduConnection),
 }
 
 impl ConnectionKind {
@@ -306,6 +338,7 @@ impl ConnectionKind {
             Self::Mqtt(_) => MQTT,
             Self::Redis(_) => REDIS,
             Self::Opcua(_) => OPCUA,
+            Self::Indu(_) => INDU,
         }
     }
 }
@@ -319,6 +352,7 @@ pub const S3: &str = "s3";
 pub const MQTT: &str = "mqtt";
 pub const REDIS: &str = "redis";
 pub const OPCUA: &str = "opcua";
+pub const INDU: &str = "indu";
 
 /// What `POST /api/connections` takes: a name, and the connection itself
 /// flattened alongside it.
@@ -398,6 +432,13 @@ impl Connections {
         match self.lookup(id, KAFKA)? {
             ConnectionKind::Kafka(c) => Ok(c),
             other => Err(ConnectionError::wrong_kind(id, KAFKA, other)),
+        }
+    }
+
+    pub fn indu(&self, id: &str) -> Result<&InduConnection, ConnectionError> {
+        match self.lookup(id, INDU)? {
+            ConnectionKind::Indu(c) => Ok(c),
+            other => Err(ConnectionError::wrong_kind(id, INDU, other)),
         }
     }
 

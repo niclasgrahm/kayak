@@ -10,6 +10,19 @@ operator would want to know before upgrading* — a behaviour change, a new
 component, a default that moved. Refactors and internal work are in the git
 history, not here.
 
+## Unreleased
+
+### Added
+
+- **An `indu` connection and an `indu` output.** kayak writes a pipeline's
+  results into Indu Cloud as *streams* — series that are not sensors —
+  through `POST /ingest/v1/streams`. One message yields one reading per
+  entry in `series`, with `{field}` placeholders in the stream name so one
+  output serves every machine a pipeline reduces over; an unknown stream is
+  created on the platform on first sight. A `207` is a failure naming the
+  refused row, and each batch carries an idempotency key. See "indu" on the
+  site. The matching input is next.
+
 ## 0.1.2 — 2026-08-19
 
 ### Added

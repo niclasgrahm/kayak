@@ -35,8 +35,8 @@ pub mod testing;
 pub mod transforms;
 
 use crate::buckets::Buckets;
-use crate::history::History;
 pub use crate::endpoints::api_router;
+use crate::history::History;
 use crate::inputs::envelope::{Envelope, Meta};
 use crate::inputs::http::Inboxes;
 use crate::secrets::{EnvStore, Resolved, SecretStore};
@@ -47,9 +47,9 @@ use serde_json::Value;
 use std::path::PathBuf;
 
 use kayak_core::connections::{
-    ClickhouseConnection, Connections, FileConnection, KafkaConnection, MqttConnection,
-    OpcuaConnection,
-    NatsConnection, PostgresConnection, RedisConnection, S3Connection,
+    ClickhouseConnection, Connections, FileConnection, InduConnection, KafkaConnection,
+    MqttConnection, NatsConnection, OpcuaConnection, PostgresConnection, RedisConnection,
+    S3Connection,
 };
 
 /// Threaded through every `build()` call. It carries the pipeline map — needed
@@ -281,6 +281,10 @@ impl<'a> BuildCtx<'a> {
 
     pub fn opcua_connection(&self, id: &str) -> anyhow::Result<&OpcuaConnection> {
         Ok(self.connections.opcua(id)?)
+    }
+
+    pub fn indu_connection(&self, id: &str) -> anyhow::Result<&InduConnection> {
+        Ok(self.connections.indu(id)?)
     }
 
     /// The same, with the live state buckets a pipeline's `state` names.

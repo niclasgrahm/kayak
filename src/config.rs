@@ -91,6 +91,7 @@ impl BuildOutputConfig for OutputConfig {
             OutputKind::Mqtt(c) => c.build(ctx),
             OutputKind::Redis(c) => c.build(ctx),
             OutputKind::Http(c) => c.build(ctx),
+            OutputKind::Indu(c) => c.build(ctx),
         }
     }
 }

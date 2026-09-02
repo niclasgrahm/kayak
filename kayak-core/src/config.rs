@@ -584,6 +584,54 @@ pub struct RedisOutputConfig {
     pub channel: String,
 }
 
+/// One series an `indu` output writes: which stream a message's value goes
+/// to, and which field carries the value.
+#[derive(Clone, Debug, Deserialize, Serialize, JsonSchema, PartialEq, Eq)]
+pub struct InduSeries {
+    /// the stream's name on the Indu side, e.g. `press-3/oee`. May contain
+    /// `{field}` placeholders filled from the message — `{machine}/oee` — so
+    /// one output serves every machine a pipeline reduces over. A message
+    /// missing a placeholder's field is skipped for this series.
+    pub stream: String,
+    /// the field holding the value, as a path (`oee`, `stats.mean`). Must be a
+    /// number; a message where it is missing or not a number is skipped for
+    /// this series rather than failing the batch.
+    pub value: String,
+    /// the unit Indu records when it creates the stream, e.g. `%`. Ignored
+    /// once the stream exists.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub unit: Option<String>,
+}
+
+/// Writes messages into Indu Cloud as **streams** — series that are not
+/// sensors — through `POST /ingest/v1/streams`.
+///
+/// Every message yields one reading per entry in `series`; a reducer emitting
+/// `{machine, oee, availability}` with two series entries writes two streams
+/// per machine. An unknown stream is created on the Indu side on first sight,
+/// when the connection's key may create streams. Anything but a full
+/// acceptance fails the batch with Indu's own row errors quoted, so a stream
+/// the key may not write to shows up on the card rather than being written
+/// off as delivered.
+#[derive(Clone, Debug, Deserialize, Serialize, JsonSchema)]
+#[schemars(title = "indu")]
+pub struct InduOutputConfig {
+    /// name of the indu connection to write through — see "connections".
+    #[schemars(extend("x-connection" = "indu"))]
+    pub connection: ConnectionId,
+    /// the streams to write, one reading each per message. At least one.
+    pub series: Vec<InduSeries>,
+    /// the field holding the reading's time — an RFC 3339 string or epoch
+    /// milliseconds. Absent, the time the batch is sent is used. An `envelope`
+    /// puts an input's receive time at `_meta.received_at`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub at: Option<String>,
+    /// how long one request may take before it is given up on, in seconds.
+    /// Defaults to 30.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub timeout_seconds: Option<u64>,
+}
+
 /// Sends the batch to an http endpoint — the pipeline pushes its results at a
 /// webhook or an ingest API rather than at a broker.
 ///
@@ -1280,14 +1328,13 @@ impl EnvelopeConfig {
     pub fn payload_field(&self) -> Option<&str> {
         match self {
             Self::Merge { .. } => None,
-            Self::Wrap { payload, .. } => {
-                Some(payload.as_deref().map_or(DEFAULT_PAYLOAD_FIELD, |name| {
-                    match name.trim() {
-                        "" => DEFAULT_PAYLOAD_FIELD,
-                        name => name,
-                    }
-                }))
-            }
+            Self::Wrap { payload, .. } => Some(payload.as_deref().map_or(
+                DEFAULT_PAYLOAD_FIELD,
+                |name| match name.trim() {
+                    "" => DEFAULT_PAYLOAD_FIELD,
+                    name => name,
+                },
+            )),
         }
     }
 }
@@ -1375,6 +1422,7 @@ pub enum OutputKind {
     Mqtt(MqttOutputConfig),
     Redis(RedisOutputConfig),
     Http(HttpOutputConfig),
+    Indu(InduOutputConfig),
 }
 #[derive(Clone, Debug, Deserialize, Serialize, JsonSchema)]
 pub struct OutputConfig {
@@ -1462,6 +1510,7 @@ impl Config {
             OutputKind::S3(c) => Some(&c.connection),
             OutputKind::Mqtt(c) => Some(&c.connection),
             OutputKind::Redis(c) => Some(&c.connection),
+            OutputKind::Indu(c) => Some(&c.connection),
             OutputKind::Stdout(_) | OutputKind::Http(_) => None,
         });
         inputs.chain(outputs).collect()
