@@ -121,3 +121,16 @@ One consequence is visible in the log and is not a fault: the OPC UA client prin
 | `endpoint` | `string` | <Badge type="warning" text="required" /> | endpoint url, e.g. `opc.tcp://localhost:50000`. May reference secrets as `${NAME}` — see "secrets" in the readme. This is connected to *directly*: kayak does not ask the server for its endpoint list first. Discovery is the usual way, and it is the usual way to fail — a server behind docker, NAT or a load balancer advertises the hostname it knows itself by, which is regularly not one the client can resolve. What is written here is what is dialled. |
 | `password` | `string` | <Badge type="info" text="optional" /> | that username's password. May reference secrets as `${NAME}` — see "secrets" in the readme, and prefer a reference to a literal here. |
 | `username` | `string` | <Badge type="info" text="optional" /> | username to sign in with, if the server requires one. Must be set together with `password` or not at all; without either, the session is anonymous. |
+
+
+## `indu` {#connection-indu}
+
+An Indu Cloud deployment: where its API and ingest endpoints are, and the API key this kayak speaks to it with.
+
+One connection serves both directions: the `indu` output writes streams through `/ingest/v1/streams`, and the `indu` input reads sensors and streams through `/api/v1`. The key is minted on the Indu side (its `/keys` page, or `indud apps register --kind kayak`), bound to a role there, and arrives here as a `${NAME}` reference like every other credential.
+
+| field | type | | description |
+| --- | --- | --- | --- |
+| `url` | `string` | <Badge type="warning" text="required" /> | the deployment's origin, e.g. `https://app.acme.indu.cloud`. The ingest endpoint is reached under it as `/ingest/v1/…`; a deployment that serves ingest on a separate host names it in `ingest_url`. |
+| `api_key` | `string` | <Badge type="warning" text="required" /> | the API key, `indu.ak.…`, as a `${NAME}` reference — see "secrets". |
+| `ingest_url` | `string` | <Badge type="info" text="optional" /> | where `/ingest/v1/…` lives when it is not under `url` — the single-server install serves ingest on its own host, e.g. `https://ingest.acme.indu.cloud`. |

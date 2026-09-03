@@ -224,10 +224,14 @@ mod tests {
     }
 
     /// A query that matches nothing must not leave three empty headings behind.
+    ///
+    /// Same caveat as above: the first query has to be a term only a transform
+    /// carries. "reducer" was one until the `indu` output's description said
+    /// what a reducer emitting `oee` for some machines does to it.
     #[test]
     fn a_family_with_no_matches_is_dropped_entirely() {
-        let matched = groups(&all_components(), "reducer");
-        assert_eq!(matched.len(), 1);
+        let matched = groups(&all_components(), "out_size");
+        assert_eq!(matched.len(), 1, "matched: {:?}", kinds(&matched));
         assert_eq!(matched[0].family, Family::Transform);
 
         // a term no component kind, field or description contains

@@ -10,6 +10,27 @@ operator would want to know before upgrading* — a behaviour change, a new
 component, a default that moved. Refactors and internal work are in the git
 history, not here.
 
+## Unreleased
+
+### Added
+
+- **An `indu` connection and an `indu` output.** kayak writes a pipeline's
+  results into Indu Cloud as *streams* — series that are not sensors —
+  through `POST /ingest/v1/streams`. One message yields one reading per
+  entry in `series`, with `{field}` placeholders in the stream name so one
+  output serves every machine a pipeline reduces over; an unknown stream is
+  created on the platform on first sight. A `207` is a failure naming the
+  refused row, and each batch carries an idempotency key. See "indu" on the
+  site.
+- **An `indu` input.** The other direction: kayak reads sensors and streams
+  out of Indu Cloud live, over the platform's server-sent-events endpoint,
+  under the same connection. Sensors are named `<device>/<sensor>` and
+  streams by the name they were written under, resolved on the first read;
+  every reading is one message carrying the name, the ids, the unit and the
+  time. A dropped connection reconnects with backoff, readings the platform
+  dropped are an error on the card, and `backfill` starts each series from
+  its latest value. kayak's first SSE input.
+
 ## 0.1.2 — 2026-08-19
 
 ### Added

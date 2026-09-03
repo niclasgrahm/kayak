@@ -7,6 +7,7 @@ pub mod clickhouse;
 pub mod columns;
 pub mod file;
 pub mod http;
+pub mod indu;
 pub mod kafka;
 pub mod mqtt;
 pub mod nats;

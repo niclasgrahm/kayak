@@ -584,6 +584,95 @@ pub struct RedisOutputConfig {
     pub channel: String,
 }
 
+/// Reads sensors and streams out of Indu Cloud, live, over
+/// `/api/v1/live/sse` — the platform's own subscription protocol, under the
+/// connection's API key.
+///
+/// Sensors and streams are named the way they are named on the platform
+/// (customer-supplied ids, never UUIDs) and resolved through `/api/v1` on
+/// the first read; a name the key cannot find or may not see is reported on
+/// the card and looked for again after a pause, since a stream that does not
+/// exist yet is the usual case for one another pipeline is about to write.
+/// Every reading arrives as its own message, named — `{"kind": "sensor",
+/// "name": "press-3/temperature", "value": 71.2, "at": …}` — with the
+/// platform's ids riding along for anything that needs them. A dropped
+/// connection reconnects with backoff; readings the connection could not keep
+/// up with are reported as an error rather than silently missed.
+#[derive(Clone, Debug, Deserialize, Serialize, JsonSchema)]
+#[schemars(title = "indu")]
+pub struct InduInputConfig {
+    /// name of the indu connection to read through — see "connections".
+    #[schemars(extend("x-connection" = "indu"))]
+    pub connection: ConnectionId,
+    /// sensors to read, as `<device>/<sensor>` — the device's id followed by
+    /// the sensor's, both as the platform knows them: `press-3/temperature`.
+    /// The split is at the first `/`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub sensors: Vec<String>,
+    /// streams to read, by the name they were written under — `press-3/oee` —
+    /// or, for a stream the platform computes itself, its display name.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub streams: Vec<String>,
+    /// whether to start with each series' latest value before live readings
+    /// arrive. Defaults to true, so a pipeline restarted at 03:00 has a value
+    /// for every machine at 03:00 rather than at the next reading.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub backfill: Option<bool>,
+    /// most readings to put in one batch. Defaults to 1. Raising it only ever
+    /// coalesces readings that had *already arrived* — a quiet sensor is no
+    /// slower than it was.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_batch: Option<usize>,
+}
+
+/// One series an `indu` output writes: which stream a message's value goes
+/// to, and which field carries the value.
+#[derive(Clone, Debug, Deserialize, Serialize, JsonSchema, PartialEq, Eq)]
+pub struct InduSeries {
+    /// the stream's name on the Indu side, e.g. `press-3/oee`. May contain
+    /// `{field}` placeholders filled from the message — `{machine}/oee` — so
+    /// one output serves every machine a pipeline reduces over. A message
+    /// missing a placeholder's field is skipped for this series.
+    pub stream: String,
+    /// the field holding the value, as a path (`oee`, `stats.mean`). Must be a
+    /// number; a message where it is missing or not a number is skipped for
+    /// this series rather than failing the batch.
+    pub value: String,
+    /// the unit Indu records when it creates the stream, e.g. `%`. Ignored
+    /// once the stream exists.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub unit: Option<String>,
+}
+
+/// Writes messages into Indu Cloud as **streams** — series that are not
+/// sensors — through `POST /ingest/v1/streams`.
+///
+/// Every message yields one reading per entry in `series`; a reducer emitting
+/// `{machine, oee, availability}` with two series entries writes two streams
+/// per machine. An unknown stream is created on the Indu side on first sight,
+/// when the connection's key may create streams. Anything but a full
+/// acceptance fails the batch with Indu's own row errors quoted, so a stream
+/// the key may not write to shows up on the card rather than being written
+/// off as delivered.
+#[derive(Clone, Debug, Deserialize, Serialize, JsonSchema)]
+#[schemars(title = "indu")]
+pub struct InduOutputConfig {
+    /// name of the indu connection to write through — see "connections".
+    #[schemars(extend("x-connection" = "indu"))]
+    pub connection: ConnectionId,
+    /// the streams to write, one reading each per message. At least one.
+    pub series: Vec<InduSeries>,
+    /// the field holding the reading's time — an RFC 3339 string or epoch
+    /// milliseconds. Absent, the time the batch is sent is used. An `envelope`
+    /// puts an input's receive time at `_meta.received_at`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub at: Option<String>,
+    /// how long one request may take before it is given up on, in seconds.
+    /// Defaults to 30.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub timeout_seconds: Option<u64>,
+}
+
 /// Sends the batch to an http endpoint — the pipeline pushes its results at a
 /// webhook or an ingest API rather than at a broker.
 ///
@@ -1172,6 +1261,7 @@ pub enum InputKind {
     Mqtt(MqttConfig),
     Redis(RedisConfig),
     Opcua(OpcuaConfig),
+    Indu(InduInputConfig),
 }
 /// How an input's messages are gathered into batches before the transforms see
 /// them.
@@ -1280,14 +1370,13 @@ impl EnvelopeConfig {
     pub fn payload_field(&self) -> Option<&str> {
         match self {
             Self::Merge { .. } => None,
-            Self::Wrap { payload, .. } => {
-                Some(payload.as_deref().map_or(DEFAULT_PAYLOAD_FIELD, |name| {
-                    match name.trim() {
-                        "" => DEFAULT_PAYLOAD_FIELD,
-                        name => name,
-                    }
-                }))
-            }
+            Self::Wrap { payload, .. } => Some(payload.as_deref().map_or(
+                DEFAULT_PAYLOAD_FIELD,
+                |name| match name.trim() {
+                    "" => DEFAULT_PAYLOAD_FIELD,
+                    name => name,
+                },
+            )),
         }
     }
 }
@@ -1375,6 +1464,7 @@ pub enum OutputKind {
     Mqtt(MqttOutputConfig),
     Redis(RedisOutputConfig),
     Http(HttpOutputConfig),
+    Indu(InduOutputConfig),
 }
 #[derive(Clone, Debug, Deserialize, Serialize, JsonSchema)]
 pub struct OutputConfig {
@@ -1428,7 +1518,8 @@ impl Config {
                 | InputKind::Nats(_)
                 | InputKind::Mqtt(_)
                 | InputKind::Redis(_)
-                | InputKind::Opcua(_) => None,
+                | InputKind::Opcua(_)
+                | InputKind::Indu(_) => None,
             })
             .collect()
     }
@@ -1451,6 +1542,7 @@ impl Config {
             InputKind::Mqtt(c) => Some(&c.connection),
             InputKind::Redis(c) => Some(&c.connection),
             InputKind::Opcua(c) => Some(&c.connection),
+            InputKind::Indu(c) => Some(&c.connection),
             InputKind::Dummy(_) | InputKind::Http(_) | InputKind::Pipeline(_) => None,
         });
         let outputs = self.outputs.iter().filter_map(|output| match &output.kind {
@@ -1462,6 +1554,7 @@ impl Config {
             OutputKind::S3(c) => Some(&c.connection),
             OutputKind::Mqtt(c) => Some(&c.connection),
             OutputKind::Redis(c) => Some(&c.connection),
+            OutputKind::Indu(c) => Some(&c.connection),
             OutputKind::Stdout(_) | OutputKind::Http(_) => None,
         });
         inputs.chain(outputs).collect()

@@ -337,6 +337,12 @@ picking up."
       boundary down explicitly (readme + guide), or decide it's worth chasing
       and scope what a distributed mode would need, starting at the input as
       the durability argument under "state" already says.
+- [x] **an `indu` connection and output** (done 2026-09-02: the kayak half of
+      Indu Cloud's `docs/streams.md` — a pipeline's results land on the
+      platform as streams, one reading per `series` entry per message, with
+      templated stream names and an idempotency key per batch. The `indu`
+      *input* over the platform's SSE feed is the other half and waits on the
+      platform accepting an API key on `/api/v1`.)
 - [ ] **the connector list is thin.** nats, kafka, mqtt, redis, http and two
       dummies in; nats, kafka, mqtt, redis, http, postgres, clickhouse, file,
       s3 and stdout out — against

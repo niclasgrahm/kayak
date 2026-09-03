@@ -700,7 +700,9 @@ fn field_type_at(root: &Value, schema: &Value, depth: usize) -> FieldType {
             fields => FieldType::Object(fields),
         },
         Some("array") => element_at(root, &schema["items"], depth + 1)
-            .map_or(FieldType::Json, |element| FieldType::List(Box::new(element))),
+            .map_or(FieldType::Json, |element| {
+                FieldType::List(Box::new(element))
+            }),
         _ => FieldType::Json,
     }
 }
@@ -766,8 +768,7 @@ fn tag_of(branches: &[Value]) -> Option<String> {
             .iter()
             .all(|branch| branch["properties"][name]["const"].is_string())
     };
-    branches
-        .first()?["properties"]
+    branches.first()?["properties"]
         .as_object()?
         .keys()
         .find(|name| is_tag(name))
@@ -965,7 +966,14 @@ mod tests {
             field_names(&component("nats")),
             // `buffer`, `envelope` and `ack` are `InputConfig`'s rather than
             // the nats input's, and are appended after the kind's own fields
-            ["connection", "subject", "max_batch", "ack", "buffer", "envelope"]
+            [
+                "connection",
+                "subject",
+                "max_batch",
+                "ack",
+                "buffer",
+                "envelope"
+            ]
         );
     }
 
@@ -1109,7 +1117,6 @@ mod tests {
             );
         }
     }
-
 
     /// The envelope is a *choice of shapes*, so the modal has to offer the
     /// choice and then the fields it implies — not a JSON box. Same walk the
@@ -1336,7 +1343,10 @@ mod tests {
 
         // `source` is a union, and the code lives on its `inline` variant
         let FieldType::Union(union) = &source.field_type else {
-            panic!("`source` should render as a union, got {:?}", source.field_type);
+            panic!(
+                "`source` should render as a union, got {:?}",
+                source.field_type
+            );
         };
         let inline = union
             .variants
@@ -1370,7 +1380,8 @@ mod tests {
                 "s3",
                 "mqtt",
                 "redis",
-                "opcua"
+                "opcua",
+                "indu"
             ]
         );
 
@@ -1485,7 +1496,10 @@ mod tests {
         let buffer = field(&dummy, "buffer");
         assert_eq!(buffer.type_name, "static | tumbling | batch");
         let FieldType::Union(union) = &buffer.field_type else {
-            panic!("buffer is a choice of shapes, not a {:?}", buffer.field_type);
+            panic!(
+                "buffer is a choice of shapes, not a {:?}",
+                buffer.field_type
+            );
         };
         assert_eq!(union.tag, "type");
         let names: Vec<&str> = union.variants.iter().map(|v| v.name.as_str()).collect();
@@ -1532,7 +1546,10 @@ mod tests {
         let file = in_family("file", Family::Output);
         let rotate = field(&file, "rotate");
         let FieldType::Object(fields) = &rotate.field_type else {
-            panic!("rotate has fields of its own, not a {:?}", rotate.field_type);
+            panic!(
+                "rotate has fields of its own, not a {:?}",
+                rotate.field_type
+            );
         };
         let names: Vec<&str> = fields.iter().map(|f| f.name.as_str()).collect();
         assert_eq!(names, ["interval_secs", "max_rows"]);
@@ -1562,7 +1579,10 @@ mod tests {
         };
         assert_eq!(element.field_type, FieldType::Text);
         assert_eq!(group_by.type_name, "list of string");
-        assert!(!group_by.required, "reducing the whole batch is the default");
+        assert!(
+            !group_by.required,
+            "reducing the whole batch is the default"
+        );
 
         let aggregations = field(&reducer, "aggregations");
         let FieldType::List(element) = &aggregations.field_type else {
@@ -1727,7 +1747,10 @@ mod tests {
             .find(|f| f.name == "type")
             .unwrap_or_else(|| panic!("a column should document its type"));
         let FieldType::Enum(values) = &column_type.field_type else {
-            panic!("a column type should be a closed set, not {:?}", column_type.field_type);
+            panic!(
+                "a column type should be a closed set, not {:?}",
+                column_type.field_type
+            );
         };
         assert!(values.iter().any(|v| v == "float"), "{values:?}");
     }

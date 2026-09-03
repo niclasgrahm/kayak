@@ -137,6 +137,11 @@ pub fn for_input(kind: &str) -> Option<Sampling> {
         // nothing away from the ones already there. Like them it starts from
         // now, so an upstream that is between messages samples empty.
         "pipeline" => Sampling::Ready,
+        // A server-sent-events subscription, fanned out per subscriber like
+        // nats: the pipeline's own stream is untouched. Better than the
+        // fan-outs above, the platform backfills each series' latest reading
+        // on subscribe, so a quiet sensor still samples its last value.
+        "indu" => Sampling::Ready,
         // A consumer group is shared state: joining the pipeline's would
         // rebalance it and commit offsets on its behalf, i.e. take messages
         // away from the thing it is supposed to be showing.

@@ -52,6 +52,16 @@ fn input_samples() -> Vec<(&'static str, Value)> {
             "nats",
             json!({"type": "nats", "connection": "local-nats", "subject": "test.subject"}),
         ),
+        (
+            "indu",
+            json!({
+                "type": "indu",
+                "connection": "indu",
+                "sensors": ["press-3/temperature"],
+                "streams": ["press-3/oee"],
+                "backfill": false
+            }),
+        ),
         ("pipeline", json!({"type": "pipeline", "upstream": "p1"})),
         (
             "kafka",
@@ -225,6 +235,12 @@ fn output_samples() -> Vec<(&'static str, Value)> {
             json!({"type": "nats", "connection": "local-nats", "subject": "out.subject"}),
         ),
         (
+            "indu",
+            json!({"type": "indu", "connection": "indu", "at": "_meta.received_at",
+                "series": [{"stream": "{machine}/oee", "value": "oee", "unit": "%"},
+                           {"stream": "{machine}/availability", "value": "availability"}]}),
+        ),
+        (
             "kafka",
             json!({"type": "kafka", "connection": "local-kafka", "topic": "out.events"}),
         ),
@@ -307,6 +323,15 @@ fn connection_samples() -> Vec<(&'static str, Value)> {
         (
             "nats",
             json!({"type": "nats", "urls": "nats://localhost:4222"}),
+        ),
+        (
+            "indu",
+            json!({
+                "type": "indu",
+                "url": "https://app.acme.indu.cloud",
+                "ingest_url": "https://ingest.acme.indu.cloud",
+                "api_key": "${INDU_API_KEY}"
+            }),
         ),
         (
             "postgres",
@@ -609,7 +634,10 @@ fn a_sample_reducer_grouping_on_metadata_has_an_input_that_attaches_it() -> anyh
             );
         }
     }
-    assert!(checked > 0, "the sample should demonstrate a metadata group_by");
+    assert!(
+        checked > 0,
+        "the sample should demonstrate a metadata group_by"
+    );
     Ok(())
 }
 
@@ -676,7 +704,11 @@ fn every_buffer_shape_parses_and_round_trips() -> anyhow::Result<()> {
             format!("{expected:?}"),
             "parsed {wire} as the wrong buffer"
         );
-        assert_eq!(serde_json::to_value(&parsed)?, wire, "{wire} did not survive");
+        assert_eq!(
+            serde_json::to_value(&parsed)?,
+            wire,
+            "{wire} did not survive"
+        );
     }
     Ok(())
 }
@@ -751,7 +783,11 @@ fn every_buffer_trigger_parses_and_round_trips() -> anyhow::Result<()> {
     assert_eq!(gate.bucket.as_deref(), Some("ingest-control"));
     assert_eq!(gate.key.as_deref(), Some("nightly-load"));
     assert_eq!(gate.conditions.len(), 1);
-    assert_eq!(serde_json::to_value(&parsed)?, wire, "{wire} did not survive");
+    assert_eq!(
+        serde_json::to_value(&parsed)?,
+        wire,
+        "{wire} did not survive"
+    );
     Ok(())
 }
 
@@ -770,7 +806,11 @@ fn a_gate_without_a_bucket_or_key_round_trips_as_written() -> anyhow::Result<()>
         }
     });
     let parsed: TransformKind = serde_json::from_value(wire.clone())?;
-    assert_eq!(serde_json::to_value(&parsed)?, wire, "{wire} did not survive");
+    assert_eq!(
+        serde_json::to_value(&parsed)?,
+        wire,
+        "{wire} did not survive"
+    );
     Ok(())
 }
 
@@ -863,10 +903,8 @@ fn an_http_input_without_a_capacity_round_trips_bare() -> anyhow::Result<()> {
 fn a_dummy_input_without_a_payload_round_trips_bare() -> anyhow::Result<()> {
     let bare = json!({"type": "dummy", "duration": 1});
     let kind: InputKind = serde_json::from_value(bare.clone())?;
-    assert!(
-        matches!(kind, InputKind::Dummy(ref c)
-            if c.payload.is_none() && c.amplitude.is_none() && c.period.is_none())
-    );
+    assert!(matches!(kind, InputKind::Dummy(ref c)
+            if c.payload.is_none() && c.amplitude.is_none() && c.period.is_none()));
     assert_eq!(serde_json::to_value(&kind)?, bare);
     Ok(())
 }
@@ -874,7 +912,10 @@ fn a_dummy_input_without_a_payload_round_trips_bare() -> anyhow::Result<()> {
 /// The two payload spellings are the wire format the UI's dropdown posts.
 #[test]
 fn dummy_payloads_are_snake_case() -> anyhow::Result<()> {
-    for (spelling, expected) in [("number", DummyPayload::Number), ("text", DummyPayload::Text)] {
+    for (spelling, expected) in [
+        ("number", DummyPayload::Number),
+        ("text", DummyPayload::Text),
+    ] {
         let kind: InputKind =
             serde_json::from_value(json!({"type": "dummy", "duration": 1, "payload": spelling}))?;
         assert!(matches!(kind, InputKind::Dummy(ref c) if c.payload == Some(expected)));
@@ -968,9 +1009,8 @@ fn a_pipeline_without_transforms_or_outputs_parses() -> anyhow::Result<()> {
 /// …and the same in YAML, which is how the sample is written.
 #[test]
 fn a_yaml_pipeline_without_transforms_or_outputs_parses() -> anyhow::Result<()> {
-    let config: Config = serde_norway::from_str(
-        "id: ticker\ninputs:\n  - type: dummy\n    duration: 1\n",
-    )?;
+    let config: Config =
+        serde_norway::from_str("id: ticker\ninputs:\n  - type: dummy\n    duration: 1\n")?;
     assert!(config.transforms.is_empty());
     assert!(config.outputs.is_empty());
     Ok(())
@@ -986,7 +1026,10 @@ fn neither_transforms_nor_outputs_is_a_required_field() -> anyhow::Result<()> {
         .as_array()
         .map(|r| r.iter().filter_map(serde_json::Value::as_str).collect())
         .unwrap_or_default();
-    assert!(required.contains(&"inputs"), "inputs stays required: {required:?}");
+    assert!(
+        required.contains(&"inputs"),
+        "inputs stays required: {required:?}"
+    );
     assert!(!required.contains(&"transforms"), "{required:?}");
     assert!(!required.contains(&"outputs"), "{required:?}");
     Ok(())

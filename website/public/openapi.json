@@ -904,6 +904,19 @@
               "type"
             ],
             "type": "object"
+          },
+          {
+            "$ref": "#/components/schemas/InduConnection",
+            "properties": {
+              "type": {
+                "const": "indu",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type"
+            ],
+            "type": "object"
           }
         ]
       },
@@ -1027,6 +1040,19 @@
             "properties": {
               "type": {
                 "const": "opcua",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type"
+            ],
+            "type": "object"
+          },
+          {
+            "$ref": "#/components/schemas/InduConnection",
+            "properties": {
+              "type": {
+                "const": "indu",
                 "type": "string"
               }
             },
@@ -1953,6 +1979,141 @@
         ],
         "type": "string"
       },
+      "InduConnection": {
+        "description": "An Indu Cloud deployment: where its API and ingest endpoints are, and the\nAPI key this kayak speaks to it with.\n\nOne connection serves both directions: the `indu` output writes streams\nthrough `/ingest/v1/streams`, and the `indu` input reads sensors and\nstreams through `/api/v1`. The key is minted on the Indu side (its `/keys`\npage, or `indud apps register --kind kayak`), bound to a role there, and\narrives here as a `${NAME}` reference like every other credential.",
+        "properties": {
+          "api_key": {
+            "$ref": "#/components/schemas/Secret",
+            "description": "the API key, `indu.ak.…`, as a `${NAME}` reference — see \"secrets\"."
+          },
+          "ingest_url": {
+            "description": "where `/ingest/v1/…` lives when it is not under `url` — the single-server\ninstall serves ingest on its own host, e.g. `https://ingest.acme.indu.cloud`.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "url": {
+            "description": "the deployment's origin, e.g. `https://app.acme.indu.cloud`. The ingest\nendpoint is reached under it as `/ingest/v1/…`; a deployment that serves\ningest on a separate host names it in `ingest_url`.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "url",
+          "api_key"
+        ],
+        "title": "indu",
+        "type": "object"
+      },
+      "InduInputConfig": {
+        "description": "Reads sensors and streams out of Indu Cloud, live, over\n`/api/v1/live/sse` — the platform's own subscription protocol, under the\nconnection's API key.\n\nSensors and streams are named the way they are named on the platform\n(customer-supplied ids, never UUIDs) and resolved through `/api/v1` on\nthe first read; a name the key cannot find or may not see is reported on\nthe card and looked for again after a pause, since a stream that does not\nexist yet is the usual case for one another pipeline is about to write.\nEvery reading arrives as its own message, named — `{\"kind\": \"sensor\",\n\"name\": \"press-3/temperature\", \"value\": 71.2, \"at\": …}` — with the\nplatform's ids riding along for anything that needs them. A dropped\nconnection reconnects with backoff; readings the connection could not keep\nup with are reported as an error rather than silently missed.",
+        "properties": {
+          "backfill": {
+            "description": "whether to start with each series' latest value before live readings\narrive. Defaults to true, so a pipeline restarted at 03:00 has a value\nfor every machine at 03:00 rather than at the next reading.",
+            "type": [
+              "boolean",
+              "null"
+            ]
+          },
+          "connection": {
+            "description": "name of the indu connection to read through — see \"connections\".",
+            "type": "string",
+            "x-connection": "indu"
+          },
+          "max_batch": {
+            "description": "most readings to put in one batch. Defaults to 1. Raising it only ever\ncoalesces readings that had *already arrived* — a quiet sensor is no\nslower than it was.",
+            "format": "uint",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "sensors": {
+            "description": "sensors to read, as `<device>/<sensor>` — the device's id followed by\nthe sensor's, both as the platform knows them: `press-3/temperature`.\nThe split is at the first `/`.",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "streams": {
+            "description": "streams to read, by the name they were written under — `press-3/oee` —\nor, for a stream the platform computes itself, its display name.",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "connection"
+        ],
+        "title": "indu",
+        "type": "object"
+      },
+      "InduOutputConfig": {
+        "description": "Writes messages into Indu Cloud as **streams** — series that are not\nsensors — through `POST /ingest/v1/streams`.\n\nEvery message yields one reading per entry in `series`; a reducer emitting\n`{machine, oee, availability}` with two series entries writes two streams\nper machine. An unknown stream is created on the Indu side on first sight,\nwhen the connection's key may create streams. Anything but a full\nacceptance fails the batch with Indu's own row errors quoted, so a stream\nthe key may not write to shows up on the card rather than being written\noff as delivered.",
+        "properties": {
+          "at": {
+            "description": "the field holding the reading's time — an RFC 3339 string or epoch\nmilliseconds. Absent, the time the batch is sent is used. An `envelope`\nputs an input's receive time at `_meta.received_at`.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "connection": {
+            "description": "name of the indu connection to write through — see \"connections\".",
+            "type": "string",
+            "x-connection": "indu"
+          },
+          "series": {
+            "description": "the streams to write, one reading each per message. At least one.",
+            "items": {
+              "$ref": "#/components/schemas/InduSeries"
+            },
+            "type": "array"
+          },
+          "timeout_seconds": {
+            "description": "how long one request may take before it is given up on, in seconds.\nDefaults to 30.",
+            "format": "uint64",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "connection",
+          "series"
+        ],
+        "title": "indu",
+        "type": "object"
+      },
+      "InduSeries": {
+        "description": "One series an `indu` output writes: which stream a message's value goes\nto, and which field carries the value.",
+        "properties": {
+          "stream": {
+            "description": "the stream's name on the Indu side, e.g. `press-3/oee`. May contain\n`{field}` placeholders filled from the message — `{machine}/oee` — so\none output serves every machine a pipeline reduces over. A message\nmissing a placeholder's field is skipped for this series.",
+            "type": "string"
+          },
+          "unit": {
+            "description": "the unit Indu records when it creates the stream, e.g. `%`. Ignored\nonce the stream exists.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "value": {
+            "description": "the field holding the value, as a path (`oee`, `stats.mean`). Must be a\nnumber; a message where it is missing or not a number is skipped for\nthis series rather than failing the batch.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "stream",
+          "value"
+        ],
+        "type": "object"
+      },
       "IngestRequest": {
         "anyOf": [
           {
@@ -2080,6 +2241,19 @@
             "properties": {
               "type": {
                 "const": "opcua",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type"
+            ],
+            "type": "object"
+          },
+          {
+            "$ref": "#/components/schemas/InduInputConfig",
+            "properties": {
+              "type": {
+                "const": "indu",
                 "type": "string"
               }
             },
@@ -3226,6 +3400,19 @@
             "properties": {
               "type": {
                 "const": "http",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type"
+            ],
+            "type": "object"
+          },
+          {
+            "$ref": "#/components/schemas/InduOutputConfig",
+            "properties": {
+              "type": {
+                "const": "indu",
                 "type": "string"
               }
             },

@@ -69,6 +69,10 @@
     {
       "link": "/reference/connections#connection-opcua",
       "text": "opcua"
+    },
+    {
+      "link": "/reference/connections#connection-indu",
+      "text": "indu"
     }
   ],
   "inputs": [
@@ -103,6 +107,10 @@
     {
       "link": "/reference/inputs#input-opcua",
       "text": "opcua"
+    },
+    {
+      "link": "/reference/inputs#input-indu",
+      "text": "indu"
     }
   ],
   "outputs": [
@@ -145,6 +153,10 @@
     {
       "link": "/reference/outputs#output-http",
       "text": "http"
+    },
+    {
+      "link": "/reference/outputs#output-indu",
+      "text": "indu"
     }
   ],
   "transforms": [
