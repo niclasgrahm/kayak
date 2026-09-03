@@ -504,3 +504,63 @@ The nodes are named by `nodes`, or found by `browse`, or both — one of them is
 | `input` | kind of input it was read by, e.g. `nats` |
 | `received_at` | when kayak read it, RFC 3339. This is an arrival time and not an event time: it says when the message reached this pipeline, not when whatever it describes happened. |
 | `connection` | name of the connection the session was opened through. Which *node* the reading came from is deliberately not here: it is on the message itself, as `node` and `name`, because a value without its tag is not a reading and metadata is opt-in. |
+
+
+## `indu` {#input-indu}
+
+Reads sensors and streams out of Indu Cloud, live, over `/api/v1/live/sse` — the platform's own subscription protocol, under the connection's API key.
+
+Sensors and streams are named the way they are named on the platform (customer-supplied ids, never UUIDs) and resolved through `/api/v1` on the first read; a name the key cannot find or may not see is reported on the card and looked for again after a pause, since a stream that does not exist yet is the usual case for one another pipeline is about to write. Every reading arrives as its own message, named — `{"kind": "sensor", "name": "press-3/temperature", "value": 71.2, "at": …}` — with the platform's ids riding along for anything that needs them. A dropped connection reconnects with backoff; readings the connection could not keep up with are reported as an error rather than silently missed.
+
+| field | type | | description |
+| --- | --- | --- | --- |
+| `connection` | `indu` connection | <Badge type="warning" text="required" /> | name of the indu connection to read through — see "connections". |
+| `backfill` | `boolean` | <Badge type="info" text="optional" /> | whether to start with each series' latest value before live readings arrive. Defaults to true, so a pipeline restarted at 03:00 has a value for every machine at 03:00 rather than at the next reading. |
+| `max_batch` | `integer` | <Badge type="info" text="optional" /> | most readings to put in one batch. Defaults to 1. Raising it only ever coalesces readings that had *already arrived* — a quiet sensor is no slower than it was. |
+| `sensors` | `list of string` | <Badge type="info" text="optional" /> | sensors to read, as `<device>/<sensor>` — the device's id followed by the sensor's, both as the platform knows them: `press-3/temperature`. The split is at the first `/`. |
+| `streams` | `list of string` | <Badge type="info" text="optional" /> | streams to read, by the name they were written under — `press-3/oee` — or, for a stream the platform computes itself, its display name. |
+| `ack` | `on_receipt` \| `on_delivery` | <Badge type="info" text="optional" /> | when this input tells its broker a message is done with. Available on every input kind in the schema, but only honoured by ones with a broker-side notion of "received" vs "delivered" of their own (`kafka`, for now) — an input with nothing to acknowledge refuses to build rather than silently treating this as `on_receipt`. Defaults to `on_receipt`, which is what every input has always done. See "acknowledgement modes" in the guide. |
+| `buffer` | `static \| tumbling \| batch` | <Badge type="info" text="optional" /> | batch messages from this input before the transforms see them — by count (`static`), by time (`tumbling`) or by whichever comes first (`batch`). Never emits an empty batch. Available on every input kind. Not to be confused with the `buffer` transform. |
+| `envelope` | `merge \| wrap` | <Badge type="info" text="optional" /> | attach metadata about where each message came from — the subject, topic, partition and so on listed under "metadata" below. Available on every input kind. Omit it and messages are passed on exactly as they arrive. |
+
+**`buffer` — `type: "static"`**
+
+| field | type | | description |
+| --- | --- | --- | --- |
+| `size` | `integer` | <Badge type="warning" text="required" /> | how many messages to gather before the batch is handed on |
+
+**`buffer` — `type: "tumbling"`**
+
+| field | type | | description |
+| --- | --- | --- | --- |
+| `window_seconds` | `integer` | <Badge type="warning" text="required" /> | how long to gather messages for, measured from the first one |
+
+**`buffer` — `type: "batch"`**
+
+| field | type | | description |
+| --- | --- | --- | --- |
+| `size` | `integer` | <Badge type="warning" text="required" /> | how many messages end the batch immediately |
+| `window_seconds` | `integer` | <Badge type="warning" text="required" /> | how long to wait for them, measured from the first message in the batch |
+
+**`envelope` — `type: "merge"`**
+
+| field | type | | description |
+| --- | --- | --- | --- |
+| `meta` | `string` | <Badge type="info" text="optional" /> | the field the metadata object is written to. Defaults to `_meta`. |
+
+**`envelope` — `type: "wrap"`**
+
+| field | type | | description |
+| --- | --- | --- | --- |
+| `meta` | `string` | <Badge type="info" text="optional" /> | the field the metadata object is written to. Defaults to `_meta`. |
+| `payload` | `string` | <Badge type="info" text="optional" /> | the field the original payload is written to. Defaults to `value`. |
+
+**metadata** — what this input attaches to a message when its `envelope` is set.
+
+| field | holds |
+| --- | --- |
+| `pipeline` | id of the pipeline that read the message |
+| `input` | kind of input it was read by, e.g. `nats` |
+| `received_at` | when kayak read it, RFC 3339. This is an arrival time and not an event time: it says when the message reached this pipeline, not when whatever it describes happened. |
+| `connection` | name of the connection it was read through |
+| `event` | which platform event carried it: `reading` for a sensor, `stream_reading` for a stream |
