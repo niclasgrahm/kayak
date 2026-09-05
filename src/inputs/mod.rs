@@ -8,6 +8,7 @@ use crate::state::{PipelineId, UiEvent};
 use kayak_core::Stage;
 
 pub mod ack;
+pub mod clickhouse;
 pub mod dummy;
 pub mod envelope;
 pub mod http;
@@ -17,6 +18,8 @@ pub mod mqtt;
 pub mod nats;
 pub mod opcua;
 pub mod pipeline;
+pub mod poll;
+pub mod postgres;
 pub mod redis;
 
 pub use ack::{Ack, Delivery};

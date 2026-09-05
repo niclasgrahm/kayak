@@ -188,6 +188,75 @@ connect; `main.rs`'s `QUIET` silences the one module that is *only* about
 reading those files, and the other two are left alone because their modules log
 real failures too.
 
+### The sql inputs
+
+`postgres` and `clickhouse` as *inputs*: every other input is reached by its
+messages, these ask — a query on a timer, one message per row, the row
+rendered by the server (`row_to_json`, `JSONEachRow`). Three files and the
+split is the one `columns.rs` draws: `kayak-core/src/sql.rs` is the
+declaration (`SqlPollConfig`, flattened into both input configs, so neither
+declares a polling concept of its own), `src/inputs/poll.rs` is the neutral
+half — `Plan::build` validates, `Poller` is the `InputSource`, `Reader` is the
+five queries a database has to answer — and `src/inputs/postgres.rs` /
+`src/inputs/clickhouse.rs` are only how their server spells those queries.
+Keep polling work on the `poll.rs` side of that line.
+
+Five decisions are load-bearing:
+
+- **`table` and `query` are one thing — a relation — and the input owns the
+  statement around it.** Whichever was given is wrapped as a subquery and the
+  projection, the cursor condition, the `ORDER BY` and the `LIMIT` are added
+  outside. That is what makes an incremental read of a hand-written query
+  possible with no placeholder convention, and it is why a query carrying its
+  own cursor condition (which somebody would forget) never had to exist.
+  `mode` is a tagged union (`snapshot` | `incremental`), not a bool beside a
+  field — the `AuthConfig` argument.
+- **The watermark is in memory and moves when rows are handed on.** So an
+  incremental input is at-least-once across a restart, and `on_delivery` is
+  *refused* rather than honoured: the run loop acks whether or not outputs
+  succeeded, so tying the watermark to the ack would buy nothing today. A
+  durable watermark is on the roadmap and is where that changes.
+  `start_from` defaults to `newest` (one `max()` query at the first read;
+  `maxOrNull` on clickhouse, because `max` of an empty table is the type's
+  zero there and a watermark of 1970 reads the whole table).
+- **Ties at a page boundary are cut, not lost** (`poll::cut_at_last_value`).
+  A full page is truncated before its last distinct cursor value and those
+  rows come back on the next page, whole; a page whose every row shares the
+  value is uncuttable and handed on with one warning per run. Without this a
+  timestamp cursor with duplicates loses rows silently at every boundary.
+- **The cursor travels as text and the server casts it.** Postgres returns
+  `(field)::text` beside each row and the next page binds `($1::text)::"<type>"`,
+  the type read off a prepared `LIMIT 0` statement's column; clickhouse
+  returns `toString(field)` under `__kayak_cursor` (stripped before the row is
+  handed on) and casts `{cursor:String}` to what `DESCRIBE` said. Text is the
+  one representation every type round-trips exactly, and it is the output's
+  `$n::text::NUMERIC` rule read the other way. Don't replace it with typed
+  binding.
+- **`page_size` bounds a read; only a short page starts the interval.** Full
+  pages are fetched back to back, the interval counts from the end of a read,
+  and a snapshot has no page at all (one query, whole relation — the
+  reference-data case, documented as such).
+
+Two clickhouse settings found the hard way: `output_format_json_quote_64bit_integers=0`
+(the default quotes every `Int64` as a string) and `date_time_output_format=iso`
+(the default is a bare `YYYY-MM-DD hh:mm:ss` the postgres output refuses).
+`toString` is unaffected by the second, which is what makes the cursor round
+trip. `q.*` beside an aliased expression is legal there; `FROM ("t")` is not
+legal on postgres, which is why the relation is always a `SELECT`.
+
+Sampling is `Ready` for both and the sampler flips `start_from` to `oldest`
+with a note *only when it changed something* — the note is pushed by
+`prepare()` rather than declared statically, because a static note would lie
+about a config already reading from the oldest.
+
+**The live tests are the exception to "everything is offline."** What a
+server renders and what it reads back cannot be answered by a double, so
+`tests/live_sql.rs` is `#[ignore]`d out of `just ci` and run by `just
+test-live` against the compose stack, each test on a table of its own. The
+poller itself is tested offline with a scripted `Reader` under paused time.
+The sample's `readings_from_postgres` follows the table `sensors_archive`
+writes, so the two make a round trip under `docker compose up`.
+
 ### Message metadata (the envelope)
 
 `InputConfig.envelope` sits beside `buffer` — available on every input kind,

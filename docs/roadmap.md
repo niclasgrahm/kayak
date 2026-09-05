@@ -7,6 +7,25 @@ re-derive. See the [docs site](../website/) for how the finished parts behave, a
 
 ## currently working on
 
+- [x] **sql inputs** (done 2026-09-05: `postgres` and `clickhouse` inputs that
+      read a table or a query on a timer, as a `snapshot` of the whole relation
+      or `incremental` above an in-memory watermark on a column that grows.
+      The polling — schedule, paging, the watermark, ties at a page boundary —
+      is one neutral module, `src/inputs/poll.rs`, over a five-query `Reader`
+      each database implements; the declaration is `kayak_core::sql`, the
+      mirror of `columns.rs`. See "the sql inputs" in `CLAUDE.md` and
+      [the page](../website/io/database-inputs.md). `just test-live` runs them
+      against the compose stack.)
+- [ ] **a durable watermark for the sql inputs.** In memory today, so a
+      restart replays from `start_from` — at least once, said plainly. A
+      checkpoint file is the fix, and it has the same shape as the history
+      store's would: a third directory boundary, a schema that outlives an
+      upgrade, a degrade path when the disk is full. It is also the point at
+      which `ack: on_delivery` would start to mean something on these inputs,
+      since the watermark could then wait for the acknowledgement.
+- [ ] **mysql input and output.** Both are a `Reader` and a `ColumnPlan`
+      renderer respectively and nothing else; the connection kind is the
+      larger part.
 - [x] **see the actual data while building a pipeline**
       (done 2026-08-19, in three pieces: `kayak_core::schema::infer` reads the
       fields back off a handful of messages and `FieldType::MessageField`
@@ -343,9 +362,9 @@ picking up."
       templated stream names and an idempotency key per batch. The `indu`
       *input* over the platform's SSE feed is the other half and waits on the
       platform accepting an API key on `/api/v1`.)
-- [ ] **the connector list is thin.** nats, kafka, mqtt, redis, http and two
-      dummies in; nats, kafka, mqtt, redis, http, postgres, clickhouse, file,
-      s3 and stdout out — against
+- [ ] **the connector list is thin.** nats, kafka, mqtt, redis, http, postgres,
+      clickhouse, opcua, indu and a dummy in; nats, kafka, mqtt, redis, http,
+      postgres, clickhouse, file, s3, indu and stdout out — against
       Benthos/Redpanda Connect's 300+. The five-touchpoint recipe for adding a
       component (config enum, `build()` arm, impl module, wire-format sample,
       doc comment) is cheap by design, but "cheap to add" isn't "already

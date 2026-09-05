@@ -32,6 +32,8 @@ impl BuildInputConfig for InputKind {
             InputKind::Redis(c) => c.build(ctx),
             InputKind::Opcua(c) => c.build(ctx),
             InputKind::Indu(c) => c.build(ctx),
+            InputKind::Postgres(c) => c.build(ctx),
+            InputKind::Clickhouse(c) => c.build(ctx),
         }
     }
 }

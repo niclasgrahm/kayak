@@ -144,6 +144,16 @@ pub fn for_input(kind: &str) -> Option<Vec<MetaFieldDoc>> {
              the message itself, as `node` and `name`, because a value without \
              its tag is not a reading and metadata is opt-in.",
         )],
+        "postgres" | "clickhouse" => vec![
+            MetaFieldDoc::new("connection", "name of the connection it was read through"),
+            MetaFieldDoc::new(
+                "polled_at",
+                "when the read that returned this row started, RFC 3339. Every \
+                 row of one read carries the same value, which is what tells a \
+                 snapshot's rows apart from the previous snapshot's — and it is \
+                 the input's clock, not the server's.",
+            ),
+        ],
         "pipeline" => vec![MetaFieldDoc::new(
             "upstream",
             "id of the pipeline this batch came from. Note that metadata \

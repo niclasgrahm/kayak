@@ -75,26 +75,7 @@ impl BuildOutput for ClickhouseOutputConfig {
             .clickhouse_connection(&self.connection)
             .context("the clickhouse output cannot be built")?;
 
-        let url = server.url.trim_end_matches('/').to_string();
-        // the user and password go with every insert, so a plaintext url is a
-        // decision the connection has to have written down — the same rule the
-        // s3 output's `allow_http` follows, and for the same reason
-        if url.starts_with("http://") {
-            if !server.allows_http() {
-                bail!(
-                    "connection '{}' reaches clickhouse over plaintext http, which would send its \
-                     credentials in the clear; set \"allow_http\": true on the connection if that \
-                     is what you want",
-                    self.connection
-                );
-            }
-        } else if !url.starts_with("https://") {
-            bail!(
-                "connection '{}' has url '{url}', which is not an http(s) url; clickhouse is \
-                 reached over its HTTP interface, e.g. http://localhost:8123",
-                self.connection
-            );
-        }
+        let url = checked_url(server, &self.connection)?;
 
         Ok(Box::new(ClickhouseOutput {
             url,
@@ -113,6 +94,34 @@ impl BuildOutput for ClickhouseOutputConfig {
             gate: Gate::new(),
         }))
     }
+}
+
+/// The connection's url as a request goes to it, or why it cannot be used.
+///
+/// The user and password go with every request, so a plaintext url is a
+/// decision the connection has to have written down — the same rule the s3
+/// output's `allow_http` follows, and for the same reason. Shared with the
+/// clickhouse input, which sends the same credentials the same way.
+pub fn checked_url(
+    server: &kayak_core::connections::ClickhouseConnection,
+    connection: &str,
+) -> Result<String> {
+    let url = server.url.trim_end_matches('/').to_string();
+    if url.starts_with("http://") {
+        if !server.allows_http() {
+            bail!(
+                "connection '{connection}' reaches clickhouse over plaintext http, which would \
+                 send its credentials in the clear; set \"allow_http\": true on the connection \
+                 if that is what you want"
+            );
+        }
+    } else if !url.starts_with("https://") {
+        bail!(
+            "connection '{connection}' has url '{url}', which is not an http(s) url; clickhouse \
+             is reached over its HTTP interface, e.g. http://localhost:8123"
+        );
+    }
+    Ok(url)
 }
 
 /// What the table looks like, which is the one thing that differs between an

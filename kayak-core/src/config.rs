@@ -3,6 +3,7 @@ use crate::columns::{ColumnMapping, ExtraFieldPolicy, TableIndex};
 use crate::connections::ConnectionId;
 use crate::mapping::MapTransformConfig;
 use crate::script::ScriptTransformConfig;
+use crate::sql::SqlPollConfig;
 use crate::state::PipelineState;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -1250,6 +1251,58 @@ pub struct SplitterTransformConfig {
     pub out_size: usize,
 }
 
+/// Reads a postgres table, view or query on a timer and hands each row on as
+/// a message.
+///
+/// Every other input is pushed to; this one asks. It runs a query every
+/// `interval_secs`, either the whole relation (`snapshot`) or only the rows
+/// past where the last read got to (`incremental`, following a column that
+/// grows), and each row becomes one JSON object with the column names as its
+/// fields — rendered by the server itself with `row_to_json`, so a timestamp
+/// is ISO 8601, a `numeric` keeps its digits and a `jsonb` column arrives as
+/// the nested value it holds:
+///
+/// ```json
+/// {"id": 42, "sensor": "press-3", "value": 21.5, "recorded_at": "2026-01-01T12:00:00.123456+00:00"}
+/// ```
+///
+/// An incremental read is *at least once* across a restart — the watermark is
+/// held in memory and the first read starts over from `start_from` — and it
+/// never sees a delete. Index the field it follows, or every read scans the
+/// table. See "database inputs" in the guide for the whole argument.
+#[derive(Clone, Debug, Deserialize, Serialize, JsonSchema)]
+#[schemars(title = "postgres")]
+pub struct PostgresInputConfig {
+    /// name of the postgres connection to read through — see "connections" in
+    /// the readme. The server is declared once, in the connections file, and a
+    /// pipeline names what it wants from it here.
+    #[schemars(extend("x-connection" = "postgres"))]
+    pub connection: ConnectionId,
+    #[serde(flatten)]
+    pub poll: SqlPollConfig,
+}
+
+/// Reads a `ClickHouse` table, view or query on a timer and hands each row on
+/// as a message — the same input as `postgres`, over `ClickHouse`'s HTTP
+/// interface.
+///
+/// Rows come back as `JSONEachRow`, rendered by the server: a `DateTime` is
+/// ISO 8601, an `Int64` is a number rather than the quoted string the server
+/// would otherwise send, a `Decimal` keeps its digits. Everything the
+/// `postgres` input says about snapshots, watermarks and what an incremental
+/// read cannot see applies here unchanged — the polling is shared, only the
+/// SQL differs.
+#[derive(Clone, Debug, Deserialize, Serialize, JsonSchema)]
+#[schemars(title = "clickhouse")]
+pub struct ClickhouseInputConfig {
+    /// name of the clickhouse connection to read through — see "connections"
+    /// in the readme.
+    #[schemars(extend("x-connection" = "clickhouse"))]
+    pub connection: ConnectionId,
+    #[serde(flatten)]
+    pub poll: SqlPollConfig,
+}
+
 #[derive(Clone, Debug, Deserialize, Serialize, JsonSchema)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum InputKind {
@@ -1262,6 +1315,8 @@ pub enum InputKind {
     Redis(RedisConfig),
     Opcua(OpcuaConfig),
     Indu(InduInputConfig),
+    Postgres(PostgresInputConfig),
+    Clickhouse(ClickhouseInputConfig),
 }
 /// How an input's messages are gathered into batches before the transforms see
 /// them.
@@ -1519,7 +1574,9 @@ impl Config {
                 | InputKind::Mqtt(_)
                 | InputKind::Redis(_)
                 | InputKind::Opcua(_)
-                | InputKind::Indu(_) => None,
+                | InputKind::Indu(_)
+                | InputKind::Postgres(_)
+                | InputKind::Clickhouse(_) => None,
             })
             .collect()
     }
@@ -1543,6 +1600,8 @@ impl Config {
             InputKind::Redis(c) => Some(&c.connection),
             InputKind::Opcua(c) => Some(&c.connection),
             InputKind::Indu(c) => Some(&c.connection),
+            InputKind::Postgres(c) => Some(&c.connection),
+            InputKind::Clickhouse(c) => Some(&c.connection),
             InputKind::Dummy(_) | InputKind::Http(_) | InputKind::Pipeline(_) => None,
         });
         let outputs = self.outputs.iter().filter_map(|output| match &output.kind {
