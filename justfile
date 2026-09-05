@@ -206,6 +206,16 @@ install: build
 test-embed:
   cargo test --features embed-assets --lib site::
 
+# The SQL inputs against the real postgres and clickhouse in the compose file.
+# Not part of `ci` for the reason nothing else in `just test` needs a network:
+# what these check — how a server renders a row, how it reads a watermark
+# back — is exactly what no double can answer, so they are `#[ignore]`d and
+# run here. `docker compose up -d postgres clickhouse` first.
+
+# the sql inputs against the compose stack's postgres and clickhouse
+test-live:
+  cargo test --test live_sql -- --ignored
+
 # smoke test against a server that is already running on :6767
 test-http:
   hurl --test hurl/tests/*.hurl

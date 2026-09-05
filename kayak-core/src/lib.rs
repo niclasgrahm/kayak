@@ -18,6 +18,7 @@ pub mod metadata;
 pub mod sample;
 pub mod schema;
 pub mod script;
+pub mod sql;
 pub mod server_config;
 pub mod state;
 

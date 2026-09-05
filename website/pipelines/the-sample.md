@@ -39,6 +39,16 @@ over ten seconds — which is a plain `group_by` on `name`, because an opcua
 reading carries its tag in the message rather than behind the envelope (see
 [opcua input](/io/opcua-input)).
 
+Two of the roots are the SQL inputs, and both read what other pipelines in
+the sample wrote, so they do real work under `docker compose up` and show a
+round trip: `readings_from_postgres` follows the `readings` table that
+`sensors_archive` fills, incrementally by `id` and starting from the newest
+row, so it echoes each archived reading a few seconds after it lands;
+`sensor_peaks_from_clickhouse` is the snapshot shape over a *query* — a
+`GROUP BY` the server runs every thirty seconds over what `sensors_to_clickhouse`
+inserted — which is the reference-data case, an aggregate polled rather than a
+stream followed (see [database inputs](/io/database-inputs)).
+
 ## the four broken ones
 
 `broken_cast`, `broken_aggregate`, `broken_webhook` and `broken_intermittently`

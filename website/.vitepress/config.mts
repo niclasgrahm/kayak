@@ -102,6 +102,7 @@ export default defineConfig({
           { text: 'file output', link: '/io/file-output' },
           { text: 's3 output', link: '/io/s3-output' },
           { text: 'database outputs', link: '/io/database-outputs' },
+          { text: 'database inputs', link: '/io/database-inputs' },
         ],
       },
       {

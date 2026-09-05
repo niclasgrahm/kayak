@@ -432,6 +432,72 @@
         "title": "clickhouse",
         "type": "object"
       },
+      "ClickhouseInputConfig": {
+        "description": "Reads a `ClickHouse` table, view or query on a timer and hands each row on\nas a message — the same input as `postgres`, over `ClickHouse`'s HTTP\ninterface.\n\nRows come back as `JSONEachRow`, rendered by the server: a `DateTime` is\nISO 8601, an `Int64` is a number rather than the quoted string the server\nwould otherwise send, a `Decimal` keeps its digits. Everything the\n`postgres` input says about snapshots, watermarks and what an incremental\nread cannot see applies here unchanged — the polling is shared, only the\nSQL differs.",
+        "properties": {
+          "columns": {
+            "description": "the columns to read, in the order they are listed. Empty reads every\ncolumn the table or query has. An incremental input's `field` has to be\namong them.",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "connection": {
+            "description": "name of the clickhouse connection to read through — see \"connections\"\nin the readme.",
+            "type": "string",
+            "x-connection": "clickhouse"
+          },
+          "interval_secs": {
+            "description": "how long to wait between reads, in seconds, counted from the end of one\nread to the start of the next — a read that takes longer than this\nnever overlaps itself. The first read happens as soon as the pipeline\nstarts.",
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "max_batch": {
+            "description": "most rows to put in one batch. Defaults to 1 — one message per batch,\nwhich is what every input does unless asked otherwise. Rows already\nread are grouped up to this many; the input never waits for a batch to\nfill.",
+            "format": "uint",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "mode": {
+            "$ref": "#/components/schemas/PollMode",
+            "description": "whether every read returns the whole relation (`snapshot`) or only the\nrows past where the last read got to (`incremental`)."
+          },
+          "page_size": {
+            "description": "most rows one query returns, and so the most an incremental read holds\nat once. A read that fills a page asks for the next one straight away\nuntil a page comes back short; only then does the interval start.\nDefaults to 1000. Ignored by `snapshot`, which reads the relation\nwhole.",
+            "format": "uint",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "query": {
+            "description": "a `SELECT` to read instead of a table. It is the *source*, not the whole\nstatement: the input wraps it as a subquery and adds the cursor\ncondition, the ordering and the page limit itself, so an incremental\nquery needs no placeholder and no `ORDER BY` of its own. One statement,\nno trailing semicolon; anything the server can put in a subquery\n(including a `WITH`) is fine.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "table": {
+            "description": "the table or view to read, as `name` or `schema.name`. Exactly one of\n`table` and `query` is required.",
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "connection",
+          "interval_secs",
+          "mode"
+        ],
+        "title": "clickhouse",
+        "type": "object"
+      },
       "ClickhouseOutputConfig": {
         "description": "Inserts every batch into a ClickHouse table, one insert per batch.\n\n`columns` is spelled exactly as the postgres output's is — each entry names\na column, its type and the field to read, and `field` defaults to the\ncolumn's name. Without them the table gets a single column holding each\nmessage as JSON text.\n\nWhere it differs from postgres is what a created table is *sorted* by.\nClickHouse has no auto-increment column and no unique constraint, so there\nis no surrogate `id` to fall back on: `order_by` names the MergeTree sorting\nkey, and a table that names none is sorted by the `received_at` timestamp it\ngets for free. A sorting key does not deduplicate — naming one says how the\ntable is laid out and indexed, not that its rows are unique.\n\nThe table is created if it isn't there; set `create_table` to false for a\ntable someone else owns. Creation never *alters* an existing table.",
         "properties": {
@@ -2261,6 +2327,32 @@
               "type"
             ],
             "type": "object"
+          },
+          {
+            "$ref": "#/components/schemas/PostgresInputConfig",
+            "properties": {
+              "type": {
+                "const": "postgres",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type"
+            ],
+            "type": "object"
+          },
+          {
+            "$ref": "#/components/schemas/ClickhouseInputConfig",
+            "properties": {
+              "type": {
+                "const": "clickhouse",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type"
+            ],
+            "type": "object"
           }
         ],
         "properties": {
@@ -3670,6 +3762,62 @@
         "title": "pipeline state",
         "type": "object"
       },
+      "PollMode": {
+        "description": "Whether a read returns everything or only what is new.",
+        "oneOf": [
+          {
+            "description": "Every row, every read, in one query. For reference data — a table the\npipeline remembers rather than a stream it follows — and for relations\nthat fit in memory, since there is no page limit on a snapshot.",
+            "properties": {
+              "type": {
+                "const": "snapshot",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "Only rows whose `field` is past the highest value already handed on,\nread in pages ordered by that field. The field has to be one that\ngrows — an id, an `updated_at` — and it should be indexed, or every\nread is a scan of the whole table.",
+            "properties": {
+              "field": {
+                "description": "the column the input follows: the watermark is the highest value\nof it handed on so far, and each read asks for rows above that.\nRows where it is `null` are never read.",
+                "type": "string"
+              },
+              "lag_secs": {
+                "description": "how far behind the current moment to stay, in seconds, for a\ntimestamp cursor: rows above the watermark but within this many\nseconds of `now()` are left for a later read, giving a transaction\nthat commits late time to land. Meaningless on a numeric cursor and\nrefused by the server on one.",
+                "format": "uint64",
+                "minimum": 0,
+                "type": [
+                  "integer",
+                  "null"
+                ]
+              },
+              "start_from": {
+                "anyOf": [
+                  {
+                    "$ref": "#/components/schemas/StartFrom"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "description": "where the first read starts: `newest` reads only rows added after\nthe pipeline started, `oldest` reads the whole relation first and\nthen follows it. Defaults to `newest` — replaying a whole table\ninto a pipeline is the surprising outcome and the one to ask for."
+              },
+              "type": {
+                "const": "incremental",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "field"
+            ],
+            "type": "object"
+          }
+        ]
+      },
       "PortLayout": {
         "description": "Where an edge attaches to a card, once someone has said so by hand.\n\n`along` is measured from the start of the face — its left end for a top or\nbottom face, its top end for a left or right one — rather than as a fraction\nof it. A distance is what the drag meant: \"attach a card's width in from the\ncorner\" stays put when the card is made taller, where a fraction would slide.\n\n`side` is carried because the automatic router can change its mind: move a\ncard and an edge that left by the bottom may now leave by the side, and a\nposition measured along the old face means nothing on the new one. When they\ndisagree the stored position is ignored and the edge goes back to being\nplaced automatically, which is self-healing and needs no cleanup pass.",
         "properties": {
@@ -3722,6 +3870,72 @@
           "database",
           "user",
           "password"
+        ],
+        "title": "postgres",
+        "type": "object"
+      },
+      "PostgresInputConfig": {
+        "description": "Reads a postgres table, view or query on a timer and hands each row on as\na message.\n\nEvery other input is pushed to; this one asks. It runs a query every\n`interval_secs`, either the whole relation (`snapshot`) or only the rows\npast where the last read got to (`incremental`, following a column that\ngrows), and each row becomes one JSON object with the column names as its\nfields — rendered by the server itself with `row_to_json`, so a timestamp\nis ISO 8601, a `numeric` keeps its digits and a `jsonb` column arrives as\nthe nested value it holds:\n\n```json\n{\"id\": 42, \"sensor\": \"press-3\", \"value\": 21.5, \"recorded_at\": \"2026-01-01T12:00:00.123456+00:00\"}\n```\n\nAn incremental read is *at least once* across a restart — the watermark is\nheld in memory and the first read starts over from `start_from` — and it\nnever sees a delete. Index the field it follows, or every read scans the\ntable. See \"database inputs\" in the guide for the whole argument.",
+        "properties": {
+          "columns": {
+            "description": "the columns to read, in the order they are listed. Empty reads every\ncolumn the table or query has. An incremental input's `field` has to be\namong them.",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "connection": {
+            "description": "name of the postgres connection to read through — see \"connections\" in\nthe readme. The server is declared once, in the connections file, and a\npipeline names what it wants from it here.",
+            "type": "string",
+            "x-connection": "postgres"
+          },
+          "interval_secs": {
+            "description": "how long to wait between reads, in seconds, counted from the end of one\nread to the start of the next — a read that takes longer than this\nnever overlaps itself. The first read happens as soon as the pipeline\nstarts.",
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "max_batch": {
+            "description": "most rows to put in one batch. Defaults to 1 — one message per batch,\nwhich is what every input does unless asked otherwise. Rows already\nread are grouped up to this many; the input never waits for a batch to\nfill.",
+            "format": "uint",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "mode": {
+            "$ref": "#/components/schemas/PollMode",
+            "description": "whether every read returns the whole relation (`snapshot`) or only the\nrows past where the last read got to (`incremental`)."
+          },
+          "page_size": {
+            "description": "most rows one query returns, and so the most an incremental read holds\nat once. A read that fills a page asks for the next one straight away\nuntil a page comes back short; only then does the interval start.\nDefaults to 1000. Ignored by `snapshot`, which reads the relation\nwhole.",
+            "format": "uint",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "query": {
+            "description": "a `SELECT` to read instead of a table. It is the *source*, not the whole\nstatement: the input wraps it as a subquery and adds the cursor\ncondition, the ordering and the page limit itself, so an incremental\nquery needs no placeholder and no `ORDER BY` of its own. One statement,\nno trailing semicolon; anything the server can put in a subquery\n(including a `WITH`) is fine.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "table": {
+            "description": "the table or view to read, as `name` or `schema.name`. Exactly one of\n`table` and `query` is required.",
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "connection",
+          "interval_secs",
+          "mode"
         ],
         "title": "postgres",
         "type": "object"
@@ -4505,6 +4719,21 @@
           "batches"
         ],
         "type": "object"
+      },
+      "StartFrom": {
+        "description": "Where an incremental input's first read starts.",
+        "oneOf": [
+          {
+            "const": "oldest",
+            "description": "From the beginning: the first read returns every row, page by page.",
+            "type": "string"
+          },
+          {
+            "const": "newest",
+            "description": "From now: the first read finds the highest value of the field and\nreturns only rows above it. The default.",
+            "type": "string"
+          }
+        ]
       },
       "StdoutOutputConfig": {
         "description": "Prints each batch to the server's stdout. Useful while building a pipeline\nup; takes no settings.",

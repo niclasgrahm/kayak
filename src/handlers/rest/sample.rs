@@ -24,8 +24,9 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use axum::{Json, extract::State, response::IntoResponse};
-use kayak_core::config::{InputConfig, InputKind};
+use kayak_core::config::{ClickhouseInputConfig, InputConfig, InputKind, PostgresInputConfig};
 use kayak_core::sample::{SampleRequest, SampleResponse, SampleStage, Sampling};
+use kayak_core::sql::{PollMode, StartFrom};
 use serde_json::Value;
 
 use crate::handlers::error::AppError;
@@ -145,6 +146,23 @@ fn prepare(mut input: InputConfig, notes: &mut Vec<String>) -> InputConfig {
             |name| format!("kayak-sample-{name}"),
         );
     }
+    // A database is the one source that still holds what was written before
+    // the sample started, so an input that would start from the newest rows
+    // is started from the oldest instead — a table full of rows that sampled
+    // empty would read as a broken connection. Said only when it was done:
+    // an input already reading from the oldest rows is left alone.
+    if let InputKind::Postgres(PostgresInputConfig { poll, .. })
+    | InputKind::Clickhouse(ClickhouseInputConfig { poll, .. }) = &mut input.kind
+        && let PollMode::Incremental { start_from, .. } = &mut poll.mode
+        && start_from.unwrap_or_default() == StartFrom::Newest
+    {
+        *start_from = Some(StartFrom::Oldest);
+        notes.push(
+            "read from the oldest rows rather than waiting for new ones, so there is \
+             something to show — the pipeline itself will start from the newest"
+                .to_string(),
+        );
+    }
     input
 }
 
@@ -187,6 +205,42 @@ mod tests {
         let mut notes = Vec::new();
         prepare(
             input(serde_json::json!({"type": "dummy", "duration": 1})),
+            &mut notes,
+        );
+        assert!(notes.is_empty());
+    }
+
+    /// A database still holds its rows, so a sample that would wait for new
+    /// ones is turned round to read the old ones — and says so. One that
+    /// already reads from the oldest is left alone and nothing is said.
+    #[test]
+    fn a_sql_sample_reads_from_the_oldest_rows_and_says_so() {
+        let mut notes = Vec::new();
+        let prepared = prepare(
+            input(serde_json::json!({
+                "type": "postgres",
+                "connection": "pg",
+                "table": "readings",
+                "interval_secs": 5,
+                "mode": {"type": "incremental", "field": "id"},
+            })),
+            &mut notes,
+        );
+        let InputKind::Postgres(postgres) = &prepared.kind else {
+            panic!("still a postgres input");
+        };
+        assert_eq!(postgres.poll.start_from(), Some(StartFrom::Oldest));
+        assert_eq!(notes.len(), 1);
+
+        let mut notes = Vec::new();
+        prepare(
+            input(serde_json::json!({
+                "type": "clickhouse",
+                "connection": "ch",
+                "table": "readings",
+                "interval_secs": 5,
+                "mode": {"type": "incremental", "field": "id", "start_from": "oldest"},
+            })),
             &mut notes,
         );
         assert!(notes.is_empty());

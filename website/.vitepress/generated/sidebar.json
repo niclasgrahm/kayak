@@ -111,6 +111,14 @@
     {
       "link": "/reference/inputs#input-indu",
       "text": "indu"
+    },
+    {
+      "link": "/reference/inputs#input-postgres",
+      "text": "postgres"
+    },
+    {
+      "link": "/reference/inputs#input-clickhouse",
+      "text": "clickhouse"
     }
   ],
   "outputs": [

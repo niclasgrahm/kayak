@@ -92,6 +92,33 @@ pipelines:
   transforms: []
   outputs:
   - type: stdout
+- id: readings_from_postgres
+  inputs:
+  - type: postgres
+    connection: local-postgres
+    table: readings
+    interval_secs: 5
+    mode:
+      type: incremental
+      field: id
+    max_batch: 100
+    envelope:
+      type: merge
+  transforms: []
+  outputs:
+  - type: stdout
+- id: sensor_peaks_from_clickhouse
+  inputs:
+  - type: clickhouse
+    connection: local-clickhouse
+    query: SELECT sensor, max(value) AS peak, count() AS readings FROM sensor_readings GROUP BY sensor
+    interval_secs: 30
+    mode:
+      type: snapshot
+    max_batch: 100
+  transforms: []
+  outputs:
+  - type: stdout
 - id: sensors
   inputs:
   - type: nats
