@@ -468,6 +468,148 @@ larger concept — and the durability argument under "state" says the same thing
 correctness across restarts starts at the input, with checkpointed positions,
 not at the pieces downstream of it.
 
+## statistics in the stream
+
+Came out of asking (2026-09-05) whether an ARIMA transform makes sense, given
+that one real use of kayak is "buffer readings until a condition, post the
+batch to an ML model, publish the answer". The full note, with the technique
+and application surveys behind these entries, is
+[here](https://claude.ai/code/artifact/6f21f22f-b802-4a84-a04f-c78c5b3d71c5).
+The short version: yes, but as one `model` option on a `forecast` transform,
+with exponential smoothing as the default, and it is not where to start.
+
+The line drawn, and the reason each item below is where it is: a technique
+belongs **in the engine** when it needs per-key state plus a tick (a script
+has neither comfortably) or is numeric work over a window that the interpreter
+would do slowly; it is a **rhai builtin** when it is a pure function over an
+array; it stays **behind http** when it trains. Kayak runs models, it does not
+fit them — a `train` transform is where the scope stops being a stream
+processor. Most of the value for the industrial cases (edge data reduction,
+sensor health, SPC, alarming) is in the first tier, which needs no dependency
+at all.
+
+Every keyed transform here reads its series out of `group_by` (the reducer's
+list) and keeps its per-key state in a declared **state bucket**, so the bound,
+the TTL and the revert rule are the ones already written and tested; a stateful
+transform with no bucket refuses to build, as `recall` does. Tiers two and
+three each cost one optional dependency and go behind a cargo feature the way
+`embed-assets` does, so `cargo check` and `just ci` stay quick and a component
+whose feature is off is absent from the config enum rather than present and
+failing to build.
+
+Roughly in dependency order:
+
+- [ ] **time on the message.** Nearly everything below reads a timestamp off
+      the message and kayak has no rule for that today — `now_millis()` exists
+      but nothing parses one. A shared `time` setting on the component (a field
+      path, defaulting to arrival time, RFC 3339 or epoch millis accepted) and a
+      `parse_time`/`format_time` pair in rhai are one fact twice and should
+      land together. No dependency; unblocks the script version of the
+      buffer-and-predict pipeline immediately.
+- [ ] **array builtins for scripts.** `pluck(batch, path)` — the bridge from a
+      batch to a number array — then `mean`, `median`, `min`, `max`, `sum`,
+      `std`, `var`, `quantile`, `mad`, `zscore`, `skew`, `kurtosis`, `rms`,
+      `diff`, `cumsum`, `ewma`, `linfit` (`#{slope, intercept, r2}`),
+      `autocorr`, `peaks`, `histogram`, `clamp`, `interp`, `dtw`. Empty input
+      reads as `()`, never NaN. Each goes in `kayak_core::script::builtins()`,
+      which the runner test pins against the engine in both directions. With
+      `pluck`, `mean`, `std` and `linfit` the cycle-features script is four
+      lines, and it is the fallback for any feature the closed set below
+      lacks. `std` and `slope` want to be `reduce` functions at the same time
+      (Cpk per lot is `reduce` plus `map` arithmetic once std exists).
+- [ ] **streaming statistics, tier one, no crate.** Six transforms, all
+      O(1) state per key:
+      `rolling` — sliding-window aggregations over the last `size` messages or
+      `seconds`, the reducer's `{function, field, as}` list, results written
+      onto the message. A second component rather than a `window` field on
+      `reduce` because the cardinality differs (one out per message in, not one
+      per group per batch).
+      `deadband` — drop unless `field` moved by more than `delta` (absolute or
+      percent) since the last message that passed, or `max_seconds` elapsed;
+      `flatline_seconds` emits a `stuck: true` message. The single most-used
+      transform in any historian pipeline, and a stateful filter, which is why
+      `filter` cannot be it.
+      `derive` — `rate` (per second, off the time field), `delta`, `cumsum`,
+      `counter` with wrap handling. Not a `map` operation because it needs the
+      previous message.
+      `smooth` — `ewma` (alpha or half-life), `median`, `hampel`,
+      `savitzky_golay`. Hampel is the right first stage before any detector.
+      `detect` — one component with `method` variants, like `filter`:
+      `zscore`, `mad`, `cusum`, `ewma_chart`, `western_electric`, `flatline`;
+      `mode: annotate | only_anomalies`; `min_samples` warm-up during which
+      nothing is flagged.
+      `resample` — per key onto an `interval_ms` grid: `last`, `mean`,
+      `linear`, `forward_fill` with `max_gap`. Emits on the tick, so a quiet
+      key still produces its grid points — the second real user of
+      `Transform::wakeup` the tick entry above is looking for, and the
+      precondition every window model has.
+      Wants a `kayak-bench` row for `rolling` at a thousand keys.
+- [ ] **`features`, and the http round trip.** Batch scope: a window in, one
+      descriptor message out, `include` picked from a closed set (`mean`,
+      `std`, `min`, `max`, `range`, `slope`, `skew`, `kurtosis`, `rms`,
+      `crest_factor`, `zero_crossings`, `n_peaks`, `autocorr_1`,
+      `dominant_frequency`, `band_energy(lo, hi)`, `count`, `duration`),
+      group fields kept. A model endpoint rarely wants four hundred raw
+      temperatures; it wants seven numbers with the identifiers, and raw
+      vibration waveforms should never leave the edge. The spectral members
+      need an FFT (`rustfft`/`realfft`, pure Rust, small); the rest is
+      arithmetic. Pairs with **request shaping and response merging on the
+      `http` transform** under the machine-cycle scenario — the two together
+      are what makes the external-model case good, and they are complementary
+      to statistics in the engine rather than an alternative to them.
+- [ ] **window models, tier two, behind an `augurs` feature.**
+      [`augurs`](https://lib.rs/crates/augurs) (Grafana-hosted, not an official
+      Grafana project; 0.10.2, Feb 2026; MIT/Apache; modular features, wasm-
+      capable) covers all of these in one dependency: AutoETS, MSTL,
+      seasonality detection, BOCPD changepoints (wrapping the `changepoint`
+      crate), MAD and DBSCAN outliers, DTW. Leave its `prophet` features off —
+      holidays and a Stan optimiser are the wrong tool for a sensor.
+      `forecast` — batch scope after a `buffer`, or its own per-key ring of
+      `history` points; `model: seasonal_naive | ets | theta` (+ `arima`, see
+      below), `horizon`, `season_length`, `interval` level. Emits `point[]`,
+      `lower[]`, `upper[]` with the group fields; `residuals: true` annotates
+      the actuals with one-step-ahead error, which is what a downstream
+      `detect` consumes for a series with trend and season.
+      `decompose` — STL/MSTL, `trend`/`seasonal`/`remainder` onto each message.
+      `changepoint` — per key, online BOCPD, `hazard` and `threshold`,
+      annotating with `change_probability` and `run_length`. Finds cycle
+      boundaries in the machine-cycle scenario when there is no
+      `cycle_status` tag at all.
+      Plus `mad`/`dbscan` methods on `detect`.
+- [ ] **ARIMA.** As a `model` variant on `forecast` and only if a real user
+      asks for it by name — on 2 Hz sensor data ETS and Theta match it, fit in
+      a fraction of the time and need neither regular spacing nor an order
+      search. `augurs` has no ARIMA. The one maintained Rust port is
+      [`anofox-forecast`](https://lib.rs/crates/anofox-forecast) (0.15.9, Aug
+      2026, MIT; AutoARIMA/SARIMA, TBATS, Theta, 50+ models), which is 99k
+      lines, ~500 downloads a month and lists an AI as co-maintainer: behind
+      its own feature, and read the ARIMA module before trusting it. The old
+      [`arima`](https://crates.io/crates/arima) crate is tiny and dormant —
+      read it for the algorithm, don't depend on it.
+- [ ] **`infer`, tier three, behind a `tract` feature.** Run an ONNX model
+      per message or per batch. `model` is a path under the config directory
+      with the `file` script source's boundary rules, loaded once at build so
+      a wrong path refuses the build; `inputs` maps field paths onto the tensor
+      in order, the way `columns` maps fields onto a table, `outputs` names
+      the fields the result lands in, `on_missing` as elsewhere. One transform
+      covers isolation forests, boosted trees, small autoencoders and exported
+      scikit-learn pipelines, and the training stays where the data scientists
+      are. [`tract-onnx`](https://lib.rs/crates/tract-onnx) (Sonos, 0.23.6,
+      Sep 2026, MIT/Apache, pure Rust, ~20 MB of deps) is the pick: no C++
+      runtime, so the Dockerfile stays a two-stage build with nothing to copy
+      in. [`ort`](https://lib.rs/crates/ort) (2.0.0-rc.13, wraps Microsoft's
+      onnxruntime, widest op coverage, GPU) is the fallback if a model tract
+      cannot run, at the cost of a 6–22 MB shared library in the image.
+
+Not planned, and why: **training in the pipeline** — `smartcore` (0.6.14, Aug
+2026) and `linfa` (0.8.1, Dec 2025) are both well maintained and everything
+they offer is a training loop, which is the line above; the one thing worth
+revisiting is online drift on a fixed model (ADWIN), which is a detector rather
+than a trainer. **Kalman filters** — tier one by cost, but a state-space model
+is a matrix someone has to write down. **Matrix profile** — discords and
+motifs, expensive and niche. **Event-time windows with watermarks** — already
+ruled out under the machine-cycle scenario; nothing here changes that argument.
+
 ## known issues
 
 Found during the error-handling pass on 2026-08-03. Each one needs a decision,
