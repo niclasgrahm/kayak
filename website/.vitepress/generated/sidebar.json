@@ -219,6 +219,10 @@
     {
       "link": "/reference/transforms#transform-resample",
       "text": "resample"
+    },
+    {
+      "link": "/reference/transforms#transform-features",
+      "text": "features"
     }
   ]
 }

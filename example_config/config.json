@@ -1111,6 +1111,49 @@
       ]
     },
     {
+      "id": "heartbeat_features",
+      "inputs": [
+        {
+          "type": "pipeline",
+          "upstream": "heartbeat",
+          "buffer": {
+            "type": "tumbling",
+            "window_seconds": 10
+          }
+        }
+      ],
+      "transforms": [
+        {
+          "type": "features",
+          "field": "value",
+          "include": [
+            "mean",
+            "std",
+            "slope",
+            "rms",
+            "n_peaks",
+            "dominant_frequency",
+            "count"
+          ],
+          "sample_rate_hz": 1.0
+        },
+        {
+          "type": "http",
+          "url": "http://127.0.0.1:6767/api/pipelines/ingest/messages",
+          "verb": "POST",
+          "body": "message",
+          "response": "merge",
+          "as": "ingest",
+          "timeout_seconds": 5
+        }
+      ],
+      "outputs": [
+        {
+          "type": "stdout"
+        }
+      ]
+    },
+    {
       "id": "broken_cast",
       "inputs": [
         {

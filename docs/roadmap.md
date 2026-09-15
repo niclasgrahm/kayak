@@ -439,12 +439,14 @@ Left to build, roughly in dependency order:
       `machine_7.temperature` arrives as `_meta.machine_id` and `_meta.signal`.
       Without it a wildcard subscription is unusable, since nothing can address
       part of a subject. Small, and unblocks keying by machine.
-- [ ] **request shaping and response merging on the http transform** — it
-      currently posts the batch verbatim and *replaces* it with the reply, so
-      the ML call can neither send `{machine_id, unit_id, temperatures: [...]}`
-      nor keep the identifiers it needs to publish the answer under. Wants
-      headers/auth, a timeout and a retry too, and while in there: `verb` is
-      accepted and ignored (see known issues).
+- [x] **request shaping and response merging on the http transform**
+      (done 2026-09-15: `body: batch | message`, `wrap`/`unwrap` for an API
+      that wants a key around the payload or answers under one, `response:
+      merge` writing the reply onto the message under `as` so the identifiers
+      survive the trip, plus `auth`, `timeout_seconds` and `retries` — and
+      `verb` honoured, with `GET`/`DELETE` refused at build. The shaping of
+      *what* is sent is `features`' and `reduce`'s job in front of it. See
+      "the model round trip" on the site.)
 - [ ] **templated output subjects and topics** — `kayak.{machine_id}.avg_pressure`.
       Without it every machine's results land on one subject with the id only in
       the body, which throws away the routing nats is for.
@@ -557,7 +559,13 @@ Roughly in dependency order:
       `Transform::wakeup` the tick entry above is looking for, and the
       precondition every window model has.
       Wants a `kayak-bench` row for `rolling` at a thousand keys.
-- [ ] **`features`, and the http round trip.** Batch scope: a window in, one
+- [x] **`features`, and the http round trip.**
+      (done 2026-09-15: `features` is the reducer's shape with a closed set of
+      descriptors and `bands`, sharing the reducer's grouping; the spectral
+      ones run on `rustfft` and need `sample_rate_hz` or a `time` field to
+      derive one. `heartbeat_features` in the sample runs the whole loop
+      against the server's own ingest endpoint. The original entry:) Batch
+      scope: a window in, one
       descriptor message out, `include` picked from a closed set (`mean`,
       `std`, `min`, `max`, `range`, `slope`, `skew`, `kurtosis`, `rms`,
       `crest_factor`, `zero_crossings`, `n_peaks`, `autocorr_1`,
@@ -634,12 +642,10 @@ which is why they weren't just fixed.
       for the life of the pipeline, and the same missing tick is behind the idle
       file part and the lazy bucket eviction. `out_size: 0` is now refused at
       build time rather than quietly emitting a batch per message.)
-- [ ] **the http transform ignores `verb`.** Every request is a POST regardless
-      of what the config says. Honouring it would change behaviour for existing
-      configs, so it needs a decision first. Note the `http` **output** honours
-      its own `verb` (and refuses the bodyless methods), so the two components
-      now read the same field differently — which is the argument for settling
-      this rather than leaving it.
+- [x] **the http transform ignores `verb`.** (settled 2026-09-15 with the
+      round-trip work: honoured, and `GET`/`DELETE` refused at build time, the
+      output's rule. A config that said `GET` was getting a POST; it now fails
+      to build and says why.)
 - [x] **dead pipelines stay in the map.** (fixed 2026-08-19: `RunStatus` —
       starting / running / stopped / failed — is set by the run loop, carried on
       `PipelineDto` and shown as a badge on the card. The handle deliberately

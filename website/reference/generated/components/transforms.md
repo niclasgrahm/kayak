@@ -44,12 +44,35 @@ Distinct from the `buffer` option on an input: that one batches what an input pr
 
 ## `http` {#transform-http}
 
-Posts the batch to an http endpoint as a JSON array and replaces it with the JSON array in the response — so the service on the other end is the transform.
+Sends the batch to an http endpoint and carries on with what comes back — so the service on the other end is the transform. The round trip to a model: a `buffer` and a `features` in front of it make the request the seven numbers with the identifiers, and `response: merge` writes the answer onto that message so the identifiers survive the trip.
+
+`body` says whether one request carries the whole batch as a JSON array or each message goes on its own; `wrap` puts that under a key (`{"instances": …}`) for an API that wants one. `response` says what the reply is: `replace` makes it the new batch — the JSON array it holds under `batch`, the message (or array of messages) it holds under `message` — and `merge` writes it onto the message under `as` instead. `unwrap` reads the reply out from under a key first. Anything but a 2xx fails the batch with the endpoint's own words quoted; a network failure or a 5xx is retried `retries` times with backoff before it does.
 
 | field | type | | description |
 | --- | --- | --- | --- |
-| `url` | `string` | <Badge type="warning" text="required" /> | endpoint to send the batch to |
-| `verb` | `GET` \| `POST` \| `PUT` \| `PATCH` \| `DELETE` | <Badge type="warning" text="required" /> | http method. Accepted but not honoured yet: every request is a POST. |
+| `url` | `string` | <Badge type="warning" text="required" /> | endpoint to send to |
+| `verb` | `GET` \| `POST` \| `PUT` \| `PATCH` \| `DELETE` | <Badge type="warning" text="required" /> | http method. `GET` and `DELETE` are refused — a request with no body would send none of the messages |
+| `as` | `string` | <Badge type="info" text="optional" /> | for `response: merge`: the field the reply is written under |
+| `auth` | `bearer \| header` | <Badge type="info" text="optional" /> | what this transform presents to be allowed to send. Absent sends no credential |
+| `body` | `batch` \| `message` | <Badge type="info" text="optional" /> | what one request carries. Defaults to `batch` |
+| `response` | `replace` \| `merge` | <Badge type="info" text="optional" /> | what to do with the reply. Defaults to `replace` |
+| `retries` | `integer` | <Badge type="info" text="optional" /> | how many times a request that failed to reach the endpoint, or was answered 5xx or 429, is tried again before the batch fails. Defaults to 0. Each retry waits a little longer than the last, and the pipeline waits with it |
+| `timeout_seconds` | `integer` | <Badge type="info" text="optional" /> | how long one request may take before it is given up on, in seconds. Defaults to 30 |
+| `unwrap` | `string` | <Badge type="info" text="optional" /> | a key to read the reply out from under, for an API that answers `{"predictions": …}` |
+| `wrap` | `string` | <Badge type="info" text="optional" /> | a key to put the body under, for an API that wants `{"key": …}` |
+
+**`auth` — `type: "bearer"`**
+
+| field | type | | description |
+| --- | --- | --- | --- |
+| `token` | `string` | <Badge type="warning" text="required" /> | the token. A `${NAME}` reference, so the config file holds the name and the secret store holds the value. |
+
+**`auth` — `type: "header"`**
+
+| field | type | | description |
+| --- | --- | --- | --- |
+| `name` | `string` | <Badge type="warning" text="required" /> | the header's name, matched case-insensitively on the way in. On an `http` input it may not be one of the headers an `envelope` passes through, since that would write the credential into the messages. |
+| `value` | `string` | <Badge type="warning" text="required" /> | the exact value that header must have. A `${NAME}` reference, as above. |
 
 
 ## `splitter` {#transform-splitter}
@@ -562,3 +585,28 @@ The message out carries the group fields under their leaf names, the grid time u
 | `max_gap_seconds` | `number` | <Badge type="info" text="optional" /> | for `forward_fill`: how long a value is carried into empty intervals before the series is left to go quiet. Carried forever when left out |
 | `on_missing` | `error` \| `skip` | <Badge type="info" text="optional" /> | what to do about a message missing the field or a group field |
 | `time` | `string` | <Badge type="info" text="optional" /> | the field carrying each message's time — RFC 3339 or milliseconds since the epoch. Leave it out for arrival time, in which case empty intervals are noticed by the clock rather than by the next reading |
+
+
+## `features` {#transform-features}
+
+Folds a window of readings into one descriptor message per group — the seven numbers with the identifiers that a model endpoint actually wants, rather than the four hundred raw readings. Pair it with a `buffer` on the input, or it will only ever see one reading at a time.
+
+Each feature in `include` is written under its own name (`mean`, `rms`, `crest_factor` …), each `bands` entry under its `as`, and the `group_by` fields under their leaf names, the reducer's way. A feature that has no answer for the window — a slope of one point, a tone in a flat signal — is `null`. The spectral ones (`dominant_frequency`, `bands`) need a sample rate, which is `sample_rate_hz` when given and otherwise derived from the `time` field; without either they refuse to build. Nothing here keeps state, so no bucket is needed.
+
+| field | type | | description |
+| --- | --- | --- | --- |
+| `field` | `string` | <Badge type="warning" text="required" /> | the numeric field the window is of |
+| `bands` | `list of band` | <Badge type="info" text="optional" /> | frequency bands whose power is wanted, each under its `as` |
+| `group_by` | `list of string` | <Badge type="info" text="optional" /> | the fields that identify a series, the reducer's way. Leave it out for the whole batch as one window |
+| `include` | `list of mean \| std \| min \| max \| range \| slope \| skew \| kurtosis \| rms \| crest_factor \| zero_crossings \| n_peaks \| autocorr1 \| dominant_frequency \| count \| duration` | <Badge type="info" text="optional" /> | which features to compute, each written under its own name |
+| `on_missing` | `error` \| `skip` | <Badge type="info" text="optional" /> | what to do about a reading missing the field or a group field |
+| `sample_rate_hz` | `number` | <Badge type="info" text="optional" /> | the readings' sample rate in hertz, for the spectral features. Wins over one derived from `time`, for a source whose timestamps are coarse |
+| `time` | `string` | <Badge type="info" text="optional" /> | the field carrying each reading's time — RFC 3339 or milliseconds since the epoch. Gives `slope` and `duration` their seconds and the spectral features their sample rate |
+
+**`bands` — each entry**
+
+| field | type | | description |
+| --- | --- | --- | --- |
+| `low_hz` | `number` | <Badge type="warning" text="required" /> | the bottom of the band, in hertz, inclusive |
+| `high_hz` | `number` | <Badge type="warning" text="required" /> | the top of the band, in hertz, exclusive |
+| `as` | `string` | <Badge type="warning" text="required" /> | the field the band's power is written under |

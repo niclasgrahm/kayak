@@ -722,6 +722,42 @@ Per transform, the thing to know before changing it:
 The sample's `heartbeat_trend` and `heartbeat_grid` run all six off the
 heartbeat; `config.yaml` has to carry them too or `tests/config.rs` fails.
 
+### The model round trip (`features`, and the http transform)
+
+The complement to statistics in the engine, not an alternative: kayak runs
+models and does not fit them, so anything that trains lives behind http, and
+these two are what make "behind http" a good place. Three things:
+
+- **`src/outbound.rs` is what the http output and the http transform
+  share** — url parsing, the bodyless-verb refusal, the `Credential`, how a
+  complaint is quoted. What differs stays in each: an output discards the
+  reply, a transform is defined by it. Don't grow a third copy.
+- **`features` (`src/transforms/features.rs`) is the reducer's shape with a
+  closed set of descriptors** and reuses `reduce::group_batch` outright. It
+  keeps no state and needs no bucket, unlike the rest of `kayak_core::
+  streaming`. The sample rate is `sample_rate_hz` when given (a source with
+  coarse timestamps would derive nonsense) and otherwise `(n − 1) / duration`
+  off the `time` field; a window that can't say makes the spectral features
+  `null` rather than failing — a short cycle is data. `stats::power_spectrum`
+  is one-sided and Parseval-scaled (the bins sum to the mean square), which
+  `the_spectrum_finds_a_tone_and_keeps_parseval` pins; `band_energy` is in
+  those units. `rustfft` is the one dependency this brought.
+- **The http transform's `merge` is the round trip.** `replace` — the reply
+  *is* the new batch — is what it always did and is right when the service is
+  the transform; it is wrong for a model, which answers `{"score": 0.93}` and
+  has thrown away the machine id. `merge` writes the reply under `as` onto
+  the message that caused it; under `body: batch` an array reply of the
+  batch's length is written element-wise and anything else onto every
+  message. **A retry sleeps, the gate skips**, and they compose: `retries`
+  waits out a backoff inside the pass for the transient failure (5xx, 429, a
+  reset), the `Gate` refuses later batches without a round trip once a
+  request has failed for good. `verb` is honoured now and `GET`/`DELETE`
+  refused — the known issue, settled.
+
+`heartbeat_features` in the sample runs the loop against the server's own
+ingest endpoint (`body: message`, since ingest takes one message or an
+array), the way `heartbeat_to_webhook` stands in for a webhook.
+
 ### Secrets
 
 Config fields that can hold credentials are typed `Secret` (`kayak-core::config`), not `String`. They all live on *connections* now rather than on components. `Secret` only ever holds the *unresolved* `${NAME}` template, which is what makes it safe to serialize back out of `GET /api/pipelines` and to compile for wasm. Resolution happens at build time via `ctx.resolve()` and yields a `secrets::Resolved`, whose `Display`/`Debug` print the template rather than the value — so error contexts can name a connection without leaking it. Reaching the real value takes `.expose()`; flag new call sites in review, and never put a `Resolved` into anything `Serialize`. Stores (`EnvStore`, `FileStore`, `ChainStore`) live in `src/secrets.rs`; `main.rs` chains env ahead of `--secrets <file>`. `src/testing.rs` has `MapSecretStore` for tests. See `website/io/secrets.md`.

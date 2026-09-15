@@ -463,3 +463,134 @@ pub struct ResampleTransformConfig {
     #[serde(default, skip_serializing_if = "MissingFieldPolicy::is_default")]
     pub on_missing: MissingFieldPolicy,
 }
+
+// ── features ────────────────────────────────────────────────────────────────
+
+/// One number that describes a window of readings.
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, JsonSchema, PartialEq, Eq, Hash)]
+#[serde(rename_all = "snake_case")]
+pub enum FeatureKind {
+    /// The arithmetic mean.
+    Mean,
+    /// The population standard deviation.
+    Std,
+    /// The smallest value.
+    Min,
+    /// The largest value.
+    Max,
+    /// The largest less the smallest.
+    Range,
+    /// The least-squares slope — per second against the `time` field, per
+    /// message without one.
+    Slope,
+    /// Which way the tail points.
+    Skew,
+    /// How heavy the tails are (excess kurtosis).
+    Kurtosis,
+    /// The root mean square.
+    Rms,
+    /// The peak magnitude over the RMS — how spiky the window is.
+    CrestFactor,
+    /// How many times the signal crossed zero.
+    ZeroCrossings,
+    /// How many local maxima there were.
+    NPeaks,
+    /// The autocorrelation at lag one — how smooth the signal is.
+    Autocorr1,
+    /// The strongest frequency above DC, in hertz. Needs a sample rate: the
+    /// `time` field, or `sample_rate_hz`.
+    DominantFrequency,
+    /// How many readings the window held.
+    Count,
+    /// From the first reading to the last, in seconds, off the `time` field.
+    Duration,
+}
+
+impl FeatureKind {
+    /// The field the feature is written under — the name as it is spelled
+    /// in the config.
+    #[must_use]
+    pub fn field_name(self) -> &'static str {
+        match self {
+            Self::Mean => "mean",
+            Self::Std => "std",
+            Self::Min => "min",
+            Self::Max => "max",
+            Self::Range => "range",
+            Self::Slope => "slope",
+            Self::Skew => "skew",
+            Self::Kurtosis => "kurtosis",
+            Self::Rms => "rms",
+            Self::CrestFactor => "crest_factor",
+            Self::ZeroCrossings => "zero_crossings",
+            Self::NPeaks => "n_peaks",
+            Self::Autocorr1 => "autocorr_1",
+            Self::DominantFrequency => "dominant_frequency",
+            Self::Count => "count",
+            Self::Duration => "duration",
+        }
+    }
+
+    /// Whether the feature needs a sample rate.
+    #[must_use]
+    pub fn is_spectral(self) -> bool {
+        matches!(self, Self::DominantFrequency)
+    }
+}
+
+/// The power in one frequency band, as a feature of its own.
+#[derive(Clone, Debug, Deserialize, Serialize, JsonSchema, PartialEq)]
+#[schemars(title = "band")]
+pub struct Band {
+    /// the bottom of the band, in hertz, inclusive
+    pub low_hz: f64,
+    /// the top of the band, in hertz, exclusive
+    pub high_hz: f64,
+    /// the field the band's power is written under
+    #[serde(rename = "as")]
+    pub output: String,
+}
+
+/// Folds a window of readings into one descriptor message per group — the
+/// seven numbers with the identifiers that a model endpoint actually wants,
+/// rather than the four hundred raw readings. Pair it with a `buffer` on the
+/// input, or it will only ever see one reading at a time.
+///
+/// Each feature in `include` is written under its own name (`mean`, `rms`,
+/// `crest_factor` …), each `bands` entry under its `as`, and the `group_by`
+/// fields under their leaf names, the reducer's way. A feature that has no
+/// answer for the window — a slope of one point, a tone in a flat signal —
+/// is `null`. The spectral ones (`dominant_frequency`, `bands`) need a sample
+/// rate, which is `sample_rate_hz` when given and otherwise derived from the
+/// `time` field; without either they refuse to build. Nothing here keeps
+/// state, so no bucket is needed.
+#[derive(Clone, Debug, Deserialize, Serialize, JsonSchema, PartialEq)]
+#[schemars(title = "features")]
+pub struct FeaturesTransformConfig {
+    /// the numeric field the window is of
+    #[schemars(extend("x-message-field" = true))]
+    pub field: String,
+    /// which features to compute, each written under its own name
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub include: Vec<FeatureKind>,
+    /// frequency bands whose power is wanted, each under its `as`
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub bands: Vec<Band>,
+    /// the fields that identify a series, the reducer's way. Leave it out for
+    /// the whole batch as one window
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub group_by: Vec<String>,
+    /// the field carrying each reading's time — RFC 3339 or milliseconds since
+    /// the epoch. Gives `slope` and `duration` their seconds and the spectral
+    /// features their sample rate
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(extend("x-message-field" = true))]
+    pub time: Option<String>,
+    /// the readings' sample rate in hertz, for the spectral features. Wins
+    /// over one derived from `time`, for a source whose timestamps are coarse
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sample_rate_hz: Option<f64>,
+    /// what to do about a reading missing the field or a group field
+    #[serde(default, skip_serializing_if = "MissingFieldPolicy::is_default")]
+    pub on_missing: MissingFieldPolicy,
+}

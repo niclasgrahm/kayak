@@ -563,6 +563,32 @@ One pipeline: every input is merged into one stream, that stream runs through th
         }
       ]
     },
+    "Band": {
+      "description": "The power in one frequency band, as a feature of its own.",
+      "properties": {
+        "as": {
+          "description": "the field the band's power is written under",
+          "type": "string"
+        },
+        "high_hz": {
+          "description": "the top of the band, in hertz, exclusive",
+          "format": "double",
+          "type": "number"
+        },
+        "low_hz": {
+          "description": "the bottom of the band, in hertz, inclusive",
+          "format": "double",
+          "type": "number"
+        }
+      },
+      "required": [
+        "low_hz",
+        "high_hz",
+        "as"
+      ],
+      "title": "band",
+      "type": "object"
+    },
     "BufferConfig": {
       "description": "How an input's messages are gathered into batches before the transforms see\nthem.\n\nAll three shapes are the same two limits with different halves left off — a\ncount, a time, or both, whichever is reached first. **A buffer never emits an\nempty batch**: the clock starts when the first message of a batch arrives,\nnot when the window was asked for, so an input that goes quiet emits nothing\nrather than a tick of nothing.\n\n`size` is a floor rather than a ceiling, the same rule a file output's\n`max_rows` follows: an arriving batch is never split, so an input already\nproducing batches of its own (`max_batch` on kafka and nats) can overshoot.",
       "oneOf": [
@@ -1520,6 +1546,147 @@ One pipeline: every input is merged into one stream, that stream runs through th
         }
       ]
     },
+    "FeatureKind": {
+      "description": "One number that describes a window of readings.",
+      "oneOf": [
+        {
+          "const": "mean",
+          "description": "The arithmetic mean.",
+          "type": "string"
+        },
+        {
+          "const": "std",
+          "description": "The population standard deviation.",
+          "type": "string"
+        },
+        {
+          "const": "min",
+          "description": "The smallest value.",
+          "type": "string"
+        },
+        {
+          "const": "max",
+          "description": "The largest value.",
+          "type": "string"
+        },
+        {
+          "const": "range",
+          "description": "The largest less the smallest.",
+          "type": "string"
+        },
+        {
+          "const": "slope",
+          "description": "The least-squares slope — per second against the `time` field, per\nmessage without one.",
+          "type": "string"
+        },
+        {
+          "const": "skew",
+          "description": "Which way the tail points.",
+          "type": "string"
+        },
+        {
+          "const": "kurtosis",
+          "description": "How heavy the tails are (excess kurtosis).",
+          "type": "string"
+        },
+        {
+          "const": "rms",
+          "description": "The root mean square.",
+          "type": "string"
+        },
+        {
+          "const": "crest_factor",
+          "description": "The peak magnitude over the RMS — how spiky the window is.",
+          "type": "string"
+        },
+        {
+          "const": "zero_crossings",
+          "description": "How many times the signal crossed zero.",
+          "type": "string"
+        },
+        {
+          "const": "n_peaks",
+          "description": "How many local maxima there were.",
+          "type": "string"
+        },
+        {
+          "const": "autocorr1",
+          "description": "The autocorrelation at lag one — how smooth the signal is.",
+          "type": "string"
+        },
+        {
+          "const": "dominant_frequency",
+          "description": "The strongest frequency above DC, in hertz. Needs a sample rate: the\n`time` field, or `sample_rate_hz`.",
+          "type": "string"
+        },
+        {
+          "const": "count",
+          "description": "How many readings the window held.",
+          "type": "string"
+        },
+        {
+          "const": "duration",
+          "description": "From the first reading to the last, in seconds, off the `time` field.",
+          "type": "string"
+        }
+      ]
+    },
+    "FeaturesTransformConfig": {
+      "description": "Folds a window of readings into one descriptor message per group — the\nseven numbers with the identifiers that a model endpoint actually wants,\nrather than the four hundred raw readings. Pair it with a `buffer` on the\ninput, or it will only ever see one reading at a time.\n\nEach feature in `include` is written under its own name (`mean`, `rms`,\n`crest_factor` …), each `bands` entry under its `as`, and the `group_by`\nfields under their leaf names, the reducer's way. A feature that has no\nanswer for the window — a slope of one point, a tone in a flat signal —\nis `null`. The spectral ones (`dominant_frequency`, `bands`) need a sample\nrate, which is `sample_rate_hz` when given and otherwise derived from the\n`time` field; without either they refuse to build. Nothing here keeps\nstate, so no bucket is needed.",
+      "properties": {
+        "bands": {
+          "description": "frequency bands whose power is wanted, each under its `as`",
+          "items": {
+            "$ref": "#/$defs/Band"
+          },
+          "type": "array"
+        },
+        "field": {
+          "description": "the numeric field the window is of",
+          "type": "string",
+          "x-message-field": true
+        },
+        "group_by": {
+          "description": "the fields that identify a series, the reducer's way. Leave it out for\nthe whole batch as one window",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "include": {
+          "description": "which features to compute, each written under its own name",
+          "items": {
+            "$ref": "#/$defs/FeatureKind"
+          },
+          "type": "array"
+        },
+        "on_missing": {
+          "$ref": "#/$defs/MissingFieldPolicy",
+          "description": "what to do about a reading missing the field or a group field"
+        },
+        "sample_rate_hz": {
+          "description": "the readings' sample rate in hertz, for the spectral features. Wins\nover one derived from `time`, for a source whose timestamps are coarse",
+          "format": "double",
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "time": {
+          "description": "the field carrying each reading's time — RFC 3339 or milliseconds since\nthe epoch. Gives `slope` and `duration` their seconds and the spectral\nfeatures their sample rate",
+          "type": [
+            "string",
+            "null"
+          ],
+          "x-message-field": true
+        }
+      },
+      "required": [
+        "field"
+      ],
+      "title": "features",
+      "type": "object"
+    },
     "FileFormat": {
       "description": "How the messages in a file are laid out.\n\nBoth are JSON — the difference is whether the file is one document or one\ndocument per line. `ndjson` is the one to want for anything that streams:\nthe file is valid after every batch, so a run that is still going (or that\ndied) is still readable, and every tool that eats logs eats it.",
       "oneOf": [
@@ -1786,16 +1953,103 @@ One pipeline: every input is merged into one stream, that stream runs through th
       "title": "http",
       "type": "object"
     },
+    "HttpResponseKind": {
+      "description": "What an `http` transform does with the reply.",
+      "oneOf": [
+        {
+          "const": "replace",
+          "description": "The reply is the new batch: a JSON array of messages under `body:\nbatch`, a message or an array of them under `body: message`. The\nservice decides what carries on.",
+          "type": "string"
+        },
+        {
+          "const": "merge",
+          "description": "The reply is written onto the message that caused it, under `as`. Under\n`body: batch` an array reply of the batch's length is written\nelement-wise, and any other reply onto every message. Nothing the\npipeline sent is lost.",
+          "type": "string"
+        }
+      ]
+    },
     "HttpTransformConfig": {
-      "description": "Posts the batch to an http endpoint as a JSON array and replaces it with the\nJSON array in the response — so the service on the other end is the\ntransform.",
+      "description": "Sends the batch to an http endpoint and carries on with what comes back —\nso the service on the other end is the transform. The round trip to a\nmodel: a `buffer` and a `features` in front of it make the request the\nseven numbers with the identifiers, and `response: merge` writes the\nanswer onto that message so the identifiers survive the trip.\n\n`body` says whether one request carries the whole batch as a JSON array\nor each message goes on its own; `wrap` puts that under a key\n(`{\"instances\": …}`) for an API that wants one. `response` says what the\nreply is: `replace` makes it the new batch — the JSON array it holds under\n`batch`, the message (or array of messages) it holds under `message` —\nand `merge` writes it onto the message under `as` instead. `unwrap` reads\nthe reply out from under a key first. Anything but a 2xx fails the batch\nwith the endpoint's own words quoted; a network failure or a 5xx is\nretried `retries` times with backoff before it does.",
       "properties": {
+        "as": {
+          "description": "for `response: merge`: the field the reply is written under",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "auth": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/HttpAuthConfig"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "what this transform presents to be allowed to send. Absent sends no\ncredential"
+        },
+        "body": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/HttpBodyKind"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "what one request carries. Defaults to `batch`"
+        },
+        "response": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/HttpResponseKind"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "what to do with the reply. Defaults to `replace`"
+        },
+        "retries": {
+          "description": "how many times a request that failed to reach the endpoint, or was\nanswered 5xx or 429, is tried again before the batch fails. Defaults to\n0. Each retry waits a little longer than the last, and the pipeline\nwaits with it",
+          "format": "uint32",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "timeout_seconds": {
+          "description": "how long one request may take before it is given up on, in seconds.\nDefaults to 30",
+          "format": "uint64",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "unwrap": {
+          "description": "a key to read the reply out from under, for an API that answers\n`{\"predictions\": …}`",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
         "url": {
-          "description": "endpoint to send the batch to",
+          "description": "endpoint to send to",
           "type": "string"
         },
         "verb": {
           "$ref": "#/$defs/HttpVerb",
-          "description": "http method. Accepted but not honoured yet: every request is a POST."
+          "description": "http method. `GET` and `DELETE` are refused — a request with no body\nwould send none of the messages"
+        },
+        "wrap": {
+          "description": "a key to put the body under, for an API that wants `{\"key\": …}`",
+          "type": [
+            "string",
+            "null"
+          ]
         }
       },
       "required": [
@@ -4015,6 +4269,19 @@ One pipeline: every input is merged into one stream, that stream runs through th
             "type"
           ],
           "type": "object"
+        },
+        {
+          "$ref": "#/$defs/FeaturesTransformConfig",
+          "properties": {
+            "type": {
+              "const": "features",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type"
+          ],
+          "type": "object"
         }
       ],
       "type": "object"
@@ -5528,6 +5795,32 @@ Run a draft's transforms over some messages.
         }
       ]
     },
+    "Band": {
+      "description": "The power in one frequency band, as a feature of its own.",
+      "properties": {
+        "as": {
+          "description": "the field the band's power is written under",
+          "type": "string"
+        },
+        "high_hz": {
+          "description": "the top of the band, in hertz, exclusive",
+          "format": "double",
+          "type": "number"
+        },
+        "low_hz": {
+          "description": "the bottom of the band, in hertz, inclusive",
+          "format": "double",
+          "type": "number"
+        }
+      },
+      "required": [
+        "low_hz",
+        "high_hz",
+        "as"
+      ],
+      "title": "band",
+      "type": "object"
+    },
     "BufferGateConfig": {
       "description": "A condition on a state bucket, as a release trigger for the `buffer`\ntransform.\n\nThe conditions are tested against the bucket entry rendered as an object —\nthe names `remember` wrote under are its fields — so `field` is a dotted\npath exactly as it is everywhere else, and several conditions mean *all of\nthem*, exactly as they do on `remember`'s `when`.\n\nNote what this is not: it is a gate on the whole buffer, not a test applied\nto each held message. When it opens, everything held is handed on.",
       "properties": {
@@ -6139,6 +6432,147 @@ Run a draft's transforms over some messages.
       "title": "detect",
       "type": "object"
     },
+    "FeatureKind": {
+      "description": "One number that describes a window of readings.",
+      "oneOf": [
+        {
+          "const": "mean",
+          "description": "The arithmetic mean.",
+          "type": "string"
+        },
+        {
+          "const": "std",
+          "description": "The population standard deviation.",
+          "type": "string"
+        },
+        {
+          "const": "min",
+          "description": "The smallest value.",
+          "type": "string"
+        },
+        {
+          "const": "max",
+          "description": "The largest value.",
+          "type": "string"
+        },
+        {
+          "const": "range",
+          "description": "The largest less the smallest.",
+          "type": "string"
+        },
+        {
+          "const": "slope",
+          "description": "The least-squares slope — per second against the `time` field, per\nmessage without one.",
+          "type": "string"
+        },
+        {
+          "const": "skew",
+          "description": "Which way the tail points.",
+          "type": "string"
+        },
+        {
+          "const": "kurtosis",
+          "description": "How heavy the tails are (excess kurtosis).",
+          "type": "string"
+        },
+        {
+          "const": "rms",
+          "description": "The root mean square.",
+          "type": "string"
+        },
+        {
+          "const": "crest_factor",
+          "description": "The peak magnitude over the RMS — how spiky the window is.",
+          "type": "string"
+        },
+        {
+          "const": "zero_crossings",
+          "description": "How many times the signal crossed zero.",
+          "type": "string"
+        },
+        {
+          "const": "n_peaks",
+          "description": "How many local maxima there were.",
+          "type": "string"
+        },
+        {
+          "const": "autocorr1",
+          "description": "The autocorrelation at lag one — how smooth the signal is.",
+          "type": "string"
+        },
+        {
+          "const": "dominant_frequency",
+          "description": "The strongest frequency above DC, in hertz. Needs a sample rate: the\n`time` field, or `sample_rate_hz`.",
+          "type": "string"
+        },
+        {
+          "const": "count",
+          "description": "How many readings the window held.",
+          "type": "string"
+        },
+        {
+          "const": "duration",
+          "description": "From the first reading to the last, in seconds, off the `time` field.",
+          "type": "string"
+        }
+      ]
+    },
+    "FeaturesTransformConfig": {
+      "description": "Folds a window of readings into one descriptor message per group — the\nseven numbers with the identifiers that a model endpoint actually wants,\nrather than the four hundred raw readings. Pair it with a `buffer` on the\ninput, or it will only ever see one reading at a time.\n\nEach feature in `include` is written under its own name (`mean`, `rms`,\n`crest_factor` …), each `bands` entry under its `as`, and the `group_by`\nfields under their leaf names, the reducer's way. A feature that has no\nanswer for the window — a slope of one point, a tone in a flat signal —\nis `null`. The spectral ones (`dominant_frequency`, `bands`) need a sample\nrate, which is `sample_rate_hz` when given and otherwise derived from the\n`time` field; without either they refuse to build. Nothing here keeps\nstate, so no bucket is needed.",
+      "properties": {
+        "bands": {
+          "description": "frequency bands whose power is wanted, each under its `as`",
+          "items": {
+            "$ref": "#/$defs/Band"
+          },
+          "type": "array"
+        },
+        "field": {
+          "description": "the numeric field the window is of",
+          "type": "string",
+          "x-message-field": true
+        },
+        "group_by": {
+          "description": "the fields that identify a series, the reducer's way. Leave it out for\nthe whole batch as one window",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "include": {
+          "description": "which features to compute, each written under its own name",
+          "items": {
+            "$ref": "#/$defs/FeatureKind"
+          },
+          "type": "array"
+        },
+        "on_missing": {
+          "$ref": "#/$defs/MissingFieldPolicy",
+          "description": "what to do about a reading missing the field or a group field"
+        },
+        "sample_rate_hz": {
+          "description": "the readings' sample rate in hertz, for the spectral features. Wins\nover one derived from `time`, for a source whose timestamps are coarse",
+          "format": "double",
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "time": {
+          "description": "the field carrying each reading's time — RFC 3339 or milliseconds since\nthe epoch. Gives `slope` and `duration` their seconds and the spectral\nfeatures their sample rate",
+          "type": [
+            "string",
+            "null"
+          ],
+          "x-message-field": true
+        }
+      },
+      "required": [
+        "field"
+      ],
+      "title": "features",
+      "type": "object"
+    },
     "FilterTransformConfig": {
       "description": "Drops messages that don't match a condition, and drops the whole batch if\nnone of them do. Pick either the `Numeric` or the `String` form — the fields\ndiffer because the comparisons do.",
       "oneOf": [
@@ -6204,16 +6638,164 @@ Run a draft's transforms over some messages.
       "title": "filter",
       "type": "object"
     },
+    "HttpAuthConfig": {
+      "description": "A credential carried in a header — checked by the `http` input on a post to\na pipeline's endpoint, and presented by the `http` output on a request it\nsends.\n\nOne type for both directions because it is one fact: a fixed string in a\nnamed header. The two halves read it differently — the input compares what\narrived against this, the output sets it — and only the input has the rule\nabout `ALLOWED_HEADERS`, since only the input can write a header into the\nmessages.\n\nThis is the **data plane's** own credential and has nothing to do with the\naccounts in the settings file: those are people signing in to look at and\nedit the graph, this is one system pushing data into one pipeline. A machine\nposting readings should not need an account that can rewrite the config, and\na person with such an account should not thereby be able to post readings.\n\nThe token is a fixed string the sender repeats on every request, which makes\nit **only as private as the transport**. kayak speaks plain HTTP; putting\nTLS in front of it is the deployment's job, and without that the token is\nreadable by anything on the path. It is the same trade every log-ingest API\nmakes, and worth making deliberately rather than by accident.",
+      "oneOf": [
+        {
+          "description": "A token in the standard `Authorization` header, as\n`Authorization: Bearer <token>`. The one to reach for unless the system\non the other end can't use that header.",
+          "properties": {
+            "token": {
+              "$ref": "#/$defs/Secret",
+              "description": "the token. A `${NAME}` reference, so the config file holds the name\nand the secret store holds the value."
+            },
+            "type": {
+              "const": "bearer",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "token"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "A fixed value in a header of your choosing — for webhook senders and\nreceivers that can't use `Authorization` but can carry a header of their\nown, which is most of them.",
+          "properties": {
+            "name": {
+              "description": "the header's name, matched case-insensitively on the way in. On an\n`http` input it may not be one of the headers an `envelope` passes\nthrough, since that would write the credential into the messages.",
+              "type": "string"
+            },
+            "type": {
+              "const": "header",
+              "type": "string"
+            },
+            "value": {
+              "$ref": "#/$defs/Secret",
+              "description": "the exact value that header must have. A `${NAME}` reference, as\nabove."
+            }
+          },
+          "required": [
+            "type",
+            "name",
+            "value"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "HttpBodyKind": {
+      "description": "What the body of one request from an `http` output holds.\n\nA closed set of two, and the choice is the receiving API's rather than a\ntuning knob: an ingest endpoint that takes an array wants `batch`, a webhook\nthat takes one event per call wants `message`. There is no third spelling\n(an envelope with a count, say) because that is the receiver's shape, and\nshaping the request is the http transform's outstanding work, not this\ncomponent's.",
+      "oneOf": [
+        {
+          "const": "batch",
+          "description": "The whole batch as one JSON array, in one request. One round trip per\nbatch however many messages it holds, which is why it is the default.",
+          "type": "string"
+        },
+        {
+          "const": "message",
+          "description": "One request per message, each body the message itself. Requests go out\nin order and the first failure fails the batch, so the messages after it\nare not sent — the same all-or-nothing a broker publish loop has.",
+          "type": "string"
+        }
+      ]
+    },
+    "HttpResponseKind": {
+      "description": "What an `http` transform does with the reply.",
+      "oneOf": [
+        {
+          "const": "replace",
+          "description": "The reply is the new batch: a JSON array of messages under `body:\nbatch`, a message or an array of them under `body: message`. The\nservice decides what carries on.",
+          "type": "string"
+        },
+        {
+          "const": "merge",
+          "description": "The reply is written onto the message that caused it, under `as`. Under\n`body: batch` an array reply of the batch's length is written\nelement-wise, and any other reply onto every message. Nothing the\npipeline sent is lost.",
+          "type": "string"
+        }
+      ]
+    },
     "HttpTransformConfig": {
-      "description": "Posts the batch to an http endpoint as a JSON array and replaces it with the\nJSON array in the response — so the service on the other end is the\ntransform.",
+      "description": "Sends the batch to an http endpoint and carries on with what comes back —\nso the service on the other end is the transform. The round trip to a\nmodel: a `buffer` and a `features` in front of it make the request the\nseven numbers with the identifiers, and `response: merge` writes the\nanswer onto that message so the identifiers survive the trip.\n\n`body` says whether one request carries the whole batch as a JSON array\nor each message goes on its own; `wrap` puts that under a key\n(`{\"instances\": …}`) for an API that wants one. `response` says what the\nreply is: `replace` makes it the new batch — the JSON array it holds under\n`batch`, the message (or array of messages) it holds under `message` —\nand `merge` writes it onto the message under `as` instead. `unwrap` reads\nthe reply out from under a key first. Anything but a 2xx fails the batch\nwith the endpoint's own words quoted; a network failure or a 5xx is\nretried `retries` times with backoff before it does.",
       "properties": {
+        "as": {
+          "description": "for `response: merge`: the field the reply is written under",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "auth": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/HttpAuthConfig"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "what this transform presents to be allowed to send. Absent sends no\ncredential"
+        },
+        "body": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/HttpBodyKind"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "what one request carries. Defaults to `batch`"
+        },
+        "response": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/HttpResponseKind"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "what to do with the reply. Defaults to `replace`"
+        },
+        "retries": {
+          "description": "how many times a request that failed to reach the endpoint, or was\nanswered 5xx or 429, is tried again before the batch fails. Defaults to\n0. Each retry waits a little longer than the last, and the pipeline\nwaits with it",
+          "format": "uint32",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "timeout_seconds": {
+          "description": "how long one request may take before it is given up on, in seconds.\nDefaults to 30",
+          "format": "uint64",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "unwrap": {
+          "description": "a key to read the reply out from under, for an API that answers\n`{\"predictions\": …}`",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
         "url": {
-          "description": "endpoint to send the batch to",
+          "description": "endpoint to send to",
           "type": "string"
         },
         "verb": {
           "$ref": "#/$defs/HttpVerb",
-          "description": "http method. Accepted but not honoured yet: every request is a POST."
+          "description": "http method. `GET` and `DELETE` are refused — a request with no body\nwould send none of the messages"
+        },
+        "wrap": {
+          "description": "a key to put the body under, for an API that wants `{\"key\": …}`",
+          "type": [
+            "string",
+            "null"
+          ]
         }
       },
       "required": [
@@ -7080,6 +7662,10 @@ Run a draft's transforms over some messages.
       "title": "script",
       "type": "object"
     },
+    "Secret": {
+      "description": "A config value that may *reference* secrets rather than contain them.\n\nOn the wire it is an ordinary JSON string, but `${NAME}` placeholders in it\nare replaced with real values when the pipeline is built, against whatever\nsecret store the server was started with:\n\n```json\n{ \"type\": \"nats\", \"urls\": \"nats://app:${NATS_PASSWORD}@broker:4222\" }\n```\n\nThe unresolved form is the only one this type ever holds. That is what makes\nit safe to commit, safe to hand back from `GET /api/pipelines` and safe to show\nin the UI — a resolved value exists only inside the built runtime component,\nnever in a `Config`. Resolution deliberately lives in the root crate: this\ncrate compiles to wasm for the frontend, which must not be able to hold a\nresolved secret at all.\n\nA value with no `${...}` in it is passed through untouched, so fields that\nhold nothing sensitive need no special handling.",
+      "type": "string"
+    },
     "SmoothMethod": {
       "description": "How a value is smoothed against the ones before it.",
       "oneOf": [
@@ -7449,6 +8035,19 @@ Run a draft's transforms over some messages.
             "type"
           ],
           "type": "object"
+        },
+        {
+          "$ref": "#/$defs/FeaturesTransformConfig",
+          "properties": {
+            "type": {
+              "const": "features",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type"
+          ],
+          "type": "object"
         }
       ],
       "type": "object"
@@ -7715,6 +8314,32 @@ The same wire shape the run loop's `PipelineView` serializes to — this is the 
           "type": "string"
         }
       ]
+    },
+    "Band": {
+      "description": "The power in one frequency band, as a feature of its own.",
+      "properties": {
+        "as": {
+          "description": "the field the band's power is written under",
+          "type": "string"
+        },
+        "high_hz": {
+          "description": "the top of the band, in hertz, exclusive",
+          "format": "double",
+          "type": "number"
+        },
+        "low_hz": {
+          "description": "the bottom of the band, in hertz, inclusive",
+          "format": "double",
+          "type": "number"
+        }
+      },
+      "required": [
+        "low_hz",
+        "high_hz",
+        "as"
+      ],
+      "title": "band",
+      "type": "object"
     },
     "BufferConfig": {
       "description": "How an input's messages are gathered into batches before the transforms see\nthem.\n\nAll three shapes are the same two limits with different halves left off — a\ncount, a time, or both, whichever is reached first. **A buffer never emits an\nempty batch**: the clock starts when the first message of a batch arrives,\nnot when the window was asked for, so an input that goes quiet emits nothing\nrather than a tick of nothing.\n\n`size` is a floor rather than a ceiling, the same rule a file output's\n`max_rows` follows: an arriving batch is never split, so an input already\nproducing batches of its own (`max_batch` on kafka and nats) can overshoot.",
@@ -8722,6 +9347,147 @@ The same wire shape the run loop's `PipelineView` serializes to — this is the 
         }
       ]
     },
+    "FeatureKind": {
+      "description": "One number that describes a window of readings.",
+      "oneOf": [
+        {
+          "const": "mean",
+          "description": "The arithmetic mean.",
+          "type": "string"
+        },
+        {
+          "const": "std",
+          "description": "The population standard deviation.",
+          "type": "string"
+        },
+        {
+          "const": "min",
+          "description": "The smallest value.",
+          "type": "string"
+        },
+        {
+          "const": "max",
+          "description": "The largest value.",
+          "type": "string"
+        },
+        {
+          "const": "range",
+          "description": "The largest less the smallest.",
+          "type": "string"
+        },
+        {
+          "const": "slope",
+          "description": "The least-squares slope — per second against the `time` field, per\nmessage without one.",
+          "type": "string"
+        },
+        {
+          "const": "skew",
+          "description": "Which way the tail points.",
+          "type": "string"
+        },
+        {
+          "const": "kurtosis",
+          "description": "How heavy the tails are (excess kurtosis).",
+          "type": "string"
+        },
+        {
+          "const": "rms",
+          "description": "The root mean square.",
+          "type": "string"
+        },
+        {
+          "const": "crest_factor",
+          "description": "The peak magnitude over the RMS — how spiky the window is.",
+          "type": "string"
+        },
+        {
+          "const": "zero_crossings",
+          "description": "How many times the signal crossed zero.",
+          "type": "string"
+        },
+        {
+          "const": "n_peaks",
+          "description": "How many local maxima there were.",
+          "type": "string"
+        },
+        {
+          "const": "autocorr1",
+          "description": "The autocorrelation at lag one — how smooth the signal is.",
+          "type": "string"
+        },
+        {
+          "const": "dominant_frequency",
+          "description": "The strongest frequency above DC, in hertz. Needs a sample rate: the\n`time` field, or `sample_rate_hz`.",
+          "type": "string"
+        },
+        {
+          "const": "count",
+          "description": "How many readings the window held.",
+          "type": "string"
+        },
+        {
+          "const": "duration",
+          "description": "From the first reading to the last, in seconds, off the `time` field.",
+          "type": "string"
+        }
+      ]
+    },
+    "FeaturesTransformConfig": {
+      "description": "Folds a window of readings into one descriptor message per group — the\nseven numbers with the identifiers that a model endpoint actually wants,\nrather than the four hundred raw readings. Pair it with a `buffer` on the\ninput, or it will only ever see one reading at a time.\n\nEach feature in `include` is written under its own name (`mean`, `rms`,\n`crest_factor` …), each `bands` entry under its `as`, and the `group_by`\nfields under their leaf names, the reducer's way. A feature that has no\nanswer for the window — a slope of one point, a tone in a flat signal —\nis `null`. The spectral ones (`dominant_frequency`, `bands`) need a sample\nrate, which is `sample_rate_hz` when given and otherwise derived from the\n`time` field; without either they refuse to build. Nothing here keeps\nstate, so no bucket is needed.",
+      "properties": {
+        "bands": {
+          "description": "frequency bands whose power is wanted, each under its `as`",
+          "items": {
+            "$ref": "#/$defs/Band"
+          },
+          "type": "array"
+        },
+        "field": {
+          "description": "the numeric field the window is of",
+          "type": "string",
+          "x-message-field": true
+        },
+        "group_by": {
+          "description": "the fields that identify a series, the reducer's way. Leave it out for\nthe whole batch as one window",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "include": {
+          "description": "which features to compute, each written under its own name",
+          "items": {
+            "$ref": "#/$defs/FeatureKind"
+          },
+          "type": "array"
+        },
+        "on_missing": {
+          "$ref": "#/$defs/MissingFieldPolicy",
+          "description": "what to do about a reading missing the field or a group field"
+        },
+        "sample_rate_hz": {
+          "description": "the readings' sample rate in hertz, for the spectral features. Wins\nover one derived from `time`, for a source whose timestamps are coarse",
+          "format": "double",
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "time": {
+          "description": "the field carrying each reading's time — RFC 3339 or milliseconds since\nthe epoch. Gives `slope` and `duration` their seconds and the spectral\nfeatures their sample rate",
+          "type": [
+            "string",
+            "null"
+          ],
+          "x-message-field": true
+        }
+      },
+      "required": [
+        "field"
+      ],
+      "title": "features",
+      "type": "object"
+    },
     "FileFormat": {
       "description": "How the messages in a file are laid out.\n\nBoth are JSON — the difference is whether the file is one document or one\ndocument per line. `ndjson` is the one to want for anything that streams:\nthe file is valid after every batch, so a run that is still going (or that\ndied) is still readable, and every tool that eats logs eats it.",
       "oneOf": [
@@ -8988,16 +9754,103 @@ The same wire shape the run loop's `PipelineView` serializes to — this is the 
       "title": "http",
       "type": "object"
     },
+    "HttpResponseKind": {
+      "description": "What an `http` transform does with the reply.",
+      "oneOf": [
+        {
+          "const": "replace",
+          "description": "The reply is the new batch: a JSON array of messages under `body:\nbatch`, a message or an array of them under `body: message`. The\nservice decides what carries on.",
+          "type": "string"
+        },
+        {
+          "const": "merge",
+          "description": "The reply is written onto the message that caused it, under `as`. Under\n`body: batch` an array reply of the batch's length is written\nelement-wise, and any other reply onto every message. Nothing the\npipeline sent is lost.",
+          "type": "string"
+        }
+      ]
+    },
     "HttpTransformConfig": {
-      "description": "Posts the batch to an http endpoint as a JSON array and replaces it with the\nJSON array in the response — so the service on the other end is the\ntransform.",
+      "description": "Sends the batch to an http endpoint and carries on with what comes back —\nso the service on the other end is the transform. The round trip to a\nmodel: a `buffer` and a `features` in front of it make the request the\nseven numbers with the identifiers, and `response: merge` writes the\nanswer onto that message so the identifiers survive the trip.\n\n`body` says whether one request carries the whole batch as a JSON array\nor each message goes on its own; `wrap` puts that under a key\n(`{\"instances\": …}`) for an API that wants one. `response` says what the\nreply is: `replace` makes it the new batch — the JSON array it holds under\n`batch`, the message (or array of messages) it holds under `message` —\nand `merge` writes it onto the message under `as` instead. `unwrap` reads\nthe reply out from under a key first. Anything but a 2xx fails the batch\nwith the endpoint's own words quoted; a network failure or a 5xx is\nretried `retries` times with backoff before it does.",
       "properties": {
+        "as": {
+          "description": "for `response: merge`: the field the reply is written under",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "auth": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/HttpAuthConfig"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "what this transform presents to be allowed to send. Absent sends no\ncredential"
+        },
+        "body": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/HttpBodyKind"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "what one request carries. Defaults to `batch`"
+        },
+        "response": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/HttpResponseKind"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "what to do with the reply. Defaults to `replace`"
+        },
+        "retries": {
+          "description": "how many times a request that failed to reach the endpoint, or was\nanswered 5xx or 429, is tried again before the batch fails. Defaults to\n0. Each retry waits a little longer than the last, and the pipeline\nwaits with it",
+          "format": "uint32",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "timeout_seconds": {
+          "description": "how long one request may take before it is given up on, in seconds.\nDefaults to 30",
+          "format": "uint64",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "unwrap": {
+          "description": "a key to read the reply out from under, for an API that answers\n`{\"predictions\": …}`",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
         "url": {
-          "description": "endpoint to send the batch to",
+          "description": "endpoint to send to",
           "type": "string"
         },
         "verb": {
           "$ref": "#/$defs/HttpVerb",
-          "description": "http method. Accepted but not honoured yet: every request is a POST."
+          "description": "http method. `GET` and `DELETE` are refused — a request with no body\nwould send none of the messages"
+        },
+        "wrap": {
+          "description": "a key to put the body under, for an API that wants `{\"key\": …}`",
+          "type": [
+            "string",
+            "null"
+          ]
         }
       },
       "required": [
@@ -11235,6 +12088,19 @@ The same wire shape the run loop's `PipelineView` serializes to — this is the 
           "properties": {
             "type": {
               "const": "resample",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type"
+          ],
+          "type": "object"
+        },
+        {
+          "$ref": "#/$defs/FeaturesTransformConfig",
+          "properties": {
+            "type": {
+              "const": "features",
               "type": "string"
             }
           },

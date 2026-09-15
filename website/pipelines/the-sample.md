@@ -140,6 +140,15 @@ grid points are emitted by the clock rather than by a reading. Both share the
 and it is `max_keys: 8` rather than 1 because every transform in a pipeline
 keeps its own state under the key, and the state tab shows each of them.
 
+`heartbeat_features` is the [model round trip](/pipelines/model-round-trip)
+in miniature: a ten-second `buffer` on its input, a `features` that folds each
+window into one descriptor — mean, spread, slope, a dominant frequency off a
+declared one-hertz sample rate — and an `http` transform that posts that
+descriptor to the server's own `ingest` endpoint and merges the reply
+(`{"accepted": 1}`) back onto it under `ingest`. It stands in for a model
+endpoint the way `heartbeat_to_webhook` stands in for a webhook, so the whole
+loop runs on a bare `just dev`.
+
 `heartbeat_to_disk` is the file output's sample, and it hangs off `heartbeat`
 rather than off the nats source on purpose: the dummy input needs nothing
 running, so it is the one pipeline in here that writes real output on a bare

@@ -991,16 +991,75 @@ pub struct FilterTransformConfig {
     pub filter: FilterKind,
 }
 
-/// Posts the batch to an http endpoint as a JSON array and replaces it with the
-/// JSON array in the response — so the service on the other end is the
-/// transform.
+/// Sends the batch to an http endpoint and carries on with what comes back —
+/// so the service on the other end is the transform. The round trip to a
+/// model: a `buffer` and a `features` in front of it make the request the
+/// seven numbers with the identifiers, and `response: merge` writes the
+/// answer onto that message so the identifiers survive the trip.
+///
+/// `body` says whether one request carries the whole batch as a JSON array
+/// or each message goes on its own; `wrap` puts that under a key
+/// (`{"instances": …}`) for an API that wants one. `response` says what the
+/// reply is: `replace` makes it the new batch — the JSON array it holds under
+/// `batch`, the message (or array of messages) it holds under `message` —
+/// and `merge` writes it onto the message under `as` instead. `unwrap` reads
+/// the reply out from under a key first. Anything but a 2xx fails the batch
+/// with the endpoint's own words quoted; a network failure or a 5xx is
+/// retried `retries` times with backoff before it does.
 #[derive(Clone, Debug, Deserialize, Serialize, JsonSchema)]
 #[schemars(title = "http")]
 pub struct HttpTransformConfig {
-    /// endpoint to send the batch to
+    /// endpoint to send to
     pub url: String,
-    /// http method. Accepted but not honoured yet: every request is a POST.
+    /// http method. `GET` and `DELETE` are refused — a request with no body
+    /// would send none of the messages
     pub verb: HttpVerb,
+    /// what one request carries. Defaults to `batch`
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub body: Option<HttpBodyKind>,
+    /// a key to put the body under, for an API that wants `{"key": …}`
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub wrap: Option<String>,
+    /// what to do with the reply. Defaults to `replace`
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub response: Option<HttpResponseKind>,
+    /// a key to read the reply out from under, for an API that answers
+    /// `{"predictions": …}`
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub unwrap: Option<String>,
+    /// for `response: merge`: the field the reply is written under
+    #[serde(default, rename = "as", skip_serializing_if = "Option::is_none")]
+    pub output: Option<String>,
+    /// what this transform presents to be allowed to send. Absent sends no
+    /// credential
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub auth: Option<HttpAuthConfig>,
+    /// how long one request may take before it is given up on, in seconds.
+    /// Defaults to 30
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub timeout_seconds: Option<u64>,
+    /// how many times a request that failed to reach the endpoint, or was
+    /// answered 5xx or 429, is tried again before the batch fails. Defaults to
+    /// 0. Each retry waits a little longer than the last, and the pipeline
+    /// waits with it
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub retries: Option<u32>,
+}
+
+/// What an `http` transform does with the reply.
+#[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, JsonSchema, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum HttpResponseKind {
+    /// The reply is the new batch: a JSON array of messages under `body:
+    /// batch`, a message or an array of them under `body: message`. The
+    /// service decides what carries on.
+    #[default]
+    Replace,
+    /// The reply is written onto the message that caused it, under `as`. Under
+    /// `body: batch` an array reply of the batch's length is written
+    /// element-wise, and any other reply onto every message. Nothing the
+    /// pipeline sent is lost.
+    Merge,
 }
 
 /// The http method an http transform sends with.
@@ -1460,6 +1519,7 @@ pub enum TransformKind {
     Smooth(crate::streaming::SmoothTransformConfig),
     Detect(crate::streaming::DetectTransformConfig),
     Resample(crate::streaming::ResampleTransformConfig),
+    Features(crate::streaming::FeaturesTransformConfig),
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, JsonSchema)]

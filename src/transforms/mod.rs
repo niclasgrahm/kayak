@@ -6,6 +6,7 @@ pub mod buffer;
 pub mod deadband;
 pub mod derive;
 pub mod detect;
+pub mod features;
 pub mod filter;
 pub mod keyed;
 pub mod http;

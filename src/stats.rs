@@ -455,6 +455,107 @@ pub fn interp(xs: &[f64], ys: &[f64], x: f64) -> Option<f64> {
     Some(y0 + (y1 - y0) * (x - x0) / (x1 - x0))
 }
 
+/// The peak magnitude over the RMS — how spiky a signal is. `None` of
+/// nothing or of a signal that is all zero.
+#[must_use]
+pub fn crest_factor(numbers: &[f64]) -> Option<f64> {
+    let rms = rms(numbers)?;
+    if rms == 0.0 {
+        return None;
+    }
+    let peak = numbers.iter().fold(0.0_f64, |m, x| m.max(x.abs()));
+    Some(peak / rms)
+}
+
+/// How many times the signal crosses zero. An exact zero takes the sign of
+/// the value before it, so a signal that touches zero and comes back does
+/// not count twice.
+#[must_use]
+pub fn zero_crossings(numbers: &[f64]) -> usize {
+    let mut crossings = 0;
+    let mut previous: Option<bool> = None;
+    for &x in numbers {
+        if x == 0.0 {
+            continue;
+        }
+        let positive = x > 0.0;
+        if previous.is_some_and(|p| p != positive) {
+            crossings += 1;
+        }
+        previous = Some(positive);
+    }
+    crossings
+}
+
+/// The one-sided power spectrum: `n / 2 + 1` bins, bin `k` at `k · fs / n`,
+/// scaled so the bins sum to the signal's mean square (Parseval). Nothing is
+/// windowed, so a tone between two bins leaks into both — the resolution a
+/// short window has is the resolution it has. Empty of nothing.
+#[must_use]
+pub fn power_spectrum(numbers: &[f64]) -> Vec<f64> {
+    use rustfft::{FftPlanner, num_complex::Complex};
+    let n = numbers.len();
+    if n == 0 {
+        return Vec::new();
+    }
+    let mut buffer: Vec<Complex<f64>> = numbers.iter().map(|&x| Complex::new(x, 0.0)).collect();
+    FftPlanner::new().plan_fft_forward(n).process(&mut buffer);
+    #[allow(clippy::cast_precision_loss)]
+    let scale = (n as f64) * (n as f64);
+    (0..=n / 2)
+        .map(|k| {
+            let power = buffer[k].norm_sqr() / scale;
+            // every bin but DC and (for even n) Nyquist has a mirror image
+            // in the half that is not returned
+            let mirrored = k != 0 && !(n.is_multiple_of(2) && k == n / 2);
+            if mirrored { 2.0 * power } else { power }
+        })
+        .collect()
+}
+
+/// The frequency, in the units of `sample_rate`, of the strongest bin above
+/// DC. `None` of fewer than two samples or of a signal with no power.
+#[must_use]
+pub fn dominant_frequency(numbers: &[f64], sample_rate: f64) -> Option<f64> {
+    if numbers.len() < 2 || sample_rate <= 0.0 {
+        return None;
+    }
+    let spectrum = power_spectrum(numbers);
+    let (k, power) = spectrum
+        .iter()
+        .enumerate()
+        .skip(1)
+        .max_by(|a, b| a.1.total_cmp(b.1))?;
+    if *power <= 0.0 {
+        return None;
+    }
+    #[allow(clippy::cast_precision_loss)]
+    Some(k as f64 * sample_rate / numbers.len() as f64)
+}
+
+/// The power in the bins whose frequency is within `low..high`, in the same
+/// mean-square units the spectrum sums to. `None` of fewer than two samples.
+#[must_use]
+pub fn band_energy(numbers: &[f64], sample_rate: f64, low: f64, high: f64) -> Option<f64> {
+    if numbers.len() < 2 || sample_rate <= 0.0 {
+        return None;
+    }
+    #[allow(clippy::cast_precision_loss)]
+    let n = numbers.len() as f64;
+    Some(
+        power_spectrum(numbers)
+            .iter()
+            .enumerate()
+            .filter(|(k, _)| {
+                #[allow(clippy::cast_precision_loss)]
+                let f = *k as f64 * sample_rate / n;
+                f >= low && f < high
+            })
+            .map(|(_, p)| p)
+            .sum(),
+    )
+}
+
 /// The dynamic-time-warping distance between two series: the sum of absolute
 /// differences along the alignment that makes them most alike, so two cycles
 /// of the same shape at different speeds are close. O(n·m) time and O(m)
@@ -644,6 +745,33 @@ mod tests {
         assert_eq!(clamp(5.0, 0.0, 3.0), 3.0);
         assert_eq!(clamp(-1.0, 0.0, 3.0), 0.0);
         assert_eq!(clamp(1.0, 0.0, 3.0), 1.0);
+    }
+
+    #[test]
+    fn waveform_shape_features() {
+        let square = [1.0, 1.0, -1.0, -1.0, 1.0, 1.0, -1.0, -1.0];
+        assert_eq!(crest_factor(&square), Some(1.0), "a square wave's peak is its rms");
+        assert_eq!(crest_factor(&[0.0, 0.0]), None);
+        assert_eq!(zero_crossings(&square), 3);
+        assert_eq!(zero_crossings(&[1.0, 0.0, 1.0, -1.0]), 1, "touching zero is not a crossing");
+    }
+
+    /// A pure tone at bin 2 of 16 samples at 16 Hz is a 2 Hz tone, all of
+    /// whose power is in that bin — and the spectrum sums to the mean square.
+    #[test]
+    fn the_spectrum_finds_a_tone_and_keeps_parseval() {
+        let fs = 16.0;
+        let tone: Vec<f64> = (0..16)
+            .map(|i| (2.0 * std::f64::consts::PI * 2.0 * f64::from(i) / fs).sin())
+            .collect();
+        assert!(close(dominant_frequency(&tone, fs).unwrap_or_default(), 2.0));
+        let total: f64 = power_spectrum(&tone).iter().sum();
+        let mean_square = rms(&tone).map(|r| r * r).unwrap_or_default();
+        assert!(close(total, mean_square), "{total} vs {mean_square}");
+        assert!(close(band_energy(&tone, fs, 1.5, 2.5).unwrap_or_default(), mean_square));
+        assert!(close(band_energy(&tone, fs, 4.0, 8.0).unwrap_or_default(), 0.0));
+        assert_eq!(dominant_frequency(&[0.0; 8], fs), None, "no power, no tone");
+        assert_eq!(dominant_frequency(&[1.0], fs), None);
     }
 
     #[test]

@@ -119,6 +119,7 @@ redis = { version = "1.5.0", features = ["tokio-comp"] }
 async-opcua = { version = "0.19.0", default-features = false, features = ["client"] }
 rhai = { version = "1.25.1", features = ["sync"] }
 jsonwebtoken = { version = "11.0.0", default-features = false, features = ["aws_lc_rs", "use_pem"] }
+rustfft = "6.4.1"
 
 [dev-dependencies]
 # The same rhai the runtime uses, with the feature that lets a test read the

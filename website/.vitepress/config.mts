@@ -89,6 +89,7 @@ export default defineConfig({
           { text: 'scripting', link: '/pipelines/scripting' },
           { text: 'time and numbers', link: '/pipelines/time-and-numbers' },
           { text: 'streaming statistics', link: '/pipelines/streaming-statistics' },
+          { text: 'the model round trip', link: '/pipelines/model-round-trip' },
           { text: 'the sample graph', link: '/pipelines/the-sample' },
         ],
       },

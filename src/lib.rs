@@ -23,6 +23,7 @@ pub mod inputs;
 pub mod layout;
 pub mod listen;
 pub mod openapi;
+pub mod outbound;
 pub mod outputs;
 pub mod persist;
 pub mod pipeline;

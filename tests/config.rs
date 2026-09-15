@@ -189,15 +189,45 @@ fn streaming_transform_samples() -> Vec<(&'static str, Value)> {
                 "time": "ts"
             }),
         ),
+        (
+            "features",
+            json!({
+                "type": "features",
+                "field": "vibration",
+                "include": ["mean", "rms", "crest_factor", "dominant_frequency", "count"],
+                "bands": [{"low_hz": 10.0, "high_hz": 50.0, "as": "band_10_50"}],
+                "group_by": ["_meta.machine_id"],
+                "time": "ts",
+                "sample_rate_hz": 2000.0
+            }),
+        ),
     ]
+}
+
+/// The round trip to a model, with every knob set — the sample is also what
+/// the reference renders, so the spelling of each is pinned here.
+fn http_transform_sample() -> (&'static str, Value) {
+    (
+        "http",
+        json!({
+            "type": "http",
+            "url": "http://localhost/model",
+            "verb": "POST",
+            "body": "message",
+            "wrap": "instances",
+            "response": "merge",
+            "unwrap": "predictions",
+            "as": "prediction",
+            "auth": {"type": "bearer", "token": "${MODEL_TOKEN}"},
+            "timeout_seconds": 10,
+            "retries": 2
+        }),
+    )
 }
 
 fn chain_transform_samples() -> Vec<(&'static str, Value)> {
     vec![
-        (
-            "http",
-            json!({"type": "http", "url": "http://localhost/x", "verb": "POST"}),
-        ),
+        http_transform_sample(),
         ("splitter", json!({"type": "splitter", "out_size": 2})),
         (
             "reducer",

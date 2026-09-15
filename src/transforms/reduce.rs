@@ -89,9 +89,9 @@ pub struct ReduceTransform {
 /// The messages are kept rather than the running answers because the functions
 /// don't share one accumulator — `median` needs every value, `collect` is every
 /// value — and a batch is already entirely in memory by the time it gets here.
-struct Group {
-    key: Vec<Value>,
-    messages: Vec<Arc<Value>>,
+pub(crate) struct Group {
+    pub(crate) key: Vec<Value>,
+    pub(crate) messages: Vec<Arc<Value>>,
 }
 
 #[async_trait::async_trait]
@@ -129,43 +129,7 @@ impl ReduceTransform {
     /// the handful of distinct values a batch holds, and hashing a `Vec<Value>`
     /// would mean giving `Value` a `Hash` it doesn't have.
     fn group(&self, batch: &MessageBatch) -> anyhow::Result<Vec<Group>> {
-        if self.group_by.is_empty() {
-            return Ok(vec![Group {
-                key: Vec::new(),
-                messages: batch.clone(),
-            }]);
-        }
-
-        let mut groups: Vec<Group> = Vec::new();
-        for message in batch {
-            let mut key = Vec::with_capacity(self.group_by.len());
-            let mut complete = true;
-            for name in &self.group_by {
-                if let Some(value) = present(message, name) {
-                    key.push(value.clone());
-                } else {
-                    // a message that can't be placed in a group can't be
-                    // reduced at all, so this one is about the message rather
-                    // than about one aggregation
-                    if self.on_missing == MissingFieldPolicy::Error {
-                        bail!("group_by field '{name}' is missing from a message");
-                    }
-                    complete = false;
-                    break;
-                }
-            }
-            if !complete {
-                continue;
-            }
-            match groups.iter_mut().find(|group| group.key == key) {
-                Some(group) => group.messages.push(Arc::clone(message)),
-                None => groups.push(Group {
-                    key,
-                    messages: vec![Arc::clone(message)],
-                }),
-            }
-        }
-        Ok(groups)
+        group_batch(batch, &self.group_by, self.on_missing)
     }
 
     /// One group as the message it comes out as: what it was grouped by, then
@@ -255,6 +219,53 @@ impl ReduceTransform {
         }
         Ok(values)
     }
+}
+
+/// Split a batch into its groups, in the order they were first seen — the
+/// reducer's grouping, shared with `features`, which asks the same question
+/// of a window.
+pub(crate) fn group_batch(
+    batch: &MessageBatch,
+    group_by: &[String],
+    on_missing: MissingFieldPolicy,
+) -> anyhow::Result<Vec<Group>> {
+    if group_by.is_empty() {
+        return Ok(vec![Group {
+            key: Vec::new(),
+            messages: batch.clone(),
+        }]);
+    }
+
+    let mut groups: Vec<Group> = Vec::new();
+    for message in batch {
+        let mut key = Vec::with_capacity(group_by.len());
+        let mut complete = true;
+        for name in group_by {
+            if let Some(value) = present(message, name) {
+                key.push(value.clone());
+            } else {
+                // a message that can't be placed in a group can't be
+                // reduced at all, so this one is about the message rather
+                // than about one aggregation
+                if on_missing == MissingFieldPolicy::Error {
+                    bail!("group_by field '{name}' is missing from a message");
+                }
+                complete = false;
+                break;
+            }
+        }
+        if !complete {
+            continue;
+        }
+        match groups.iter_mut().find(|group| group.key == key) {
+            Some(group) => group.messages.push(Arc::clone(message)),
+            None => groups.push(Group {
+                key,
+                messages: vec![Arc::clone(message)],
+            }),
+        }
+    }
+    Ok(groups)
 }
 
 /// A field's value, if the message really carries one.
