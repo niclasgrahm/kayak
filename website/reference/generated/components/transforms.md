@@ -424,3 +424,67 @@ Several derivations run at once and each is written under its own `as`, so one p
 | `field` | `string` | <Badge type="warning" text="required" /> | the numeric field it is derived from |
 | `as` | `string` | <Badge type="warning" text="required" /> | the field the answer is written under |
 | `wrap_at` | `number` | <Badge type="info" text="optional" /> | for `counter`: the value the counter wraps back to zero at, so a drop is read as having run through the top rather than as a reset |
+
+
+## `rolling` {#transform-rolling}
+
+Writes onto each message aggregations over the last few messages of its series — the last `size` of them, or the last `seconds`' worth, or both limits at once. The reducer's `{function, field, as}` list, the reducer's functions; a second component rather than a `window` on `reduce` because the cardinality differs — one message out per message in, not one per group per batch.
+
+`size` is always required, because it is the bound: a window by time alone grows with the rate of the stream, and every piece of state has a bound. `seconds` on top of it also drops what is older than that, off the `time` field. `count` needs a `field` here — it counts how many of the window carried one, which is `size` once the window is warm and the warm-up check before that.
+
+| field | type | | description |
+| --- | --- | --- | --- |
+| `aggregations` | `list of aggregation` | <Badge type="warning" text="required" /> | what to compute over the window. At least one, each with a distinct `as` |
+| `size` | `integer` | <Badge type="warning" text="required" /> | how many messages the window holds at most |
+| `group_by` | `list of string` | <Badge type="info" text="optional" /> | the fields that identify a series, the reducer's way. Leave it out for one series |
+| `on_missing` | `error` \| `skip` | <Badge type="info" text="optional" /> | what to do about a message missing an aggregated field or a group field |
+| `seconds` | `number` | <Badge type="info" text="optional" /> | also drop from the window whatever is older than this many seconds, off the `time` field |
+| `time` | `string` | <Badge type="info" text="optional" /> | the field carrying each message's time — RFC 3339 or milliseconds since the epoch. Leave it out for arrival time |
+
+**`aggregations` — each entry**
+
+| field | type | | description |
+| --- | --- | --- | --- |
+| `function` | `sum` \| `avg` \| `min` \| `max` \| `count` \| `count_distinct` \| `first` \| `last` \| `collect` \| `median` \| `stddev` \| `slope` | <Badge type="warning" text="required" /> | how to combine the values |
+| `as` | `string` | <Badge type="warning" text="required" /> | the field the emitted message carries this answer under. Two aggregations may not share one, and none may collide with a `group_by` field. |
+| `field` | `string` | <Badge type="info" text="optional" /> | the field to aggregate. Required by every function except `count`, which counts messages when it is left out. |
+
+
+## `smooth` {#transform-smooth}
+
+Smooths a numeric field against the values before it in its series, writing the result onto the message — over the field itself, or under `as`.
+
+| field | type | | description |
+| --- | --- | --- | --- |
+| `field` | `string` | <Badge type="warning" text="required" /> | the numeric field to smooth |
+| `method` | `ewma \| median \| hampel \| savitzky_golay` | <Badge type="warning" text="required" /> | how |
+| `as` | `string` | <Badge type="info" text="optional" /> | the field the smoothed value is written under. Leave it out to replace the field itself |
+| `group_by` | `list of string` | <Badge type="info" text="optional" /> | the fields that identify a series, the reducer's way. Leave it out for one series |
+| `on_missing` | `error` \| `skip` | <Badge type="info" text="optional" /> | what to do about a message missing the field or a group field |
+
+**`method` — `type: "ewma"`**
+
+| field | type | | description |
+| --- | --- | --- | --- |
+| `alpha` | `number` | <Badge type="info" text="optional" /> | the weight of the newest value, 0 to 1 |
+| `half_life` | `number` | <Badge type="info" text="optional" /> | the number of messages after which a value's weight has halved — the spelling with an intuition behind it |
+
+**`method` — `type: "median"`**
+
+| field | type | | description |
+| --- | --- | --- | --- |
+| `size` | `integer` | <Badge type="warning" text="required" /> | how many values the window holds |
+
+**`method` — `type: "hampel"`**
+
+| field | type | | description |
+| --- | --- | --- | --- |
+| `size` | `integer` | <Badge type="warning" text="required" /> | how many values the window holds, this one included |
+| `threshold` | `number` | <Badge type="info" text="optional" /> | how many scaled MADs from the median count as an outlier. `3` when left out |
+
+**`method` — `type: "savitzky_golay"`**
+
+| field | type | | description |
+| --- | --- | --- | --- |
+| `size` | `integer` | <Badge type="warning" text="required" /> | how many values the window holds, this one included |
+| `order` | `integer` | <Badge type="info" text="optional" /> | the degree of the polynomial, below `size`. `2` when left out |

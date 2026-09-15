@@ -10,7 +10,9 @@ pub mod keyed;
 pub mod http;
 pub mod map;
 pub mod reduce;
+pub mod rolling;
 pub mod script;
+pub mod smooth;
 pub mod splitter;
 pub mod state;
 

@@ -73,6 +73,8 @@ impl BuildTransformConfig for TransformConfig {
             TransformKind::Script(c) => c.build(ctx),
             TransformKind::Deadband(c) => c.build(ctx),
             TransformKind::Derive(c) => c.build(ctx),
+            TransformKind::Rolling(c) => c.build(ctx),
+            TransformKind::Smooth(c) => c.build(ctx),
         }
     }
 }

@@ -3111,6 +3111,57 @@ One pipeline: every input is merged into one stream, that stream runs through th
       ],
       "type": "object"
     },
+    "RollingTransformConfig": {
+      "description": "Writes onto each message aggregations over the last few messages of its\nseries — the last `size` of them, or the last `seconds`' worth, or both\nlimits at once. The reducer's `{function, field, as}` list, the reducer's\nfunctions; a second component rather than a `window` on `reduce` because\nthe cardinality differs — one message out per message in, not one per\ngroup per batch.\n\n`size` is always required, because it is the bound: a window by time alone\ngrows with the rate of the stream, and every piece of state has a bound.\n`seconds` on top of it also drops what is older than that, off the `time`\nfield. `count` needs a `field` here — it counts how many of the window\ncarried one, which is `size` once the window is warm and the warm-up check\nbefore that.",
+      "properties": {
+        "aggregations": {
+          "description": "what to compute over the window. At least one, each with a distinct `as`",
+          "items": {
+            "$ref": "#/$defs/Aggregation"
+          },
+          "type": "array"
+        },
+        "group_by": {
+          "description": "the fields that identify a series, the reducer's way. Leave it out for\none series",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "on_missing": {
+          "$ref": "#/$defs/MissingFieldPolicy",
+          "description": "what to do about a message missing an aggregated field or a group field"
+        },
+        "seconds": {
+          "description": "also drop from the window whatever is older than this many seconds,\noff the `time` field",
+          "format": "double",
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "size": {
+          "description": "how many messages the window holds at most",
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "time": {
+          "description": "the field carrying each message's time — RFC 3339 or milliseconds since\nthe epoch. Leave it out for arrival time",
+          "type": [
+            "string",
+            "null"
+          ],
+          "x-message-field": true
+        }
+      },
+      "required": [
+        "aggregations",
+        "size"
+      ],
+      "title": "rolling",
+      "type": "object"
+    },
     "RotationConfig": {
       "description": "When a file is closed and the next one started.\n\nBoth triggers are optional and are checked together — whichever comes first\nrotates. With neither, a pipeline writes one file for as long as it runs.\n\nShared with the object-store output rather than local-only: \"how big does a\npart get\" is the same question on a disk and in a bucket, and the answer\nbelongs in one place.",
       "properties": {
@@ -3258,6 +3309,155 @@ One pipeline: every input is merged into one stream, that stream runs through th
     "Secret": {
       "description": "A config value that may *reference* secrets rather than contain them.\n\nOn the wire it is an ordinary JSON string, but `${NAME}` placeholders in it\nare replaced with real values when the pipeline is built, against whatever\nsecret store the server was started with:\n\n```json\n{ \"type\": \"nats\", \"urls\": \"nats://app:${NATS_PASSWORD}@broker:4222\" }\n```\n\nThe unresolved form is the only one this type ever holds. That is what makes\nit safe to commit, safe to hand back from `GET /api/pipelines` and safe to show\nin the UI — a resolved value exists only inside the built runtime component,\nnever in a `Config`. Resolution deliberately lives in the root crate: this\ncrate compiles to wasm for the frontend, which must not be able to hold a\nresolved secret at all.\n\nA value with no `${...}` in it is passed through untouched, so fields that\nhold nothing sensitive need no special handling.",
       "type": "string"
+    },
+    "SmoothMethod": {
+      "description": "How a value is smoothed against the ones before it.",
+      "oneOf": [
+        {
+          "description": "An exponentially weighted moving average — cheap, no window, follows\nthe data as closely as `alpha` says. Give `alpha` or `half_life`, not\nboth.",
+          "properties": {
+            "alpha": {
+              "description": "the weight of the newest value, 0 to 1",
+              "format": "double",
+              "type": [
+                "number",
+                "null"
+              ]
+            },
+            "half_life": {
+              "description": "the number of messages after which a value's weight has halved —\nthe spelling with an intuition behind it",
+              "format": "double",
+              "type": [
+                "number",
+                "null"
+              ]
+            },
+            "type": {
+              "const": "ewma",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "The median of the last `size` values, this one included. Removes\nsingle-sample spikes outright, which a mean only spreads out.",
+          "properties": {
+            "size": {
+              "description": "how many values the window holds",
+              "format": "uint",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "type": {
+              "const": "median",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "size"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "A Hampel filter: the value is kept unless it is further than\n`threshold` robust standard deviations from the window's median, in\nwhich case the median replaces it. The right first stage in front of\nany detector — it removes the outliers without smearing the signal.",
+          "properties": {
+            "size": {
+              "description": "how many values the window holds, this one included",
+              "format": "uint",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "threshold": {
+              "description": "how many scaled MADs from the median count as an outlier. `3`\nwhen left out",
+              "format": "double",
+              "type": [
+                "number",
+                "null"
+              ]
+            },
+            "type": {
+              "const": "hampel",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "size"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "A Savitzky–Golay filter: a polynomial of `order` fitted to the last\n`size` values by least squares, evaluated at the newest. Smooths while\nkeeping the shape of peaks that a moving average flattens. Trailing\nrather than centred, because a stream cannot see the future; until\nthe window holds more than `order` values the value passes untouched.",
+          "properties": {
+            "order": {
+              "description": "the degree of the polynomial, below `size`. `2` when left out",
+              "format": "uint",
+              "minimum": 0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "size": {
+              "description": "how many values the window holds, this one included",
+              "format": "uint",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "type": {
+              "const": "savitzky_golay",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "size"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "SmoothTransformConfig": {
+      "description": "Smooths a numeric field against the values before it in its series, writing\nthe result onto the message — over the field itself, or under `as`.",
+      "properties": {
+        "as": {
+          "description": "the field the smoothed value is written under. Leave it out to replace\nthe field itself",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "field": {
+          "description": "the numeric field to smooth",
+          "type": "string",
+          "x-message-field": true
+        },
+        "group_by": {
+          "description": "the fields that identify a series, the reducer's way. Leave it out for\none series",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "method": {
+          "$ref": "#/$defs/SmoothMethod",
+          "description": "how"
+        },
+        "on_missing": {
+          "$ref": "#/$defs/MissingFieldPolicy",
+          "description": "what to do about a message missing the field or a group field"
+        }
+      },
+      "required": [
+        "field",
+        "method"
+      ],
+      "title": "smooth",
+      "type": "object"
     },
     "SplitterTransformConfig": {
       "description": "Cuts one batch into several smaller ones — the opposite of `buffer`.\n\nNote the current limitation: messages left over after the last whole chunk\nare dropped, so 4 messages with `out_size: 3` emit one batch, not two.",
@@ -3449,6 +3649,32 @@ One pipeline: every input is merged into one stream, that stream runs through th
           "properties": {
             "type": {
               "const": "derive",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type"
+          ],
+          "type": "object"
+        },
+        {
+          "$ref": "#/$defs/RollingTransformConfig",
+          "properties": {
+            "type": {
+              "const": "rolling",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type"
+          ],
+          "type": "object"
+        },
+        {
+          "$ref": "#/$defs/SmoothTransformConfig",
+          "properties": {
+            "type": {
+              "const": "smooth",
               "type": "string"
             }
           },
@@ -6079,6 +6305,57 @@ Run a draft's transforms over some messages.
       ],
       "type": "object"
     },
+    "RollingTransformConfig": {
+      "description": "Writes onto each message aggregations over the last few messages of its\nseries — the last `size` of them, or the last `seconds`' worth, or both\nlimits at once. The reducer's `{function, field, as}` list, the reducer's\nfunctions; a second component rather than a `window` on `reduce` because\nthe cardinality differs — one message out per message in, not one per\ngroup per batch.\n\n`size` is always required, because it is the bound: a window by time alone\ngrows with the rate of the stream, and every piece of state has a bound.\n`seconds` on top of it also drops what is older than that, off the `time`\nfield. `count` needs a `field` here — it counts how many of the window\ncarried one, which is `size` once the window is warm and the warm-up check\nbefore that.",
+      "properties": {
+        "aggregations": {
+          "description": "what to compute over the window. At least one, each with a distinct `as`",
+          "items": {
+            "$ref": "#/$defs/Aggregation"
+          },
+          "type": "array"
+        },
+        "group_by": {
+          "description": "the fields that identify a series, the reducer's way. Leave it out for\none series",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "on_missing": {
+          "$ref": "#/$defs/MissingFieldPolicy",
+          "description": "what to do about a message missing an aggregated field or a group field"
+        },
+        "seconds": {
+          "description": "also drop from the window whatever is older than this many seconds,\noff the `time` field",
+          "format": "double",
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "size": {
+          "description": "how many messages the window holds at most",
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "time": {
+          "description": "the field carrying each message's time — RFC 3339 or milliseconds since\nthe epoch. Leave it out for arrival time",
+          "type": [
+            "string",
+            "null"
+          ],
+          "x-message-field": true
+        }
+      },
+      "required": [
+        "aggregations",
+        "size"
+      ],
+      "title": "rolling",
+      "type": "object"
+    },
     "ScriptScope": {
       "description": "Whether a script is handed one message or the whole batch.\n\n`message` is the default and is what nearly everything wants: the budget is\nthen spent per message rather than per batch, the batch structure is\npreserved without the script having to rebuild it, and a script that emits\nnothing for one message has dropped exactly that message.\n\n`batch` is the escape hatch, and it is needed for the things that are about\nthe batch itself — deduplicating within it, repartitioning it, or computing\nsomething across it that `reduce` has no function for.",
       "oneOf": [
@@ -6161,6 +6438,155 @@ Run a draft's transforms over some messages.
         "source"
       ],
       "title": "script",
+      "type": "object"
+    },
+    "SmoothMethod": {
+      "description": "How a value is smoothed against the ones before it.",
+      "oneOf": [
+        {
+          "description": "An exponentially weighted moving average — cheap, no window, follows\nthe data as closely as `alpha` says. Give `alpha` or `half_life`, not\nboth.",
+          "properties": {
+            "alpha": {
+              "description": "the weight of the newest value, 0 to 1",
+              "format": "double",
+              "type": [
+                "number",
+                "null"
+              ]
+            },
+            "half_life": {
+              "description": "the number of messages after which a value's weight has halved —\nthe spelling with an intuition behind it",
+              "format": "double",
+              "type": [
+                "number",
+                "null"
+              ]
+            },
+            "type": {
+              "const": "ewma",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "The median of the last `size` values, this one included. Removes\nsingle-sample spikes outright, which a mean only spreads out.",
+          "properties": {
+            "size": {
+              "description": "how many values the window holds",
+              "format": "uint",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "type": {
+              "const": "median",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "size"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "A Hampel filter: the value is kept unless it is further than\n`threshold` robust standard deviations from the window's median, in\nwhich case the median replaces it. The right first stage in front of\nany detector — it removes the outliers without smearing the signal.",
+          "properties": {
+            "size": {
+              "description": "how many values the window holds, this one included",
+              "format": "uint",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "threshold": {
+              "description": "how many scaled MADs from the median count as an outlier. `3`\nwhen left out",
+              "format": "double",
+              "type": [
+                "number",
+                "null"
+              ]
+            },
+            "type": {
+              "const": "hampel",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "size"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "A Savitzky–Golay filter: a polynomial of `order` fitted to the last\n`size` values by least squares, evaluated at the newest. Smooths while\nkeeping the shape of peaks that a moving average flattens. Trailing\nrather than centred, because a stream cannot see the future; until\nthe window holds more than `order` values the value passes untouched.",
+          "properties": {
+            "order": {
+              "description": "the degree of the polynomial, below `size`. `2` when left out",
+              "format": "uint",
+              "minimum": 0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "size": {
+              "description": "how many values the window holds, this one included",
+              "format": "uint",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "type": {
+              "const": "savitzky_golay",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "size"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "SmoothTransformConfig": {
+      "description": "Smooths a numeric field against the values before it in its series, writing\nthe result onto the message — over the field itself, or under `as`.",
+      "properties": {
+        "as": {
+          "description": "the field the smoothed value is written under. Leave it out to replace\nthe field itself",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "field": {
+          "description": "the numeric field to smooth",
+          "type": "string",
+          "x-message-field": true
+        },
+        "group_by": {
+          "description": "the fields that identify a series, the reducer's way. Leave it out for\none series",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "method": {
+          "$ref": "#/$defs/SmoothMethod",
+          "description": "how"
+        },
+        "on_missing": {
+          "$ref": "#/$defs/MissingFieldPolicy",
+          "description": "what to do about a message missing the field or a group field"
+        }
+      },
+      "required": [
+        "field",
+        "method"
+      ],
+      "title": "smooth",
       "type": "object"
     },
     "SplitterTransformConfig": {
@@ -6324,6 +6750,32 @@ Run a draft's transforms over some messages.
           "properties": {
             "type": {
               "const": "derive",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type"
+          ],
+          "type": "object"
+        },
+        {
+          "$ref": "#/$defs/RollingTransformConfig",
+          "properties": {
+            "type": {
+              "const": "rolling",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type"
+          ],
+          "type": "object"
+        },
+        {
+          "$ref": "#/$defs/SmoothTransformConfig",
+          "properties": {
+            "type": {
+              "const": "smooth",
               "type": "string"
             }
           },
@@ -9195,6 +9647,57 @@ The same wire shape the run loop's `PipelineView` serializes to — this is the 
       ],
       "type": "object"
     },
+    "RollingTransformConfig": {
+      "description": "Writes onto each message aggregations over the last few messages of its\nseries — the last `size` of them, or the last `seconds`' worth, or both\nlimits at once. The reducer's `{function, field, as}` list, the reducer's\nfunctions; a second component rather than a `window` on `reduce` because\nthe cardinality differs — one message out per message in, not one per\ngroup per batch.\n\n`size` is always required, because it is the bound: a window by time alone\ngrows with the rate of the stream, and every piece of state has a bound.\n`seconds` on top of it also drops what is older than that, off the `time`\nfield. `count` needs a `field` here — it counts how many of the window\ncarried one, which is `size` once the window is warm and the warm-up check\nbefore that.",
+      "properties": {
+        "aggregations": {
+          "description": "what to compute over the window. At least one, each with a distinct `as`",
+          "items": {
+            "$ref": "#/$defs/Aggregation"
+          },
+          "type": "array"
+        },
+        "group_by": {
+          "description": "the fields that identify a series, the reducer's way. Leave it out for\none series",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "on_missing": {
+          "$ref": "#/$defs/MissingFieldPolicy",
+          "description": "what to do about a message missing an aggregated field or a group field"
+        },
+        "seconds": {
+          "description": "also drop from the window whatever is older than this many seconds,\noff the `time` field",
+          "format": "double",
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "size": {
+          "description": "how many messages the window holds at most",
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "time": {
+          "description": "the field carrying each message's time — RFC 3339 or milliseconds since\nthe epoch. Leave it out for arrival time",
+          "type": [
+            "string",
+            "null"
+          ],
+          "x-message-field": true
+        }
+      },
+      "required": [
+        "aggregations",
+        "size"
+      ],
+      "title": "rolling",
+      "type": "object"
+    },
     "RotationConfig": {
       "description": "When a file is closed and the next one started.\n\nBoth triggers are optional and are checked together — whichever comes first\nrotates. With neither, a pipeline writes one file for as long as it runs.\n\nShared with the object-store output rather than local-only: \"how big does a\npart get\" is the same question on a disk and in a bucket, and the answer\nbelongs in one place.",
       "properties": {
@@ -9367,6 +9870,155 @@ The same wire shape the run loop's `PipelineView` serializes to — this is the 
     "Secret": {
       "description": "A config value that may *reference* secrets rather than contain them.\n\nOn the wire it is an ordinary JSON string, but `${NAME}` placeholders in it\nare replaced with real values when the pipeline is built, against whatever\nsecret store the server was started with:\n\n```json\n{ \"type\": \"nats\", \"urls\": \"nats://app:${NATS_PASSWORD}@broker:4222\" }\n```\n\nThe unresolved form is the only one this type ever holds. That is what makes\nit safe to commit, safe to hand back from `GET /api/pipelines` and safe to show\nin the UI — a resolved value exists only inside the built runtime component,\nnever in a `Config`. Resolution deliberately lives in the root crate: this\ncrate compiles to wasm for the frontend, which must not be able to hold a\nresolved secret at all.\n\nA value with no `${...}` in it is passed through untouched, so fields that\nhold nothing sensitive need no special handling.",
       "type": "string"
+    },
+    "SmoothMethod": {
+      "description": "How a value is smoothed against the ones before it.",
+      "oneOf": [
+        {
+          "description": "An exponentially weighted moving average — cheap, no window, follows\nthe data as closely as `alpha` says. Give `alpha` or `half_life`, not\nboth.",
+          "properties": {
+            "alpha": {
+              "description": "the weight of the newest value, 0 to 1",
+              "format": "double",
+              "type": [
+                "number",
+                "null"
+              ]
+            },
+            "half_life": {
+              "description": "the number of messages after which a value's weight has halved —\nthe spelling with an intuition behind it",
+              "format": "double",
+              "type": [
+                "number",
+                "null"
+              ]
+            },
+            "type": {
+              "const": "ewma",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "The median of the last `size` values, this one included. Removes\nsingle-sample spikes outright, which a mean only spreads out.",
+          "properties": {
+            "size": {
+              "description": "how many values the window holds",
+              "format": "uint",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "type": {
+              "const": "median",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "size"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "A Hampel filter: the value is kept unless it is further than\n`threshold` robust standard deviations from the window's median, in\nwhich case the median replaces it. The right first stage in front of\nany detector — it removes the outliers without smearing the signal.",
+          "properties": {
+            "size": {
+              "description": "how many values the window holds, this one included",
+              "format": "uint",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "threshold": {
+              "description": "how many scaled MADs from the median count as an outlier. `3`\nwhen left out",
+              "format": "double",
+              "type": [
+                "number",
+                "null"
+              ]
+            },
+            "type": {
+              "const": "hampel",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "size"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "A Savitzky–Golay filter: a polynomial of `order` fitted to the last\n`size` values by least squares, evaluated at the newest. Smooths while\nkeeping the shape of peaks that a moving average flattens. Trailing\nrather than centred, because a stream cannot see the future; until\nthe window holds more than `order` values the value passes untouched.",
+          "properties": {
+            "order": {
+              "description": "the degree of the polynomial, below `size`. `2` when left out",
+              "format": "uint",
+              "minimum": 0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "size": {
+              "description": "how many values the window holds, this one included",
+              "format": "uint",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "type": {
+              "const": "savitzky_golay",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "size"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "SmoothTransformConfig": {
+      "description": "Smooths a numeric field against the values before it in its series, writing\nthe result onto the message — over the field itself, or under `as`.",
+      "properties": {
+        "as": {
+          "description": "the field the smoothed value is written under. Leave it out to replace\nthe field itself",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "field": {
+          "description": "the numeric field to smooth",
+          "type": "string",
+          "x-message-field": true
+        },
+        "group_by": {
+          "description": "the fields that identify a series, the reducer's way. Leave it out for\none series",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "method": {
+          "$ref": "#/$defs/SmoothMethod",
+          "description": "how"
+        },
+        "on_missing": {
+          "$ref": "#/$defs/MissingFieldPolicy",
+          "description": "what to do about a message missing the field or a group field"
+        }
+      },
+      "required": [
+        "field",
+        "method"
+      ],
+      "title": "smooth",
+      "type": "object"
     },
     "SplitterTransformConfig": {
       "description": "Cuts one batch into several smaller ones — the opposite of `buffer`.\n\nNote the current limitation: messages left over after the last whole chunk\nare dropped, so 4 messages with `out_size: 3` emit one batch, not two.",
@@ -9558,6 +10210,32 @@ The same wire shape the run loop's `PipelineView` serializes to — this is the 
           "properties": {
             "type": {
               "const": "derive",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type"
+          ],
+          "type": "object"
+        },
+        {
+          "$ref": "#/$defs/RollingTransformConfig",
+          "properties": {
+            "type": {
+              "const": "rolling",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type"
+          ],
+          "type": "object"
+        },
+        {
+          "$ref": "#/$defs/SmoothTransformConfig",
+          "properties": {
+            "type": {
+              "const": "smooth",
               "type": "string"
             }
           },

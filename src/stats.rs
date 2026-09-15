@@ -281,6 +281,74 @@ pub fn linfit_indexed(ys: &[f64]) -> Option<Fit> {
     linfit(&xs, ys)
 }
 
+/// The least-squares polynomial of `order` through `(x, y)` pairs, as
+/// coefficients lowest power first. `None` for fewer points than
+/// coefficients, mismatched lengths, or a system too degenerate to solve.
+///
+/// Solved by the normal equations with partial pivoting, which is fine for
+/// the low orders a smoother uses — a window of a few dozen points and a
+/// cubic. It is not a general polynomial fitter and does not want to be.
+#[must_use]
+pub fn polyfit(xs: &[f64], ys: &[f64], order: usize) -> Option<Vec<f64>> {
+    let terms = order + 1;
+    if xs.len() != ys.len() || xs.len() < terms {
+        return None;
+    }
+    // Build the normal equations A·c = b with A[i][j] = Σ x^(i+j), b[i] = Σ x^i·y.
+    let mut a = vec![vec![0.0; terms]; terms];
+    let mut b = vec![0.0; terms];
+    for (&x, &y) in xs.iter().zip(ys) {
+        let mut powers = vec![1.0; 2 * terms - 1];
+        for i in 1..powers.len() {
+            powers[i] = powers[i - 1] * x;
+        }
+        for i in 0..terms {
+            for j in 0..terms {
+                a[i][j] += powers[i + j];
+            }
+            b[i] += powers[i] * y;
+        }
+    }
+    // Gaussian elimination with partial pivoting.
+    for column in 0..terms {
+        let pivot = (column..terms).max_by(|&p, &q| a[p][column].abs().total_cmp(&a[q][column].abs()))?;
+        if a[pivot][column].abs() < 1e-12 {
+            return None;
+        }
+        a.swap(column, pivot);
+        b.swap(column, pivot);
+        let (pivot_row, below) = a.split_at_mut(column + 1);
+        let pivot_row = &pivot_row[column];
+        for (offset, row) in below.iter_mut().enumerate() {
+            let factor = row[column] / pivot_row[column];
+            for (cell, &above) in row.iter_mut().zip(pivot_row).skip(column) {
+                *cell -= factor * above;
+            }
+            b[column + 1 + offset] -= factor * b[column];
+        }
+    }
+    let mut coefficients = vec![0.0; terms];
+    for row in (0..terms).rev() {
+        let tail: f64 = (row + 1..terms).map(|k| a[row][k] * coefficients[k]).sum();
+        coefficients[row] = (b[row] - tail) / a[row][row];
+    }
+    Some(coefficients)
+}
+
+/// A trailing Savitzky–Golay smoother's answer for the newest of `ys`: the
+/// polynomial of `order` fitted to the window (taken as evenly spaced),
+/// evaluated at its last point. `None` when the window is too short for the
+/// order.
+///
+/// The points are placed at `x = -(n-1) … 0`, so the answer is the fitted
+/// polynomial's constant term and nothing has to be evaluated.
+#[must_use]
+pub fn savitzky_golay_last(ys: &[f64], order: usize) -> Option<f64> {
+    #[allow(clippy::cast_precision_loss)]
+    let xs: Vec<f64> = (0..ys.len()).map(|i| i as f64 - (ys.len() as f64 - 1.0)).collect();
+    polyfit(&xs, ys, order).and_then(|c| c.first().copied())
+}
+
 /// The autocorrelation at `lag` — how much a value resembles the one `lag`
 /// steps before it, from −1 to 1. `None` when the lag leaves fewer than two
 /// pairs or the series has no spread.
@@ -511,6 +579,26 @@ mod tests {
 
         let noisy = linfit_indexed(&[1.0, 3.0, 2.0, 4.0]).map(|f| f.r2);
         assert!(noisy.is_some_and(|r2| r2 > 0.0 && r2 < 1.0));
+    }
+
+    #[test]
+    fn a_polynomial_fit_recovers_its_coefficients() {
+        let xs: Vec<f64> = (0..8).map(f64::from).collect();
+        let ys: Vec<f64> = xs.iter().map(|x| 1.0 + 2.0 * x - 0.5 * x * x).collect();
+        let c = polyfit(&xs, &ys, 2).unwrap_or_default();
+        assert!(close(c[0], 1.0) && close(c[1], 2.0) && close(c[2], -0.5), "{c:?}");
+        assert_eq!(polyfit(&xs[..2], &ys[..2], 2), None, "too few points");
+        assert_eq!(polyfit(&[1.0, 1.0, 1.0], &[1.0, 2.0, 3.0], 1), None, "a vertical line");
+    }
+
+    #[test]
+    fn savitzky_golay_keeps_a_parabola_and_smooths_noise() {
+        let exact: Vec<f64> = (0..7).map(|i| f64::from(i * i)).collect();
+        assert!(close(savitzky_golay_last(&exact, 2).unwrap_or_default(), 36.0));
+        let noisy = [1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 5.0];
+        let smoothed = savitzky_golay_last(&noisy, 2).unwrap_or_default();
+        assert!(smoothed > 1.0 && smoothed < 5.0, "{smoothed}");
+        assert_eq!(savitzky_golay_last(&[1.0, 2.0], 2), None);
     }
 
     #[test]

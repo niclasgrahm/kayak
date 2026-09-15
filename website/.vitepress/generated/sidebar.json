@@ -203,6 +203,14 @@
     {
       "link": "/reference/transforms#transform-derive",
       "text": "derive"
+    },
+    {
+      "link": "/reference/transforms#transform-rolling",
+      "text": "rolling"
+    },
+    {
+      "link": "/reference/transforms#transform-smooth",
+      "text": "smooth"
     }
   ]
 }

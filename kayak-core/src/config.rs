@@ -1456,6 +1456,8 @@ pub enum TransformKind {
     Script(ScriptTransformConfig),
     Deadband(crate::streaming::DeadbandTransformConfig),
     Derive(crate::streaming::DeriveTransformConfig),
+    Rolling(crate::streaming::RollingTransformConfig),
+    Smooth(crate::streaming::SmoothTransformConfig),
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, JsonSchema)]

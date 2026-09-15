@@ -141,6 +141,30 @@ fn streaming_transform_samples() -> Vec<(&'static str, Value)> {
                 "on_missing": "skip"
             }),
         ),
+        (
+            "rolling",
+            json!({
+                "type": "rolling",
+                "aggregations": [
+                    {"function": "avg", "field": "temperature", "as": "temp_avg"},
+                    {"function": "slope", "field": "temperature", "as": "temp_trend"}
+                ],
+                "size": 60,
+                "seconds": 300.0,
+                "group_by": ["_meta.machine_id"],
+                "time": "ts"
+            }),
+        ),
+        (
+            "smooth",
+            json!({
+                "type": "smooth",
+                "field": "vibration",
+                "method": {"type": "hampel", "size": 7, "threshold": 3.0},
+                "as": "vibration_clean",
+                "group_by": ["_meta.machine_id"]
+            }),
+        ),
     ]
 }
 

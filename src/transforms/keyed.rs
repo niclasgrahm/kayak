@@ -184,27 +184,29 @@ impl Series {
     }
 }
 
-/// A run of numbers kept as a JSON array under a state name — the window
+/// A run of readings kept as a JSON array under a state name — the window
 /// every windowed transform holds, spelled once.
 ///
 /// Stored as `[[millis, value], ...]`, oldest first, so a window can be
 /// trimmed by count *and* by age from one representation. Kept as `Value`
 /// rather than a typed struct because it is edited where it lies (see
 /// [`Buckets::update`]) and a typed round trip would be the clone that
-/// facility exists to avoid.
+/// facility exists to avoid. The value is any JSON, since the reducer's
+/// functions take any — `rolling` holds whatever the field held, `smooth`
+/// only ever pushes numbers.
 pub struct Window;
 
 impl Window {
     /// Append a point and trim to `size` and, if given, to the last `seconds`
-    /// before `millis`. Returns the values, oldest first.
-    pub fn push(state: &mut Value, millis: i64, value: f64, size: usize, seconds: Option<f64>) -> Vec<f64> {
+    /// before `millis`.
+    pub fn push(state: &mut Value, millis: i64, value: Value, size: usize, seconds: Option<f64>) {
         if !state.is_array() {
             *state = Value::Array(Vec::new());
         }
         let Some(points) = state.as_array_mut() else {
-            return Vec::new();
+            return;
         };
-        points.push(Value::Array(vec![Value::from(millis), Value::from(value)]));
+        points.push(Value::Array(vec![Value::from(millis), value]));
         if let Some(seconds) = seconds {
             #[allow(clippy::cast_possible_truncation, reason = "seconds to millis, well within range")]
             let cutoff = millis - (seconds * 1000.0).round() as i64;
@@ -214,12 +216,25 @@ impl Window {
         if excess > 0 {
             points.drain(..excess);
         }
-        Self::values(points)
+    }
+
+    /// The stored points, oldest first — empty for a state that is not yet a
+    /// window.
+    #[must_use]
+    pub fn points(state: &Value) -> &[Value] {
+        state.as_array().map_or(&[], Vec::as_slice)
     }
 
     /// The values of a stored window, oldest first.
     #[must_use]
-    pub fn values(points: &[Value]) -> Vec<f64> {
+    pub fn values(points: &[Value]) -> Vec<&Value> {
+        points.iter().filter_map(|p| p.get(1)).collect()
+    }
+
+    /// The values as numbers, skipping any that aren't — a window that was
+    /// only ever pushed numbers loses nothing here.
+    #[must_use]
+    pub fn numbers(points: &[Value]) -> Vec<f64> {
         points.iter().filter_map(|p| p[1].as_f64()).collect()
     }
 
@@ -338,16 +353,18 @@ mod tests {
     fn a_window_is_trimmed_by_count_and_by_age() {
         let mut state = Value::Null;
         for (t, v) in [(0, 1.0), (1000, 2.0), (2000, 3.0), (3000, 4.0)] {
-            Window::push(&mut state, t, v, 3, None);
+            Window::push(&mut state, t, json!(v), 3, None);
         }
-        assert_eq!(Window::values(state.as_array().map_or(&[][..], Vec::as_slice)), vec![2.0, 3.0, 4.0]);
+        assert_eq!(Window::numbers(Window::points(&state)), vec![2.0, 3.0, 4.0]);
 
         let mut state = Value::Null;
         for (t, v) in [(0, 1.0), (1000, 2.0), (5000, 3.0)] {
-            Window::push(&mut state, t, v, 100, Some(2.5));
+            Window::push(&mut state, t, json!(v), 100, Some(2.5));
         }
-        let points = state.as_array().map_or(&[][..], Vec::as_slice);
-        assert_eq!(Window::values(points), vec![3.0]);
+        let points = Window::points(&state);
+        assert_eq!(Window::numbers(points), vec![3.0]);
         assert_eq!(Window::seconds(points), vec![5.0]);
+        assert_eq!(Window::values(points), vec![&json!(3.0)]);
+        assert!(Window::points(&Value::Null).is_empty());
     }
 }

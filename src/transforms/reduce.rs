@@ -262,7 +262,7 @@ impl ReduceTransform {
 /// An explicit `null` reads as missing: "the field isn't there" and "the field
 /// is there and empty" are the same fact for anything being aggregated, and
 /// treating them differently would make `sum` fail on one and not the other.
-fn present<'a>(message: &'a Value, field: &str) -> Option<&'a Value> {
+pub(crate) fn present<'a>(message: &'a Value, field: &str) -> Option<&'a Value> {
     match crate::fields::get(message, field) {
         Some(Value::Null) | None => None,
         Some(value) => Some(value),
@@ -272,8 +272,9 @@ fn present<'a>(message: &'a Value, field: &str) -> Option<&'a Value> {
 /// One aggregation's answer over the values it was given.
 ///
 /// `messages` is how many messages were in the group, which only `count`
-/// without a field has any use for.
-fn apply_function(
+/// without a field has any use for. Shared with the `rolling` transform,
+/// which asks the same question over a window instead of a group.
+pub(crate) fn apply_function(
     aggregation: &Aggregation,
     values: &[&Value],
     messages: usize,
