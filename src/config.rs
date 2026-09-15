@@ -75,6 +75,8 @@ impl BuildTransformConfig for TransformConfig {
             TransformKind::Derive(c) => c.build(ctx),
             TransformKind::Rolling(c) => c.build(ctx),
             TransformKind::Smooth(c) => c.build(ctx),
+            TransformKind::Detect(c) => c.build(ctx),
+            TransformKind::Resample(c) => c.build(ctx),
         }
     }
 }

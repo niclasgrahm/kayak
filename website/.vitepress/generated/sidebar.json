@@ -211,6 +211,14 @@
     {
       "link": "/reference/transforms#transform-smooth",
       "text": "smooth"
+    },
+    {
+      "link": "/reference/transforms#transform-detect",
+      "text": "detect"
+    },
+    {
+      "link": "/reference/transforms#transform-resample",
+      "text": "resample"
     }
   ]
 }

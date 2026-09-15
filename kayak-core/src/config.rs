@@ -1458,6 +1458,8 @@ pub enum TransformKind {
     Derive(crate::streaming::DeriveTransformConfig),
     Rolling(crate::streaming::RollingTransformConfig),
     Smooth(crate::streaming::SmoothTransformConfig),
+    Detect(crate::streaming::DetectTransformConfig),
+    Resample(crate::streaming::ResampleTransformConfig),
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, JsonSchema)]

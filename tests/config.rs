@@ -165,6 +165,30 @@ fn streaming_transform_samples() -> Vec<(&'static str, Value)> {
                 "group_by": ["_meta.machine_id"]
             }),
         ),
+        (
+            "detect",
+            json!({
+                "type": "detect",
+                "field": "vibration_clean",
+                "method": {"type": "mad", "size": 50, "threshold": 3.5},
+                "mode": "only_anomalies",
+                "min_samples": 20,
+                "as": "spike",
+                "group_by": ["_meta.machine_id"]
+            }),
+        ),
+        (
+            "resample",
+            json!({
+                "type": "resample",
+                "field": "temperature",
+                "interval_seconds": 1.0,
+                "method": "forward_fill",
+                "max_gap_seconds": 30.0,
+                "group_by": ["_meta.machine_id"],
+                "time": "ts"
+            }),
+        ),
     ]
 }
 

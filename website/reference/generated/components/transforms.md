@@ -488,3 +488,77 @@ Smooths a numeric field against the values before it in its series, writing the 
 | --- | --- | --- | --- |
 | `size` | `integer` | <Badge type="warning" text="required" /> | how many values the window holds, this one included |
 | `order` | `integer` | <Badge type="info" text="optional" /> | the degree of the polynomial, below `size`. `2` when left out |
+
+
+## `detect` {#transform-detect}
+
+Flags anomalies in a numeric field against its own series — one component with a `method`, the way `filter` is one component with a kind.
+
+Writes a boolean under `as` (`anomaly` when left out), and beside it `<as>_score` — how far outside normal the value was, in the method's own units — so a downstream `filter` can be stricter than the threshold. Nothing is flagged during the warm-up of `min_samples` messages per key, because until then there is no idea of normal to be outside of.
+
+| field | type | | description |
+| --- | --- | --- | --- |
+| `field` | `string` | <Badge type="warning" text="required" /> | the numeric field to watch |
+| `method` | `zscore \| mad \| cusum \| ewma_chart \| western_electric \| flatline` | <Badge type="warning" text="required" /> | how an anomaly is decided |
+| `as` | `string` | <Badge type="info" text="optional" /> | the field the flag is written under; the score goes under `<as>_score`. `anomaly` when left out |
+| `group_by` | `list of string` | <Badge type="info" text="optional" /> | the fields that identify a series, the reducer's way. Leave it out for one series |
+| `min_samples` | `integer` | <Badge type="info" text="optional" /> | how many messages per key to see before flagging anything. The method's window `size` when left out, or 30 for a method without one |
+| `mode` | `annotate` \| `only_anomalies` | <Badge type="info" text="optional" /> | whether everything comes out annotated or only the anomalies |
+| `on_missing` | `error` \| `skip` | <Badge type="info" text="optional" /> | what to do about a message missing the field or a group field |
+
+**`method` — `type: "zscore"`**
+
+| field | type | | description |
+| --- | --- | --- | --- |
+| `size` | `integer` | <Badge type="warning" text="required" /> | how many earlier values the baseline is drawn from |
+| `threshold` | `number` | <Badge type="info" text="optional" /> | how many standard deviations count. `3` when left out |
+
+**`method` — `type: "mad"`**
+
+| field | type | | description |
+| --- | --- | --- | --- |
+| `size` | `integer` | <Badge type="warning" text="required" /> | how many earlier values the baseline is drawn from |
+| `threshold` | `number` | <Badge type="info" text="optional" /> | how many scaled MADs count. `3.5` when left out |
+
+**`method` — `type: "cusum"`**
+
+| field | type | | description |
+| --- | --- | --- | --- |
+| `drift` | `number` | <Badge type="warning" text="required" /> | the slack per message that is not counted as drift, in the field's units |
+| `threshold` | `number` | <Badge type="warning" text="required" /> | the accumulated drift that counts |
+| `target` | `number` | <Badge type="info" text="optional" /> | the value the series is expected to sit at. Left out, the mean of the warm-up is used |
+
+**`method` — `type: "ewma_chart"`**
+
+| field | type | | description |
+| --- | --- | --- | --- |
+| `alpha` | `number` | <Badge type="info" text="optional" /> | the weight of the newest value, 0 to 1. `0.2` when left out |
+| `threshold` | `number` | <Badge type="info" text="optional" /> | the width of the band, in standard deviations. `3` when left out |
+
+**`method` — `type: "western_electric"`**
+
+This component takes no configuration.
+
+**`method` — `type: "flatline"`**
+
+| field | type | | description |
+| --- | --- | --- | --- |
+| `size` | `integer` | <Badge type="warning" text="required" /> | how many identical values in a row count |
+
+
+## `resample` {#transform-resample}
+
+Puts a series onto a regular grid: one message per key per `interval` seconds, at times that are multiples of it, whichever rate the readings arrive at. The precondition every window model has, and the second real user of the run loop's tick — a `forward_fill` series keeps emitting while its readings have gone quiet.
+
+The message out carries the group fields under their leaf names, the grid time under `time`'s name (or `time` when arrival time is used) as an RFC 3339 string, and the value under `as` (the field's leaf when left out). A grid point is emitted when a reading past it arrives, or — for `forward_fill` only — when the clock passes it with nothing arriving.
+
+| field | type | | description |
+| --- | --- | --- | --- |
+| `field` | `string` | <Badge type="warning" text="required" /> | the numeric field to resample |
+| `interval_seconds` | `number` | <Badge type="warning" text="required" /> | the spacing of the grid, in seconds |
+| `method` | `last` \| `mean` \| `linear` \| `forward_fill` | <Badge type="warning" text="required" /> | how the readings in an interval become its value |
+| `as` | `string` | <Badge type="info" text="optional" /> | the field the value is written under. The field's leaf when left out |
+| `group_by` | `list of string` | <Badge type="info" text="optional" /> | the fields that identify a series, the reducer's way. Leave it out for one series |
+| `max_gap_seconds` | `number` | <Badge type="info" text="optional" /> | for `forward_fill`: how long a value is carried into empty intervals before the series is left to go quiet. Carried forever when left out |
+| `on_missing` | `error` \| `skip` | <Badge type="info" text="optional" /> | what to do about a message missing the field or a group field |
+| `time` | `string` | <Badge type="info" text="optional" /> | the field carrying each message's time — RFC 3339 or milliseconds since the epoch. Leave it out for arrival time, in which case empty intervals are noticed by the clock rather than by the next reading |

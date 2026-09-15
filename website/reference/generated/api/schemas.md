@@ -1173,6 +1173,228 @@ One pipeline: every input is merged into one stream, that stream runs through th
       "title": "derive",
       "type": "object"
     },
+    "DetectMethod": {
+      "description": "How an anomaly is decided.\n\nThe window methods compare a value against the values *before* it, never\nincluding it, so a spike does not pull the baseline it is measured against.\nThe chart methods freeze their baseline at the end of the warm-up, which is\nwhat a control chart is: a fixed idea of normal that the process is held to.",
+      "oneOf": [
+        {
+          "description": "Further than `threshold` standard deviations from the mean of the\nlast `size` values.",
+          "properties": {
+            "size": {
+              "description": "how many earlier values the baseline is drawn from",
+              "format": "uint",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "threshold": {
+              "description": "how many standard deviations count. `3` when left out",
+              "format": "double",
+              "type": [
+                "number",
+                "null"
+              ]
+            },
+            "type": {
+              "const": "zscore",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "size"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "The robust twin: further than `threshold` scaled median absolute\ndeviations from the median of the last `size` values. Prefer it when\nthe baseline itself contains outliers.",
+          "properties": {
+            "size": {
+              "description": "how many earlier values the baseline is drawn from",
+              "format": "uint",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "threshold": {
+              "description": "how many scaled MADs count. `3.5` when left out",
+              "format": "double",
+              "type": [
+                "number",
+                "null"
+              ]
+            },
+            "type": {
+              "const": "mad",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "size"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "A two-sided CUSUM: sums the drift above and below `target`, and flags\nwhen either sum passes `threshold`. Finds a small sustained shift a\nsingle-point test never sees. The sum that fired is reset.",
+          "properties": {
+            "drift": {
+              "description": "the slack per message that is not counted as drift, in the\nfield's units",
+              "format": "double",
+              "type": "number"
+            },
+            "target": {
+              "description": "the value the series is expected to sit at. Left out, the mean of\nthe warm-up is used",
+              "format": "double",
+              "type": [
+                "number",
+                "null"
+              ]
+            },
+            "threshold": {
+              "description": "the accumulated drift that counts",
+              "format": "double",
+              "type": "number"
+            },
+            "type": {
+              "const": "cusum",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "drift",
+            "threshold"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "An EWMA control chart: the smoothed value leaves a band of\n`threshold` standard deviations around the warm-up mean. Sensitive to\nsmall shifts, robust to single points.",
+          "properties": {
+            "alpha": {
+              "description": "the weight of the newest value, 0 to 1. `0.2` when left out",
+              "format": "double",
+              "type": [
+                "number",
+                "null"
+              ]
+            },
+            "threshold": {
+              "description": "the width of the band, in standard deviations. `3` when left out",
+              "format": "double",
+              "type": [
+                "number",
+                "null"
+              ]
+            },
+            "type": {
+              "const": "ewma_chart",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "The Western Electric rules against the warm-up mean and deviation: one\npoint beyond 3σ, two of three beyond 2σ on one side, four of five\nbeyond 1σ on one side, eight in a row on one side. The rule that fired\nis written beside the flag.",
+          "properties": {
+            "type": {
+              "const": "western_electric",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "The last `size` values are identical — a stuck instrument.",
+          "properties": {
+            "size": {
+              "description": "how many identical values in a row count",
+              "format": "uint",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "type": {
+              "const": "flatline",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "size"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "DetectMode": {
+      "description": "Whether every message comes out annotated, or only the anomalies.",
+      "oneOf": [
+        {
+          "const": "annotate",
+          "description": "Every message passes, carrying the flag and the score.",
+          "type": "string"
+        },
+        {
+          "const": "only_anomalies",
+          "description": "Only the anomalies pass, annotated. The stream becomes an alarm feed.",
+          "type": "string"
+        }
+      ]
+    },
+    "DetectTransformConfig": {
+      "description": "Flags anomalies in a numeric field against its own series — one component\nwith a `method`, the way `filter` is one component with a kind.\n\nWrites a boolean under `as` (`anomaly` when left out), and beside it\n`<as>_score` — how far outside normal the value was, in the method's own\nunits — so a downstream `filter` can be stricter than the threshold. Nothing\nis flagged during the warm-up of `min_samples` messages per key, because\nuntil then there is no idea of normal to be outside of.",
+      "properties": {
+        "as": {
+          "description": "the field the flag is written under; the score goes under `<as>_score`.\n`anomaly` when left out",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "field": {
+          "description": "the numeric field to watch",
+          "type": "string",
+          "x-message-field": true
+        },
+        "group_by": {
+          "description": "the fields that identify a series, the reducer's way. Leave it out for\none series",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "method": {
+          "$ref": "#/$defs/DetectMethod",
+          "description": "how an anomaly is decided"
+        },
+        "min_samples": {
+          "description": "how many messages per key to see before flagging anything. The\nmethod's window `size` when left out, or 30 for a method without one",
+          "format": "uint",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "mode": {
+          "$ref": "#/$defs/DetectMode",
+          "description": "whether everything comes out annotated or only the anomalies"
+        },
+        "on_missing": {
+          "$ref": "#/$defs/MissingFieldPolicy",
+          "description": "what to do about a message missing the field or a group field"
+        }
+      },
+      "required": [
+        "field",
+        "method"
+      ],
+      "title": "detect",
+      "type": "object"
+    },
     "DummyConfig": {
       "description": "Emits one generated message on a fixed interval — a heartbeat for testing a\npipeline without a real source attached.\n\nEvery message carries a `value` and the `current_time` it was emitted at.\nWhat the `value` holds is the `payload` field's business: a number sampled\nfrom a sine wave, so a chart of it has a shape, or a random sentence, so a\ntext transform has something to chew on.",
       "properties": {
@@ -3111,6 +3333,91 @@ One pipeline: every input is merged into one stream, that stream runs through th
       ],
       "type": "object"
     },
+    "ResampleMethod": {
+      "description": "How the readings that fell in one interval become the value at its grid\npoint, and what an interval with none in it gets.",
+      "oneOf": [
+        {
+          "const": "last",
+          "description": "The last reading in the interval. An empty interval emits nothing.",
+          "type": "string"
+        },
+        {
+          "const": "mean",
+          "description": "The mean of the readings in the interval. An empty interval emits\nnothing.",
+          "type": "string"
+        },
+        {
+          "const": "linear",
+          "description": "The value at the grid point by a straight line between the last\nreading before it and the first after — so a grid point is emitted\nonce the reading after it has arrived. Empty intervals in between are\nfilled by the same line.",
+          "type": "string"
+        },
+        {
+          "const": "forward_fill",
+          "description": "The last reading seen, carried forward: an empty interval repeats the\nlast value, for up to `max_gap_seconds`, and then stops. The one method\nthat emits from a quiet series — which is what makes a sparse\nchange-on-value signal into a regular one.",
+          "type": "string"
+        }
+      ]
+    },
+    "ResampleTransformConfig": {
+      "description": "Puts a series onto a regular grid: one message per key per `interval`\nseconds, at times that are multiples of it, whichever rate the readings\narrive at. The precondition every window model has, and the second real\nuser of the run loop's tick — a `forward_fill` series keeps emitting while\nits readings have gone quiet.\n\nThe message out carries the group fields under their leaf names, the grid\ntime under `time`'s name (or `time` when arrival time is used) as an RFC\n3339 string, and the value under `as` (the field's leaf when left out). A\ngrid point is emitted when a reading past it arrives, or — for `forward_fill`\nonly — when the clock passes it with nothing arriving.",
+      "properties": {
+        "as": {
+          "description": "the field the value is written under. The field's leaf when left out",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "field": {
+          "description": "the numeric field to resample",
+          "type": "string",
+          "x-message-field": true
+        },
+        "group_by": {
+          "description": "the fields that identify a series, the reducer's way. Leave it out for\none series",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "interval_seconds": {
+          "description": "the spacing of the grid, in seconds",
+          "format": "double",
+          "type": "number"
+        },
+        "max_gap_seconds": {
+          "description": "for `forward_fill`: how long a value is carried into empty intervals\nbefore the series is left to go quiet. Carried forever when left out",
+          "format": "double",
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "method": {
+          "$ref": "#/$defs/ResampleMethod",
+          "description": "how the readings in an interval become its value"
+        },
+        "on_missing": {
+          "$ref": "#/$defs/MissingFieldPolicy",
+          "description": "what to do about a message missing the field or a group field"
+        },
+        "time": {
+          "description": "the field carrying each message's time — RFC 3339 or milliseconds since\nthe epoch. Leave it out for arrival time, in which case empty intervals\nare noticed by the clock rather than by the next reading",
+          "type": [
+            "string",
+            "null"
+          ],
+          "x-message-field": true
+        }
+      },
+      "required": [
+        "field",
+        "interval_seconds",
+        "method"
+      ],
+      "title": "resample",
+      "type": "object"
+    },
     "RollingTransformConfig": {
       "description": "Writes onto each message aggregations over the last few messages of its\nseries — the last `size` of them, or the last `seconds`' worth, or both\nlimits at once. The reducer's `{function, field, as}` list, the reducer's\nfunctions; a second component rather than a `window` on `reduce` because\nthe cardinality differs — one message out per message in, not one per\ngroup per batch.\n\n`size` is always required, because it is the bound: a window by time alone\ngrows with the rate of the stream, and every piece of state has a bound.\n`seconds` on top of it also drops what is older than that, off the `time`\nfield. `count` needs a `field` here — it counts how many of the window\ncarried one, which is `size` once the window is warm and the warm-up check\nbefore that.",
       "properties": {
@@ -3675,6 +3982,32 @@ One pipeline: every input is merged into one stream, that stream runs through th
           "properties": {
             "type": {
               "const": "smooth",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type"
+          ],
+          "type": "object"
+        },
+        {
+          "$ref": "#/$defs/DetectTransformConfig",
+          "properties": {
+            "type": {
+              "const": "detect",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type"
+          ],
+          "type": "object"
+        },
+        {
+          "$ref": "#/$defs/ResampleTransformConfig",
+          "properties": {
+            "type": {
+              "const": "resample",
               "type": "string"
             }
           },
@@ -5584,6 +5917,228 @@ Run a draft's transforms over some messages.
       "title": "derive",
       "type": "object"
     },
+    "DetectMethod": {
+      "description": "How an anomaly is decided.\n\nThe window methods compare a value against the values *before* it, never\nincluding it, so a spike does not pull the baseline it is measured against.\nThe chart methods freeze their baseline at the end of the warm-up, which is\nwhat a control chart is: a fixed idea of normal that the process is held to.",
+      "oneOf": [
+        {
+          "description": "Further than `threshold` standard deviations from the mean of the\nlast `size` values.",
+          "properties": {
+            "size": {
+              "description": "how many earlier values the baseline is drawn from",
+              "format": "uint",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "threshold": {
+              "description": "how many standard deviations count. `3` when left out",
+              "format": "double",
+              "type": [
+                "number",
+                "null"
+              ]
+            },
+            "type": {
+              "const": "zscore",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "size"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "The robust twin: further than `threshold` scaled median absolute\ndeviations from the median of the last `size` values. Prefer it when\nthe baseline itself contains outliers.",
+          "properties": {
+            "size": {
+              "description": "how many earlier values the baseline is drawn from",
+              "format": "uint",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "threshold": {
+              "description": "how many scaled MADs count. `3.5` when left out",
+              "format": "double",
+              "type": [
+                "number",
+                "null"
+              ]
+            },
+            "type": {
+              "const": "mad",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "size"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "A two-sided CUSUM: sums the drift above and below `target`, and flags\nwhen either sum passes `threshold`. Finds a small sustained shift a\nsingle-point test never sees. The sum that fired is reset.",
+          "properties": {
+            "drift": {
+              "description": "the slack per message that is not counted as drift, in the\nfield's units",
+              "format": "double",
+              "type": "number"
+            },
+            "target": {
+              "description": "the value the series is expected to sit at. Left out, the mean of\nthe warm-up is used",
+              "format": "double",
+              "type": [
+                "number",
+                "null"
+              ]
+            },
+            "threshold": {
+              "description": "the accumulated drift that counts",
+              "format": "double",
+              "type": "number"
+            },
+            "type": {
+              "const": "cusum",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "drift",
+            "threshold"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "An EWMA control chart: the smoothed value leaves a band of\n`threshold` standard deviations around the warm-up mean. Sensitive to\nsmall shifts, robust to single points.",
+          "properties": {
+            "alpha": {
+              "description": "the weight of the newest value, 0 to 1. `0.2` when left out",
+              "format": "double",
+              "type": [
+                "number",
+                "null"
+              ]
+            },
+            "threshold": {
+              "description": "the width of the band, in standard deviations. `3` when left out",
+              "format": "double",
+              "type": [
+                "number",
+                "null"
+              ]
+            },
+            "type": {
+              "const": "ewma_chart",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "The Western Electric rules against the warm-up mean and deviation: one\npoint beyond 3σ, two of three beyond 2σ on one side, four of five\nbeyond 1σ on one side, eight in a row on one side. The rule that fired\nis written beside the flag.",
+          "properties": {
+            "type": {
+              "const": "western_electric",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "The last `size` values are identical — a stuck instrument.",
+          "properties": {
+            "size": {
+              "description": "how many identical values in a row count",
+              "format": "uint",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "type": {
+              "const": "flatline",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "size"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "DetectMode": {
+      "description": "Whether every message comes out annotated, or only the anomalies.",
+      "oneOf": [
+        {
+          "const": "annotate",
+          "description": "Every message passes, carrying the flag and the score.",
+          "type": "string"
+        },
+        {
+          "const": "only_anomalies",
+          "description": "Only the anomalies pass, annotated. The stream becomes an alarm feed.",
+          "type": "string"
+        }
+      ]
+    },
+    "DetectTransformConfig": {
+      "description": "Flags anomalies in a numeric field against its own series — one component\nwith a `method`, the way `filter` is one component with a kind.\n\nWrites a boolean under `as` (`anomaly` when left out), and beside it\n`<as>_score` — how far outside normal the value was, in the method's own\nunits — so a downstream `filter` can be stricter than the threshold. Nothing\nis flagged during the warm-up of `min_samples` messages per key, because\nuntil then there is no idea of normal to be outside of.",
+      "properties": {
+        "as": {
+          "description": "the field the flag is written under; the score goes under `<as>_score`.\n`anomaly` when left out",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "field": {
+          "description": "the numeric field to watch",
+          "type": "string",
+          "x-message-field": true
+        },
+        "group_by": {
+          "description": "the fields that identify a series, the reducer's way. Leave it out for\none series",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "method": {
+          "$ref": "#/$defs/DetectMethod",
+          "description": "how an anomaly is decided"
+        },
+        "min_samples": {
+          "description": "how many messages per key to see before flagging anything. The\nmethod's window `size` when left out, or 30 for a method without one",
+          "format": "uint",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "mode": {
+          "$ref": "#/$defs/DetectMode",
+          "description": "whether everything comes out annotated or only the anomalies"
+        },
+        "on_missing": {
+          "$ref": "#/$defs/MissingFieldPolicy",
+          "description": "what to do about a message missing the field or a group field"
+        }
+      },
+      "required": [
+        "field",
+        "method"
+      ],
+      "title": "detect",
+      "type": "object"
+    },
     "FilterTransformConfig": {
       "description": "Drops messages that don't match a condition, and drops the whole batch if\nnone of them do. Pick either the `Numeric` or the `String` form — the fields\ndiffer because the comparisons do.",
       "oneOf": [
@@ -6305,6 +6860,91 @@ Run a draft's transforms over some messages.
       ],
       "type": "object"
     },
+    "ResampleMethod": {
+      "description": "How the readings that fell in one interval become the value at its grid\npoint, and what an interval with none in it gets.",
+      "oneOf": [
+        {
+          "const": "last",
+          "description": "The last reading in the interval. An empty interval emits nothing.",
+          "type": "string"
+        },
+        {
+          "const": "mean",
+          "description": "The mean of the readings in the interval. An empty interval emits\nnothing.",
+          "type": "string"
+        },
+        {
+          "const": "linear",
+          "description": "The value at the grid point by a straight line between the last\nreading before it and the first after — so a grid point is emitted\nonce the reading after it has arrived. Empty intervals in between are\nfilled by the same line.",
+          "type": "string"
+        },
+        {
+          "const": "forward_fill",
+          "description": "The last reading seen, carried forward: an empty interval repeats the\nlast value, for up to `max_gap_seconds`, and then stops. The one method\nthat emits from a quiet series — which is what makes a sparse\nchange-on-value signal into a regular one.",
+          "type": "string"
+        }
+      ]
+    },
+    "ResampleTransformConfig": {
+      "description": "Puts a series onto a regular grid: one message per key per `interval`\nseconds, at times that are multiples of it, whichever rate the readings\narrive at. The precondition every window model has, and the second real\nuser of the run loop's tick — a `forward_fill` series keeps emitting while\nits readings have gone quiet.\n\nThe message out carries the group fields under their leaf names, the grid\ntime under `time`'s name (or `time` when arrival time is used) as an RFC\n3339 string, and the value under `as` (the field's leaf when left out). A\ngrid point is emitted when a reading past it arrives, or — for `forward_fill`\nonly — when the clock passes it with nothing arriving.",
+      "properties": {
+        "as": {
+          "description": "the field the value is written under. The field's leaf when left out",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "field": {
+          "description": "the numeric field to resample",
+          "type": "string",
+          "x-message-field": true
+        },
+        "group_by": {
+          "description": "the fields that identify a series, the reducer's way. Leave it out for\none series",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "interval_seconds": {
+          "description": "the spacing of the grid, in seconds",
+          "format": "double",
+          "type": "number"
+        },
+        "max_gap_seconds": {
+          "description": "for `forward_fill`: how long a value is carried into empty intervals\nbefore the series is left to go quiet. Carried forever when left out",
+          "format": "double",
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "method": {
+          "$ref": "#/$defs/ResampleMethod",
+          "description": "how the readings in an interval become its value"
+        },
+        "on_missing": {
+          "$ref": "#/$defs/MissingFieldPolicy",
+          "description": "what to do about a message missing the field or a group field"
+        },
+        "time": {
+          "description": "the field carrying each message's time — RFC 3339 or milliseconds since\nthe epoch. Leave it out for arrival time, in which case empty intervals\nare noticed by the clock rather than by the next reading",
+          "type": [
+            "string",
+            "null"
+          ],
+          "x-message-field": true
+        }
+      },
+      "required": [
+        "field",
+        "interval_seconds",
+        "method"
+      ],
+      "title": "resample",
+      "type": "object"
+    },
     "RollingTransformConfig": {
       "description": "Writes onto each message aggregations over the last few messages of its\nseries — the last `size` of them, or the last `seconds`' worth, or both\nlimits at once. The reducer's `{function, field, as}` list, the reducer's\nfunctions; a second component rather than a `window` on `reduce` because\nthe cardinality differs — one message out per message in, not one per\ngroup per batch.\n\n`size` is always required, because it is the bound: a window by time alone\ngrows with the rate of the stream, and every piece of state has a bound.\n`seconds` on top of it also drops what is older than that, off the `time`\nfield. `count` needs a `field` here — it counts how many of the window\ncarried one, which is `size` once the window is warm and the warm-up check\nbefore that.",
       "properties": {
@@ -6776,6 +7416,32 @@ Run a draft's transforms over some messages.
           "properties": {
             "type": {
               "const": "smooth",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type"
+          ],
+          "type": "object"
+        },
+        {
+          "$ref": "#/$defs/DetectTransformConfig",
+          "properties": {
+            "type": {
+              "const": "detect",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type"
+          ],
+          "type": "object"
+        },
+        {
+          "$ref": "#/$defs/ResampleTransformConfig",
+          "properties": {
+            "type": {
+              "const": "resample",
               "type": "string"
             }
           },
@@ -7707,6 +8373,228 @@ The same wire shape the run loop's `PipelineView` serializes to — this is the 
         "derive"
       ],
       "title": "derive",
+      "type": "object"
+    },
+    "DetectMethod": {
+      "description": "How an anomaly is decided.\n\nThe window methods compare a value against the values *before* it, never\nincluding it, so a spike does not pull the baseline it is measured against.\nThe chart methods freeze their baseline at the end of the warm-up, which is\nwhat a control chart is: a fixed idea of normal that the process is held to.",
+      "oneOf": [
+        {
+          "description": "Further than `threshold` standard deviations from the mean of the\nlast `size` values.",
+          "properties": {
+            "size": {
+              "description": "how many earlier values the baseline is drawn from",
+              "format": "uint",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "threshold": {
+              "description": "how many standard deviations count. `3` when left out",
+              "format": "double",
+              "type": [
+                "number",
+                "null"
+              ]
+            },
+            "type": {
+              "const": "zscore",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "size"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "The robust twin: further than `threshold` scaled median absolute\ndeviations from the median of the last `size` values. Prefer it when\nthe baseline itself contains outliers.",
+          "properties": {
+            "size": {
+              "description": "how many earlier values the baseline is drawn from",
+              "format": "uint",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "threshold": {
+              "description": "how many scaled MADs count. `3.5` when left out",
+              "format": "double",
+              "type": [
+                "number",
+                "null"
+              ]
+            },
+            "type": {
+              "const": "mad",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "size"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "A two-sided CUSUM: sums the drift above and below `target`, and flags\nwhen either sum passes `threshold`. Finds a small sustained shift a\nsingle-point test never sees. The sum that fired is reset.",
+          "properties": {
+            "drift": {
+              "description": "the slack per message that is not counted as drift, in the\nfield's units",
+              "format": "double",
+              "type": "number"
+            },
+            "target": {
+              "description": "the value the series is expected to sit at. Left out, the mean of\nthe warm-up is used",
+              "format": "double",
+              "type": [
+                "number",
+                "null"
+              ]
+            },
+            "threshold": {
+              "description": "the accumulated drift that counts",
+              "format": "double",
+              "type": "number"
+            },
+            "type": {
+              "const": "cusum",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "drift",
+            "threshold"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "An EWMA control chart: the smoothed value leaves a band of\n`threshold` standard deviations around the warm-up mean. Sensitive to\nsmall shifts, robust to single points.",
+          "properties": {
+            "alpha": {
+              "description": "the weight of the newest value, 0 to 1. `0.2` when left out",
+              "format": "double",
+              "type": [
+                "number",
+                "null"
+              ]
+            },
+            "threshold": {
+              "description": "the width of the band, in standard deviations. `3` when left out",
+              "format": "double",
+              "type": [
+                "number",
+                "null"
+              ]
+            },
+            "type": {
+              "const": "ewma_chart",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "The Western Electric rules against the warm-up mean and deviation: one\npoint beyond 3σ, two of three beyond 2σ on one side, four of five\nbeyond 1σ on one side, eight in a row on one side. The rule that fired\nis written beside the flag.",
+          "properties": {
+            "type": {
+              "const": "western_electric",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "The last `size` values are identical — a stuck instrument.",
+          "properties": {
+            "size": {
+              "description": "how many identical values in a row count",
+              "format": "uint",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "type": {
+              "const": "flatline",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "size"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "DetectMode": {
+      "description": "Whether every message comes out annotated, or only the anomalies.",
+      "oneOf": [
+        {
+          "const": "annotate",
+          "description": "Every message passes, carrying the flag and the score.",
+          "type": "string"
+        },
+        {
+          "const": "only_anomalies",
+          "description": "Only the anomalies pass, annotated. The stream becomes an alarm feed.",
+          "type": "string"
+        }
+      ]
+    },
+    "DetectTransformConfig": {
+      "description": "Flags anomalies in a numeric field against its own series — one component\nwith a `method`, the way `filter` is one component with a kind.\n\nWrites a boolean under `as` (`anomaly` when left out), and beside it\n`<as>_score` — how far outside normal the value was, in the method's own\nunits — so a downstream `filter` can be stricter than the threshold. Nothing\nis flagged during the warm-up of `min_samples` messages per key, because\nuntil then there is no idea of normal to be outside of.",
+      "properties": {
+        "as": {
+          "description": "the field the flag is written under; the score goes under `<as>_score`.\n`anomaly` when left out",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "field": {
+          "description": "the numeric field to watch",
+          "type": "string",
+          "x-message-field": true
+        },
+        "group_by": {
+          "description": "the fields that identify a series, the reducer's way. Leave it out for\none series",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "method": {
+          "$ref": "#/$defs/DetectMethod",
+          "description": "how an anomaly is decided"
+        },
+        "min_samples": {
+          "description": "how many messages per key to see before flagging anything. The\nmethod's window `size` when left out, or 30 for a method without one",
+          "format": "uint",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "mode": {
+          "$ref": "#/$defs/DetectMode",
+          "description": "whether everything comes out annotated or only the anomalies"
+        },
+        "on_missing": {
+          "$ref": "#/$defs/MissingFieldPolicy",
+          "description": "what to do about a message missing the field or a group field"
+        }
+      },
+      "required": [
+        "field",
+        "method"
+      ],
+      "title": "detect",
       "type": "object"
     },
     "DummyConfig": {
@@ -9647,6 +10535,91 @@ The same wire shape the run loop's `PipelineView` serializes to — this is the 
       ],
       "type": "object"
     },
+    "ResampleMethod": {
+      "description": "How the readings that fell in one interval become the value at its grid\npoint, and what an interval with none in it gets.",
+      "oneOf": [
+        {
+          "const": "last",
+          "description": "The last reading in the interval. An empty interval emits nothing.",
+          "type": "string"
+        },
+        {
+          "const": "mean",
+          "description": "The mean of the readings in the interval. An empty interval emits\nnothing.",
+          "type": "string"
+        },
+        {
+          "const": "linear",
+          "description": "The value at the grid point by a straight line between the last\nreading before it and the first after — so a grid point is emitted\nonce the reading after it has arrived. Empty intervals in between are\nfilled by the same line.",
+          "type": "string"
+        },
+        {
+          "const": "forward_fill",
+          "description": "The last reading seen, carried forward: an empty interval repeats the\nlast value, for up to `max_gap_seconds`, and then stops. The one method\nthat emits from a quiet series — which is what makes a sparse\nchange-on-value signal into a regular one.",
+          "type": "string"
+        }
+      ]
+    },
+    "ResampleTransformConfig": {
+      "description": "Puts a series onto a regular grid: one message per key per `interval`\nseconds, at times that are multiples of it, whichever rate the readings\narrive at. The precondition every window model has, and the second real\nuser of the run loop's tick — a `forward_fill` series keeps emitting while\nits readings have gone quiet.\n\nThe message out carries the group fields under their leaf names, the grid\ntime under `time`'s name (or `time` when arrival time is used) as an RFC\n3339 string, and the value under `as` (the field's leaf when left out). A\ngrid point is emitted when a reading past it arrives, or — for `forward_fill`\nonly — when the clock passes it with nothing arriving.",
+      "properties": {
+        "as": {
+          "description": "the field the value is written under. The field's leaf when left out",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "field": {
+          "description": "the numeric field to resample",
+          "type": "string",
+          "x-message-field": true
+        },
+        "group_by": {
+          "description": "the fields that identify a series, the reducer's way. Leave it out for\none series",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "interval_seconds": {
+          "description": "the spacing of the grid, in seconds",
+          "format": "double",
+          "type": "number"
+        },
+        "max_gap_seconds": {
+          "description": "for `forward_fill`: how long a value is carried into empty intervals\nbefore the series is left to go quiet. Carried forever when left out",
+          "format": "double",
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "method": {
+          "$ref": "#/$defs/ResampleMethod",
+          "description": "how the readings in an interval become its value"
+        },
+        "on_missing": {
+          "$ref": "#/$defs/MissingFieldPolicy",
+          "description": "what to do about a message missing the field or a group field"
+        },
+        "time": {
+          "description": "the field carrying each message's time — RFC 3339 or milliseconds since\nthe epoch. Leave it out for arrival time, in which case empty intervals\nare noticed by the clock rather than by the next reading",
+          "type": [
+            "string",
+            "null"
+          ],
+          "x-message-field": true
+        }
+      },
+      "required": [
+        "field",
+        "interval_seconds",
+        "method"
+      ],
+      "title": "resample",
+      "type": "object"
+    },
     "RollingTransformConfig": {
       "description": "Writes onto each message aggregations over the last few messages of its\nseries — the last `size` of them, or the last `seconds`' worth, or both\nlimits at once. The reducer's `{function, field, as}` list, the reducer's\nfunctions; a second component rather than a `window` on `reduce` because\nthe cardinality differs — one message out per message in, not one per\ngroup per batch.\n\n`size` is always required, because it is the bound: a window by time alone\ngrows with the rate of the stream, and every piece of state has a bound.\n`seconds` on top of it also drops what is older than that, off the `time`\nfield. `count` needs a `field` here — it counts how many of the window\ncarried one, which is `size` once the window is warm and the warm-up check\nbefore that.",
       "properties": {
@@ -10236,6 +11209,32 @@ The same wire shape the run loop's `PipelineView` serializes to — this is the 
           "properties": {
             "type": {
               "const": "smooth",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type"
+          ],
+          "type": "object"
+        },
+        {
+          "$ref": "#/$defs/DetectTransformConfig",
+          "properties": {
+            "type": {
+              "const": "detect",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type"
+          ],
+          "type": "object"
+        },
+        {
+          "$ref": "#/$defs/ResampleTransformConfig",
+          "properties": {
+            "type": {
+              "const": "resample",
               "type": "string"
             }
           },
