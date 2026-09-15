@@ -7,6 +7,8 @@ use std::sync::Arc;
 use crate::{
     BuildCtx,
     inputs::MessageBatch,
+    stats,
+    time::MessageTime,
     transforms::{BuildTransform, Transform},
 };
 
@@ -34,6 +36,7 @@ impl BuildTransform for ReduceTransformConfig {
             }
         }
 
+        let time = MessageTime::new(self.time);
         let mut names = HashSet::new();
         for aggregation in &self.aggregations {
             let name = aggregation.output.trim();
@@ -45,6 +48,14 @@ impl BuildTransform for ReduceTransformConfig {
             }
             if aggregation.function != ReduceFnKind::Count && aggregation.field.is_none() {
                 bail!("the '{name}' aggregation needs a 'field' to aggregate");
+            }
+            // a slope is per second, so it needs to know each message's
+            // second; arrival time would make every batch a vertical line
+            if aggregation.function == ReduceFnKind::Slope && time.is_arrival() {
+                bail!(
+                    "the '{name}' aggregation is a slope, which needs the reducer's 'time' \
+                     setting to say which field carries each message's time"
+                );
             }
             if !names.insert(name.to_string()) {
                 bail!("two aggregations are both called '{name}'");
@@ -58,6 +69,7 @@ impl BuildTransform for ReduceTransformConfig {
             aggregations: self.aggregations,
             group_by: self.group_by,
             on_missing: self.on_missing,
+            time,
         }))
     }
 }
@@ -66,6 +78,9 @@ pub struct ReduceTransform {
     aggregations: Vec<Aggregation>,
     group_by: Vec<String>,
     on_missing: MissingFieldPolicy,
+    /// Where each message's time is read from — `crate::time`'s one rule.
+    /// Only `slope` asks, and only it refuses to build without a field.
+    time: MessageTime,
 }
 
 /// One group being accumulated: the values its key was built from, and the
@@ -167,12 +182,52 @@ impl ReduceTransform {
             out.insert(crate::fields::leaf(name).to_string(), value.clone());
         }
         for aggregation in &self.aggregations {
-            let values = self.values_for(aggregation, &group.messages)?;
-            let answer = apply_function(aggregation, &values, group.messages.len())
-                .with_context(|| format!("aggregation '{}'", aggregation.output))?;
+            let answer = if aggregation.function == ReduceFnKind::Slope {
+                self.slope(aggregation, &group.messages)
+            } else {
+                let values = self.values_for(aggregation, &group.messages)?;
+                apply_function(aggregation, &values, group.messages.len())
+            }
+            .with_context(|| format!("aggregation '{}'", aggregation.output))?;
             out.insert(aggregation.output.trim().to_string(), answer);
         }
         Ok(Value::Object(out))
+    }
+
+    /// `slope`: the least-squares line of the field against time, per second.
+    ///
+    /// Separate from `apply_function` because it is the one function that
+    /// reads *two* things off each message, and the pairing has to survive
+    /// `on_missing: skip` — a message left out for lacking the field has to
+    /// take its time with it, or the values and the times drift apart by one.
+    /// A group with fewer than two readings, or with every reading at the same
+    /// instant, has no slope and reports `null`, as the other functions report
+    /// nothing to average.
+    fn slope(&self, aggregation: &Aggregation, messages: &[Arc<Value>]) -> anyhow::Result<Value> {
+        let field = aggregation
+            .field
+            .as_deref()
+            .context("a slope needs a field")?;
+        let mut times = Vec::with_capacity(messages.len());
+        let mut values = Vec::with_capacity(messages.len());
+        for message in messages {
+            let value = match present(message, field) {
+                Some(value) => value,
+                None if self.on_missing == MissingFieldPolicy::Skip => continue,
+                None => bail!("field '{field}' is missing from a message"),
+            };
+            let number = value
+                .as_f64()
+                .with_context(|| format!("{value} is not a number"))?;
+            // milliseconds to seconds: the unit the answer is in. A time
+            // within 2^53 ms of the epoch — every one before the year 287,000
+            // — is exact.
+            #[allow(clippy::cast_precision_loss)]
+            let seconds = self.time.millis_of(message)? as f64 / 1000.0;
+            times.push(seconds);
+            values.push(number);
+        }
+        Ok(crate::stats::linfit(&times, &values).map_or(Value::Null, |fit| Value::from(fit.slope)))
     }
 
     /// The values one aggregation sees: its field across the group's messages,
@@ -245,13 +300,17 @@ fn apply_function(
         _ if values.is_empty() => Ok(Value::Null),
         ReduceFnKind::Sum | ReduceFnKind::Avg | ReduceFnKind::Median | ReduceFnKind::Stddev => {
             let numbers = numbers(values)?;
-            Ok(Value::from(match function {
-                ReduceFnKind::Sum => numbers.iter().sum::<f64>(),
-                ReduceFnKind::Avg => mean(&numbers),
-                ReduceFnKind::Median => median(&numbers),
-                _ => stddev(&numbers),
-            }))
+            // `values` is non-empty here, so none of these is undefined
+            let answer = match function {
+                ReduceFnKind::Sum => Some(stats::sum(&numbers)),
+                ReduceFnKind::Avg => stats::mean(&numbers),
+                ReduceFnKind::Median => stats::median(&numbers),
+                _ => stats::stddev(&numbers),
+            };
+            Ok(answer.map_or(Value::Null, Value::from))
         }
+        // dispatched in `reduce`, before the values are collected
+        ReduceFnKind::Slope => bail!("a slope is computed against time, not over values"),
     }
 }
 
@@ -316,35 +375,6 @@ fn numbers(values: &[&Value]) -> anyhow::Result<Vec<f64>> {
         .collect()
 }
 
-// a batch would have to hold 2^52 messages for this cast to lose anything; it
-// can't, they're all in memory at once
-#[allow(clippy::cast_precision_loss)]
-fn mean(numbers: &[f64]) -> f64 {
-    numbers.iter().sum::<f64>() / numbers.len() as f64
-}
-
-/// The middle value, or the mean of the two middle ones. Sorted with
-/// `total_cmp` so a NaN that arrived as a number has a defined place rather
-/// than making the sort itself misbehave.
-fn median(numbers: &[f64]) -> f64 {
-    let mut sorted = numbers.to_vec();
-    sorted.sort_by(f64::total_cmp);
-    let middle = sorted.len() / 2;
-    if sorted.len().is_multiple_of(2) {
-        f64::midpoint(sorted[middle - 1], sorted[middle])
-    } else {
-        sorted[middle]
-    }
-}
-
-/// The *population* standard deviation, not the sample one: a window holds
-/// every message that arrived in it, so it is the population.
-fn stddev(numbers: &[f64]) -> f64 {
-    let centre = mean(numbers);
-    let squares: Vec<f64> = numbers.iter().map(|n| (n - centre).powi(2)).collect();
-    mean(&squares).sqrt()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -373,6 +403,7 @@ mod tests {
             aggregations,
             group_by: Vec::new(),
             on_missing: MissingFieldPolicy::Error,
+            time: None,
         }
     }
 
@@ -808,5 +839,56 @@ mod tests {
             transform(config).is_err(),
             "an aggregation called 'subject' would overwrite the group field"
         );
+    }
+    /// `slope` is per second against the `time` field, and `on_missing: skip`
+    /// drops a reading's time along with its value — the pairing is the whole
+    /// of what makes the answer right.
+    #[tokio::test]
+    async fn slope_is_per_second_against_the_time_field() -> anyhow::Result<()> {
+        let mut config = config(vec![aggregation(ReduceFnKind::Slope, Some("value"), "rate")]);
+        config.time = Some("ts".to_string());
+        config.on_missing = MissingFieldPolicy::Skip;
+        let out = run(
+            config,
+            vec![
+                json!({ "ts": "1970-01-01T00:00:00Z", "value": 10 }),
+                json!({ "ts": "1970-01-01T00:00:02Z", "value": 14 }),
+                json!({ "ts": "1970-01-01T00:00:03Z" }),
+                json!({ "ts": 4000, "value": 18 }),
+            ],
+        )
+        .await?;
+        assert_eq!(out, vec![json!({ "rate": 2.0 })]);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn a_slope_of_one_reading_is_null() -> anyhow::Result<()> {
+        let mut config = config(vec![aggregation(ReduceFnKind::Slope, Some("value"), "rate")]);
+        config.time = Some("ts".to_string());
+        let out = run(config, vec![json!({ "ts": 0, "value": 10 })]).await?;
+        assert_eq!(out, vec![json!({ "rate": null })]);
+        Ok(())
+    }
+
+    /// The time rule is one rule: a configured field that is missing fails the
+    /// batch and names the field, rather than substituting arrival time.
+    #[tokio::test]
+    async fn a_reading_without_a_time_fails_the_batch() {
+        let mut config = config(vec![aggregation(ReduceFnKind::Slope, Some("value"), "rate")]);
+        config.time = Some("ts".to_string());
+        let err = run(config, vec![json!({ "value": 1 }), json!({ "ts": 1000, "value": 2 })])
+            .await
+            .err()
+            .map(|e| format!("{e:#}"))
+            .unwrap_or_default();
+        assert!(err.contains("'ts'"), "got: {err}");
+    }
+
+    #[test]
+    fn a_slope_without_a_time_setting_is_refused_at_build() {
+        let config = config(vec![aggregation(ReduceFnKind::Slope, Some("value"), "rate")]);
+        let err = transform(config).err().map(|e| format!("{e:#}")).unwrap_or_default();
+        assert!(err.contains("'time'"), "got: {err}");
     }
 }

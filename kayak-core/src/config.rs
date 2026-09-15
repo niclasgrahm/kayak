@@ -1058,6 +1058,10 @@ pub enum ReduceFnKind {
     Median,
     /// The population standard deviation. Numbers only.
     Stddev,
+    /// How fast the field is changing, per second, by a least-squares line
+    /// against each message's time. Numbers only, and it needs the reducer's
+    /// `time` setting — a slope with no time is a slope per nothing.
+    Slope,
 }
 
 /// What to do about a message that doesn't carry a field being aggregated or
@@ -1128,6 +1132,13 @@ pub struct ReduceTransformConfig {
     /// what to do about a message missing one of the fields above
     #[serde(default, skip_serializing_if = "MissingFieldPolicy::is_default")]
     pub on_missing: MissingFieldPolicy,
+    /// the field carrying each message's time — an RFC 3339 string or
+    /// milliseconds since the epoch. Needed by `slope`; a message missing it
+    /// fails the batch. Leave it out and each message's time is when it
+    /// arrived.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(extend("x-message-field" = true))]
+    pub time: Option<String>,
 }
 
 /// One test a message either passes or doesn't.

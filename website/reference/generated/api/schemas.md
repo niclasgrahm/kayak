@@ -2856,6 +2856,11 @@ One pipeline: every input is merged into one stream, that stream runs through th
           "const": "stddev",
           "description": "The population standard deviation. Numbers only.",
           "type": "string"
+        },
+        {
+          "const": "slope",
+          "description": "How fast the field is changing, per second, by a least-squares line\nagainst each message's time. Numbers only, and it needs the reducer's\n`time` setting — a slope with no time is a slope per nothing.",
+          "type": "string"
         }
       ]
     },
@@ -2879,6 +2884,14 @@ One pipeline: every input is merged into one stream, that stream runs through th
         "on_missing": {
           "$ref": "#/$defs/MissingFieldPolicy",
           "description": "what to do about a message missing one of the fields above"
+        },
+        "time": {
+          "description": "the field carrying each message's time — an RFC 3339 string or\nmilliseconds since the epoch. Needed by `slope`; a message missing it\nfails the batch. Leave it out and each message's time is when it\narrived.",
+          "type": [
+            "string",
+            "null"
+          ],
+          "x-message-field": true
         }
       },
       "required": [
@@ -5616,6 +5629,11 @@ Run a draft's transforms over some messages.
           "const": "stddev",
           "description": "The population standard deviation. Numbers only.",
           "type": "string"
+        },
+        {
+          "const": "slope",
+          "description": "How fast the field is changing, per second, by a least-squares line\nagainst each message's time. Numbers only, and it needs the reducer's\n`time` setting — a slope with no time is a slope per nothing.",
+          "type": "string"
         }
       ]
     },
@@ -5639,6 +5657,14 @@ Run a draft's transforms over some messages.
         "on_missing": {
           "$ref": "#/$defs/MissingFieldPolicy",
           "description": "what to do about a message missing one of the fields above"
+        },
+        "time": {
+          "description": "the field carrying each message's time — an RFC 3339 string or\nmilliseconds since the epoch. Needed by `slope`; a message missing it\nfails the batch. Leave it out and each message's time is when it\narrived.",
+          "type": [
+            "string",
+            "null"
+          ],
+          "x-message-field": true
         }
       },
       "required": [
@@ -8524,6 +8550,11 @@ The same wire shape the run loop's `PipelineView` serializes to — this is the 
           "const": "stddev",
           "description": "The population standard deviation. Numbers only.",
           "type": "string"
+        },
+        {
+          "const": "slope",
+          "description": "How fast the field is changing, per second, by a least-squares line\nagainst each message's time. Numbers only, and it needs the reducer's\n`time` setting — a slope with no time is a slope per nothing.",
+          "type": "string"
         }
       ]
     },
@@ -8547,6 +8578,14 @@ The same wire shape the run loop's `PipelineView` serializes to — this is the 
         "on_missing": {
           "$ref": "#/$defs/MissingFieldPolicy",
           "description": "what to do about a message missing one of the fields above"
+        },
+        "time": {
+          "description": "the field carrying each message's time — an RFC 3339 string or\nmilliseconds since the epoch. Needed by `slope`; a message missing it\nfails the batch. Leave it out and each message's time is when it\narrived.",
+          "type": [
+            "string",
+            "null"
+          ],
+          "x-message-field": true
         }
       },
       "required": [

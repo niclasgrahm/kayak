@@ -11,6 +11,7 @@
 //! part of that sandbox is load-bearing.
 
 pub mod error;
+pub mod math;
 pub mod modules;
 pub mod runner;
 pub mod source;

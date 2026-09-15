@@ -369,6 +369,7 @@ mod tests {
                     }],
                     group_by: vec!["sensor".to_string()],
                     on_missing: MissingFieldPolicy::Error,
+                    time: None,
                 }),
             ],
             OutputKind::Stdout(StdoutOutputConfig {}),

@@ -87,6 +87,7 @@ export default defineConfig({
           { text: 'reshaping messages', link: '/pipelines/reshaping-messages' },
           { text: 'state', link: '/pipelines/state' },
           { text: 'scripting', link: '/pipelines/scripting' },
+          { text: 'time and numbers', link: '/pipelines/time-and-numbers' },
           { text: 'the sample graph', link: '/pipelines/the-sample' },
         ],
       },

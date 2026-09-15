@@ -76,12 +76,13 @@ Each aggregation is a `function`, the `field` to apply it to and the `as` name t
 | `aggregations` | `list of aggregation` | <Badge type="warning" text="required" /> | what to compute. At least one, and each needs a distinct `as`. |
 | `group_by` | `list of string` | <Badge type="info" text="optional" /> | the fields whose combination defines a group. Omit it to reduce the whole batch at once. |
 | `on_missing` | `error` \| `skip` | <Badge type="info" text="optional" /> | what to do about a message missing one of the fields above |
+| `time` | `string` | <Badge type="info" text="optional" /> | the field carrying each message's time — an RFC 3339 string or milliseconds since the epoch. Needed by `slope`; a message missing it fails the batch. Leave it out and each message's time is when it arrived. |
 
 **`aggregations` — each entry**
 
 | field | type | | description |
 | --- | --- | --- | --- |
-| `function` | `sum` \| `avg` \| `min` \| `max` \| `count` \| `count_distinct` \| `first` \| `last` \| `collect` \| `median` \| `stddev` | <Badge type="warning" text="required" /> | how to combine the values |
+| `function` | `sum` \| `avg` \| `min` \| `max` \| `count` \| `count_distinct` \| `first` \| `last` \| `collect` \| `median` \| `stddev` \| `slope` | <Badge type="warning" text="required" /> | how to combine the values |
 | `as` | `string` | <Badge type="warning" text="required" /> | the field the emitted message carries this answer under. Two aggregations may not share one, and none may collide with a `group_by` field. |
 | `field` | `string` | <Badge type="info" text="optional" /> | the field to aggregate. Required by every function except `count`, which counts messages when it is left out. |
 

@@ -365,6 +365,10 @@ fn build_engine(
         tracing::warn!("script: {text}");
     });
 
+    // ── numbers and times ───────────────────────────────────────────────────
+    // `pluck`, `mean`, `linfit` … and `parse_time`/`format_time`: see `math`.
+    super::math::register(&mut engine);
+
     register_state(&mut engine, bindings.state);
     engine
 }

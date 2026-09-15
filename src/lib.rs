@@ -31,7 +31,9 @@ pub mod server_config;
 pub mod shutdown;
 pub mod site;
 pub mod state;
+pub mod stats;
 pub mod testing;
+pub mod time;
 pub mod transforms;
 
 use crate::buckets::Buckets;

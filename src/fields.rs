@@ -36,6 +36,19 @@
 use anyhow::{Result, bail};
 use serde_json::{Map, Value};
 
+/// What a value is, for an error that has to say why it wasn't accepted.
+#[must_use]
+pub fn describe(value: &Value) -> &'static str {
+    match value {
+        Value::Null => "null",
+        Value::Bool(_) => "a boolean",
+        Value::Number(_) => "a number",
+        Value::String(_) => "a string",
+        Value::Array(_) => "an array",
+        Value::Object(_) => "an object",
+    }
+}
+
 /// The value at `field`, by exact key first and then as a dotted path.
 ///
 /// `None` for a field that isn't there *and* for one that is explicitly `null`

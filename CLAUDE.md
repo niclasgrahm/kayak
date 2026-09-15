@@ -617,6 +617,52 @@ union, at depth five. That constant is a stack guard against self-referential
 schemas, not a statement about how deep config should nest — raise it when
 something legitimate reaches it.
 
+### Time on the message, and the numbers a script can do
+
+The first two entries of the roadmap's "statistics in the stream", built
+together because they are one fact twice. Three files:
+
+- **`src/time.rs` is the one rule for reading a time off a message**: an RFC
+  3339 string or a number of **milliseconds** since the epoch, nothing else,
+  and a near miss (`"2024-01-01 12:00"`, a bare date) is an error naming the
+  value rather than a guess. `MessageTime` is the component-side half — a
+  `time: Option<String>` field on the component, arrival time when absent, and
+  a configured field that is *missing* fails the batch rather than falling
+  back to arrival. Any component that reads a time goes through it; the
+  reducer is the first (for `slope`), and `parse_time`/`format_time` in rhai
+  are the same rule for a script. **Known, deliberate wart:** `map`'s `cast:
+  timestamp` reads a bare number as *seconds* — it is a conversion into the
+  column mapping's world, where `to_timestamp` means seconds — and the two are
+  documented against each other on the site. Don't unify them by changing
+  either; a config in the wild depends on each.
+- **`src/stats.rs` is the arithmetic, over `&[f64]` and nothing else.** Two
+  rules hold throughout: anything undefined is `None` rather than NaN (each
+  caller spells that in its own vocabulary — `null` from the reducer, `()` from
+  a script), and spread is the *population* kind, which is what the reducer's
+  `stddev` always was. `reduce` now routes its `avg`/`median`/`stddev` through
+  it, and the streaming transforms still to come (`rolling`, `smooth`,
+  `detect`) are meant to as well, so a test per function here stands for every
+  caller. Keep `Value`, `Dynamic` and config out of it.
+- **`src/transforms/script/math.rs` adapts it for rhai.** `pluck(batch, path)`
+  is the bridge and it **skips** missing/null values (the `skip` half of the
+  reducer's `on_missing`, since a script is where someone goes when strict got
+  in the way); a *present* non-number is an error, the transforms' own
+  absent-against-wrong rule. Results are floats even from integer input, so a
+  script's arithmetic can't change type on the data's say-so; counts and
+  positions (`histogram.counts`, `peaks`) are integers. `var` is spelled
+  `variance` because rhai reserves the word — a reserved word is a compile
+  error in the *script*, which the builtins test cannot see.
+
+The reducer's `slope` is per **second** against the `time` field and refuses
+to build without one — arrival time would make every batch a vertical line. It
+is dispatched in `reduce()` before `values_for`, not in `apply_function`,
+because it is the one function that reads two things off each message and the
+pairing has to survive `on_missing: skip`.
+
+Every builtin is declared in `kayak_core::script::builtins()` as before;
+`builtins_are_the_functions_the_engine_has` still pins the two lists in both
+directions, and `just docs` regenerates the table on the scripting page.
+
 ### Secrets
 
 Config fields that can hold credentials are typed `Secret` (`kayak-core::config`), not `String`. They all live on *connections* now rather than on components. `Secret` only ever holds the *unresolved* `${NAME}` template, which is what makes it safe to serialize back out of `GET /api/pipelines` and to compile for wasm. Resolution happens at build time via `ctx.resolve()` and yields a `secrets::Resolved`, whose `Display`/`Debug` print the template rather than the value — so error contexts can name a connection without leaking it. Reaching the real value takes `.expose()`; flag new call sites in review, and never put a `Resolved` into anything `Serialize`. Stores (`EnvStore`, `FileStore`, `ChainStore`) live in `src/secrets.rs`; `main.rs` chains env ahead of `--secrets <file>`. `src/testing.rs` has `MapSecretStore` for tests. See `website/io/secrets.md`.

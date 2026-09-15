@@ -93,7 +93,10 @@ containing JSON**, for the common case of a payload that arrived double-encoded.
 It stays conservative about the conversions that could go two ways. `12.5` to
 `integer` is an error, not a rounding — which way to round is not something the
 config said. A timestamp is an RFC 3339 string or a number read as **seconds**
-since the epoch, the same reading the column mapping makes.
+since the epoch, the same reading the column mapping makes — and the one place
+seconds are assumed. Everywhere a time is *read* rather than converted (the
+reducer's `time`, a script's `parse_time`) a number is milliseconds; see
+[time and numbers](/pipelines/time-and-numbers).
 
 **A value that is present and won't convert is an error whatever `on_missing`
 says.** `on_missing` is about a stream that is sparser than the config expected;

@@ -499,24 +499,23 @@ failing to build.
 
 Roughly in dependency order:
 
-- [ ] **time on the message.** Nearly everything below reads a timestamp off
-      the message and kayak has no rule for that today — `now_millis()` exists
-      but nothing parses one. A shared `time` setting on the component (a field
-      path, defaulting to arrival time, RFC 3339 or epoch millis accepted) and a
-      `parse_time`/`format_time` pair in rhai are one fact twice and should
-      land together. No dependency; unblocks the script version of the
-      buffer-and-predict pipeline immediately.
-- [ ] **array builtins for scripts.** `pluck(batch, path)` — the bridge from a
-      batch to a number array — then `mean`, `median`, `min`, `max`, `sum`,
-      `std`, `var`, `quantile`, `mad`, `zscore`, `skew`, `kurtosis`, `rms`,
-      `diff`, `cumsum`, `ewma`, `linfit` (`#{slope, intercept, r2}`),
-      `autocorr`, `peaks`, `histogram`, `clamp`, `interp`, `dtw`. Empty input
-      reads as `()`, never NaN. Each goes in `kayak_core::script::builtins()`,
-      which the runner test pins against the engine in both directions. With
-      `pluck`, `mean`, `std` and `linfit` the cycle-features script is four
-      lines, and it is the fallback for any feature the closed set below
-      lacks. `std` and `slope` want to be `reduce` functions at the same time
-      (Cpk per lot is `reduce` plus `map` arithmetic once std exists).
+- [x] **time on the message.**
+      (done 2026-09-14: `src/time.rs` is the one rule — RFC 3339 or epoch
+      *millis*, arrival when no field is named, a configured field that is
+      missing fails the batch — and `MessageTime` is the component-side half.
+      The reducer is the first to carry a `time` setting, for `slope`;
+      `parse_time`/`format_time` are the same rule in rhai. Note `map`'s
+      `cast: timestamp` still reads a number as seconds, deliberately: it is a
+      conversion into the column mapping's world, and the site documents the
+      two against each other. See "time and numbers" on the site.)
+- [x] **array builtins for scripts.**
+      (done 2026-09-14: the whole list, with `var` spelled `variance` because
+      rhai reserves the word. `src/stats.rs` is the pure half — `Option` for
+      undefined, population spread throughout — and
+      `src/transforms/script/math.rs` adapts it; `reduce` now goes through
+      `stats` too, and grew `slope` beside its existing `stddev`/`median`.
+      `pluck` skips missing values and a present non-number is an error, the
+      transforms' own absent-against-wrong rule.)
 - [ ] **streaming statistics, tier one, no crate.** Six transforms, all
       O(1) state per key:
       `rolling` — sliding-window aggregations over the last `size` messages or
