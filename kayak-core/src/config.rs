@@ -1089,7 +1089,7 @@ impl MissingFieldPolicy {
 }
 
 /// One thing to compute over a group, and what to call it in the result.
-#[derive(Clone, Debug, Deserialize, Serialize, JsonSchema)]
+#[derive(Clone, Debug, Deserialize, Serialize, JsonSchema, PartialEq)]
 #[schemars(title = "aggregation")]
 pub struct Aggregation {
     /// how to combine the values
@@ -1454,6 +1454,8 @@ pub enum TransformKind {
     Recall(RecallTransformConfig),
     Map(MapTransformConfig),
     Script(ScriptTransformConfig),
+    Deadband(crate::streaming::DeadbandTransformConfig),
+    Derive(crate::streaming::DeriveTransformConfig),
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, JsonSchema)]

@@ -1004,6 +1004,175 @@ One pipeline: every input is merged into one stream, that stream runs through th
         }
       ]
     },
+    "DeadbandMode": {
+      "description": "Whether a deadband's `delta` is an amount or a fraction of the last value\nthat passed.",
+      "oneOf": [
+        {
+          "const": "absolute",
+          "description": "`delta` is in the field's own units: `0.5` is half a degree.",
+          "type": "string"
+        },
+        {
+          "const": "percent",
+          "description": "`delta` is a percentage of the last value that passed: `2` is two\npercent. A last value of zero passes everything, since a fraction of\nnothing is nothing.",
+          "type": "string"
+        }
+      ]
+    },
+    "DeadbandTransformConfig": {
+      "description": "Drops a message unless its field has moved far enough from the last one\nthat passed — the single most used transform in any historian pipeline,\nand a *stateful* filter, which is why `filter` cannot be it.\n\nThe first message per key always passes. After that a message passes when\n`field` differs from the last passed value by more than `delta`, or when\n`max_seconds` have gone by since anything passed, so a steady reading is\nstill confirmed now and then. `flatline_seconds` is the sensor-health half:\nwhen the value has not moved in that long the next message passes with\n`stuck: true` on it, once per flat stretch, so a stuck instrument is\ndistinguishable from a quiet one downstream.",
+      "properties": {
+        "delta": {
+          "description": "how far the value has to move to pass, in the field's units or as a\npercentage, by `mode`",
+          "format": "double",
+          "type": "number"
+        },
+        "field": {
+          "description": "the numeric field the band is on",
+          "type": "string",
+          "x-message-field": true
+        },
+        "flatline_seconds": {
+          "description": "after this many seconds with no movement, let the next message through\ncarrying `stuck: true` — once per flat stretch",
+          "format": "double",
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "group_by": {
+          "description": "the fields that identify a series, the reducer's way. Leave it out for\none series",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "max_seconds": {
+          "description": "pass a message anyway once this many seconds have gone by since the\nlast one that passed, so a steady value is still reported now and then",
+          "format": "double",
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "mode": {
+          "$ref": "#/$defs/DeadbandMode",
+          "description": "what `delta` is measured in"
+        },
+        "on_missing": {
+          "$ref": "#/$defs/MissingFieldPolicy",
+          "description": "what to do about a message missing the field or a group field"
+        },
+        "time": {
+          "description": "the field carrying each message's time — RFC 3339 or milliseconds since\nthe epoch. Leave it out for arrival time",
+          "type": [
+            "string",
+            "null"
+          ],
+          "x-message-field": true
+        }
+      },
+      "required": [
+        "field",
+        "delta"
+      ],
+      "title": "deadband",
+      "type": "object"
+    },
+    "Derivation": {
+      "description": "One derived value and the field it is written to.",
+      "properties": {
+        "as": {
+          "description": "the field the answer is written under",
+          "type": "string"
+        },
+        "field": {
+          "description": "the numeric field it is derived from",
+          "type": "string",
+          "x-message-field": true
+        },
+        "function": {
+          "$ref": "#/$defs/DeriveFnKind",
+          "description": "how the value is derived from this message and the previous one"
+        },
+        "wrap_at": {
+          "description": "for `counter`: the value the counter wraps back to zero at, so a drop\nis read as having run through the top rather than as a reset",
+          "format": "double",
+          "type": [
+            "number",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "function",
+        "field",
+        "as"
+      ],
+      "title": "derivation",
+      "type": "object"
+    },
+    "DeriveFnKind": {
+      "description": "How one message's value is combined with the previous one's.",
+      "oneOf": [
+        {
+          "const": "rate",
+          "description": "The change per second since the previous message, off the `time`\nfield. `null` on the first message and when no time has passed.",
+          "type": "string"
+        },
+        {
+          "const": "delta",
+          "description": "The change since the previous message. `null` on the first.",
+          "type": "string"
+        },
+        {
+          "const": "cumsum",
+          "description": "The running total of the field, from the first message on.",
+          "type": "string"
+        },
+        {
+          "const": "counter",
+          "description": "The running total of the *increases* — for a counter that resets or\nwraps. A drop below the previous value counts as a wrap when `wrap_at`\nis set (the increase runs through the top), and as a reset otherwise\n(the new value is the increase).",
+          "type": "string"
+        }
+      ]
+    },
+    "DeriveTransformConfig": {
+      "description": "Writes onto each message something that needs the previous one: a rate of\nchange, a delta, a running total, a wrap-tolerant counter. Not a `map`\noperation because a `map` sees one message at a time; this remembers the\nlast per key.\n\nSeveral derivations run at once and each is written under its own `as`, so\none pass gives both `delta` and `rate`. The first message per key has no\nprevious, and the derivations that need one write `null` for it.",
+      "properties": {
+        "derive": {
+          "description": "what to derive. At least one, each with a distinct `as`",
+          "items": {
+            "$ref": "#/$defs/Derivation"
+          },
+          "type": "array"
+        },
+        "group_by": {
+          "description": "the fields that identify a series, the reducer's way. Leave it out for\none series",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "on_missing": {
+          "$ref": "#/$defs/MissingFieldPolicy",
+          "description": "what to do about a message missing a derived field or a group field"
+        },
+        "time": {
+          "description": "the field carrying each message's time — RFC 3339 or milliseconds since\nthe epoch. Leave it out for arrival time",
+          "type": [
+            "string",
+            "null"
+          ],
+          "x-message-field": true
+        }
+      },
+      "required": [
+        "derive"
+      ],
+      "title": "derive",
+      "type": "object"
+    },
     "DummyConfig": {
       "description": "Emits one generated message on a fixed interval — a heartbeat for testing a\npipeline without a real source attached.\n\nEvery message carries a `value` and the `current_time` it was emitted at.\nWhat the `value` holds is the `payload` field's business: a number sampled\nfrom a sine wave, so a chart of it has a shape, or a random sentence, so a\ntext transform has something to chew on.",
       "properties": {
@@ -3261,6 +3430,32 @@ One pipeline: every input is merged into one stream, that stream runs through th
             "type"
           ],
           "type": "object"
+        },
+        {
+          "$ref": "#/$defs/DeadbandTransformConfig",
+          "properties": {
+            "type": {
+              "const": "deadband",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type"
+          ],
+          "type": "object"
+        },
+        {
+          "$ref": "#/$defs/DeriveTransformConfig",
+          "properties": {
+            "type": {
+              "const": "derive",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type"
+          ],
+          "type": "object"
         }
       ],
       "type": "object"
@@ -4994,6 +5189,175 @@ Run a draft's transforms over some messages.
         }
       ]
     },
+    "DeadbandMode": {
+      "description": "Whether a deadband's `delta` is an amount or a fraction of the last value\nthat passed.",
+      "oneOf": [
+        {
+          "const": "absolute",
+          "description": "`delta` is in the field's own units: `0.5` is half a degree.",
+          "type": "string"
+        },
+        {
+          "const": "percent",
+          "description": "`delta` is a percentage of the last value that passed: `2` is two\npercent. A last value of zero passes everything, since a fraction of\nnothing is nothing.",
+          "type": "string"
+        }
+      ]
+    },
+    "DeadbandTransformConfig": {
+      "description": "Drops a message unless its field has moved far enough from the last one\nthat passed — the single most used transform in any historian pipeline,\nand a *stateful* filter, which is why `filter` cannot be it.\n\nThe first message per key always passes. After that a message passes when\n`field` differs from the last passed value by more than `delta`, or when\n`max_seconds` have gone by since anything passed, so a steady reading is\nstill confirmed now and then. `flatline_seconds` is the sensor-health half:\nwhen the value has not moved in that long the next message passes with\n`stuck: true` on it, once per flat stretch, so a stuck instrument is\ndistinguishable from a quiet one downstream.",
+      "properties": {
+        "delta": {
+          "description": "how far the value has to move to pass, in the field's units or as a\npercentage, by `mode`",
+          "format": "double",
+          "type": "number"
+        },
+        "field": {
+          "description": "the numeric field the band is on",
+          "type": "string",
+          "x-message-field": true
+        },
+        "flatline_seconds": {
+          "description": "after this many seconds with no movement, let the next message through\ncarrying `stuck: true` — once per flat stretch",
+          "format": "double",
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "group_by": {
+          "description": "the fields that identify a series, the reducer's way. Leave it out for\none series",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "max_seconds": {
+          "description": "pass a message anyway once this many seconds have gone by since the\nlast one that passed, so a steady value is still reported now and then",
+          "format": "double",
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "mode": {
+          "$ref": "#/$defs/DeadbandMode",
+          "description": "what `delta` is measured in"
+        },
+        "on_missing": {
+          "$ref": "#/$defs/MissingFieldPolicy",
+          "description": "what to do about a message missing the field or a group field"
+        },
+        "time": {
+          "description": "the field carrying each message's time — RFC 3339 or milliseconds since\nthe epoch. Leave it out for arrival time",
+          "type": [
+            "string",
+            "null"
+          ],
+          "x-message-field": true
+        }
+      },
+      "required": [
+        "field",
+        "delta"
+      ],
+      "title": "deadband",
+      "type": "object"
+    },
+    "Derivation": {
+      "description": "One derived value and the field it is written to.",
+      "properties": {
+        "as": {
+          "description": "the field the answer is written under",
+          "type": "string"
+        },
+        "field": {
+          "description": "the numeric field it is derived from",
+          "type": "string",
+          "x-message-field": true
+        },
+        "function": {
+          "$ref": "#/$defs/DeriveFnKind",
+          "description": "how the value is derived from this message and the previous one"
+        },
+        "wrap_at": {
+          "description": "for `counter`: the value the counter wraps back to zero at, so a drop\nis read as having run through the top rather than as a reset",
+          "format": "double",
+          "type": [
+            "number",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "function",
+        "field",
+        "as"
+      ],
+      "title": "derivation",
+      "type": "object"
+    },
+    "DeriveFnKind": {
+      "description": "How one message's value is combined with the previous one's.",
+      "oneOf": [
+        {
+          "const": "rate",
+          "description": "The change per second since the previous message, off the `time`\nfield. `null` on the first message and when no time has passed.",
+          "type": "string"
+        },
+        {
+          "const": "delta",
+          "description": "The change since the previous message. `null` on the first.",
+          "type": "string"
+        },
+        {
+          "const": "cumsum",
+          "description": "The running total of the field, from the first message on.",
+          "type": "string"
+        },
+        {
+          "const": "counter",
+          "description": "The running total of the *increases* — for a counter that resets or\nwraps. A drop below the previous value counts as a wrap when `wrap_at`\nis set (the increase runs through the top), and as a reset otherwise\n(the new value is the increase).",
+          "type": "string"
+        }
+      ]
+    },
+    "DeriveTransformConfig": {
+      "description": "Writes onto each message something that needs the previous one: a rate of\nchange, a delta, a running total, a wrap-tolerant counter. Not a `map`\noperation because a `map` sees one message at a time; this remembers the\nlast per key.\n\nSeveral derivations run at once and each is written under its own `as`, so\none pass gives both `delta` and `rate`. The first message per key has no\nprevious, and the derivations that need one write `null` for it.",
+      "properties": {
+        "derive": {
+          "description": "what to derive. At least one, each with a distinct `as`",
+          "items": {
+            "$ref": "#/$defs/Derivation"
+          },
+          "type": "array"
+        },
+        "group_by": {
+          "description": "the fields that identify a series, the reducer's way. Leave it out for\none series",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "on_missing": {
+          "$ref": "#/$defs/MissingFieldPolicy",
+          "description": "what to do about a message missing a derived field or a group field"
+        },
+        "time": {
+          "description": "the field carrying each message's time — RFC 3339 or milliseconds since\nthe epoch. Leave it out for arrival time",
+          "type": [
+            "string",
+            "null"
+          ],
+          "x-message-field": true
+        }
+      },
+      "required": [
+        "derive"
+      ],
+      "title": "derive",
+      "type": "object"
+    },
     "FilterTransformConfig": {
       "description": "Drops messages that don't match a condition, and drops the whole batch if\nnone of them do. Pick either the `Numeric` or the `String` form — the fields\ndiffer because the comparisons do.",
       "oneOf": [
@@ -5941,6 +6305,32 @@ Run a draft's transforms over some messages.
             "type"
           ],
           "type": "object"
+        },
+        {
+          "$ref": "#/$defs/DeadbandTransformConfig",
+          "properties": {
+            "type": {
+              "const": "deadband",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type"
+          ],
+          "type": "object"
+        },
+        {
+          "$ref": "#/$defs/DeriveTransformConfig",
+          "properties": {
+            "type": {
+              "const": "derive",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type"
+          ],
+          "type": "object"
         }
       ],
       "type": "object"
@@ -6696,6 +7086,175 @@ The same wire shape the run loop's `PipelineView` serializes to — this is the 
       "required": [
         "inputs"
       ],
+      "type": "object"
+    },
+    "DeadbandMode": {
+      "description": "Whether a deadband's `delta` is an amount or a fraction of the last value\nthat passed.",
+      "oneOf": [
+        {
+          "const": "absolute",
+          "description": "`delta` is in the field's own units: `0.5` is half a degree.",
+          "type": "string"
+        },
+        {
+          "const": "percent",
+          "description": "`delta` is a percentage of the last value that passed: `2` is two\npercent. A last value of zero passes everything, since a fraction of\nnothing is nothing.",
+          "type": "string"
+        }
+      ]
+    },
+    "DeadbandTransformConfig": {
+      "description": "Drops a message unless its field has moved far enough from the last one\nthat passed — the single most used transform in any historian pipeline,\nand a *stateful* filter, which is why `filter` cannot be it.\n\nThe first message per key always passes. After that a message passes when\n`field` differs from the last passed value by more than `delta`, or when\n`max_seconds` have gone by since anything passed, so a steady reading is\nstill confirmed now and then. `flatline_seconds` is the sensor-health half:\nwhen the value has not moved in that long the next message passes with\n`stuck: true` on it, once per flat stretch, so a stuck instrument is\ndistinguishable from a quiet one downstream.",
+      "properties": {
+        "delta": {
+          "description": "how far the value has to move to pass, in the field's units or as a\npercentage, by `mode`",
+          "format": "double",
+          "type": "number"
+        },
+        "field": {
+          "description": "the numeric field the band is on",
+          "type": "string",
+          "x-message-field": true
+        },
+        "flatline_seconds": {
+          "description": "after this many seconds with no movement, let the next message through\ncarrying `stuck: true` — once per flat stretch",
+          "format": "double",
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "group_by": {
+          "description": "the fields that identify a series, the reducer's way. Leave it out for\none series",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "max_seconds": {
+          "description": "pass a message anyway once this many seconds have gone by since the\nlast one that passed, so a steady value is still reported now and then",
+          "format": "double",
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "mode": {
+          "$ref": "#/$defs/DeadbandMode",
+          "description": "what `delta` is measured in"
+        },
+        "on_missing": {
+          "$ref": "#/$defs/MissingFieldPolicy",
+          "description": "what to do about a message missing the field or a group field"
+        },
+        "time": {
+          "description": "the field carrying each message's time — RFC 3339 or milliseconds since\nthe epoch. Leave it out for arrival time",
+          "type": [
+            "string",
+            "null"
+          ],
+          "x-message-field": true
+        }
+      },
+      "required": [
+        "field",
+        "delta"
+      ],
+      "title": "deadband",
+      "type": "object"
+    },
+    "Derivation": {
+      "description": "One derived value and the field it is written to.",
+      "properties": {
+        "as": {
+          "description": "the field the answer is written under",
+          "type": "string"
+        },
+        "field": {
+          "description": "the numeric field it is derived from",
+          "type": "string",
+          "x-message-field": true
+        },
+        "function": {
+          "$ref": "#/$defs/DeriveFnKind",
+          "description": "how the value is derived from this message and the previous one"
+        },
+        "wrap_at": {
+          "description": "for `counter`: the value the counter wraps back to zero at, so a drop\nis read as having run through the top rather than as a reset",
+          "format": "double",
+          "type": [
+            "number",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "function",
+        "field",
+        "as"
+      ],
+      "title": "derivation",
+      "type": "object"
+    },
+    "DeriveFnKind": {
+      "description": "How one message's value is combined with the previous one's.",
+      "oneOf": [
+        {
+          "const": "rate",
+          "description": "The change per second since the previous message, off the `time`\nfield. `null` on the first message and when no time has passed.",
+          "type": "string"
+        },
+        {
+          "const": "delta",
+          "description": "The change since the previous message. `null` on the first.",
+          "type": "string"
+        },
+        {
+          "const": "cumsum",
+          "description": "The running total of the field, from the first message on.",
+          "type": "string"
+        },
+        {
+          "const": "counter",
+          "description": "The running total of the *increases* — for a counter that resets or\nwraps. A drop below the previous value counts as a wrap when `wrap_at`\nis set (the increase runs through the top), and as a reset otherwise\n(the new value is the increase).",
+          "type": "string"
+        }
+      ]
+    },
+    "DeriveTransformConfig": {
+      "description": "Writes onto each message something that needs the previous one: a rate of\nchange, a delta, a running total, a wrap-tolerant counter. Not a `map`\noperation because a `map` sees one message at a time; this remembers the\nlast per key.\n\nSeveral derivations run at once and each is written under its own `as`, so\none pass gives both `delta` and `rate`. The first message per key has no\nprevious, and the derivations that need one write `null` for it.",
+      "properties": {
+        "derive": {
+          "description": "what to derive. At least one, each with a distinct `as`",
+          "items": {
+            "$ref": "#/$defs/Derivation"
+          },
+          "type": "array"
+        },
+        "group_by": {
+          "description": "the fields that identify a series, the reducer's way. Leave it out for\none series",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "on_missing": {
+          "$ref": "#/$defs/MissingFieldPolicy",
+          "description": "what to do about a message missing a derived field or a group field"
+        },
+        "time": {
+          "description": "the field carrying each message's time — RFC 3339 or milliseconds since\nthe epoch. Leave it out for arrival time",
+          "type": [
+            "string",
+            "null"
+          ],
+          "x-message-field": true
+        }
+      },
+      "required": [
+        "derive"
+      ],
+      "title": "derive",
       "type": "object"
     },
     "DummyConfig": {
@@ -8973,6 +9532,32 @@ The same wire shape the run loop's `PipelineView` serializes to — this is the 
           "properties": {
             "type": {
               "const": "script",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type"
+          ],
+          "type": "object"
+        },
+        {
+          "$ref": "#/$defs/DeadbandTransformConfig",
+          "properties": {
+            "type": {
+              "const": "deadband",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type"
+          ],
+          "type": "object"
+        },
+        {
+          "$ref": "#/$defs/DeriveTransformConfig",
+          "properties": {
+            "type": {
+              "const": "derive",
               "type": "string"
             }
           },

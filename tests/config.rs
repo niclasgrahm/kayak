@@ -106,8 +106,46 @@ fn input_samples() -> Vec<(&'static str, Value)> {
 }
 
 fn transform_samples() -> Vec<(&'static str, Value)> {
+    let mut samples = vec![("buffer", json!({"type": "buffer", "size": 10}))];
+    samples.extend(chain_transform_samples());
+    samples.extend(streaming_transform_samples());
+    samples
+}
+
+/// The streaming statistics family — one sample per transform, each keyed
+/// and timed, since that is the shape they share.
+fn streaming_transform_samples() -> Vec<(&'static str, Value)> {
     vec![
-        ("buffer", json!({"type": "buffer", "size": 10})),
+        (
+            "deadband",
+            json!({
+                "type": "deadband",
+                "field": "temperature",
+                "delta": 0.5,
+                "max_seconds": 60.0,
+                "flatline_seconds": 600.0,
+                "group_by": ["_meta.machine_id"],
+                "time": "ts"
+            }),
+        ),
+        (
+            "derive",
+            json!({
+                "type": "derive",
+                "derive": [
+                    {"function": "rate", "field": "count", "as": "per_second"},
+                    {"function": "counter", "field": "count", "as": "total", "wrap_at": 65536.0}
+                ],
+                "group_by": ["_meta.machine_id"],
+                "time": "ts",
+                "on_missing": "skip"
+            }),
+        ),
+    ]
+}
+
+fn chain_transform_samples() -> Vec<(&'static str, Value)> {
+    vec![
         (
             "http",
             json!({"type": "http", "url": "http://localhost/x", "verb": "POST"}),

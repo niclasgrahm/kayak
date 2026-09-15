@@ -383,3 +383,44 @@ A script may **`import`** other rhai files — shared helpers, written once — 
 | field | type | | description |
 | --- | --- | --- | --- |
 | `path` | `string` | <Badge type="warning" text="required" /> | the path, relative to the config file's directory. It may not climb out of that directory. |
+
+
+## `deadband` {#transform-deadband}
+
+Drops a message unless its field has moved far enough from the last one that passed — the single most used transform in any historian pipeline, and a *stateful* filter, which is why `filter` cannot be it.
+
+The first message per key always passes. After that a message passes when `field` differs from the last passed value by more than `delta`, or when `max_seconds` have gone by since anything passed, so a steady reading is still confirmed now and then. `flatline_seconds` is the sensor-health half: when the value has not moved in that long the next message passes with `stuck: true` on it, once per flat stretch, so a stuck instrument is distinguishable from a quiet one downstream.
+
+| field | type | | description |
+| --- | --- | --- | --- |
+| `field` | `string` | <Badge type="warning" text="required" /> | the numeric field the band is on |
+| `delta` | `number` | <Badge type="warning" text="required" /> | how far the value has to move to pass, in the field's units or as a percentage, by `mode` |
+| `flatline_seconds` | `number` | <Badge type="info" text="optional" /> | after this many seconds with no movement, let the next message through carrying `stuck: true` — once per flat stretch |
+| `group_by` | `list of string` | <Badge type="info" text="optional" /> | the fields that identify a series, the reducer's way. Leave it out for one series |
+| `max_seconds` | `number` | <Badge type="info" text="optional" /> | pass a message anyway once this many seconds have gone by since the last one that passed, so a steady value is still reported now and then |
+| `mode` | `absolute` \| `percent` | <Badge type="info" text="optional" /> | what `delta` is measured in |
+| `on_missing` | `error` \| `skip` | <Badge type="info" text="optional" /> | what to do about a message missing the field or a group field |
+| `time` | `string` | <Badge type="info" text="optional" /> | the field carrying each message's time — RFC 3339 or milliseconds since the epoch. Leave it out for arrival time |
+
+
+## `derive` {#transform-derive}
+
+Writes onto each message something that needs the previous one: a rate of change, a delta, a running total, a wrap-tolerant counter. Not a `map` operation because a `map` sees one message at a time; this remembers the last per key.
+
+Several derivations run at once and each is written under its own `as`, so one pass gives both `delta` and `rate`. The first message per key has no previous, and the derivations that need one write `null` for it.
+
+| field | type | | description |
+| --- | --- | --- | --- |
+| `derive` | `list of derivation` | <Badge type="warning" text="required" /> | what to derive. At least one, each with a distinct `as` |
+| `group_by` | `list of string` | <Badge type="info" text="optional" /> | the fields that identify a series, the reducer's way. Leave it out for one series |
+| `on_missing` | `error` \| `skip` | <Badge type="info" text="optional" /> | what to do about a message missing a derived field or a group field |
+| `time` | `string` | <Badge type="info" text="optional" /> | the field carrying each message's time — RFC 3339 or milliseconds since the epoch. Leave it out for arrival time |
+
+**`derive` — each entry**
+
+| field | type | | description |
+| --- | --- | --- | --- |
+| `function` | `rate` \| `delta` \| `cumsum` \| `counter` | <Badge type="warning" text="required" /> | how the value is derived from this message and the previous one |
+| `field` | `string` | <Badge type="warning" text="required" /> | the numeric field it is derived from |
+| `as` | `string` | <Badge type="warning" text="required" /> | the field the answer is written under |
+| `wrap_at` | `number` | <Badge type="info" text="optional" /> | for `counter`: the value the counter wraps back to zero at, so a drop is read as having run through the top rather than as a reset |
