@@ -663,6 +663,65 @@ Every builtin is declared in `kayak_core::script::builtins()` as before;
 `builtins_are_the_functions_the_engine_has` still pins the two lists in both
 directions, and `just docs` regenerates the table on the scripting page.
 
+### Streaming statistics (tier one)
+
+Six transforms — `deadband`, `derive`, `rolling`, `smooth`, `detect`,
+`resample` — declared together in `kayak-core/src/streaming.rs` and built on
+one shared shape in `src/transforms/keyed.rs`. The shape is the decision:
+
+- **The key is `group_by`** (the reducer's list, rendered — a bare value for
+  one field, a JSON array for several), **the state is in the pipeline's
+  declared bucket**, under a name of the transform's own (`rolling:avg_30,
+  trend`), so the bound, the idle timeout and the revert rule are the store's
+  and a transform can't forget them. No `state` on the pipeline, no build —
+  the same refusal `recall` makes. Two identical transforms in one chain
+  would share state; documented, not prevented.
+- **`Buckets::update` is the in-place edit** every one of them goes through:
+  a closure under the bucket's lock, the value edited where it lies. It exists
+  because `recall` + `remember` would clone a thousand-point window out and
+  back per message. `rolling1`/`rolling1000` in the bench are what keep that
+  cost visible.
+- **Absent follows `on_missing` (error by default, like the reducer); present
+  and wrong is always an error.** `Series::number` is the one place that rule
+  is spelled. A skipped message passes through as the *same `Arc`*, untouched.
+- **Time is `MessageTime`** — arrival when no `time` field is named. Only the
+  transforms that measure something *per second* or *by age* carry the field
+  (`deadband`, `derive`, `rolling`, `resample`); `smooth` and `detect` are
+  about order, and a `time` on them would be a promise they don't keep.
+
+Per transform, the thing to know before changing it:
+
+- `deadband` anchors on the last value that *passed*, forced passes included
+  (that is what a historian's exception filter does), but its flatline clock
+  runs from the last *change*, so a `max_seconds` confirmation of a stuck
+  value doesn't reset the stretch. `stuck: true` fires once per stretch.
+- `derive` keeps `{last, at, acc}` per derivation under its `as`, so a
+  message lacking one field (under `skip`) leaves that derivation's state
+  alone rather than computing the next delta against a null.
+- `rolling` reuses `reduce::apply_function` verbatim — one window per
+  aggregated *field* per key, holding whatever the field held — and requires
+  `size` always: a window by time alone has no bound. `count` needs a field
+  here (it is the warm-up check).
+- `smooth`'s window methods include the current value; Savitzky–Golay is
+  *trailing* (a stream can't see the future) and passes the value through
+  until the window can carry the order. `stats::polyfit` is the normal
+  equations with pivoting and is not a general fitter.
+- `detect`'s window methods (`zscore`, `mad`) score against the window
+  *before* the reading, so a spike can't pull its own baseline; the chart
+  methods (`cusum` without a target, `ewma_chart`, `western_electric`)
+  **freeze** the warm-up's mean and deviation. Nothing is flagged during
+  `min_samples`; a baseline with no spread flags any departure.
+- `resample` is the tick's second user and **only under arrival time**: a
+  `time` field means the readings' own clock is driving, and the wall clock
+  says nothing about whether an interval is over, so a quiet key's interval
+  waits for that key's next reading. `deadlines` on the transform is a
+  *mirror* of the bucket, never the truth. `linear` never emits on the clock
+  (nothing to interpolate towards); `forward_fill` is the only method that
+  emits an empty interval.
+
+The sample's `heartbeat_trend` and `heartbeat_grid` run all six off the
+heartbeat; `config.yaml` has to carry them too or `tests/config.rs` fails.
+
 ### Secrets
 
 Config fields that can hold credentials are typed `Secret` (`kayak-core::config`), not `String`. They all live on *connections* now rather than on components. `Secret` only ever holds the *unresolved* `${NAME}` template, which is what makes it safe to serialize back out of `GET /api/pipelines` and to compile for wasm. Resolution happens at build time via `ctx.resolve()` and yields a `secrets::Resolved`, whose `Display`/`Debug` print the template rather than the value — so error contexts can name a connection without leaking it. Reaching the real value takes `.expose()`; flag new call sites in review, and never put a `Resolved` into anything `Serialize`. Stores (`EnvStore`, `FileStore`, `ChainStore`) live in `src/secrets.rs`; `main.rs` chains env ahead of `--secrets <file>`. `src/testing.rs` has `MapSecretStore` for tests. See `website/io/secrets.md`.

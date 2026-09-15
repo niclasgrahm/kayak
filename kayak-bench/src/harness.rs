@@ -32,6 +32,8 @@ use kayak_core::config::{
     PipelineConfig, TransformConfig, TransformKind,
 };
 use kayak_core::mapping::{MapTransformConfig, Mapping};
+use kayak_core::state::{PipelineState, StateBucketConfig, StateBuckets};
+use kayak_core::streaming::RollingTransformConfig;
 use tokio::sync::broadcast;
 use tokio::task::JoinSet;
 
@@ -146,12 +148,42 @@ fn transforms(chain: Chain) -> Result<Vec<Box<dyn Transform>>> {
             keep: kayak_core::mapping::KeepPolicy::All,
             on_missing: kayak_core::mapping::MapMissingPolicy::Error,
         })],
+        Chain::Rolling => vec![TransformKind::Rolling(RollingTransformConfig {
+            aggregations: vec![kayak_core::config::Aggregation {
+                function: kayak_core::config::ReduceFnKind::Avg,
+                output: "value_avg".to_string(),
+                field: Some("value".to_string()),
+            }],
+            size: 100,
+            seconds: None,
+            group_by: vec!["sensor_id".to_string()],
+            time: None,
+            on_missing: kayak_core::config::MissingFieldPolicy::Error,
+        })],
     };
     let mut pipelines = HashMap::new();
     let (events, _rx) = broadcast::channel(EVENT_CHANNEL);
+    // A stateful chain needs a bucket to keep its keys in, sized for the
+    // largest `keys` any scenario asks for — the store's default, as it
+    // happens, spelled out so a scenario past it fails to build rather than
+    // quietly evicting.
+    let mut declared = StateBuckets::new();
+    declared.insert(
+        "bench",
+        StateBucketConfig {
+            max_keys: Some(kayak_core::state::DEFAULT_MAX_KEYS),
+            idle_timeout_secs: None,
+        },
+    );
+    let buckets = Arc::new(kayak::buckets::Buckets::from_config(&declared));
     let mut built = Vec::with_capacity(kinds.len());
     for kind in kinds {
         let mut ctx = BuildCtx::new(&mut pipelines, "bench".to_string(), events.clone());
+        ctx.buckets = Arc::clone(&buckets);
+        ctx.state = Some(PipelineState {
+            bucket: "bench".to_string(),
+            key: None,
+        });
         built.push(
             TransformConfig { kind }
                 .build(&mut ctx)
@@ -185,6 +217,9 @@ fn build(
             // The root generates; every hop below it reads what the one above
             // sent. Two different inputs, which is the whole point of `depth`.
             let input: Box<dyn InputSource> = match &upstream {
+                None if scenario.keys > 1 => {
+                    Box::new(LoadInput::keyed(scenario.batch_size, scenario.keys))
+                }
                 None => Box::new(LoadInput::new(scenario.batch_size)),
                 Some(up) => {
                     let mut ctx =
@@ -370,7 +405,7 @@ mod tests {
     /// it would fail loudly, which is exactly what this asserts it doesn't.
     #[tokio::test(flavor = "multi_thread")]
     async fn every_chain_runs_against_the_generated_message() {
-        for chain in [Chain::Filter(1), Chain::Filter(5), Chain::Map] {
+        for chain in [Chain::Filter(1), Chain::Filter(5), Chain::Map, Chain::Rolling] {
             let mut s = scenario("batch100");
             s.chain = chain;
             let (counted, _) = match run(&s, WARMUP, WINDOW).await {

@@ -461,6 +461,31 @@ impl LoadInput {
         }
     }
 
+    /// The same message with `sensor_id` rotating over `keys` distinct ids
+    /// across the batch, for a scenario about *per-key* state — a rolling
+    /// window at a thousand keys. The fields are [`LoadInput::MESSAGE_FIELDS`]
+    /// exactly, so a keyed batch costs what a plain one does to serialize; only
+    /// scenarios that ask for keys read it, so the existing rows keep their
+    /// meaning.
+    #[must_use]
+    pub fn keyed(batch_size: usize, keys: usize) -> Self {
+        let keys = keys.max(1);
+        let batch = (0..batch_size)
+            .map(|i| {
+                Arc::new(serde_json::json!({
+                    "sensor_id": format!("sensor-{:04}", i % keys),
+                    "value": 21.5,
+                    "recorded_at": "2026-01-01T00:00:00Z",
+                    "site": "north",
+                    "reading": { "unit": "celsius", "quality": "good" },
+                }))
+            })
+            .collect();
+        Self {
+            batch: Arc::new(batch),
+        }
+    }
+
     /// A generator of a batch the caller built, for a bench that needs a
     /// particular shape — a payload a `map` mapping actually reads, say.
     #[must_use]

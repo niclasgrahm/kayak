@@ -433,7 +433,8 @@ Left to build, roughly in dependency order:
       other two users: the session window's idle timeout, and the idle `file`
       output holding its part open — the second needs the same seam on
       `OutputDestination`, which does not have it. Bucket eviction could stop
-      being lazy on the back of it too.
+      being lazy on the back of it too. (2026-09-15: `resample` is now the
+      second caller, for arrival-time intervals.)
 - [ ] **`subject_fields` on the nats input** — name the subject's tokens so
       `machine_7.temperature` arrives as `_meta.machine_id` and `_meta.signal`.
       Without it a wildcard subscription is unusable, since nothing can address
@@ -516,8 +517,21 @@ Roughly in dependency order:
       `stats` too, and grew `slope` beside its existing `stddev`/`median`.
       `pluck` skips missing values and a present non-number is an error, the
       transforms' own absent-against-wrong rule.)
-- [ ] **streaming statistics, tier one, no crate.** Six transforms, all
-      O(1) state per key:
+- [x] **streaming statistics, tier one, no crate.**
+      (done 2026-09-15, all six, with the shared shape in
+      `src/transforms/keyed.rs` and the declarations in
+      `kayak_core::streaming`; `Buckets::update` edits state in place so a
+      window is never cloned per message. `rolling` reuses the reducer's
+      `apply_function` and needs `size` always — a window by time alone has no
+      bound. `detect`'s window methods score against the window *before* the
+      reading and its chart methods freeze a warm-up baseline. `resample` is
+      the tick's second user, under arrival time only: with a `time` field the
+      wall clock says nothing about whether an interval is over. Two sample
+      pipelines off `heartbeat`, and `rolling1`/`rolling1000` in the bench.
+      See "streaming statistics" on the site. What is deliberately not here:
+      a per-key spelling of `until`, and any tick under event time — both are
+      the session window's problem.) The original entry, for the record — six
+      transforms, all O(1) state per key:
       `rolling` — sliding-window aggregations over the last `size` messages or
       `seconds`, the reducer's `{function, field, as}` list, results written
       onto the message. A second component rather than a `window` field on

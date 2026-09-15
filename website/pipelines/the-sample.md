@@ -125,6 +125,21 @@ inline one is a single escaped `\n` away from being unreadable, and that is a
 fair advertisement for keeping scripts in files or writing the config in YAML.
 `config.yaml` beside it renders the same script as a literal block.
 
+`heartbeat_trend` and `heartbeat_grid` are the
+[streaming statistics](/pipelines/streaming-statistics) samples, and between
+them they run all six transforms off the heartbeat with nothing else up.
+`heartbeat_trend` is the annotating chain — `smooth`, `derive`, `rolling`,
+`detect` — so one card shows a reading arriving and leaving with its smoothed
+value, its rate, a rolling average and trend, and an anomaly flag beside it.
+`heartbeat_grid` is the cardinality-changing pair: a `deadband` that lets a
+sine through every couple of degrees and confirms it every fifteen seconds,
+then a `resample` that puts what is left back on a five-second grid by forward
+fill, which is the tick at work — with the deadband holding readings back, some
+grid points are emitted by the clock rather than by a reading. Both share the
+`heartbeat_stats` bucket, which is what a stateful transform needs to build,
+and it is `max_keys: 8` rather than 1 because every transform in a pipeline
+keeps its own state under the key, and the state tab shows each of them.
+
 `heartbeat_to_disk` is the file output's sample, and it hangs off `heartbeat`
 rather than off the nats source on purpose: the dummy input needs nothing
 running, so it is the one pipeline in here that writes real output on a bare
