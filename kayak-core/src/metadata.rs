@@ -144,6 +144,19 @@ pub fn for_input(kind: &str) -> Option<Vec<MetaFieldDoc>> {
              the message itself, as `node` and `name`, because a value without \
              its tag is not a reading and metadata is opt-in.",
         )],
+        "http_poll" => vec![
+            MetaFieldDoc::new(
+                "url",
+                "the url the message was read from, without any username or \
+                 password it carried",
+            ),
+            MetaFieldDoc::new(
+                "polled_at",
+                "when the read that returned this message started, RFC 3339. \
+                 Every message of one read carries the same value, which is \
+                 what tells one snapshot's messages apart from the next's.",
+            ),
+        ],
         "postgres" | "clickhouse" => vec![
             MetaFieldDoc::new("connection", "name of the connection it was read through"),
             MetaFieldDoc::new(

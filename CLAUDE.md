@@ -197,7 +197,8 @@ split is the one `columns.rs` draws: `kayak-core/src/sql.rs` is the
 declaration (`SqlPollConfig`, flattened into both input configs, so neither
 declares a polling concept of its own), `src/inputs/poll.rs` is the neutral
 half — `Plan::build` validates, `Poller` is the `InputSource`, `Reader` is the
-five queries a database has to answer — and `src/inputs/postgres.rs` /
+queries a database has to answer, `Schedule` is all the poller knows of a
+plan (so `http_poll` can hand it one without speaking SQL) — and `src/inputs/postgres.rs` /
 `src/inputs/clickhouse.rs` are only how their server spells those queries.
 Keep polling work on the `poll.rs` side of that line.
 
@@ -256,6 +257,31 @@ test-live` against the compose stack, each test on a table of its own. The
 poller itself is tested offline with a scripted `Reader` under paused time.
 The sample's `readings_from_postgres` follows the table `sensors_archive`
 writes, so the two make a round trip under `docker compose up`.
+
+### The http_poll input
+
+`src/inputs/http_poll.rs`: the database inputs' `snapshot` mode for an api, a
+`GET` on a timer with the whole reply handed on every read. It is a `Reader`
+for `poll.rs` (only `snapshot` is reachable, because its `Schedule` has no
+`start_from`) rather than an input of its own, so the schedule, the backoff
+and the batching stay in one place. Three decisions:
+
+- **Snapshot only.** An api has no common spelling of "rows after this one",
+  and picking one would be picking an api. The case is reference data, small
+  and wanted whole, sent to a sink that keeps the latest value per key.
+- **The reply is bounded** (`MAX_BODY_BYTES`, read in chunks), since a
+  snapshot is held whole. No unbounded spelling, as with the state buckets.
+- **No connection kind**, for the http output's reason; `auth` is the http
+  output's `Credential` (`pub(crate)` there, with the component's name in its
+  errors). The envelope carries `url` (userinfo stripped by the output's
+  `describe`) where the SQL inputs carry `connection`: `Poller::new` takes
+  that origin as `Meta`.
+
+`items` is a JSON pointer (RFC 6901, `Value::pointer_mut`), validated as one
+at build time. A pointer at nothing is a failed read, not an empty snapshot.
+Tests run against a real axum endpoint on a loopback port, like the http
+output's. The sample's `components_from_api` polls the server's own public
+`/api/docs`, so it works under `just dev` with nothing else running.
 
 ### Message metadata (the envelope)
 

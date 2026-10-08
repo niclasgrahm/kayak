@@ -2599,6 +2599,63 @@
         "title": "http",
         "type": "object"
       },
+      "HttpPollConfig": {
+        "description": "Fetches a url on a timer and hands on what it returns — the `snapshot`\nmode of the database inputs, for an api.\n\nEvery read is a `GET`, and every read hands on the whole answer: an array\nis one message per element, anything else is one message. `items` points\ninto a reply that wraps its records (`{\"data\": {\"machines\": [...]}}`). This\nis the reference-data case — a list of machines, recipes or thresholds that\nchanges rarely and that a downstream system needs all of — so there is no\nwatermark, no paging and no notion of what changed since the last read: a\nsink that upserts by key makes the repetition harmless.\n\nA read that fails (unreachable, a status other than 2xx, a body that is not\nJSON, an `items` that points at nothing) is reported once and retried on the\nusual backoff, and the interval starts again from the next read that works.",
+        "properties": {
+          "auth": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/HttpAuthConfig"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "what this input presents to the api. Absent — the default — sends no\ncredential, which is what an open endpoint wants."
+          },
+          "interval_secs": {
+            "description": "how long to wait between reads, in seconds, counted from the end of one\nread to the start of the next. The first read happens as soon as the\npipeline starts.",
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "items": {
+            "description": "where the records are in the reply, as a JSON pointer: `/data/machines`\nreads the array at `data.machines`. Absent reads the reply itself. What\nit points at is split like a whole reply would be — an array into its\nelements, anything else as one message.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "max_batch": {
+            "description": "most messages to put in one batch. Defaults to 1, as on every input.\nMessages already read are grouped up to this many; the input never\nwaits for a batch to fill.",
+            "format": "uint",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "timeout_seconds": {
+            "description": "how long one request may take before it is given up on, in seconds.\nDefaults to 30.",
+            "format": "uint64",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "url": {
+            "description": "the url to fetch, e.g. `https://erp.example.com/api/machines`",
+            "type": "string"
+          }
+        },
+        "required": [
+          "url",
+          "interval_secs"
+        ],
+        "title": "http_poll",
+        "type": "object"
+      },
       "HttpResponseKind": {
         "description": "What an `http` transform does with the reply.",
         "oneOf": [
@@ -3017,6 +3074,19 @@
             "properties": {
               "type": {
                 "const": "clickhouse",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type"
+            ],
+            "type": "object"
+          },
+          {
+            "$ref": "#/components/schemas/HttpPollConfig",
+            "properties": {
+              "type": {
+                "const": "http_poll",
                 "type": "string"
               }
             },

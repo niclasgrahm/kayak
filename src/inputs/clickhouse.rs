@@ -75,9 +75,9 @@ impl BuildInput for ClickhouseInputConfig {
         };
         let envelope = ctx.envelope("clickhouse", Some(&self.connection));
         Ok(Box::new(Poller::new(
-            plan,
+            plan.schedule(),
             Box::new(reader),
-            self.connection,
+            vec![("connection", Value::String(self.connection))],
             envelope,
             ctx.pipeline_id.clone(),
             ctx.events.clone(),

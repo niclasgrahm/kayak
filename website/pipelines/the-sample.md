@@ -49,6 +49,13 @@ row, so it echoes each archived reading a few seconds after it lands;
 inserted — which is the reference-data case, an aggregate polled rather than a
 stream followed (see [database inputs](/io/database-inputs)).
 
+`components_from_api` is the same shape over an api: an `http_poll` input
+that fetches kayak's own component reference (`/api/docs`, which needs no
+sign-in) every five minutes and hands on one message per component, trimmed
+by a `map` to its `kind`, its `family` and the `polled_at` every message of
+one read shares. It needs nothing but the server it runs in (see
+[polling an api](/io/polling-an-api)).
+
 ## the four broken ones
 
 `broken_cast`, `broken_aggregate`, `broken_webhook` and `broken_intermittently`

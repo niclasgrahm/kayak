@@ -102,6 +102,15 @@ fn input_samples() -> Vec<(&'static str, Value)> {
                 "deadband": 0.5
             }),
         ),
+    ]
+    .into_iter()
+    .chain(polling_input_samples())
+    .collect()
+}
+
+/// The inputs that ask rather than being reached: a query or a url on a timer.
+fn polling_input_samples() -> Vec<(&'static str, Value)> {
+    vec![
         (
             "postgres",
             json!({
@@ -123,6 +132,18 @@ fn input_samples() -> Vec<(&'static str, Value)> {
                 "query": "SELECT * FROM readings WHERE site = 'a'",
                 "interval_secs": 60,
                 "mode": {"type": "snapshot"}
+            }),
+        ),
+        (
+            "http_poll",
+            json!({
+                "type": "http_poll",
+                "url": "https://erp.example.com/api/machines",
+                "interval_secs": 3600,
+                "items": "/data/machines",
+                "auth": {"type": "bearer", "token": "${ERP_TOKEN}"},
+                "timeout_seconds": 10,
+                "max_batch": 500
             }),
         ),
     ]
