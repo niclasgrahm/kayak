@@ -519,6 +519,42 @@ hold a null from quietly holding a zero.
 `Date32`; the connection is the HTTP interface with `allow_http` following the
 s3 connection's rule, since the credentials go with every insert.
 
+### The tidepool output
+
+The third consumer of the column mapping, and the first whose table is not
+the output's to create: Tidepool declares tables in its own project. So where
+the database outputs render DDL, `src/outputs/tidepool.rs` *reads* the table
+(`GET /v1/tables/{table}`) in `init` and checks the plan against it — every
+mapped column exists, its type is one Tidepool takes from that mapping type
+(`writes`), nothing writes null into a column that needs a value, and every
+such column is written. All problems at once, the table's columns named.
+`init` failing is retried by the run loop like any output's, which is what a
+Tidepool that isn't up yet needs.
+
+Three things are load-bearing:
+
+- **`emit` retries, unlike every other output.** A `503` is Tidepool's
+  backpressure, and the run loop drops a batch whose `emit` fails, so giving
+  up at once would lose data. `503`, a transport error, other `5xx` and a
+  `409` "still being processed" are retried (honouring `Retry-After`, else
+  `Backoff`) until `retry_seconds`; only then does the gate record a failure.
+  A `400` is never retried: Tidepool writes a batch whole or not at all, and
+  the same batch would be refused the same way.
+- **One idempotency key per batch, the same on every attempt**:
+  `{pipeline}:{run}:{batch}`, `run` random per build. That is what makes the
+  retry safe when a request landed and its reply was lost — Tidepool answers
+  a seen key with the first answer for 24 h. The test's fake Tidepool dedups
+  by key the same way, and a key minted per attempt fails it.
+- **The wire types are written out by hand**, as the `indu` output's are:
+  Tidepool's `tidepool-protocol` lives in another repository, and a few fields
+  of four responses aren't worth the dependency. Unknown fields are ignored.
+
+After a refusal a changed table explains (`400`, `404`, `409`), `stale` makes
+the next batch read the table again first: Tidepool's config changes live,
+and the card should say "`ok` is not a column" once rather than repeat row
+errors. `example_config`'s `sensors_to_tidepool` is the sample; it waits in
+`init` under `just dev` unless a Tidepool is running on :7070.
+
 ### The http output
 
 The pushing half of the http family, and the one output with **no connection

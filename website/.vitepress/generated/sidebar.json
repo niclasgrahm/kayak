@@ -73,6 +73,10 @@
     {
       "link": "/reference/connections#connection-indu",
       "text": "indu"
+    },
+    {
+      "link": "/reference/connections#connection-tidepool",
+      "text": "tidepool"
     }
   ],
   "inputs": [
@@ -157,6 +161,10 @@
     {
       "link": "/reference/outputs#output-indu",
       "text": "indu"
+    },
+    {
+      "link": "/reference/outputs#output-tidepool",
+      "text": "tidepool"
     }
   ],
   "transforms": [

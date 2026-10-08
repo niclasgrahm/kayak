@@ -100,6 +100,7 @@ impl BuildOutputConfig for OutputConfig {
             OutputKind::Redis(c) => c.build(ctx),
             OutputKind::Http(c) => c.build(ctx),
             OutputKind::Indu(c) => c.build(ctx),
+            OutputKind::Tidepool(c) => c.build(ctx),
         }
     }
 }

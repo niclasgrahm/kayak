@@ -3262,6 +3262,19 @@ One pipeline: every input is merged into one stream, that stream runs through th
             "type"
           ],
           "type": "object"
+        },
+        {
+          "$ref": "#/$defs/TidepoolOutputConfig",
+          "properties": {
+            "type": {
+              "const": "tidepool",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type"
+          ],
+          "type": "object"
         }
       ],
       "type": "object"
@@ -4073,6 +4086,55 @@ One pipeline: every input is merged into one stream, that stream runs through th
       "title": "index",
       "type": "object"
     },
+    "TidepoolOutputConfig": {
+      "description": "Writes every batch into a Tidepool table, one request per batch.\n\nThe table has to exist: Tidepool's project declares it, with its column\ntypes, and this output checks against that on start — every mapped column\nhas to be one of the table's, of a type it can write, and every column the\ntable requires has to be written. A mismatch fails the start rather than\nthe first batch.\n\n`columns` is spelled as the database outputs spell it. Leave it out to send\neach message as a row as it is, for messages already shaped like the table:\nTidepool checks every value and refuses a batch with any problem in it, so\nnothing is coerced on either side.\n\nA batch Tidepool refuses fails with its problems quoted by row and column.\nA busy server (`503`) or one that can't be reached is retried for up to\n`retry_seconds` under the same idempotency key, so a retry never writes a\nbatch twice.",
+      "properties": {
+        "columns": {
+          "description": "which message field goes in which column. Leave it out to send each\nmessage as a row as it is.",
+          "items": {
+            "$ref": "#/$defs/ColumnMapping"
+          },
+          "type": "array"
+        },
+        "connection": {
+          "description": "name of the tidepool connection to write through — see \"connections\"\nin the readme.",
+          "type": "string",
+          "x-connection": "tidepool"
+        },
+        "on_extra_fields": {
+          "$ref": "#/$defs/ExtraFieldPolicy",
+          "description": "what to do about a message carrying fields no column reads"
+        },
+        "retry_seconds": {
+          "description": "how long one batch keeps being retried while the server is busy or\nunreachable, in seconds. Defaults to 30.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "table": {
+          "description": "the table to write into, as Tidepool's project names it",
+          "type": "string"
+        },
+        "timeout_seconds": {
+          "description": "how long one request may take, in seconds. Defaults to 30.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "connection",
+        "table"
+      ],
+      "title": "tidepool",
+      "type": "object"
+    },
     "TransformConfig": {
       "oneOf": [
         {
@@ -4520,6 +4582,19 @@ A `BTreeMap` rather than a list of `{id, ...}` objects: the name is the identity
             "type"
           ],
           "type": "object"
+        },
+        {
+          "$ref": "#/$defs/TidepoolConnection",
+          "properties": {
+            "type": {
+              "const": "tidepool",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type"
+          ],
+          "type": "object"
         }
       ]
     },
@@ -4774,6 +4849,38 @@ A `BTreeMap` rather than a list of `{id, ...}` objects: the name is the identity
     "Secret": {
       "description": "A config value that may *reference* secrets rather than contain them.\n\nOn the wire it is an ordinary JSON string, but `${NAME}` placeholders in it\nare replaced with real values when the pipeline is built, against whatever\nsecret store the server was started with:\n\n```json\n{ \"type\": \"nats\", \"urls\": \"nats://app:${NATS_PASSWORD}@broker:4222\" }\n```\n\nThe unresolved form is the only one this type ever holds. That is what makes\nit safe to commit, safe to hand back from `GET /api/pipelines` and safe to show\nin the UI — a resolved value exists only inside the built runtime component,\nnever in a `Config`. Resolution deliberately lives in the root crate: this\ncrate compiles to wasm for the frontend, which must not be able to hold a\nresolved secret at all.\n\nA value with no `${...}` in it is passed through untouched, so fields that\nhold nothing sensitive need no special handling.",
       "type": "string"
+    },
+    "TidepoolConnection": {
+      "description": "A Tidepool server: where it listens, and the ingest token it wants.\n\nThe same split every connection makes: the server and its credential are\nthe connection's, the *table* belongs to the output that writes it. Tables\nare declared in Tidepool's own project, never created from here.",
+      "properties": {
+        "allow_http": {
+          "description": "allow a plaintext `http://` url while a `token` is set. Defaults to\nfalse, for the clickhouse connection's reason: the token goes with\nevery batch. Without a token there is nothing to send in the clear.",
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "token": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Secret"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "the ingest token (the server's `TIDEPOOL_INGEST_TOKEN`, or its admin\ntoken) as a `${NAME}` reference — see \"secrets\". Leave it out for a\nserver whose ingest is open."
+        },
+        "url": {
+          "description": "the server's url, e.g. `http://localhost:7070`.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "url"
+      ],
+      "title": "tidepool",
+      "type": "object"
     }
   },
   "$schema": "https://json-schema.org/draft/2020-12/schema",
@@ -5086,6 +5193,38 @@ The name is a field here rather than a path segment because it is part of what i
     "Secret": {
       "description": "A config value that may *reference* secrets rather than contain them.\n\nOn the wire it is an ordinary JSON string, but `${NAME}` placeholders in it\nare replaced with real values when the pipeline is built, against whatever\nsecret store the server was started with:\n\n```json\n{ \"type\": \"nats\", \"urls\": \"nats://app:${NATS_PASSWORD}@broker:4222\" }\n```\n\nThe unresolved form is the only one this type ever holds. That is what makes\nit safe to commit, safe to hand back from `GET /api/pipelines` and safe to show\nin the UI — a resolved value exists only inside the built runtime component,\nnever in a `Config`. Resolution deliberately lives in the root crate: this\ncrate compiles to wasm for the frontend, which must not be able to hold a\nresolved secret at all.\n\nA value with no `${...}` in it is passed through untouched, so fields that\nhold nothing sensitive need no special handling.",
       "type": "string"
+    },
+    "TidepoolConnection": {
+      "description": "A Tidepool server: where it listens, and the ingest token it wants.\n\nThe same split every connection makes: the server and its credential are\nthe connection's, the *table* belongs to the output that writes it. Tables\nare declared in Tidepool's own project, never created from here.",
+      "properties": {
+        "allow_http": {
+          "description": "allow a plaintext `http://` url while a `token` is set. Defaults to\nfalse, for the clickhouse connection's reason: the token goes with\nevery batch. Without a token there is nothing to send in the clear.",
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "token": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Secret"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "the ingest token (the server's `TIDEPOOL_INGEST_TOKEN`, or its admin\ntoken) as a `${NAME}` reference — see \"secrets\". Leave it out for a\nserver whose ingest is open."
+        },
+        "url": {
+          "description": "the server's url, e.g. `http://localhost:7070`.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "url"
+      ],
+      "title": "tidepool",
+      "type": "object"
     }
   },
   "$schema": "https://json-schema.org/draft/2020-12/schema",
@@ -5213,6 +5352,19 @@ The name is a field here rather than a path segment because it is part of what i
       "properties": {
         "type": {
           "const": "indu",
+          "type": "string"
+        }
+      },
+      "required": [
+        "type"
+      ],
+      "type": "object"
+    },
+    {
+      "$ref": "#/$defs/TidepoolConnection",
+      "properties": {
+        "type": {
+          "const": "tidepool",
           "type": "string"
         }
       },
@@ -11063,6 +11215,19 @@ The same wire shape the run loop's `PipelineView` serializes to — this is the 
             "type"
           ],
           "type": "object"
+        },
+        {
+          "$ref": "#/$defs/TidepoolOutputConfig",
+          "properties": {
+            "type": {
+              "const": "tidepool",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type"
+          ],
+          "type": "object"
         }
       ],
       "type": "object"
@@ -11897,6 +12062,55 @@ The same wire shape the run loop's `PipelineView` serializes to — this is the 
         "columns"
       ],
       "title": "index",
+      "type": "object"
+    },
+    "TidepoolOutputConfig": {
+      "description": "Writes every batch into a Tidepool table, one request per batch.\n\nThe table has to exist: Tidepool's project declares it, with its column\ntypes, and this output checks against that on start — every mapped column\nhas to be one of the table's, of a type it can write, and every column the\ntable requires has to be written. A mismatch fails the start rather than\nthe first batch.\n\n`columns` is spelled as the database outputs spell it. Leave it out to send\neach message as a row as it is, for messages already shaped like the table:\nTidepool checks every value and refuses a batch with any problem in it, so\nnothing is coerced on either side.\n\nA batch Tidepool refuses fails with its problems quoted by row and column.\nA busy server (`503`) or one that can't be reached is retried for up to\n`retry_seconds` under the same idempotency key, so a retry never writes a\nbatch twice.",
+      "properties": {
+        "columns": {
+          "description": "which message field goes in which column. Leave it out to send each\nmessage as a row as it is.",
+          "items": {
+            "$ref": "#/$defs/ColumnMapping"
+          },
+          "type": "array"
+        },
+        "connection": {
+          "description": "name of the tidepool connection to write through — see \"connections\"\nin the readme.",
+          "type": "string",
+          "x-connection": "tidepool"
+        },
+        "on_extra_fields": {
+          "$ref": "#/$defs/ExtraFieldPolicy",
+          "description": "what to do about a message carrying fields no column reads"
+        },
+        "retry_seconds": {
+          "description": "how long one batch keeps being retried while the server is busy or\nunreachable, in seconds. Defaults to 30.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "table": {
+          "description": "the table to write into, as Tidepool's project names it",
+          "type": "string"
+        },
+        "timeout_seconds": {
+          "description": "how long one request may take, in seconds. Defaults to 30.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "connection",
+        "table"
+      ],
+      "title": "tidepool",
       "type": "object"
     },
     "TransformConfig": {

@@ -211,3 +211,34 @@ Every message yields one reading per entry in `series`; a reducer emitting `{mac
 | `stream` | `string` | <Badge type="warning" text="required" /> | the stream's name on the Indu side, e.g. `press-3/oee`. May contain `{field}` placeholders filled from the message — `{machine}/oee` — so one output serves every machine a pipeline reduces over. A message missing a placeholder's field is skipped for this series. |
 | `value` | `string` | <Badge type="warning" text="required" /> | the field holding the value, as a path (`oee`, `stats.mean`). Must be a number; a message where it is missing or not a number is skipped for this series rather than failing the batch. |
 | `unit` | `string` | <Badge type="info" text="optional" /> | the unit Indu records when it creates the stream, e.g. `%`. Ignored once the stream exists. |
+
+
+## `tidepool` {#output-tidepool}
+
+Writes every batch into a Tidepool table, one request per batch.
+
+The table has to exist: Tidepool's project declares it, with its column types, and this output checks against that on start — every mapped column has to be one of the table's, of a type it can write, and every column the table requires has to be written. A mismatch fails the start rather than the first batch.
+
+`columns` is spelled as the database outputs spell it. Leave it out to send each message as a row as it is, for messages already shaped like the table: Tidepool checks every value and refuses a batch with any problem in it, so nothing is coerced on either side.
+
+A batch Tidepool refuses fails with its problems quoted by row and column. A busy server (`503`) or one that can't be reached is retried for up to `retry_seconds` under the same idempotency key, so a retry never writes a batch twice.
+
+| field | type | | description |
+| --- | --- | --- | --- |
+| `connection` | `tidepool` connection | <Badge type="warning" text="required" /> | name of the tidepool connection to write through — see "connections" in the readme. |
+| `table` | `string` | <Badge type="warning" text="required" /> | the table to write into, as Tidepool's project names it |
+| `columns` | `list of column` | <Badge type="info" text="optional" /> | which message field goes in which column. Leave it out to send each message as a row as it is. |
+| `on_extra_fields` | `ignore` \| `error` | <Badge type="info" text="optional" /> | what to do about a message carrying fields no column reads |
+| `retry_seconds` | `integer` | <Badge type="info" text="optional" /> | how long one batch keeps being retried while the server is busy or unreachable, in seconds. Defaults to 30. |
+| `timeout_seconds` | `integer` | <Badge type="info" text="optional" /> | how long one request may take, in seconds. Defaults to 30. |
+
+**`columns` — each entry**
+
+| field | type | | description |
+| --- | --- | --- | --- |
+| `name` | `string` | <Badge type="warning" text="required" /> | the column's name in the table. Letters, digits and underscores only, since it cannot be sent as a query parameter. |
+| `type` | `text` \| `integer` \| `bigint` \| `float` \| `decimal` \| `boolean` \| `timestamp` \| `date` \| `uuid` \| `json` | <Badge type="warning" text="required" /> | what the column holds. Values are checked against it rather than coerced into it. |
+| `field` | `string` | <Badge type="info" text="optional" /> | the field to read, as a dotted path. Defaults to the column's name. |
+| `message` | `boolean` | <Badge type="info" text="optional" /> | store the whole message in this column instead of one of its fields. Only for a `json` column, and not together with `field`. |
+| `nullable` | `boolean` | <Badge type="info" text="optional" /> | whether the column accepts `NULL`. Defaults to true; `false` makes the created column `NOT NULL` and makes a missing field an error. |
+| `on_missing` | `null` \| `error` \| `skip_row` | <Badge type="info" text="optional" /> | what to do about a message that doesn't carry the field. Defaults to `null`, or to `error` for a column that is not nullable. |

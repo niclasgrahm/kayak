@@ -38,3 +38,6 @@ local-s3:
   secret_access_key: ${S3_SECRET_ACCESS_KEY}
   endpoint: http://localhost:9000
   allow_http: true
+local-tidepool:
+  type: tidepool
+  url: http://localhost:7070

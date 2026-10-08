@@ -848,6 +848,48 @@ pub struct ClickhouseOutputConfig {
     pub on_extra_fields: ExtraFieldPolicy,
 }
 
+/// Writes every batch into a Tidepool table, one request per batch.
+///
+/// The table has to exist: Tidepool's project declares it, with its column
+/// types, and this output checks against that on start — every mapped column
+/// has to be one of the table's, of a type it can write, and every column the
+/// table requires has to be written. A mismatch fails the start rather than
+/// the first batch.
+///
+/// `columns` is spelled as the database outputs spell it. Leave it out to send
+/// each message as a row as it is, for messages already shaped like the table:
+/// Tidepool checks every value and refuses a batch with any problem in it, so
+/// nothing is coerced on either side.
+///
+/// A batch Tidepool refuses fails with its problems quoted by row and column.
+/// A busy server (`503`) or one that can't be reached is retried for up to
+/// `retry_seconds` under the same idempotency key, so a retry never writes a
+/// batch twice.
+#[derive(Clone, Debug, Deserialize, Serialize, JsonSchema)]
+#[schemars(title = "tidepool")]
+pub struct TidepoolOutputConfig {
+    /// name of the tidepool connection to write through — see "connections"
+    /// in the readme.
+    #[schemars(extend("x-connection" = "tidepool"))]
+    pub connection: ConnectionId,
+    /// the table to write into, as Tidepool's project names it
+    pub table: String,
+    /// which message field goes in which column. Leave it out to send each
+    /// message as a row as it is.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub columns: Vec<ColumnMapping>,
+    /// what to do about a message carrying fields no column reads
+    #[serde(default, skip_serializing_if = "ExtraFieldPolicy::is_default")]
+    pub on_extra_fields: ExtraFieldPolicy,
+    /// how long one batch keeps being retried while the server is busy or
+    /// unreachable, in seconds. Defaults to 30.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub retry_seconds: Option<u64>,
+    /// how long one request may take, in seconds. Defaults to 30.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub timeout_seconds: Option<u64>,
+}
+
 /// Publishes every message in the batch to a kafka topic, one message per
 /// record. Records are sent without a key, so they round-robin across the
 /// topic's partitions.
@@ -1542,6 +1584,7 @@ pub enum OutputKind {
     Redis(RedisOutputConfig),
     Http(HttpOutputConfig),
     Indu(InduOutputConfig),
+    Tidepool(TidepoolOutputConfig),
 }
 #[derive(Clone, Debug, Deserialize, Serialize, JsonSchema)]
 pub struct OutputConfig {
@@ -1632,6 +1675,7 @@ impl Config {
             OutputKind::Mqtt(c) => Some(&c.connection),
             OutputKind::Redis(c) => Some(&c.connection),
             OutputKind::Indu(c) => Some(&c.connection),
+            OutputKind::Tidepool(c) => Some(&c.connection),
             OutputKind::Stdout(_) | OutputKind::Http(_) => None,
         });
         inputs.chain(outputs).collect()

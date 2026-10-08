@@ -860,6 +860,44 @@
       ]
     },
     {
+      "id": "sensors_to_tidepool",
+      "inputs": [
+        {
+          "type": "pipeline",
+          "upstream": "sensors",
+          "buffer": {
+            "type": "batch",
+            "size": 100,
+            "window_seconds": 1
+          }
+        }
+      ],
+      "transforms": [],
+      "outputs": [
+        {
+          "type": "tidepool",
+          "connection": "local-tidepool",
+          "table": "sensor_readings",
+          "columns": [
+            {
+              "name": "sensor",
+              "type": "text",
+              "nullable": false
+            },
+            {
+              "name": "value",
+              "type": "float"
+            },
+            {
+              "name": "recorded_at",
+              "type": "timestamp",
+              "field": "ts"
+            }
+          ]
+        }
+      ]
+    },
+    {
       "id": "slow_requests",
       "inputs": [
         {

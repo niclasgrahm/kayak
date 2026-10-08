@@ -350,6 +350,9 @@ fn output_samples() -> Vec<(&'static str, Value)> {
             "nats",
             json!({"type": "nats", "connection": "local-nats", "subject": "out.subject"}),
         ),
+        ("tidepool", json!({"type": "tidepool", "connection": "local-tidepool", "table": "readings",
+            "columns": [{"name": "value", "type": "decimal", "nullable": false}],
+            "retry_seconds": 60, "timeout_seconds": 10})),
         (
             "indu",
             json!({"type": "indu", "connection": "indu", "at": "_meta.received_at",
@@ -439,6 +442,15 @@ fn connection_samples() -> Vec<(&'static str, Value)> {
         (
             "nats",
             json!({"type": "nats", "urls": "nats://localhost:4222"}),
+        ),
+        (
+            "tidepool",
+            json!({
+                "type": "tidepool",
+                "url": "https://tidepool.example.com",
+                "token": "${TIDEPOOL_INGEST_TOKEN}",
+                "allow_http": false
+            }),
         ),
         (
             "indu",

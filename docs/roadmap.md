@@ -343,6 +343,12 @@ picking up."
       templated stream names and an idempotency key per batch. The `indu`
       *input* over the platform's SSE feed is the other half and waits on the
       platform accepting an API key on `/api/v1`.)
+- [x] **a `tidepool` connection and output** (done 2026-10-08: Tidepool's
+      K1 — a pipeline fills a Tidepool table, the mapping checked against
+      the table on start, `503`s retried under one idempotency key per
+      batch, and the table read again after a refusal. The `tidepool`
+      *input*, subscribing to a live metric, is Tidepool's §15.3 and comes
+      later.)
 - [ ] **the connector list is thin.** nats, kafka, mqtt, redis, http and two
       dummies in; nats, kafka, mqtt, redis, http, postgres, clickhouse, file,
       s3 and stdout out — against

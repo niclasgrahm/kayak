@@ -134,3 +134,16 @@ One connection serves both directions: the `indu` output writes streams through 
 | `url` | `string` | <Badge type="warning" text="required" /> | the deployment's origin, e.g. `https://app.acme.indu.cloud`. The ingest endpoint is reached under it as `/ingest/v1/…`; a deployment that serves ingest on a separate host names it in `ingest_url`. |
 | `api_key` | `string` | <Badge type="warning" text="required" /> | the API key, `indu.ak.…`, as a `${NAME}` reference — see "secrets". |
 | `ingest_url` | `string` | <Badge type="info" text="optional" /> | where `/ingest/v1/…` lives when it is not under `url` — the single-server install serves ingest on its own host, e.g. `https://ingest.acme.indu.cloud`. |
+
+
+## `tidepool` {#connection-tidepool}
+
+A Tidepool server: where it listens, and the ingest token it wants.
+
+The same split every connection makes: the server and its credential are the connection's, the *table* belongs to the output that writes it. Tables are declared in Tidepool's own project, never created from here.
+
+| field | type | | description |
+| --- | --- | --- | --- |
+| `url` | `string` | <Badge type="warning" text="required" /> | the server's url, e.g. `http://localhost:7070`. |
+| `allow_http` | `boolean` | <Badge type="info" text="optional" /> | allow a plaintext `http://` url while a `token` is set. Defaults to false, for the clickhouse connection's reason: the token goes with every batch. Without a token there is nothing to send in the clear. |
+| `token` | `string` | <Badge type="info" text="optional" /> | the ingest token (the server's `TIDEPOOL_INGEST_TOKEN`, or its admin token) as a `${NAME}` reference — see "secrets". Leave it out for a server whose ingest is open. |

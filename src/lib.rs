@@ -52,7 +52,7 @@ use std::path::PathBuf;
 use kayak_core::connections::{
     ClickhouseConnection, Connections, FileConnection, InduConnection, KafkaConnection,
     MqttConnection, NatsConnection, OpcuaConnection, PostgresConnection, RedisConnection,
-    S3Connection,
+    S3Connection, TidepoolConnection,
 };
 
 /// Threaded through every `build()` call. It carries the pipeline map — needed
@@ -288,6 +288,10 @@ impl<'a> BuildCtx<'a> {
 
     pub fn indu_connection(&self, id: &str) -> anyhow::Result<&InduConnection> {
         Ok(self.connections.indu(id)?)
+    }
+
+    pub fn tidepool_connection(&self, id: &str) -> anyhow::Result<&TidepoolConnection> {
+        Ok(self.connections.tidepool(id)?)
     }
 
     /// The same, with the live state buckets a pipeline's `state` names.

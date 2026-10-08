@@ -14,6 +14,17 @@ history, not here.
 
 ### Added
 
+- **A `tidepool` connection and a `tidepool` output.** kayak writes a
+  pipeline's messages into a table of a Tidepool server, one NDJSON request
+  per batch, with `columns` spelled as the database outputs spell them (or
+  messages sent as they are). The table is read on start and the mapping
+  checked against it, so a column it doesn't have, a type it can't take or a
+  null where it wants a value fails the start. A refused batch fails with
+  Tidepool's problems quoted by row and column; a busy server (`503`) or an
+  unreachable one is retried for up to `retry_seconds` under one idempotency
+  key per batch, so a retry never writes twice. After a refusal the table is
+  read again, since Tidepool's config changes live. See "tidepool" on the
+  site.
 - **An `indu` connection and an `indu` output.** kayak writes a pipeline's
   results into Indu Cloud as *streams* — series that are not sensors —
   through `POST /ingest/v1/streams`. One message yields one reading per

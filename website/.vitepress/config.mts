@@ -101,6 +101,7 @@ export default defineConfig({
           { text: 'posting into a pipeline', link: '/io/posting-into-a-pipeline' },
           { text: 'sending over http', link: '/io/sending-over-http' },
           { text: 'indu', link: '/io/indu' },
+          { text: 'tidepool', link: '/io/tidepool' },
           { text: 'opcua input', link: '/io/opcua-input' },
           { text: 'file output', link: '/io/file-output' },
           { text: 's3 output', link: '/io/s3-output' },
