@@ -527,7 +527,7 @@ mod tests {
         assert!(!contents.truncated);
         assert_eq!(contents.entries[0].key, "machine_1");
         assert_eq!(contents.entries[0].values["unit_id"], json!("u-7"));
-        assert!(!contents.entries[0].updated_at.is_empty());
+        assert_ne!(contents.entries[0].updated_at, "");
         assert!(buckets.contents("nope").is_none());
     }
 
@@ -578,7 +578,7 @@ mod tests {
 
         let rebuilt = buckets.rebuilt(&StateBuckets::new());
         assert!(!rebuilt.contains("b"));
-        assert!(rebuilt.summaries().is_empty());
+        assert_eq!(rebuilt.summaries(), [] as [kayak_core::state::BucketSummary; 0]);
     }
 
     #[tokio::test]

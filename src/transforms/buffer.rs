@@ -570,7 +570,7 @@ mod tests {
         let out = t.apply(batch(vec![json!({"i": 0})])).await?;
         assert!(out.is_empty(), "nothing is remembered yet, so nothing goes");
         let out = t.apply(batch(vec![json!({"i": 1})])).await?;
-        assert!(out.is_empty());
+        assert_eq!(out, [] as [rhai::Shared<std::vec::Vec<rhai::Shared<serde_json::Value>>>; 0]);
 
         buckets.remember(
             "control",
@@ -668,7 +668,7 @@ mod tests {
     async fn a_flush_with_no_trigger_met_releases_nothing() -> Result<()> {
         let (_, mut t) = gated()?;
         t.apply(batch(vec![json!({"i": 0})])).await?;
-        assert!(t.flush().await?.is_empty());
+        assert_eq!(t.flush().await?, [] as [rhai::Shared<std::vec::Vec<rhai::Shared<serde_json::Value>>>; 0]);
         Ok(())
     }
 

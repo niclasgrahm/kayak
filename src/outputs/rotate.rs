@@ -310,7 +310,7 @@ mod tests {
         let mut encoder = Encoder::new(FileFormat::Ndjson);
         let bytes = encoder.encode(&messages(&[json!({"a": 1}), json!({"a": 2})]))?;
         assert_eq!(String::from_utf8(bytes)?, "{\"a\":1}\n{\"a\":2}\n");
-        assert!(encoder.finish().is_empty());
+        assert_eq!(encoder.finish(), [] as [u8; 0]);
         Ok(())
     }
 
@@ -346,7 +346,7 @@ mod tests {
     fn an_empty_json_array_part_is_still_valid_json() -> anyhow::Result<()> {
         let encoder = Encoder::new(FileFormat::JsonArray);
         let parsed: Vec<serde_json::Value> = serde_json::from_slice(&encoder.finish())?;
-        assert!(parsed.is_empty());
+        assert_eq!(parsed, [] as [serde_json::Value; 0]);
         Ok(())
     }
 

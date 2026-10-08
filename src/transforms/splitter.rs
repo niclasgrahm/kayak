@@ -107,7 +107,7 @@ mod tests {
 
     #[tokio::test]
     async fn an_empty_batch_emits_nothing() {
-        assert!(split(3, 0).await.is_empty());
+        assert_eq!(split(3, 0).await, [] as [std::vec::Vec<serde_json::Value>; 0]);
     }
 
     #[test]
