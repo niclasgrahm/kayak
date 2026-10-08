@@ -184,13 +184,22 @@ fn render(template: &str, message: &Value) -> Option<String> {
 
 /// The reading's time: the configured field as RFC 3339 or epoch
 /// milliseconds, else `now`.
+///
+/// Indu reads `at` as RFC 3339 and nothing else, so epoch milliseconds are
+/// converted here rather than passed on as a string of digits — which Indu
+/// refuses row by row as `timestamp_unparseable`, failing the whole batch.
+/// A number that is not a whole count of milliseconds in chrono's range
+/// skips the message, as a missing field does.
 fn timestamp(at: Option<&str>, message: &Value, now: &str) -> Option<String> {
     let Some(field) = at else {
         return Some(now.to_string());
     };
     match fields::get(message, field)? {
         Value::String(s) => Some(s.clone()),
-        Value::Number(n) => n.as_i64().map(|ms| ms.to_string()),
+        Value::Number(n) => n
+            .as_i64()
+            .and_then(chrono::DateTime::from_timestamp_millis)
+            .map(|t| t.to_rfc3339_opts(chrono::SecondsFormat::Millis, true)),
         _ => None,
     }
 }
@@ -452,6 +461,27 @@ mod tests {
         // press-5 has no `at` field, and `at` names one: skipped, because a
         // reading with a made-up time is worse than no reading
         assert!(rows.iter().all(|r| r["stream"] != "press-5/oee"));
+    }
+
+    #[test]
+    fn epoch_milliseconds_become_rfc_3339_because_indu_reads_nothing_else() {
+        let at = Some("at");
+        assert_eq!(
+            timestamp(at, &json!({"at": 1_791_448_376_806_i64}), "NOW").as_deref(),
+            Some("2026-10-08T08:32:56.806Z"),
+            "a number is epoch milliseconds, sent as the instant it names"
+        );
+        assert_eq!(
+            timestamp(at, &json!({"at": "2026-09-02T10:00:00+02:00"}), "NOW").as_deref(),
+            Some("2026-09-02T10:00:00+02:00"),
+            "a string is passed through as written"
+        );
+        assert_eq!(timestamp(None, &json!({}), "NOW").as_deref(), Some("NOW"));
+        assert!(
+            timestamp(at, &json!({"at": 1.5}), "NOW").is_none(),
+            "a fraction of a millisecond is not a time Indu can be told"
+        );
+        assert!(timestamp(at, &json!({"at": true}), "NOW").is_none());
     }
 
     #[test]
