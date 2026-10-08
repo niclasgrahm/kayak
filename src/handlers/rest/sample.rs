@@ -189,7 +189,7 @@ mod tests {
             input(serde_json::json!({"type": "dummy", "duration": 1})),
             &mut notes,
         );
-        assert!(notes.is_empty());
+        assert_eq!(notes, [] as [String; 0]);
     }
 
     /// The pipeline's own group is what must not be joined — see the note in

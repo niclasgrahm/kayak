@@ -757,7 +757,7 @@ mod tests {
             layout.body(&batch(vec![json!({"a": "x"}), json!({}), json!({"a": "y"})]))?,
             "[\"x\"]\n[\"y\"]\n"
         );
-        assert!(layout.body(&batch(vec![json!({})]))?.is_empty());
+        assert_eq!(layout.body(&batch(vec![json!({})]))?, "");
         Ok(())
     }
 

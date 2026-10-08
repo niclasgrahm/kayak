@@ -367,8 +367,8 @@ mod tests {
 
     #[test]
     fn a_graph_with_every_upstream_present_has_no_dangling_references() {
-        assert!(
-            dangling_upstreams(&[pipeline("root", &[]), pipeline("child", &["root"])]).is_empty()
+        assert_eq!(
+            dangling_upstreams(&[pipeline("root", &[]), pipeline("child", &["root"])]), [] as [String; 0]
         );
     }
 

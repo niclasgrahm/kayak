@@ -617,7 +617,7 @@ mod tests {
         let sql = layout.insert_sql(&table);
         assert!(sql.contains("(payload)"), "{sql}");
         assert_eq!(sql.matches('$').count(), 1, "{sql}");
-        assert!(layout.index_sql(&table).is_empty());
+        assert_eq!(layout.index_sql(&table), [] as [String; 0]);
         Ok(())
     }
 

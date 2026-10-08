@@ -160,7 +160,7 @@ async fn a_pipeline_naming_an_unknown_connection_is_rejected() -> anyhow::Result
         err.contains("broker"),
         "the known names should be listed: {err}"
     );
-    assert!(state.get_pipeline_ids().is_empty());
+    assert_eq!(state.get_pipeline_ids(), [] as [String; 0]);
     Ok(())
 }
 

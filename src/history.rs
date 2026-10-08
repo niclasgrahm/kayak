@@ -709,7 +709,7 @@ mod tests {
 
         // an hour later it has aged out
         history.sample(std::iter::empty(), 3_600 * 2);
-        assert!(history.get(&id, Resolution::Coarse).buckets.is_empty());
+        assert_eq!(history.get(&id, Resolution::Coarse).buckets, [] as [kayak_core::HistoryBucket; 0]);
     }
 
     /// A deleted pipeline's ring is left alone rather than advanced. Filling it
@@ -738,8 +738,8 @@ mod tests {
     fn an_unknown_pipeline_has_an_empty_history() {
         let history = History::new(config(3_600));
         let out = history.get(&"never-existed".to_string(), Resolution::Fine);
-        assert!(out.buckets.is_empty());
-        assert!(out.errors.is_empty());
+        assert_eq!(out.buckets, [] as [kayak_core::HistoryBucket; 0]);
+        assert_eq!(out.errors, [] as [kayak_core::ErrorSignature; 0]);
         assert_eq!(out.bucket_secs, FINE_BUCKET_SECS);
     }
 
