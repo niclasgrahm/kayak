@@ -37,6 +37,7 @@ use serde_json::{Map, Value};
 use std::collections::HashSet;
 use std::sync::Arc;
 
+use crate::fields::describe;
 use crate::{
     BuildCtx,
     fields,
@@ -555,18 +556,6 @@ fn is_uuid(text: &str) -> bool {
         }
     }
     parts.next().is_none()
-}
-
-/// What a value is, for an error that has to say why it wasn't accepted.
-fn describe(value: &Value) -> &'static str {
-    match value {
-        Value::Null => "null",
-        Value::Bool(_) => "a boolean",
-        Value::Number(_) => "a number",
-        Value::String(_) => "a string",
-        Value::Array(_) => "an array",
-        Value::Object(_) => "an object",
-    }
 }
 
 #[cfg(test)]

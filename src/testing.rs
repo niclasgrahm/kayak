@@ -21,6 +21,8 @@ use crate::inputs::{InputSource, MessageBatch};
 use crate::outputs::OutputDestination;
 use crate::secrets::SecretStore;
 use crate::transforms::Transform;
+use crate::BuildCtx;
+use kayak_core::PipelineId;
 
 /// An in-memory [`SecretStore`], so tests about resolution don't have to touch
 /// the process environment or the filesystem.
@@ -459,6 +461,31 @@ impl LoadInput {
         }
     }
 
+    /// The same message with `sensor_id` rotating over `keys` distinct ids
+    /// across the batch, for a scenario about *per-key* state — a rolling
+    /// window at a thousand keys. The fields are [`LoadInput::MESSAGE_FIELDS`]
+    /// exactly, so a keyed batch costs what a plain one does to serialize; only
+    /// scenarios that ask for keys read it, so the existing rows keep their
+    /// meaning.
+    #[must_use]
+    pub fn keyed(batch_size: usize, keys: usize) -> Self {
+        let keys = keys.max(1);
+        let batch = (0..batch_size)
+            .map(|i| {
+                Arc::new(serde_json::json!({
+                    "sensor_id": format!("sensor-{:04}", i % keys),
+                    "value": 21.5,
+                    "recorded_at": "2026-01-01T00:00:00Z",
+                    "site": "north",
+                    "reading": { "unit": "celsius", "quality": "good" },
+                }))
+            })
+            .collect();
+        Self {
+            batch: Arc::new(batch),
+        }
+    }
+
     /// A generator of a batch the caller built, for a bench that needs a
     /// particular shape — a payload a `map` mapping actually reads, say.
     #[must_use]
@@ -496,4 +523,26 @@ impl OutputDestination for NullOutput {
     async fn emit(&mut self, _message_batch: Arc<MessageBatch>) -> Result<()> {
         Ok(())
     }
+}
+
+/// A build context whose pipeline declares a `state` bucket called `b`, keyed
+/// by `key` — what every stateful transform needs to build. Test-only in
+/// spirit: the buckets are fresh and nothing else is wired.
+#[must_use]
+#[allow(clippy::implicit_hasher, reason = "the map is BuildCtx's own type")]
+pub fn ctx_with_bucket<'a>(
+    pipelines: &'a mut std::collections::HashMap<PipelineId, crate::state::PipelineHandle>,
+    key: Option<&str>,
+) -> BuildCtx<'a> {
+    use kayak_core::state::{PipelineState, StateBucketConfig, StateBuckets};
+    let (events, _) = tokio::sync::broadcast::channel(16);
+    let mut ctx = BuildCtx::new(pipelines, "stateful-test".into(), events);
+    let mut declared = StateBuckets::new();
+    declared.insert("b", StateBucketConfig::default());
+    ctx.buckets = Arc::new(crate::buckets::Buckets::from_config(&declared));
+    ctx.state = Some(PipelineState {
+        bucket: "b".into(),
+        key: key.map(ToString::to_string),
+    });
+    ctx
 }

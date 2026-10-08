@@ -33,6 +33,11 @@ pub enum Chain {
     /// which is one `fields::get` down a path and one `fields::set`, the two
     /// halves of the machinery every transform addresses fields through.
     Map,
+    /// One `rolling` with an `avg` over a window of a hundred, keyed by
+    /// `sensor_id` — a per-message read and in-place edit of a state bucket,
+    /// which is the cost every streaming statistics transform shares. What it
+    /// measures depends on the scenario's `keys`.
+    Rolling,
 }
 
 impl Chain {
@@ -46,7 +51,7 @@ impl Chain {
         match self {
             Self::None => 0,
             Self::Filter(n) => n,
-            Self::Map => 1,
+            Self::Map | Self::Rolling => 1,
         }
     }
 }
@@ -69,6 +74,9 @@ pub struct Scenario {
     /// is a root on its own; `3` puts two `pipeline`-input hops below it, which
     /// is what makes the cost of a hop visible.
     pub depth: usize,
+    /// How many distinct `sensor_id`s the input rotates over. `1` is the plain
+    /// generated message; more is what a keyed chain is measured at.
+    pub keys: usize,
     /// Whether a task is draining the `/events` broadcast for the duration.
     ///
     /// This is the one scenario knob that is about the *server* rather than the
@@ -88,8 +96,14 @@ impl Scenario {
             batch_size: 100,
             chain: Chain::None,
             depth: 1,
+            keys: 1,
             watched: false,
         }
+    }
+
+    const fn keys(mut self, n: usize) -> Self {
+        self.keys = n;
+        self
     }
 
     const fn pipelines(mut self, n: usize) -> Self {
@@ -143,6 +157,11 @@ pub fn suite() -> Vec<Scenario> {
             .chain(Chain::Filter(5)),
         Scenario::new("map1", "one map, copying a nested field to the top level")
             .chain(Chain::Map),
+        Scenario::new("rolling1", "one rolling window of a hundred, one key")
+            .chain(Chain::Rolling),
+        Scenario::new("rolling1000", "the same window at a thousand keys")
+            .chain(Chain::Rolling)
+            .keys(1000),
         Scenario::new("pipelines10", "ten pipelines at once").pipelines(10),
         Scenario::new("pipelines100", "a hundred pipelines at once").pipelines(100),
         Scenario::new("pipelines1000", "a thousand pipelines at once").pipelines(1000),
@@ -190,6 +209,7 @@ mod tests {
             assert!(s.pipelines >= 1, "{} runs no pipelines", s.name);
             assert!(s.depth >= 1, "{} is zero pipelines deep", s.name);
             assert!(s.batch_size >= 1, "{} has empty batches", s.name);
+            assert!(s.keys >= 1, "{} rotates over no keys", s.name);
         }
     }
 
@@ -198,6 +218,7 @@ mod tests {
         assert_eq!(Chain::None.count(), 0);
         assert_eq!(Chain::Filter(5).count(), 5);
         assert_eq!(Chain::Map.count(), 1);
+        assert_eq!(Chain::Rolling.count(), 1);
     }
 
     #[test]

@@ -268,6 +268,49 @@ impl Buckets {
         }
     }
 
+    /// Change one value under a key **in place**, under the lock, and say it
+    /// changed. `None` for an undeclared bucket.
+    ///
+    /// This is what the streaming transforms keep their per-key state through:
+    /// a rolling window is a thousand numbers, and `recall` + `remember` would
+    /// clone it out and clone it back on every message. The closure gets the
+    /// value as it is (`Null` when there is nothing under that name yet) and
+    /// edits it where it lies. Same bounds as `remember`: an expired entry is
+    /// gone before the closure sees it, so a series that went idle past the
+    /// bucket's timeout starts again from nothing, and a new key evicts the
+    /// stalest when the bucket is full.
+    ///
+    /// The closure runs under the bucket's lock and cannot await, which is
+    /// the point of it being a closure — see [`Buckets::with`].
+    pub fn update<R>(
+        &self,
+        bucket: &str,
+        key: &str,
+        name: &str,
+        f: impl FnOnce(&mut Value) -> R,
+    ) -> Option<R> {
+        let out = self.with(bucket, |b| {
+            let now = Instant::now();
+            b.expire(now);
+            if !b.entries.contains_key(key) {
+                b.make_room();
+            }
+            let entry = b.entries.entry(key.to_string()).or_insert_with(|| Entry {
+                values: BTreeMap::new(),
+                updated: now,
+                updated_at: chrono::Utc::now(),
+            });
+            entry.updated = now;
+            entry.updated_at = chrono::Utc::now();
+            let value = entry.values.entry(name.to_string()).or_insert(Value::Null);
+            f(value)
+        })?;
+        if let Some(slot) = self.inner.get(bucket) {
+            slot.changed.send_modify(|version| *version = version.wrapping_add(1));
+        }
+        Some(out)
+    }
+
     /// Watch a bucket for writes. `None` for an undeclared bucket.
     ///
     /// What comes down the channel is a version number nothing should read: it
@@ -405,6 +448,43 @@ mod tests {
             buckets.recall("b", "machine_1", &["unit_id".to_string()]),
             vec![Some(json!("u-7"))]
         );
+    }
+
+    /// `update` edits in place and obeys the same bounds `remember` does: a
+    /// new key evicts the stalest when the bucket is full, and what it wrote
+    /// is what `recall` and `entry` then see.
+    #[test]
+    fn an_update_edits_in_place_within_the_bounds() {
+        let buckets = buckets(StateBucketConfig {
+            max_keys: Some(2),
+            idle_timeout_secs: None,
+        });
+        let push = |key: &str, n: i64| {
+            buckets.update("b", key, "window", |value| {
+                if !value.is_array() {
+                    *value = json!([]);
+                }
+                if let Some(items) = value.as_array_mut() {
+                    items.push(json!(n));
+                }
+                value.as_array().map_or(0, Vec::len)
+            })
+        };
+        assert_eq!(push("a", 1), Some(1));
+        assert_eq!(push("a", 2), Some(2), "the second edit sees the first");
+        assert_eq!(
+            buckets.recall("b", "a", &["window".to_string()]),
+            vec![Some(json!([1, 2]))]
+        );
+
+        push("b", 1);
+        push("c", 1);
+        assert_eq!(
+            buckets.recall("b", "a", &["window".to_string()]),
+            vec![None],
+            "the third key evicted the stalest"
+        );
+        assert_eq!(buckets.update("nope", "a", "x", |_| ()), None);
     }
 
     /// Keys are separate: that is the whole point of the key.

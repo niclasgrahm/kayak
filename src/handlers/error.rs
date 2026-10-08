@@ -57,7 +57,11 @@ where
         let status = match err.downcast_ref::<PipelineError>() {
             // both are "there is nothing here to post to": one has no
             // pipeline, one has no http input on the pipeline it does have
-            Some(PipelineError::NotFound(_) | PipelineError::NotAccepting(_)) => {
+            Some(
+                PipelineError::NotFound(_)
+                | PipelineError::NotAccepting(_)
+                | PipelineError::NoScript(..),
+            ) => {
                 StatusCode::NOT_FOUND
             }
             // the pipeline is there and behind, which is a "come back" rather

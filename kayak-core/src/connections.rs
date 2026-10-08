@@ -271,6 +271,36 @@ impl ClickhouseConnection {
     }
 }
 
+/// A Tidepool server: where it listens, and the ingest token it wants.
+///
+/// The same split every connection makes: the server and its credential are
+/// the connection's, the *table* belongs to the output that writes it. Tables
+/// are declared in Tidepool's own project, never created from here.
+#[derive(Clone, Debug, Deserialize, Serialize, JsonSchema, PartialEq, Eq)]
+#[schemars(title = "tidepool")]
+pub struct TidepoolConnection {
+    /// the server's url, e.g. `http://localhost:7070`.
+    pub url: String,
+    /// the ingest token (the server's `TIDEPOOL_INGEST_TOKEN`, or its admin
+    /// token) as a `${NAME}` reference — see "secrets". Leave it out for a
+    /// server whose ingest is open.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub token: Option<Secret>,
+    /// allow a plaintext `http://` url while a `token` is set. Defaults to
+    /// false, for the clickhouse connection's reason: the token goes with
+    /// every batch. Without a token there is nothing to send in the clear.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub allow_http: Option<bool>,
+}
+
+impl TidepoolConnection {
+    /// Whether a plaintext url is allowed with a token. Not unless it says so.
+    #[must_use]
+    pub fn allows_http(&self) -> bool {
+        self.allow_http.unwrap_or(false)
+    }
+}
+
 /// An Indu Cloud deployment: where its API and ingest endpoints are, and the
 /// API key this kayak speaks to it with.
 ///
@@ -321,6 +351,7 @@ pub enum ConnectionKind {
     Redis(RedisConnection),
     Opcua(OpcuaConnection),
     Indu(InduConnection),
+    Tidepool(TidepoolConnection),
 }
 
 impl ConnectionKind {
@@ -339,6 +370,7 @@ impl ConnectionKind {
             Self::Redis(_) => REDIS,
             Self::Opcua(_) => OPCUA,
             Self::Indu(_) => INDU,
+            Self::Tidepool(_) => TIDEPOOL,
         }
     }
 }
@@ -353,6 +385,7 @@ pub const MQTT: &str = "mqtt";
 pub const REDIS: &str = "redis";
 pub const OPCUA: &str = "opcua";
 pub const INDU: &str = "indu";
+pub const TIDEPOOL: &str = "tidepool";
 
 /// What `POST /api/connections` takes: a name, and the connection itself
 /// flattened alongside it.
@@ -439,6 +472,13 @@ impl Connections {
         match self.lookup(id, INDU)? {
             ConnectionKind::Indu(c) => Ok(c),
             other => Err(ConnectionError::wrong_kind(id, INDU, other)),
+        }
+    }
+
+    pub fn tidepool(&self, id: &str) -> Result<&TidepoolConnection, ConnectionError> {
+        match self.lookup(id, TIDEPOOL)? {
+            ConnectionKind::Tidepool(c) => Ok(c),
+            other => Err(ConnectionError::wrong_kind(id, TIDEPOOL, other)),
         }
     }
 

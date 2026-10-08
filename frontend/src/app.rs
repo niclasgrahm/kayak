@@ -384,6 +384,14 @@ pub struct AppState {
     pub add_upstream: RwSignal<Option<PipelineId>>,
     /// Whether the "add connection" modal is open.
     pub adding_connection: RwSignal<bool>,
+    /// The running script the viewer is showing, if it is open.
+    ///
+    /// Here rather than on the card because the viewer cannot live on the
+    /// card: a card sits inside the canvas' transformed surface, where
+    /// `position: fixed` is fixed to the *surface* and would pan and zoom with
+    /// it. So a card says which script, and `Canvas` mounts the viewer beside
+    /// the modals.
+    pub viewing_script: RwSignal<Option<ScriptTarget>>,
     /// Whether the "save as" modal is open.
     pub saving: RwSignal<bool>,
     /// Which of the sidebar's two lists is showing.
@@ -1184,6 +1192,7 @@ pub fn CanvasPage() -> impl IntoView {
         adding: RwSignal::new(false),
         add_upstream: RwSignal::new(None),
         adding_connection: RwSignal::new(false),
+        viewing_script: RwSignal::new(None),
         saving: RwSignal::new(false),
         tab: RwSignal::new(SidebarTab::Pipelines),
         sidebar_mode: RwSignal::new(SidebarMode::default()),
@@ -1539,6 +1548,10 @@ pub fn CanvasPage() -> impl IntoView {
             <Show when=move || state.adding_connection.get()>
                 <AddConnectionModal />
             </Show>
+            // Rebuilt per target rather than behind a `<Show>`: the viewer reads
+            // its target once, to fetch it, and a different script is a
+            // different fetch.
+            {move || state.viewing_script.get().map(|target| view! { <ScriptViewer target /> })}
             <Show when=move || state.saving.get()>
                 <SaveAsModal />
             </Show>
@@ -5927,7 +5940,12 @@ enum Tab {
 /// The config of a running pipeline never changes, so all three tabs are built
 /// once and only the selected one is rendered.
 #[component]
-fn Inspector(config: Config) -> impl IntoView {
+fn Inspector(
+    config: Config,
+    /// Which pipeline this is — a script row asks the server for the text the
+    /// pipeline was built with, and needs to say whose.
+    pipeline_id: PipelineId,
+) -> impl IntoView {
     let inputs = inspector::input_sections(&config);
     let outputs = inspector::output_sections(&config);
     let transforms = inspector::transform_sections(&config);
@@ -5970,9 +5988,11 @@ fn Inspector(config: Config) -> impl IntoView {
                     // batch, so numbering them would imply an order that isn't
                     // there. a transform's position *is* behaviour, so it keeps
                     // its number.
-                    Tab::Inputs => sections(&inputs, "no inputs", false),
-                    Tab::Outputs => sections(&outputs, "no outputs", false),
-                    Tab::Transforms => sections(&transforms, "no transforms", true),
+                    Tab::Inputs => sections(&inputs, "no inputs", None),
+                    Tab::Outputs => sections(&outputs, "no outputs", None),
+                    Tab::Transforms => {
+                        sections(&transforms, "no transforms", Some(&pipeline_id))
+                    }
                 }}
             </div>
         </div>
@@ -5983,7 +6003,15 @@ fn Inspector(config: Config) -> impl IntoView {
 /// is a real state for all three now: a pipeline can have no transforms and no
 /// outputs, and a config that somehow arrives with no inputs should say so
 /// rather than render a blank pane.
-fn sections(sections: &[inspector::Section], empty: &'static str, numbered: bool) -> AnyView {
+///
+/// `chain` is the pipeline for the one stage that is a chain — transforms —
+/// and `None` for a set. It numbers the sections, and it is what a script row
+/// needs to ask the server for that transform's text.
+fn sections(
+    sections: &[inspector::Section],
+    empty: &'static str,
+    chain: Option<&PipelineId>,
+) -> AnyView {
     if sections.is_empty() {
         return view! { <div class="empty">{empty}</div> }.into_any();
     }
@@ -5991,12 +6019,15 @@ fn sections(sections: &[inspector::Section], empty: &'static str, numbered: bool
         .iter()
         .cloned()
         .enumerate()
-        .map(|(i, section)| {
-            if numbered {
-                view! { <SectionView section ordinal=i + 1 /> }.into_any()
-            } else {
-                view! { <SectionView section /> }.into_any()
+        .map(|(i, section)| match chain {
+            Some(pipeline) => {
+                let target = ScriptTarget {
+                    pipeline: pipeline.clone(),
+                    index: i,
+                };
+                view! { <SectionView section ordinal=i + 1 target /> }.into_any()
             }
+            None => view! { <SectionView section /> }.into_any(),
         })
         .collect_view()
         .into_any()
@@ -6008,17 +6039,29 @@ fn sections(sections: &[inspector::Section], empty: &'static str, numbered: bool
 fn SectionView(
     section: inspector::Section,
     #[prop(optional, into)] ordinal: Option<usize>,
+    /// Where this component sits in a chain, for a script row to ask about.
+    #[prop(optional, into)]
+    target: Option<ScriptTarget>,
 ) -> impl IntoView {
     let heading = ordinal.map_or_else(
         || section.kind.clone(),
         |n| format!("{n}. {kind}", kind = section.kind),
     );
     let properties = section.properties;
+    let script = section.script.zip(target).map(|(origin, target)| {
+        view! { <ScriptSourceRow origin target /> }
+    });
+    // A script with nothing but its source has no "no settings" to say: the
+    // row above is its setting.
+    let has_script = script.is_some();
 
     view! {
         <div class="section">
             <div class="section-kind">{heading}</div>
-            {if properties.is_empty() {
+            {script}
+            {if properties.is_empty() && has_script {
+                ().into_any()
+            } else if properties.is_empty() {
                 view! { <div class="empty">"no settings"</div> }.into_any()
             } else {
                 properties
@@ -6038,6 +6081,307 @@ fn SectionView(
                     .into_any()
             }}
         </div>
+    }
+}
+
+/// Which running script: the pipeline, and the transform's position in its
+/// chain, counted from zero as the API counts it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ScriptTarget {
+    pub pipeline: PipelineId,
+    pub index: usize,
+}
+
+/// How many lines of a script its peek on the card shows. Enough to recognise
+/// it, few enough that opening one doesn't push the rest of the chain out of
+/// the pane.
+const PEEK_LINES: usize = 6;
+
+/// A script's source on the card: where it lives, folded to one row, opening
+/// to a short peek, with the viewer a click away.
+///
+/// Folded by default because a pane is 180px tall and holds the whole chain —
+/// a peek on every script would turn a three-transform pipeline into a scroll.
+/// An inline script peeks straight from the config, which is the text the
+/// pipeline was built with; a file is the server's to read, so it is fetched
+/// the first time the peek opens and kept for as long as the card is.
+#[component]
+fn ScriptSourceRow(origin: inspector::ScriptOrigin, target: ScriptTarget) -> impl IntoView {
+    let state = expect_context::<AppState>();
+    let open = RwSignal::new(false);
+    let fetched = RwSignal::new(None::<Result<kayak_core::script::LoadedScript, String>>);
+    let is_file = matches!(origin, inspector::ScriptOrigin::File(_));
+    let label = match &origin {
+        inspector::ScriptOrigin::Inline(code) => {
+            let lines = code.lines().count().max(1);
+            format!("inline · {lines} line{}", if lines == 1 { "" } else { "s" })
+        }
+        inspector::ScriptOrigin::File(path) => path.clone(),
+    };
+    let title = label.clone();
+    let origin = StoredValue::new(origin);
+    let target = StoredValue::new(target);
+
+    let view_it = move || state.viewing_script.set(Some(target.get_value()));
+    let toggle = move |_| {
+        let opening = !open.get_untracked();
+        open.set(opening);
+        if opening && is_file && fetched.get_untracked().is_none() {
+            let ScriptTarget { pipeline, index } = target.get_value();
+            leptos::task::spawn_local(async move {
+                let result = ApiClient {
+                    base: String::new(),
+                }
+                .pipeline_script(&pipeline, index)
+                .await;
+                fetched.set(Some(result.map_err(|err| err.to_string())));
+            });
+        }
+    };
+    // What the peek shows: an inline script's code at once, a file's once the
+    // server has answered.
+    let code = move || match origin.get_value() {
+        inspector::ScriptOrigin::Inline(code) => Some(Ok(code)),
+        inspector::ScriptOrigin::File(_) => fetched.get().map(|r| r.map(|script| script.code)),
+    };
+
+    view! {
+        <div class="script-source" class:open=move || open.get()>
+            <div class="script-source-row">
+                <button
+                    class="script-source-toggle"
+                    title=move || if open.get() { "hide the code" } else { "peek at the code" }
+                    on:click=toggle
+                >
+                    <span class="chevron">{move || if open.get() { "▾" } else { "▸" }}</span>
+                    <span class="name">"source"</span>
+                </button>
+                <span class="script-source-origin" class:file=is_file title=title>
+                    {label}
+                </span>
+                <button
+                    class="script-source-view"
+                    title="view the script"
+                    aria-label="view the script"
+                    on:click=move |_| view_it()
+                >
+                    "⤢"
+                </button>
+            </div>
+            <Show when=move || open.get()>
+                {move || match code() {
+                    None => view! { <div class="empty">"loading…"</div> }.into_any(),
+                    Some(Err(err)) => view! { <div class="script-source-error">{err}</div> }.into_any(),
+                    Some(Ok(code)) => {
+                        let from = crate::rhai::first_code_line(&code);
+                        let more = code.lines().count() > from + PEEK_LINES;
+                        view! {
+                            <pre
+                                class="script-peek"
+                                class:more=more
+                                title="view the script"
+                                on:click=move |_| view_it()
+                            >
+                                {code_lines(&code, from, PEEK_LINES)}
+                            </pre>
+                        }
+                            .into_any()
+                    }
+                }}
+            </Show>
+        </div>
+    }
+}
+
+/// `count` lines of highlighted code from line `from` (counted from zero),
+/// each with its number in a gutter — the one rendering the peek and the
+/// viewer share.
+fn code_lines(code: &str, from: usize, count: usize) -> impl IntoView + use<> {
+    crate::rhai::displayed_lines(code)
+        .into_iter()
+        .enumerate()
+        .skip(from)
+        .take(count)
+        .map(|(n, line)| {
+            view! {
+                <div class="code-line">
+                    <span class="code-gutter" aria-hidden="true">{n + 1}</span>
+                    <span class="code-text">
+                        {line
+                            .into_iter()
+                            .map(|span| view! { <span class=span.kind.class()>{span.text}</span> })
+                            .collect_view()}
+                    </span>
+                </div>
+            }
+        })
+        .collect_view()
+}
+
+/// The running script, whole and read-only: the text the pipeline was built
+/// with, and every module it imported.
+///
+/// Mounted by `Canvas` rather than by the card — see
+/// [`AppState::viewing_script`]. Available in read-only mode as well as edit:
+/// reading the code a pipeline runs is a way of looking at it. It edits nothing
+/// because a running pipeline's config doesn't change; editing a script is the
+/// pipeline form's job, and a viewer that wrote back would be a second editor
+/// with half the first one's checks.
+#[component]
+fn ScriptViewer(target: ScriptTarget) -> impl IntoView {
+    let state = expect_context::<AppState>();
+    let loaded = RwSignal::new(None::<Result<kayak_core::script::LoadedScript, String>>);
+    // `None` is the script itself; `Some(i)` the i-th module it imported.
+    let shown = RwSignal::new(None::<usize>);
+
+    let crumb = format!("{} · transform {}", target.pipeline, target.index + 1);
+    leptos::task::spawn_local(async move {
+        let result = ApiClient {
+            base: String::new(),
+        }
+        .pipeline_script(&target.pipeline, target.index)
+        .await;
+        loaded.set(Some(result.map_err(|err| err.to_string())));
+    });
+
+    let close = move || state.viewing_script.set(None);
+    let _ = use_event_listener(use_window(), leptos::ev::keydown, move |ev| {
+        if ev.key() == "Escape" {
+            close();
+        }
+    });
+
+    view! {
+        <div class="modal-backdrop" on:click=move |_| close()>
+            <div class="script-viewer" on:click=move |ev| ev.stop_propagation()>
+                <header class="script-viewer-head">
+                    <span class="modal-title">"script"</span>
+                    <span class="script-viewer-crumb">{crumb}</span>
+                    {move || {
+                        loaded
+                            .get()
+                            .and_then(Result::ok)
+                            .map(|script| {
+                                let scope = match script.scope {
+                                    kayak_core::script::ScriptScope::Message => "message",
+                                    kayak_core::script::ScriptScope::Batch => "batch",
+                                };
+                                view! {
+                                    <span class="script-viewer-scope" title="the script's scope">
+                                        {scope}
+                                    </span>
+                                }
+                            })
+                    }}
+                    <button class="icon-button" title="close" on:click=move |_| close()>
+                        "×"
+                    </button>
+                </header>
+                {move || match loaded.get() {
+                    None => view! { <div class="script-viewer-note">"loading…"</div> }.into_any(),
+                    Some(Err(err)) => {
+                        view! { <div class="script-viewer-note error">{err}</div> }.into_any()
+                    }
+                    Some(Ok(script)) => view! { <ScriptViewerBody script shown /> }.into_any(),
+                }}
+            </div>
+        </div>
+    }
+}
+
+/// What the viewer shows once the script has arrived: the file list when
+/// there are imports to list, a warning when a file has moved on since the
+/// build, and the code.
+#[component]
+fn ScriptViewerBody(
+    script: kayak_core::script::LoadedScript,
+    shown: RwSignal<Option<usize>>,
+) -> impl IntoView {
+    let main_name = script.path.clone().unwrap_or_else(|| "inline".to_string());
+    let has_imports = !script.modules.is_empty();
+    let script = StoredValue::new(script);
+
+    // The file on screen: its name, its code, and whether the disk has moved
+    // on from it. An index past the end — impossible, but cheap to answer — is
+    // the script itself.
+    let current = move || {
+        script.with_value(|script| match shown.get().and_then(|i| script.modules.get(i)) {
+            Some(module) => (module.path.clone(), module.code.clone(), module.changed_on_disk),
+            None => (
+                script.path.clone().unwrap_or_else(|| "inline".to_string()),
+                script.code.clone(),
+                script.changed_on_disk,
+            ),
+        })
+    };
+
+    let files = has_imports.then(|| {
+        let modules = script.with_value(|script| script.modules.clone());
+        view! {
+            <nav class="script-viewer-files">
+                <div class="script-viewer-group">"script"</div>
+                <button
+                    class="script-viewer-file"
+                    class:active=move || shown.get().is_none()
+                    on:click=move |_| shown.set(None)
+                >
+                    {main_name}
+                </button>
+                <div class="script-viewer-group">"imports"</div>
+                {modules
+                    .into_iter()
+                    .enumerate()
+                    .map(|(i, module)| {
+                        let title = module.path.clone();
+                        view! {
+                            <button
+                                class="script-viewer-file"
+                                class:active=move || shown.get() == Some(i)
+                                class:changed=module.changed_on_disk
+                                title=title
+                                on:click=move |_| shown.set(Some(i))
+                            >
+                                {module.path}
+                            </button>
+                        }
+                    })
+                    .collect_view()}
+            </nav>
+        }
+    });
+
+    view! {
+        {move || {
+            let (path, _, changed) = current();
+            changed
+                .then(|| {
+                    view! {
+                        <div class="script-viewer-banner">
+                            {format!(
+                                "{path} has changed on disk, or can no longer be read, since this \
+                                 pipeline was built. This is the text that is running; a revert \
+                                 picks up the file as it is now."
+                            )}
+                        </div>
+                    }
+                })
+        }}
+        <div class="script-viewer-body" class:with-files=has_imports>
+            {files}
+            <pre class="script-viewer-code">
+                {move || {
+                    let (_, code, _) = current();
+                    code_lines(&code, 0, usize::MAX)
+                }}
+            </pre>
+        </div>
+        <footer class="script-viewer-foot">
+            {move || {
+                let (path, code, _) = current();
+                let lines = code.lines().count().max(1);
+                format!("{path} · {lines} line{} · as built · read-only", if lines == 1 { "" } else { "s" })
+            }}
+        </footer>
     }
 }
 
@@ -7264,7 +7608,7 @@ pub fn Card(pipeline_id: PipelineId, config: Config, status: RunStatus) -> impl 
                 </button>
             </header>
             <CardSection name="config" class="section-config" open=config_open>
-                <Inspector config=config.get_value() />
+                <Inspector config=config.get_value() pipeline_id=stored_id.get_value() />
             </CardSection>
             <CardSection name="stats" class="section-stats" open=stats_open>
                 <ThroughputChart stats reseed />

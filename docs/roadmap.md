@@ -343,6 +343,12 @@ picking up."
       templated stream names and an idempotency key per batch. The `indu`
       *input* over the platform's SSE feed is the other half and waits on the
       platform accepting an API key on `/api/v1`.)
+- [x] **a `tidepool` connection and output** (done 2026-10-08: Tidepool's
+      K1 — a pipeline fills a Tidepool table, the mapping checked against
+      the table on start, `503`s retried under one idempotency key per
+      batch, and the table read again after a refusal. The `tidepool`
+      *input*, subscribing to a live metric, is Tidepool's §15.3 and comes
+      later.)
 - [ ] **the connector list is thin.** nats, kafka, mqtt, redis, http and two
       dummies in; nats, kafka, mqtt, redis, http, postgres, clickhouse, file,
       s3 and stdout out — against
@@ -433,17 +439,20 @@ Left to build, roughly in dependency order:
       other two users: the session window's idle timeout, and the idle `file`
       output holding its part open — the second needs the same seam on
       `OutputDestination`, which does not have it. Bucket eviction could stop
-      being lazy on the back of it too.
+      being lazy on the back of it too. (2026-09-15: `resample` is now the
+      second caller, for arrival-time intervals.)
 - [ ] **`subject_fields` on the nats input** — name the subject's tokens so
       `machine_7.temperature` arrives as `_meta.machine_id` and `_meta.signal`.
       Without it a wildcard subscription is unusable, since nothing can address
       part of a subject. Small, and unblocks keying by machine.
-- [ ] **request shaping and response merging on the http transform** — it
-      currently posts the batch verbatim and *replaces* it with the reply, so
-      the ML call can neither send `{machine_id, unit_id, temperatures: [...]}`
-      nor keep the identifiers it needs to publish the answer under. Wants
-      headers/auth, a timeout and a retry too, and while in there: `verb` is
-      accepted and ignored (see known issues).
+- [x] **request shaping and response merging on the http transform**
+      (done 2026-09-15: `body: batch | message`, `wrap`/`unwrap` for an API
+      that wants a key around the payload or answers under one, `response:
+      merge` writing the reply onto the message under `as` so the identifiers
+      survive the trip, plus `auth`, `timeout_seconds` and `retries` — and
+      `verb` honoured, with `GET`/`DELETE` refused at build. The shaping of
+      *what* is sent is `features`' and `reduce`'s job in front of it. See
+      "the model round trip" on the site.)
 - [ ] **templated output subjects and topics** — `kayak.{machine_id}.avg_pressure`.
       Without it every machine's results land on one subject with the id only in
       the body, which throws away the routing nats is for.
@@ -468,6 +477,166 @@ larger concept — and the durability argument under "state" says the same thing
 correctness across restarts starts at the input, with checkpointed positions,
 not at the pieces downstream of it.
 
+## statistics in the stream
+
+Came out of asking (2026-09-05) whether an ARIMA transform makes sense, given
+that one real use of kayak is "buffer readings until a condition, post the
+batch to an ML model, publish the answer". The full note, with the technique
+and application surveys behind these entries, is
+[here](https://claude.ai/code/artifact/6f21f22f-b802-4a84-a04f-c78c5b3d71c5).
+The short version: yes, but as one `model` option on a `forecast` transform,
+with exponential smoothing as the default, and it is not where to start.
+
+The line drawn, and the reason each item below is where it is: a technique
+belongs **in the engine** when it needs per-key state plus a tick (a script
+has neither comfortably) or is numeric work over a window that the interpreter
+would do slowly; it is a **rhai builtin** when it is a pure function over an
+array; it stays **behind http** when it trains. Kayak runs models, it does not
+fit them — a `train` transform is where the scope stops being a stream
+processor. Most of the value for the industrial cases (edge data reduction,
+sensor health, SPC, alarming) is in the first tier, which needs no dependency
+at all.
+
+Every keyed transform here reads its series out of `group_by` (the reducer's
+list) and keeps its per-key state in a declared **state bucket**, so the bound,
+the TTL and the revert rule are the ones already written and tested; a stateful
+transform with no bucket refuses to build, as `recall` does. Tiers two and
+three each cost one optional dependency and go behind a cargo feature the way
+`embed-assets` does, so `cargo check` and `just ci` stay quick and a component
+whose feature is off is absent from the config enum rather than present and
+failing to build.
+
+Roughly in dependency order:
+
+- [x] **time on the message.**
+      (done 2026-09-14: `src/time.rs` is the one rule — RFC 3339 or epoch
+      *millis*, arrival when no field is named, a configured field that is
+      missing fails the batch — and `MessageTime` is the component-side half.
+      The reducer is the first to carry a `time` setting, for `slope`;
+      `parse_time`/`format_time` are the same rule in rhai. Note `map`'s
+      `cast: timestamp` still reads a number as seconds, deliberately: it is a
+      conversion into the column mapping's world, and the site documents the
+      two against each other. See "time and numbers" on the site.)
+- [x] **array builtins for scripts.**
+      (done 2026-09-14: the whole list, with `var` spelled `variance` because
+      rhai reserves the word. `src/stats.rs` is the pure half — `Option` for
+      undefined, population spread throughout — and
+      `src/transforms/script/math.rs` adapts it; `reduce` now goes through
+      `stats` too, and grew `slope` beside its existing `stddev`/`median`.
+      `pluck` skips missing values and a present non-number is an error, the
+      transforms' own absent-against-wrong rule.)
+- [x] **streaming statistics, tier one, no crate.**
+      (done 2026-09-15, all six, with the shared shape in
+      `src/transforms/keyed.rs` and the declarations in
+      `kayak_core::streaming`; `Buckets::update` edits state in place so a
+      window is never cloned per message. `rolling` reuses the reducer's
+      `apply_function` and needs `size` always — a window by time alone has no
+      bound. `detect`'s window methods score against the window *before* the
+      reading and its chart methods freeze a warm-up baseline. `resample` is
+      the tick's second user, under arrival time only: with a `time` field the
+      wall clock says nothing about whether an interval is over. Two sample
+      pipelines off `heartbeat`, and `rolling1`/`rolling1000` in the bench.
+      See "streaming statistics" on the site. What is deliberately not here:
+      a per-key spelling of `until`, and any tick under event time — both are
+      the session window's problem.) The original entry, for the record — six
+      transforms, all O(1) state per key:
+      `rolling` — sliding-window aggregations over the last `size` messages or
+      `seconds`, the reducer's `{function, field, as}` list, results written
+      onto the message. A second component rather than a `window` field on
+      `reduce` because the cardinality differs (one out per message in, not one
+      per group per batch).
+      `deadband` — drop unless `field` moved by more than `delta` (absolute or
+      percent) since the last message that passed, or `max_seconds` elapsed;
+      `flatline_seconds` emits a `stuck: true` message. The single most-used
+      transform in any historian pipeline, and a stateful filter, which is why
+      `filter` cannot be it.
+      `derive` — `rate` (per second, off the time field), `delta`, `cumsum`,
+      `counter` with wrap handling. Not a `map` operation because it needs the
+      previous message.
+      `smooth` — `ewma` (alpha or half-life), `median`, `hampel`,
+      `savitzky_golay`. Hampel is the right first stage before any detector.
+      `detect` — one component with `method` variants, like `filter`:
+      `zscore`, `mad`, `cusum`, `ewma_chart`, `western_electric`, `flatline`;
+      `mode: annotate | only_anomalies`; `min_samples` warm-up during which
+      nothing is flagged.
+      `resample` — per key onto an `interval_ms` grid: `last`, `mean`,
+      `linear`, `forward_fill` with `max_gap`. Emits on the tick, so a quiet
+      key still produces its grid points — the second real user of
+      `Transform::wakeup` the tick entry above is looking for, and the
+      precondition every window model has.
+      Wants a `kayak-bench` row for `rolling` at a thousand keys.
+- [x] **`features`, and the http round trip.**
+      (done 2026-09-15: `features` is the reducer's shape with a closed set of
+      descriptors and `bands`, sharing the reducer's grouping; the spectral
+      ones run on `rustfft` and need `sample_rate_hz` or a `time` field to
+      derive one. `heartbeat_features` in the sample runs the whole loop
+      against the server's own ingest endpoint. The original entry:) Batch
+      scope: a window in, one
+      descriptor message out, `include` picked from a closed set (`mean`,
+      `std`, `min`, `max`, `range`, `slope`, `skew`, `kurtosis`, `rms`,
+      `crest_factor`, `zero_crossings`, `n_peaks`, `autocorr_1`,
+      `dominant_frequency`, `band_energy(lo, hi)`, `count`, `duration`),
+      group fields kept. A model endpoint rarely wants four hundred raw
+      temperatures; it wants seven numbers with the identifiers, and raw
+      vibration waveforms should never leave the edge. The spectral members
+      need an FFT (`rustfft`/`realfft`, pure Rust, small); the rest is
+      arithmetic. Pairs with **request shaping and response merging on the
+      `http` transform** under the machine-cycle scenario — the two together
+      are what makes the external-model case good, and they are complementary
+      to statistics in the engine rather than an alternative to them.
+- [ ] **window models, tier two, behind an `augurs` feature.**
+      [`augurs`](https://lib.rs/crates/augurs) (Grafana-hosted, not an official
+      Grafana project; 0.10.2, Feb 2026; MIT/Apache; modular features, wasm-
+      capable) covers all of these in one dependency: AutoETS, MSTL,
+      seasonality detection, BOCPD changepoints (wrapping the `changepoint`
+      crate), MAD and DBSCAN outliers, DTW. Leave its `prophet` features off —
+      holidays and a Stan optimiser are the wrong tool for a sensor.
+      `forecast` — batch scope after a `buffer`, or its own per-key ring of
+      `history` points; `model: seasonal_naive | ets | theta` (+ `arima`, see
+      below), `horizon`, `season_length`, `interval` level. Emits `point[]`,
+      `lower[]`, `upper[]` with the group fields; `residuals: true` annotates
+      the actuals with one-step-ahead error, which is what a downstream
+      `detect` consumes for a series with trend and season.
+      `decompose` — STL/MSTL, `trend`/`seasonal`/`remainder` onto each message.
+      `changepoint` — per key, online BOCPD, `hazard` and `threshold`,
+      annotating with `change_probability` and `run_length`. Finds cycle
+      boundaries in the machine-cycle scenario when there is no
+      `cycle_status` tag at all.
+      Plus `mad`/`dbscan` methods on `detect`.
+- [ ] **ARIMA.** As a `model` variant on `forecast` and only if a real user
+      asks for it by name — on 2 Hz sensor data ETS and Theta match it, fit in
+      a fraction of the time and need neither regular spacing nor an order
+      search. `augurs` has no ARIMA. The one maintained Rust port is
+      [`anofox-forecast`](https://lib.rs/crates/anofox-forecast) (0.15.9, Aug
+      2026, MIT; AutoARIMA/SARIMA, TBATS, Theta, 50+ models), which is 99k
+      lines, ~500 downloads a month and lists an AI as co-maintainer: behind
+      its own feature, and read the ARIMA module before trusting it. The old
+      [`arima`](https://crates.io/crates/arima) crate is tiny and dormant —
+      read it for the algorithm, don't depend on it.
+- [ ] **`infer`, tier three, behind a `tract` feature.** Run an ONNX model
+      per message or per batch. `model` is a path under the config directory
+      with the `file` script source's boundary rules, loaded once at build so
+      a wrong path refuses the build; `inputs` maps field paths onto the tensor
+      in order, the way `columns` maps fields onto a table, `outputs` names
+      the fields the result lands in, `on_missing` as elsewhere. One transform
+      covers isolation forests, boosted trees, small autoencoders and exported
+      scikit-learn pipelines, and the training stays where the data scientists
+      are. [`tract-onnx`](https://lib.rs/crates/tract-onnx) (Sonos, 0.23.6,
+      Sep 2026, MIT/Apache, pure Rust, ~20 MB of deps) is the pick: no C++
+      runtime, so the Dockerfile stays a two-stage build with nothing to copy
+      in. [`ort`](https://lib.rs/crates/ort) (2.0.0-rc.13, wraps Microsoft's
+      onnxruntime, widest op coverage, GPU) is the fallback if a model tract
+      cannot run, at the cost of a 6–22 MB shared library in the image.
+
+Not planned, and why: **training in the pipeline** — `smartcore` (0.6.14, Aug
+2026) and `linfa` (0.8.1, Dec 2025) are both well maintained and everything
+they offer is a training loop, which is the line above; the one thing worth
+revisiting is online drift on a fixed model (ADWIN), which is a detector rather
+than a trainer. **Kalman filters** — tier one by cost, but a state-space model
+is a matrix someone has to write down. **Matrix profile** — discords and
+motifs, expensive and niche. **Event-time windows with watermarks** — already
+ruled out under the machine-cycle scenario; nothing here changes that argument.
+
 ## known issues
 
 Found during the error-handling pass on 2026-08-03. Each one needs a decision,
@@ -479,12 +648,10 @@ which is why they weren't just fixed.
       for the life of the pipeline, and the same missing tick is behind the idle
       file part and the lazy bucket eviction. `out_size: 0` is now refused at
       build time rather than quietly emitting a batch per message.)
-- [ ] **the http transform ignores `verb`.** Every request is a POST regardless
-      of what the config says. Honouring it would change behaviour for existing
-      configs, so it needs a decision first. Note the `http` **output** honours
-      its own `verb` (and refuses the bodyless methods), so the two components
-      now read the same field differently — which is the argument for settling
-      this rather than leaving it.
+- [x] **the http transform ignores `verb`.** (settled 2026-09-15 with the
+      round-trip work: honoured, and `GET`/`DELETE` refused at build time, the
+      output's rule. A config that said `GET` was getting a POST; it now fails
+      to build and says why.)
 - [x] **dead pipelines stay in the map.** (fixed 2026-08-19: `RunStatus` —
       starting / running / stopped / failed — is set by the run loop, carried on
       `PipelineDto` and shown as a badge on the card. The handle deliberately

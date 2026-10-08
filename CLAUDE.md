@@ -519,6 +519,42 @@ hold a null from quietly holding a zero.
 `Date32`; the connection is the HTTP interface with `allow_http` following the
 s3 connection's rule, since the credentials go with every insert.
 
+### The tidepool output
+
+The third consumer of the column mapping, and the first whose table is not
+the output's to create: Tidepool declares tables in its own project. So where
+the database outputs render DDL, `src/outputs/tidepool.rs` *reads* the table
+(`GET /v1/tables/{table}`) in `init` and checks the plan against it — every
+mapped column exists, its type is one Tidepool takes from that mapping type
+(`writes`), nothing writes null into a column that needs a value, and every
+such column is written. All problems at once, the table's columns named.
+`init` failing is retried by the run loop like any output's, which is what a
+Tidepool that isn't up yet needs.
+
+Three things are load-bearing:
+
+- **`emit` retries, unlike every other output.** A `503` is Tidepool's
+  backpressure, and the run loop drops a batch whose `emit` fails, so giving
+  up at once would lose data. `503`, a transport error, other `5xx` and a
+  `409` "still being processed" are retried (honouring `Retry-After`, else
+  `Backoff`) until `retry_seconds`; only then does the gate record a failure.
+  A `400` is never retried: Tidepool writes a batch whole or not at all, and
+  the same batch would be refused the same way.
+- **One idempotency key per batch, the same on every attempt**:
+  `{pipeline}:{run}:{batch}`, `run` random per build. That is what makes the
+  retry safe when a request landed and its reply was lost — Tidepool answers
+  a seen key with the first answer for 24 h. The test's fake Tidepool dedups
+  by key the same way, and a key minted per attempt fails it.
+- **The wire types are written out by hand**, as the `indu` output's are:
+  Tidepool's `tidepool-protocol` lives in another repository, and a few fields
+  of four responses aren't worth the dependency. Unknown fields are ignored.
+
+After a refusal a changed table explains (`400`, `404`, `409`), `stale` makes
+the next batch read the table again first: Tidepool's config changes live,
+and the card should say "`ok` is not a column" once rather than repeat row
+errors. `example_config`'s `sensors_to_tidepool` is the sample; it waits in
+`init` under `just dev` unless a Tidepool is running on :7070.
+
 ### The http output
 
 The pushing half of the http family, and the one output with **no connection
@@ -616,6 +652,147 @@ Note this is what pushed `docs.rs::MAX_NESTING` from 4 to 6:
 union, at depth five. That constant is a stack guard against self-referential
 schemas, not a statement about how deep config should nest — raise it when
 something legitimate reaches it.
+
+### Time on the message, and the numbers a script can do
+
+The first two entries of the roadmap's "statistics in the stream", built
+together because they are one fact twice. Three files:
+
+- **`src/time.rs` is the one rule for reading a time off a message**: an RFC
+  3339 string or a number of **milliseconds** since the epoch, nothing else,
+  and a near miss (`"2024-01-01 12:00"`, a bare date) is an error naming the
+  value rather than a guess. `MessageTime` is the component-side half — a
+  `time: Option<String>` field on the component, arrival time when absent, and
+  a configured field that is *missing* fails the batch rather than falling
+  back to arrival. Any component that reads a time goes through it; the
+  reducer is the first (for `slope`), and `parse_time`/`format_time` in rhai
+  are the same rule for a script. **Known, deliberate wart:** `map`'s `cast:
+  timestamp` reads a bare number as *seconds* — it is a conversion into the
+  column mapping's world, where `to_timestamp` means seconds — and the two are
+  documented against each other on the site. Don't unify them by changing
+  either; a config in the wild depends on each.
+- **`src/stats.rs` is the arithmetic, over `&[f64]` and nothing else.** Two
+  rules hold throughout: anything undefined is `None` rather than NaN (each
+  caller spells that in its own vocabulary — `null` from the reducer, `()` from
+  a script), and spread is the *population* kind, which is what the reducer's
+  `stddev` always was. `reduce` now routes its `avg`/`median`/`stddev` through
+  it, and the streaming transforms still to come (`rolling`, `smooth`,
+  `detect`) are meant to as well, so a test per function here stands for every
+  caller. Keep `Value`, `Dynamic` and config out of it.
+- **`src/transforms/script/math.rs` adapts it for rhai.** `pluck(batch, path)`
+  is the bridge and it **skips** missing/null values (the `skip` half of the
+  reducer's `on_missing`, since a script is where someone goes when strict got
+  in the way); a *present* non-number is an error, the transforms' own
+  absent-against-wrong rule. Results are floats even from integer input, so a
+  script's arithmetic can't change type on the data's say-so; counts and
+  positions (`histogram.counts`, `peaks`) are integers. `var` is spelled
+  `variance` because rhai reserves the word — a reserved word is a compile
+  error in the *script*, which the builtins test cannot see.
+
+The reducer's `slope` is per **second** against the `time` field and refuses
+to build without one — arrival time would make every batch a vertical line. It
+is dispatched in `reduce()` before `values_for`, not in `apply_function`,
+because it is the one function that reads two things off each message and the
+pairing has to survive `on_missing: skip`.
+
+Every builtin is declared in `kayak_core::script::builtins()` as before;
+`builtins_are_the_functions_the_engine_has` still pins the two lists in both
+directions, and `just docs` regenerates the table on the scripting page.
+
+### Streaming statistics (tier one)
+
+Six transforms — `deadband`, `derive`, `rolling`, `smooth`, `detect`,
+`resample` — declared together in `kayak-core/src/streaming.rs` and built on
+one shared shape in `src/transforms/keyed.rs`. The shape is the decision:
+
+- **The key is `group_by`** (the reducer's list, rendered — a bare value for
+  one field, a JSON array for several), **the state is in the pipeline's
+  declared bucket**, under a name of the transform's own (`rolling:avg_30,
+  trend`), so the bound, the idle timeout and the revert rule are the store's
+  and a transform can't forget them. No `state` on the pipeline, no build —
+  the same refusal `recall` makes. Two identical transforms in one chain
+  would share state; documented, not prevented.
+- **`Buckets::update` is the in-place edit** every one of them goes through:
+  a closure under the bucket's lock, the value edited where it lies. It exists
+  because `recall` + `remember` would clone a thousand-point window out and
+  back per message. `rolling1`/`rolling1000` in the bench are what keep that
+  cost visible.
+- **Absent follows `on_missing` (error by default, like the reducer); present
+  and wrong is always an error.** `Series::number` is the one place that rule
+  is spelled. A skipped message passes through as the *same `Arc`*, untouched.
+- **Time is `MessageTime`** — arrival when no `time` field is named. Only the
+  transforms that measure something *per second* or *by age* carry the field
+  (`deadband`, `derive`, `rolling`, `resample`); `smooth` and `detect` are
+  about order, and a `time` on them would be a promise they don't keep.
+
+Per transform, the thing to know before changing it:
+
+- `deadband` anchors on the last value that *passed*, forced passes included
+  (that is what a historian's exception filter does), but its flatline clock
+  runs from the last *change*, so a `max_seconds` confirmation of a stuck
+  value doesn't reset the stretch. `stuck: true` fires once per stretch.
+- `derive` keeps `{last, at, acc}` per derivation under its `as`, so a
+  message lacking one field (under `skip`) leaves that derivation's state
+  alone rather than computing the next delta against a null.
+- `rolling` reuses `reduce::apply_function` verbatim — one window per
+  aggregated *field* per key, holding whatever the field held — and requires
+  `size` always: a window by time alone has no bound. `count` needs a field
+  here (it is the warm-up check).
+- `smooth`'s window methods include the current value; Savitzky–Golay is
+  *trailing* (a stream can't see the future) and passes the value through
+  until the window can carry the order. `stats::polyfit` is the normal
+  equations with pivoting and is not a general fitter.
+- `detect`'s window methods (`zscore`, `mad`) score against the window
+  *before* the reading, so a spike can't pull its own baseline; the chart
+  methods (`cusum` without a target, `ewma_chart`, `western_electric`)
+  **freeze** the warm-up's mean and deviation. Nothing is flagged during
+  `min_samples`; a baseline with no spread flags any departure.
+- `resample` is the tick's second user and **only under arrival time**: a
+  `time` field means the readings' own clock is driving, and the wall clock
+  says nothing about whether an interval is over, so a quiet key's interval
+  waits for that key's next reading. `deadlines` on the transform is a
+  *mirror* of the bucket, never the truth. `linear` never emits on the clock
+  (nothing to interpolate towards); `forward_fill` is the only method that
+  emits an empty interval.
+
+The sample's `heartbeat_trend` and `heartbeat_grid` run all six off the
+heartbeat; `config.yaml` has to carry them too or `tests/config.rs` fails.
+
+### The model round trip (`features`, and the http transform)
+
+The complement to statistics in the engine, not an alternative: kayak runs
+models and does not fit them, so anything that trains lives behind http, and
+these two are what make "behind http" a good place. Three things:
+
+- **`src/outbound.rs` is what the http output and the http transform
+  share** — url parsing, the bodyless-verb refusal, the `Credential`, how a
+  complaint is quoted. What differs stays in each: an output discards the
+  reply, a transform is defined by it. Don't grow a third copy.
+- **`features` (`src/transforms/features.rs`) is the reducer's shape with a
+  closed set of descriptors** and reuses `reduce::group_batch` outright. It
+  keeps no state and needs no bucket, unlike the rest of `kayak_core::
+  streaming`. The sample rate is `sample_rate_hz` when given (a source with
+  coarse timestamps would derive nonsense) and otherwise `(n − 1) / duration`
+  off the `time` field; a window that can't say makes the spectral features
+  `null` rather than failing — a short cycle is data. `stats::power_spectrum`
+  is one-sided and Parseval-scaled (the bins sum to the mean square), which
+  `the_spectrum_finds_a_tone_and_keeps_parseval` pins; `band_energy` is in
+  those units. `rustfft` is the one dependency this brought.
+- **The http transform's `merge` is the round trip.** `replace` — the reply
+  *is* the new batch — is what it always did and is right when the service is
+  the transform; it is wrong for a model, which answers `{"score": 0.93}` and
+  has thrown away the machine id. `merge` writes the reply under `as` onto
+  the message that caused it; under `body: batch` an array reply of the
+  batch's length is written element-wise and anything else onto every
+  message. **A retry sleeps, the gate skips**, and they compose: `retries`
+  waits out a backoff inside the pass for the transient failure (5xx, 429, a
+  reset), the `Gate` refuses later batches without a round trip once a
+  request has failed for good. `verb` is honoured now and `GET`/`DELETE`
+  refused — the known issue, settled.
+
+`heartbeat_features` in the sample runs the loop against the server's own
+ingest endpoint (`body: message`, since ingest takes one message or an
+array), the way `heartbeat_to_webhook` stands in for a webhook.
 
 ### Secrets
 
@@ -1382,6 +1559,22 @@ highlighter and leaves the box empty. And `run_check` refuses to ask about an
 empty script at all, since the endpoint rightly 400s on one and "an inline
 script is empty" is a poor first thing to say to somebody who has just opened
 the editor.
+
+**Reading a running script is a separate, read-only path.** A card's
+transforms tab draws a script's `source` as a row of its own
+(`inspector::ScriptOrigin` — the one place `inspector.rs` names a component,
+because flattened inline code loses its newlines and a file path shows nothing),
+folding open to a peek that skips the opening comments (`rhai::first_code_line`)
+and opening `ScriptViewer`. The viewer is mounted by `Canvas`, not the card
+(`AppState::viewing_script`): a card is inside the transformed surface, where
+`position: fixed` would pan with it. Its text comes from `GET
+/api/pipelines/{id}/transforms/{index}/script`, which serves **what the pipeline
+was built with** — `Transform::loaded_script`, collected into
+`Pipeline::scripts` once at build — never the file as it stands; a running
+script never reads the disk, so the disk is not what is running.
+`source::mark_changes` compares the two under the build's own boundary and the
+answer is `changed_on_disk`. Imports are recorded by `ProjectResolver` as it
+reads them, keyed by *file* (`lib/x` and `lib/x.rhai` are one entry).
 
 The full-screen editor **unmounts the inline surface** rather than hiding it,
 which is what keeps the box uncontrolled: the two are reconciled with `source`

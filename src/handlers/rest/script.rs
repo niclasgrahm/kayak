@@ -13,14 +13,18 @@
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
-use axum::{Json, extract::State, response::IntoResponse};
+use axum::{
+    Json,
+    extract::{Path, State},
+    response::IntoResponse,
+};
 use kayak_core::script::{DryRunRequest, DryRunResponse, DryRunStage};
 use kayak_core::state::{StateBucketConfig, StateBuckets};
 use serde_json::Value;
 
 use crate::buckets::Buckets;
 use crate::handlers::error::AppError;
-use crate::state::AppState;
+use crate::state::{AppState, PipelineError};
 use crate::transforms::script::error::ScriptErrorKind;
 use crate::transforms::script::runner::{Bindings, ScriptRunner, StateBinding};
 use crate::transforms::script::source;
@@ -28,6 +32,24 @@ use crate::transforms::script::source;
 /// The bucket a dry run remembers into. A name, not a configured thing: the
 /// bucket exists for the length of one request and nothing else can name it.
 const SCRATCH_BUCKET: &str = "dry-run";
+
+/// The script a running transform was built from — see
+/// `Operation::GetPipelineScript`.
+///
+/// The index is taken as text and parsed here rather than by the extractor, so
+/// `/transforms/two/script` is the documented 404 with an `ApiError` body
+/// rather than axum's plain-text 400: there is no transform called "two", which
+/// is the same fact as there being none at position 9.
+#[allow(clippy::unused_async)]
+pub async fn get_pipeline_script(
+    State(state): State<Arc<AppState>>,
+    Path((pipeline_id, index)): Path<(String, String)>,
+) -> Result<impl IntoResponse, AppError> {
+    let index = index
+        .parse::<usize>()
+        .map_err(|_| PipelineError::NoScript(pipeline_id.clone(), index.clone()))?;
+    Ok(Json(state.loaded_script(&pipeline_id, index)?))
+}
 
 /// Run a script over some messages — see `Operation::DryRunScript`.
 #[allow(clippy::unused_async)]

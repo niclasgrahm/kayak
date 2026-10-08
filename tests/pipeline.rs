@@ -119,6 +119,7 @@ async fn transforms_are_chained_in_order_and_fan_out_within_the_chain() -> anyho
         }],
         group_by: Vec::new(),
         on_missing: MissingFieldPolicy::Error,
+        time: None,
     }))?;
 
     let emitted = run_to_completion(

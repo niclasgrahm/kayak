@@ -1381,7 +1381,8 @@ mod tests {
                 "mqtt",
                 "redis",
                 "opcua",
-                "indu"
+                "indu",
+                "tidepool"
             ]
         );
 

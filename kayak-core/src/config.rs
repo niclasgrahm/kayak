@@ -848,6 +848,48 @@ pub struct ClickhouseOutputConfig {
     pub on_extra_fields: ExtraFieldPolicy,
 }
 
+/// Writes every batch into a Tidepool table, one request per batch.
+///
+/// The table has to exist: Tidepool's project declares it, with its column
+/// types, and this output checks against that on start — every mapped column
+/// has to be one of the table's, of a type it can write, and every column the
+/// table requires has to be written. A mismatch fails the start rather than
+/// the first batch.
+///
+/// `columns` is spelled as the database outputs spell it. Leave it out to send
+/// each message as a row as it is, for messages already shaped like the table:
+/// Tidepool checks every value and refuses a batch with any problem in it, so
+/// nothing is coerced on either side.
+///
+/// A batch Tidepool refuses fails with its problems quoted by row and column.
+/// A busy server (`503`) or one that can't be reached is retried for up to
+/// `retry_seconds` under the same idempotency key, so a retry never writes a
+/// batch twice.
+#[derive(Clone, Debug, Deserialize, Serialize, JsonSchema)]
+#[schemars(title = "tidepool")]
+pub struct TidepoolOutputConfig {
+    /// name of the tidepool connection to write through — see "connections"
+    /// in the readme.
+    #[schemars(extend("x-connection" = "tidepool"))]
+    pub connection: ConnectionId,
+    /// the table to write into, as Tidepool's project names it
+    pub table: String,
+    /// which message field goes in which column. Leave it out to send each
+    /// message as a row as it is.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub columns: Vec<ColumnMapping>,
+    /// what to do about a message carrying fields no column reads
+    #[serde(default, skip_serializing_if = "ExtraFieldPolicy::is_default")]
+    pub on_extra_fields: ExtraFieldPolicy,
+    /// how long one batch keeps being retried while the server is busy or
+    /// unreachable, in seconds. Defaults to 30.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub retry_seconds: Option<u64>,
+    /// how long one request may take, in seconds. Defaults to 30.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub timeout_seconds: Option<u64>,
+}
+
 /// Publishes every message in the batch to a kafka topic, one message per
 /// record. Records are sent without a key, so they round-robin across the
 /// topic's partitions.
@@ -991,16 +1033,75 @@ pub struct FilterTransformConfig {
     pub filter: FilterKind,
 }
 
-/// Posts the batch to an http endpoint as a JSON array and replaces it with the
-/// JSON array in the response — so the service on the other end is the
-/// transform.
+/// Sends the batch to an http endpoint and carries on with what comes back —
+/// so the service on the other end is the transform. The round trip to a
+/// model: a `buffer` and a `features` in front of it make the request the
+/// seven numbers with the identifiers, and `response: merge` writes the
+/// answer onto that message so the identifiers survive the trip.
+///
+/// `body` says whether one request carries the whole batch as a JSON array
+/// or each message goes on its own; `wrap` puts that under a key
+/// (`{"instances": …}`) for an API that wants one. `response` says what the
+/// reply is: `replace` makes it the new batch — the JSON array it holds under
+/// `batch`, the message (or array of messages) it holds under `message` —
+/// and `merge` writes it onto the message under `as` instead. `unwrap` reads
+/// the reply out from under a key first. Anything but a 2xx fails the batch
+/// with the endpoint's own words quoted; a network failure or a 5xx is
+/// retried `retries` times with backoff before it does.
 #[derive(Clone, Debug, Deserialize, Serialize, JsonSchema)]
 #[schemars(title = "http")]
 pub struct HttpTransformConfig {
-    /// endpoint to send the batch to
+    /// endpoint to send to
     pub url: String,
-    /// http method. Accepted but not honoured yet: every request is a POST.
+    /// http method. `GET` and `DELETE` are refused — a request with no body
+    /// would send none of the messages
     pub verb: HttpVerb,
+    /// what one request carries. Defaults to `batch`
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub body: Option<HttpBodyKind>,
+    /// a key to put the body under, for an API that wants `{"key": …}`
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub wrap: Option<String>,
+    /// what to do with the reply. Defaults to `replace`
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub response: Option<HttpResponseKind>,
+    /// a key to read the reply out from under, for an API that answers
+    /// `{"predictions": …}`
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub unwrap: Option<String>,
+    /// for `response: merge`: the field the reply is written under
+    #[serde(default, rename = "as", skip_serializing_if = "Option::is_none")]
+    pub output: Option<String>,
+    /// what this transform presents to be allowed to send. Absent sends no
+    /// credential
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub auth: Option<HttpAuthConfig>,
+    /// how long one request may take before it is given up on, in seconds.
+    /// Defaults to 30
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub timeout_seconds: Option<u64>,
+    /// how many times a request that failed to reach the endpoint, or was
+    /// answered 5xx or 429, is tried again before the batch fails. Defaults to
+    /// 0. Each retry waits a little longer than the last, and the pipeline
+    /// waits with it
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub retries: Option<u32>,
+}
+
+/// What an `http` transform does with the reply.
+#[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, JsonSchema, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum HttpResponseKind {
+    /// The reply is the new batch: a JSON array of messages under `body:
+    /// batch`, a message or an array of them under `body: message`. The
+    /// service decides what carries on.
+    #[default]
+    Replace,
+    /// The reply is written onto the message that caused it, under `as`. Under
+    /// `body: batch` an array reply of the batch's length is written
+    /// element-wise, and any other reply onto every message. Nothing the
+    /// pipeline sent is lost.
+    Merge,
 }
 
 /// The http method an http transform sends with.
@@ -1058,6 +1159,10 @@ pub enum ReduceFnKind {
     Median,
     /// The population standard deviation. Numbers only.
     Stddev,
+    /// How fast the field is changing, per second, by a least-squares line
+    /// against each message's time. Numbers only, and it needs the reducer's
+    /// `time` setting — a slope with no time is a slope per nothing.
+    Slope,
 }
 
 /// What to do about a message that doesn't carry a field being aggregated or
@@ -1085,7 +1190,7 @@ impl MissingFieldPolicy {
 }
 
 /// One thing to compute over a group, and what to call it in the result.
-#[derive(Clone, Debug, Deserialize, Serialize, JsonSchema)]
+#[derive(Clone, Debug, Deserialize, Serialize, JsonSchema, PartialEq)]
 #[schemars(title = "aggregation")]
 pub struct Aggregation {
     /// how to combine the values
@@ -1128,6 +1233,13 @@ pub struct ReduceTransformConfig {
     /// what to do about a message missing one of the fields above
     #[serde(default, skip_serializing_if = "MissingFieldPolicy::is_default")]
     pub on_missing: MissingFieldPolicy,
+    /// the field carrying each message's time — an RFC 3339 string or
+    /// milliseconds since the epoch. Needed by `slope`; a message missing it
+    /// fails the batch. Leave it out and each message's time is when it
+    /// arrived.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(extend("x-message-field" = true))]
+    pub time: Option<String>,
 }
 
 /// One test a message either passes or doesn't.
@@ -1443,6 +1555,13 @@ pub enum TransformKind {
     Recall(RecallTransformConfig),
     Map(MapTransformConfig),
     Script(ScriptTransformConfig),
+    Deadband(crate::streaming::DeadbandTransformConfig),
+    Derive(crate::streaming::DeriveTransformConfig),
+    Rolling(crate::streaming::RollingTransformConfig),
+    Smooth(crate::streaming::SmoothTransformConfig),
+    Detect(crate::streaming::DetectTransformConfig),
+    Resample(crate::streaming::ResampleTransformConfig),
+    Features(crate::streaming::FeaturesTransformConfig),
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, JsonSchema)]
@@ -1465,6 +1584,7 @@ pub enum OutputKind {
     Redis(RedisOutputConfig),
     Http(HttpOutputConfig),
     Indu(InduOutputConfig),
+    Tidepool(TidepoolOutputConfig),
 }
 #[derive(Clone, Debug, Deserialize, Serialize, JsonSchema)]
 pub struct OutputConfig {
@@ -1555,6 +1675,7 @@ impl Config {
             OutputKind::Mqtt(c) => Some(&c.connection),
             OutputKind::Redis(c) => Some(&c.connection),
             OutputKind::Indu(c) => Some(&c.connection),
+            OutputKind::Tidepool(c) => Some(&c.connection),
             OutputKind::Stdout(_) | OutputKind::Http(_) => None,
         });
         inputs.chain(outputs).collect()

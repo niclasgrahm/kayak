@@ -20,6 +20,7 @@ pub mod schema;
 pub mod script;
 pub mod server_config;
 pub mod state;
+pub mod streaming;
 
 pub use columns::{ColumnMapping, ColumnType, ExtraFieldPolicy, MissingColumnPolicy, TableIndex};
 pub use connections::{ConnectionId, ConnectionKind, Connections};

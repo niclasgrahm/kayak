@@ -10,4 +10,30 @@
 | `remember(key, values)` | write values into the pipeline's state bucket |
 | `now()` | the current time, RFC 3339 |
 | `now_millis()` | the current time, in milliseconds since the epoch |
+| `parse_time(value)` | a time read as milliseconds since the epoch |
+| `format_time(millis)` | milliseconds since the epoch as an RFC 3339 string |
+| `pluck(batch, path)` | one field across an array of messages, as an array |
+| `sum(array)` | the total of an array of numbers |
+| `mean(array)` | the arithmetic mean, or `()` of nothing |
+| `median(array)` | the middle value, or the mean of the two middle ones |
+| `min(array)` | the smallest of an array of numbers |
+| `max(array)` | the largest of an array of numbers |
+| `std(array)` | the population standard deviation |
+| `variance(array)` | the population variance |
+| `quantile(array, q)` | the value a fraction q of the way through the sorted numbers |
+| `mad(array)` | the median absolute deviation from the median |
+| `zscore(array)` | each value as standard deviations from the mean, as an array |
+| `skew(array)` | which way the tail points: positive to the right |
+| `kurtosis(array)` | how heavy the tails are: 0 is normal, positive is heavier |
+| `rms(array)` | the root mean square |
+| `diff(array)` | each value less the one before it |
+| `cumsum(array)` | the running total, as an array the same length |
+| `ewma(array, alpha)` | an exponentially weighted moving average, as an array |
+| `linfit(array)` | the least-squares line: `#{slope, intercept, r2}` |
+| `autocorr(array, lag)` | how much each value resembles the one lag steps before it, −1 to 1 |
+| `peaks(array)` | the positions of the local maxima |
+| `histogram(array, bins)` | counts in equal-width buckets: `#{edges, counts}` |
+| `clamp(x, low, high)` | x held within low to high |
+| `interp(xs, ys, x)` | y at x, by straight lines between known points |
+| `dtw(a, b)` | the dynamic-time-warping distance between two series |
 | `warn(text)` | put a line in the server's log without failing the batch |

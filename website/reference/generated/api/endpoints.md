@@ -130,6 +130,30 @@ An unknown or newly created pipeline answers with an empty history rather than a
 | --- | --- | --- |
 | `200` | [PipelineHistory](#schema-pipelinehistory) | The pipeline's history at the resolution asked for. |
 
+### `GET /api/pipelines/{pipeline_id}/transforms/{index}/script` {#get-api-pipelines--pipeline_id--transforms--index--script}
+
+The script a running transform was built from
+
+<Badge type="warning" text="read" /> <Badge type="info" text="getPipelineScript" /> — Any signed-in user.
+
+The rhai source of one `script` transform in a running pipeline, and every module it imported — which is what a card's viewer reads, and the only way to see a `file` script from the browser at all.
+
+This is the text the pipeline was **built** with, not the file as it stands now. A file source and its imports are read once, when the pipeline is built, and a running script never reads the filesystem again, so the code worth showing is the code that is running. When a file has been edited (or removed) since, `changed_on_disk` says so on the script or the module concerned; reloading the config from disk picks the change up.
+
+**path parameters**
+
+| name | description |
+| --- | --- |
+| `pipeline_id` | Id of the pipeline. |
+| `index` | Position of the transform in the pipeline's chain, counted from zero. |
+
+**responses**
+
+| status | body | description |
+| --- | --- | --- |
+| `200` | [LoadedScript](#schema-loadedscript) | The script, as built. |
+| `404` | [ApiError](#schema-apierror) | No pipeline of that id is running, or the transform at that position is not a `script` — or there is no transform there at all. |
+
 ### `POST /api/scripts/dry-run` {#post-api-scripts-dry-run}
 
 Run a script over some messages, without creating a pipeline

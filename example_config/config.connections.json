@@ -47,5 +47,9 @@
   "local-redis": {
     "type": "redis",
     "url": "redis://localhost:6379"
+  },
+  "local-tidepool": {
+    "type": "tidepool",
+    "url": "http://localhost:7070"
   }
 }

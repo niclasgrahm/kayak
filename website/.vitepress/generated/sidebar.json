@@ -73,6 +73,10 @@
     {
       "link": "/reference/connections#connection-indu",
       "text": "indu"
+    },
+    {
+      "link": "/reference/connections#connection-tidepool",
+      "text": "tidepool"
     }
   ],
   "inputs": [
@@ -157,6 +161,10 @@
     {
       "link": "/reference/outputs#output-indu",
       "text": "indu"
+    },
+    {
+      "link": "/reference/outputs#output-tidepool",
+      "text": "tidepool"
     }
   ],
   "transforms": [
@@ -195,6 +203,34 @@
     {
       "link": "/reference/transforms#transform-script",
       "text": "script"
+    },
+    {
+      "link": "/reference/transforms#transform-deadband",
+      "text": "deadband"
+    },
+    {
+      "link": "/reference/transforms#transform-derive",
+      "text": "derive"
+    },
+    {
+      "link": "/reference/transforms#transform-rolling",
+      "text": "rolling"
+    },
+    {
+      "link": "/reference/transforms#transform-smooth",
+      "text": "smooth"
+    },
+    {
+      "link": "/reference/transforms#transform-detect",
+      "text": "detect"
+    },
+    {
+      "link": "/reference/transforms#transform-resample",
+      "text": "resample"
+    },
+    {
+      "link": "/reference/transforms#transform-features",
+      "text": "features"
     }
   ]
 }

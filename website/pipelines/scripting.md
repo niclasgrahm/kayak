@@ -104,6 +104,12 @@ Batch scope is only interesting when something upstream has made the batches
 worth looking at — put a [`buffer`](/reference/inputs) on the input, or the
 script will see one message at a time.
 
+Computing something across a batch is where the array functions come in:
+`pluck(batch, "value")` is that field across the batch as an array, and
+`mean`, `std`, `linfit` and the rest are answers over it — see
+[time and numbers](/pipelines/time-and-numbers) for the list and the three
+rules they follow.
+
 ## what a script is given
 
 <!--@include: ../reference/generated/script-builtins.md-->

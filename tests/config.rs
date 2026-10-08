@@ -106,12 +106,128 @@ fn input_samples() -> Vec<(&'static str, Value)> {
 }
 
 fn transform_samples() -> Vec<(&'static str, Value)> {
+    let mut samples = vec![("buffer", json!({"type": "buffer", "size": 10}))];
+    samples.extend(chain_transform_samples());
+    samples.extend(streaming_transform_samples());
+    samples
+}
+
+/// The streaming statistics family — one sample per transform, each keyed
+/// and timed, since that is the shape they share.
+fn streaming_transform_samples() -> Vec<(&'static str, Value)> {
     vec![
-        ("buffer", json!({"type": "buffer", "size": 10})),
         (
-            "http",
-            json!({"type": "http", "url": "http://localhost/x", "verb": "POST"}),
+            "deadband",
+            json!({
+                "type": "deadband",
+                "field": "temperature",
+                "delta": 0.5,
+                "max_seconds": 60.0,
+                "flatline_seconds": 600.0,
+                "group_by": ["_meta.machine_id"],
+                "time": "ts"
+            }),
         ),
+        (
+            "derive",
+            json!({
+                "type": "derive",
+                "derive": [
+                    {"function": "rate", "field": "count", "as": "per_second"},
+                    {"function": "counter", "field": "count", "as": "total", "wrap_at": 65536.0}
+                ],
+                "group_by": ["_meta.machine_id"],
+                "time": "ts",
+                "on_missing": "skip"
+            }),
+        ),
+        (
+            "rolling",
+            json!({
+                "type": "rolling",
+                "aggregations": [
+                    {"function": "avg", "field": "temperature", "as": "temp_avg"},
+                    {"function": "slope", "field": "temperature", "as": "temp_trend"}
+                ],
+                "size": 60,
+                "seconds": 300.0,
+                "group_by": ["_meta.machine_id"],
+                "time": "ts"
+            }),
+        ),
+        (
+            "smooth",
+            json!({
+                "type": "smooth",
+                "field": "vibration",
+                "method": {"type": "hampel", "size": 7, "threshold": 3.0},
+                "as": "vibration_clean",
+                "group_by": ["_meta.machine_id"]
+            }),
+        ),
+        (
+            "detect",
+            json!({
+                "type": "detect",
+                "field": "vibration_clean",
+                "method": {"type": "mad", "size": 50, "threshold": 3.5},
+                "mode": "only_anomalies",
+                "min_samples": 20,
+                "as": "spike",
+                "group_by": ["_meta.machine_id"]
+            }),
+        ),
+        (
+            "resample",
+            json!({
+                "type": "resample",
+                "field": "temperature",
+                "interval_seconds": 1.0,
+                "method": "forward_fill",
+                "max_gap_seconds": 30.0,
+                "group_by": ["_meta.machine_id"],
+                "time": "ts"
+            }),
+        ),
+        (
+            "features",
+            json!({
+                "type": "features",
+                "field": "vibration",
+                "include": ["mean", "rms", "crest_factor", "dominant_frequency", "count"],
+                "bands": [{"low_hz": 10.0, "high_hz": 50.0, "as": "band_10_50"}],
+                "group_by": ["_meta.machine_id"],
+                "time": "ts",
+                "sample_rate_hz": 2000.0
+            }),
+        ),
+    ]
+}
+
+/// The round trip to a model, with every knob set — the sample is also what
+/// the reference renders, so the spelling of each is pinned here.
+fn http_transform_sample() -> (&'static str, Value) {
+    (
+        "http",
+        json!({
+            "type": "http",
+            "url": "http://localhost/model",
+            "verb": "POST",
+            "body": "message",
+            "wrap": "instances",
+            "response": "merge",
+            "unwrap": "predictions",
+            "as": "prediction",
+            "auth": {"type": "bearer", "token": "${MODEL_TOKEN}"},
+            "timeout_seconds": 10,
+            "retries": 2
+        }),
+    )
+}
+
+fn chain_transform_samples() -> Vec<(&'static str, Value)> {
+    vec![
+        http_transform_sample(),
         ("splitter", json!({"type": "splitter", "out_size": 2})),
         (
             "reducer",
@@ -234,6 +350,9 @@ fn output_samples() -> Vec<(&'static str, Value)> {
             "nats",
             json!({"type": "nats", "connection": "local-nats", "subject": "out.subject"}),
         ),
+        ("tidepool", json!({"type": "tidepool", "connection": "local-tidepool", "table": "readings",
+            "columns": [{"name": "value", "type": "decimal", "nullable": false}],
+            "retry_seconds": 60, "timeout_seconds": 10})),
         (
             "indu",
             json!({"type": "indu", "connection": "indu", "at": "_meta.received_at",
@@ -323,6 +442,15 @@ fn connection_samples() -> Vec<(&'static str, Value)> {
         (
             "nats",
             json!({"type": "nats", "urls": "nats://localhost:4222"}),
+        ),
+        (
+            "tidepool",
+            json!({
+                "type": "tidepool",
+                "url": "https://tidepool.example.com",
+                "token": "${TIDEPOOL_INGEST_TOKEN}",
+                "allow_http": false
+            }),
         ),
         (
             "indu",

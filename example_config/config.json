@@ -9,6 +9,9 @@
     },
     "heartbeat_swings": {
       "max_keys": 1
+    },
+    "heartbeat_stats": {
+      "max_keys": 8
     }
   },
   "pipelines": [
@@ -857,6 +860,44 @@
       ]
     },
     {
+      "id": "sensors_to_tidepool",
+      "inputs": [
+        {
+          "type": "pipeline",
+          "upstream": "sensors",
+          "buffer": {
+            "type": "batch",
+            "size": 100,
+            "window_seconds": 1
+          }
+        }
+      ],
+      "transforms": [],
+      "outputs": [
+        {
+          "type": "tidepool",
+          "connection": "local-tidepool",
+          "table": "sensor_readings",
+          "columns": [
+            {
+              "name": "sensor",
+              "type": "text",
+              "nullable": false
+            },
+            {
+              "name": "value",
+              "type": "float"
+            },
+            {
+              "name": "recorded_at",
+              "type": "timestamp",
+              "field": "ts"
+            }
+          ]
+        }
+      ]
+    },
+    {
       "id": "slow_requests",
       "inputs": [
         {
@@ -1010,6 +1051,145 @@
         }
       ],
       "outputs": []
+    },
+    {
+      "id": "heartbeat_trend",
+      "inputs": [
+        {
+          "type": "pipeline",
+          "upstream": "heartbeat"
+        }
+      ],
+      "state": {
+        "bucket": "heartbeat_stats"
+      },
+      "transforms": [
+        {
+          "type": "smooth",
+          "field": "value",
+          "method": {
+            "type": "ewma",
+            "half_life": 5.0
+          },
+          "as": "smoothed"
+        },
+        {
+          "type": "derive",
+          "derive": [
+            {
+              "function": "rate",
+              "field": "value",
+              "as": "per_second"
+            }
+          ]
+        },
+        {
+          "type": "rolling",
+          "aggregations": [
+            {
+              "function": "avg",
+              "field": "value",
+              "as": "avg_30"
+            },
+            {
+              "function": "slope",
+              "field": "value",
+              "as": "trend"
+            }
+          ],
+          "size": 30
+        },
+        {
+          "type": "detect",
+          "field": "value",
+          "method": {
+            "type": "zscore",
+            "size": 20,
+            "threshold": 3.0
+          }
+        }
+      ],
+      "outputs": [
+        {
+          "type": "stdout"
+        }
+      ]
+    },
+    {
+      "id": "heartbeat_grid",
+      "inputs": [
+        {
+          "type": "pipeline",
+          "upstream": "heartbeat"
+        }
+      ],
+      "state": {
+        "bucket": "heartbeat_stats"
+      },
+      "transforms": [
+        {
+          "type": "deadband",
+          "field": "value",
+          "delta": 2.0,
+          "max_seconds": 15.0,
+          "flatline_seconds": 30.0
+        },
+        {
+          "type": "resample",
+          "field": "value",
+          "interval_seconds": 5.0,
+          "method": "forward_fill",
+          "max_gap_seconds": 60.0
+        }
+      ],
+      "outputs": [
+        {
+          "type": "stdout"
+        }
+      ]
+    },
+    {
+      "id": "heartbeat_features",
+      "inputs": [
+        {
+          "type": "pipeline",
+          "upstream": "heartbeat",
+          "buffer": {
+            "type": "tumbling",
+            "window_seconds": 10
+          }
+        }
+      ],
+      "transforms": [
+        {
+          "type": "features",
+          "field": "value",
+          "include": [
+            "mean",
+            "std",
+            "slope",
+            "rms",
+            "n_peaks",
+            "dominant_frequency",
+            "count"
+          ],
+          "sample_rate_hz": 1.0
+        },
+        {
+          "type": "http",
+          "url": "http://127.0.0.1:6767/api/pipelines/ingest/messages",
+          "verb": "POST",
+          "body": "message",
+          "response": "merge",
+          "as": "ingest",
+          "timeout_seconds": 5
+        }
+      ],
+      "outputs": [
+        {
+          "type": "stdout"
+        }
+      ]
     },
     {
       "id": "broken_cast",

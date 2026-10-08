@@ -22,6 +22,24 @@ history, not here.
 
 ### Added
 
+- **A running script can be read from its card.** A `script` transform's
+  source is now a row of its own in the card's transforms tab — `inline · N
+  lines` or the file's path — that folds open to a short highlighted peek and
+  opens a read-only viewer with the whole script and every module it
+  imported. It shows the text the pipeline was *built* with, and says so when
+  a file has changed on disk since. Served by the new
+  `GET /api/pipelines/{id}/transforms/{index}/script`, at `read` access.
+- **A `tidepool` connection and a `tidepool` output.** kayak writes a
+  pipeline's messages into a table of a Tidepool server, one NDJSON request
+  per batch, with `columns` spelled as the database outputs spell them (or
+  messages sent as they are). The table is read on start and the mapping
+  checked against it, so a column it doesn't have, a type it can't take or a
+  null where it wants a value fails the start. A refused batch fails with
+  Tidepool's problems quoted by row and column; a busy server (`503`) or an
+  unreachable one is retried for up to `retry_seconds` under one idempotency
+  key per batch, so a retry never writes twice. After a refusal the table is
+  read again, since Tidepool's config changes live. See "tidepool" on the
+  site.
 - **An `indu` connection and an `indu` output.** kayak writes a pipeline's
   results into Indu Cloud as *streams* — series that are not sensors —
   through `POST /ingest/v1/streams`. One message yields one reading per

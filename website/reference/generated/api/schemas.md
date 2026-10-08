@@ -563,6 +563,32 @@ One pipeline: every input is merged into one stream, that stream runs through th
         }
       ]
     },
+    "Band": {
+      "description": "The power in one frequency band, as a feature of its own.",
+      "properties": {
+        "as": {
+          "description": "the field the band's power is written under",
+          "type": "string"
+        },
+        "high_hz": {
+          "description": "the top of the band, in hertz, exclusive",
+          "format": "double",
+          "type": "number"
+        },
+        "low_hz": {
+          "description": "the bottom of the band, in hertz, inclusive",
+          "format": "double",
+          "type": "number"
+        }
+      },
+      "required": [
+        "low_hz",
+        "high_hz",
+        "as"
+      ],
+      "title": "band",
+      "type": "object"
+    },
     "BufferConfig": {
       "description": "How an input's messages are gathered into batches before the transforms see\nthem.\n\nAll three shapes are the same two limits with different halves left off — a\ncount, a time, or both, whichever is reached first. **A buffer never emits an\nempty batch**: the clock starts when the first message of a batch arrives,\nnot when the window was asked for, so an input that goes quiet emits nothing\nrather than a tick of nothing.\n\n`size` is a floor rather than a ceiling, the same rule a file output's\n`max_rows` follows: an arriving batch is never split, so an input already\nproducing batches of its own (`max_batch` on kafka and nats) can overshoot.",
       "oneOf": [
@@ -1004,6 +1030,397 @@ One pipeline: every input is merged into one stream, that stream runs through th
         }
       ]
     },
+    "DeadbandMode": {
+      "description": "Whether a deadband's `delta` is an amount or a fraction of the last value\nthat passed.",
+      "oneOf": [
+        {
+          "const": "absolute",
+          "description": "`delta` is in the field's own units: `0.5` is half a degree.",
+          "type": "string"
+        },
+        {
+          "const": "percent",
+          "description": "`delta` is a percentage of the last value that passed: `2` is two\npercent. A last value of zero passes everything, since a fraction of\nnothing is nothing.",
+          "type": "string"
+        }
+      ]
+    },
+    "DeadbandTransformConfig": {
+      "description": "Drops a message unless its field has moved far enough from the last one\nthat passed — the single most used transform in any historian pipeline,\nand a *stateful* filter, which is why `filter` cannot be it.\n\nThe first message per key always passes. After that a message passes when\n`field` differs from the last passed value by more than `delta`, or when\n`max_seconds` have gone by since anything passed, so a steady reading is\nstill confirmed now and then. `flatline_seconds` is the sensor-health half:\nwhen the value has not moved in that long the next message passes with\n`stuck: true` on it, once per flat stretch, so a stuck instrument is\ndistinguishable from a quiet one downstream.",
+      "properties": {
+        "delta": {
+          "description": "how far the value has to move to pass, in the field's units or as a\npercentage, by `mode`",
+          "format": "double",
+          "type": "number"
+        },
+        "field": {
+          "description": "the numeric field the band is on",
+          "type": "string",
+          "x-message-field": true
+        },
+        "flatline_seconds": {
+          "description": "after this many seconds with no movement, let the next message through\ncarrying `stuck: true` — once per flat stretch",
+          "format": "double",
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "group_by": {
+          "description": "the fields that identify a series, the reducer's way. Leave it out for\none series",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "max_seconds": {
+          "description": "pass a message anyway once this many seconds have gone by since the\nlast one that passed, so a steady value is still reported now and then",
+          "format": "double",
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "mode": {
+          "$ref": "#/$defs/DeadbandMode",
+          "description": "what `delta` is measured in"
+        },
+        "on_missing": {
+          "$ref": "#/$defs/MissingFieldPolicy",
+          "description": "what to do about a message missing the field or a group field"
+        },
+        "time": {
+          "description": "the field carrying each message's time — RFC 3339 or milliseconds since\nthe epoch. Leave it out for arrival time",
+          "type": [
+            "string",
+            "null"
+          ],
+          "x-message-field": true
+        }
+      },
+      "required": [
+        "field",
+        "delta"
+      ],
+      "title": "deadband",
+      "type": "object"
+    },
+    "Derivation": {
+      "description": "One derived value and the field it is written to.",
+      "properties": {
+        "as": {
+          "description": "the field the answer is written under",
+          "type": "string"
+        },
+        "field": {
+          "description": "the numeric field it is derived from",
+          "type": "string",
+          "x-message-field": true
+        },
+        "function": {
+          "$ref": "#/$defs/DeriveFnKind",
+          "description": "how the value is derived from this message and the previous one"
+        },
+        "wrap_at": {
+          "description": "for `counter`: the value the counter wraps back to zero at, so a drop\nis read as having run through the top rather than as a reset",
+          "format": "double",
+          "type": [
+            "number",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "function",
+        "field",
+        "as"
+      ],
+      "title": "derivation",
+      "type": "object"
+    },
+    "DeriveFnKind": {
+      "description": "How one message's value is combined with the previous one's.",
+      "oneOf": [
+        {
+          "const": "rate",
+          "description": "The change per second since the previous message, off the `time`\nfield. `null` on the first message and when no time has passed.",
+          "type": "string"
+        },
+        {
+          "const": "delta",
+          "description": "The change since the previous message. `null` on the first.",
+          "type": "string"
+        },
+        {
+          "const": "cumsum",
+          "description": "The running total of the field, from the first message on.",
+          "type": "string"
+        },
+        {
+          "const": "counter",
+          "description": "The running total of the *increases* — for a counter that resets or\nwraps. A drop below the previous value counts as a wrap when `wrap_at`\nis set (the increase runs through the top), and as a reset otherwise\n(the new value is the increase).",
+          "type": "string"
+        }
+      ]
+    },
+    "DeriveTransformConfig": {
+      "description": "Writes onto each message something that needs the previous one: a rate of\nchange, a delta, a running total, a wrap-tolerant counter. Not a `map`\noperation because a `map` sees one message at a time; this remembers the\nlast per key.\n\nSeveral derivations run at once and each is written under its own `as`, so\none pass gives both `delta` and `rate`. The first message per key has no\nprevious, and the derivations that need one write `null` for it.",
+      "properties": {
+        "derive": {
+          "description": "what to derive. At least one, each with a distinct `as`",
+          "items": {
+            "$ref": "#/$defs/Derivation"
+          },
+          "type": "array"
+        },
+        "group_by": {
+          "description": "the fields that identify a series, the reducer's way. Leave it out for\none series",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "on_missing": {
+          "$ref": "#/$defs/MissingFieldPolicy",
+          "description": "what to do about a message missing a derived field or a group field"
+        },
+        "time": {
+          "description": "the field carrying each message's time — RFC 3339 or milliseconds since\nthe epoch. Leave it out for arrival time",
+          "type": [
+            "string",
+            "null"
+          ],
+          "x-message-field": true
+        }
+      },
+      "required": [
+        "derive"
+      ],
+      "title": "derive",
+      "type": "object"
+    },
+    "DetectMethod": {
+      "description": "How an anomaly is decided.\n\nThe window methods compare a value against the values *before* it, never\nincluding it, so a spike does not pull the baseline it is measured against.\nThe chart methods freeze their baseline at the end of the warm-up, which is\nwhat a control chart is: a fixed idea of normal that the process is held to.",
+      "oneOf": [
+        {
+          "description": "Further than `threshold` standard deviations from the mean of the\nlast `size` values.",
+          "properties": {
+            "size": {
+              "description": "how many earlier values the baseline is drawn from",
+              "format": "uint",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "threshold": {
+              "description": "how many standard deviations count. `3` when left out",
+              "format": "double",
+              "type": [
+                "number",
+                "null"
+              ]
+            },
+            "type": {
+              "const": "zscore",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "size"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "The robust twin: further than `threshold` scaled median absolute\ndeviations from the median of the last `size` values. Prefer it when\nthe baseline itself contains outliers.",
+          "properties": {
+            "size": {
+              "description": "how many earlier values the baseline is drawn from",
+              "format": "uint",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "threshold": {
+              "description": "how many scaled MADs count. `3.5` when left out",
+              "format": "double",
+              "type": [
+                "number",
+                "null"
+              ]
+            },
+            "type": {
+              "const": "mad",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "size"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "A two-sided CUSUM: sums the drift above and below `target`, and flags\nwhen either sum passes `threshold`. Finds a small sustained shift a\nsingle-point test never sees. The sum that fired is reset.",
+          "properties": {
+            "drift": {
+              "description": "the slack per message that is not counted as drift, in the\nfield's units",
+              "format": "double",
+              "type": "number"
+            },
+            "target": {
+              "description": "the value the series is expected to sit at. Left out, the mean of\nthe warm-up is used",
+              "format": "double",
+              "type": [
+                "number",
+                "null"
+              ]
+            },
+            "threshold": {
+              "description": "the accumulated drift that counts",
+              "format": "double",
+              "type": "number"
+            },
+            "type": {
+              "const": "cusum",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "drift",
+            "threshold"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "An EWMA control chart: the smoothed value leaves a band of\n`threshold` standard deviations around the warm-up mean. Sensitive to\nsmall shifts, robust to single points.",
+          "properties": {
+            "alpha": {
+              "description": "the weight of the newest value, 0 to 1. `0.2` when left out",
+              "format": "double",
+              "type": [
+                "number",
+                "null"
+              ]
+            },
+            "threshold": {
+              "description": "the width of the band, in standard deviations. `3` when left out",
+              "format": "double",
+              "type": [
+                "number",
+                "null"
+              ]
+            },
+            "type": {
+              "const": "ewma_chart",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "The Western Electric rules against the warm-up mean and deviation: one\npoint beyond 3σ, two of three beyond 2σ on one side, four of five\nbeyond 1σ on one side, eight in a row on one side. The rule that fired\nis written beside the flag.",
+          "properties": {
+            "type": {
+              "const": "western_electric",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "The last `size` values are identical — a stuck instrument.",
+          "properties": {
+            "size": {
+              "description": "how many identical values in a row count",
+              "format": "uint",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "type": {
+              "const": "flatline",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "size"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "DetectMode": {
+      "description": "Whether every message comes out annotated, or only the anomalies.",
+      "oneOf": [
+        {
+          "const": "annotate",
+          "description": "Every message passes, carrying the flag and the score.",
+          "type": "string"
+        },
+        {
+          "const": "only_anomalies",
+          "description": "Only the anomalies pass, annotated. The stream becomes an alarm feed.",
+          "type": "string"
+        }
+      ]
+    },
+    "DetectTransformConfig": {
+      "description": "Flags anomalies in a numeric field against its own series — one component\nwith a `method`, the way `filter` is one component with a kind.\n\nWrites a boolean under `as` (`anomaly` when left out), and beside it\n`<as>_score` — how far outside normal the value was, in the method's own\nunits — so a downstream `filter` can be stricter than the threshold. Nothing\nis flagged during the warm-up of `min_samples` messages per key, because\nuntil then there is no idea of normal to be outside of.",
+      "properties": {
+        "as": {
+          "description": "the field the flag is written under; the score goes under `<as>_score`.\n`anomaly` when left out",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "field": {
+          "description": "the numeric field to watch",
+          "type": "string",
+          "x-message-field": true
+        },
+        "group_by": {
+          "description": "the fields that identify a series, the reducer's way. Leave it out for\none series",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "method": {
+          "$ref": "#/$defs/DetectMethod",
+          "description": "how an anomaly is decided"
+        },
+        "min_samples": {
+          "description": "how many messages per key to see before flagging anything. The\nmethod's window `size` when left out, or 30 for a method without one",
+          "format": "uint",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "mode": {
+          "$ref": "#/$defs/DetectMode",
+          "description": "whether everything comes out annotated or only the anomalies"
+        },
+        "on_missing": {
+          "$ref": "#/$defs/MissingFieldPolicy",
+          "description": "what to do about a message missing the field or a group field"
+        }
+      },
+      "required": [
+        "field",
+        "method"
+      ],
+      "title": "detect",
+      "type": "object"
+    },
     "DummyConfig": {
       "description": "Emits one generated message on a fixed interval — a heartbeat for testing a\npipeline without a real source attached.\n\nEvery message carries a `value` and the `current_time` it was emitted at.\nWhat the `value` holds is the `payload` field's business: a number sampled\nfrom a sine wave, so a chart of it has a shape, or a random sentence, so a\ntext transform has something to chew on.",
       "properties": {
@@ -1128,6 +1545,147 @@ One pipeline: every input is merged into one stream, that stream runs through th
           "type": "string"
         }
       ]
+    },
+    "FeatureKind": {
+      "description": "One number that describes a window of readings.",
+      "oneOf": [
+        {
+          "const": "mean",
+          "description": "The arithmetic mean.",
+          "type": "string"
+        },
+        {
+          "const": "std",
+          "description": "The population standard deviation.",
+          "type": "string"
+        },
+        {
+          "const": "min",
+          "description": "The smallest value.",
+          "type": "string"
+        },
+        {
+          "const": "max",
+          "description": "The largest value.",
+          "type": "string"
+        },
+        {
+          "const": "range",
+          "description": "The largest less the smallest.",
+          "type": "string"
+        },
+        {
+          "const": "slope",
+          "description": "The least-squares slope — per second against the `time` field, per\nmessage without one.",
+          "type": "string"
+        },
+        {
+          "const": "skew",
+          "description": "Which way the tail points.",
+          "type": "string"
+        },
+        {
+          "const": "kurtosis",
+          "description": "How heavy the tails are (excess kurtosis).",
+          "type": "string"
+        },
+        {
+          "const": "rms",
+          "description": "The root mean square.",
+          "type": "string"
+        },
+        {
+          "const": "crest_factor",
+          "description": "The peak magnitude over the RMS — how spiky the window is.",
+          "type": "string"
+        },
+        {
+          "const": "zero_crossings",
+          "description": "How many times the signal crossed zero.",
+          "type": "string"
+        },
+        {
+          "const": "n_peaks",
+          "description": "How many local maxima there were.",
+          "type": "string"
+        },
+        {
+          "const": "autocorr1",
+          "description": "The autocorrelation at lag one — how smooth the signal is.",
+          "type": "string"
+        },
+        {
+          "const": "dominant_frequency",
+          "description": "The strongest frequency above DC, in hertz. Needs a sample rate: the\n`time` field, or `sample_rate_hz`.",
+          "type": "string"
+        },
+        {
+          "const": "count",
+          "description": "How many readings the window held.",
+          "type": "string"
+        },
+        {
+          "const": "duration",
+          "description": "From the first reading to the last, in seconds, off the `time` field.",
+          "type": "string"
+        }
+      ]
+    },
+    "FeaturesTransformConfig": {
+      "description": "Folds a window of readings into one descriptor message per group — the\nseven numbers with the identifiers that a model endpoint actually wants,\nrather than the four hundred raw readings. Pair it with a `buffer` on the\ninput, or it will only ever see one reading at a time.\n\nEach feature in `include` is written under its own name (`mean`, `rms`,\n`crest_factor` …), each `bands` entry under its `as`, and the `group_by`\nfields under their leaf names, the reducer's way. A feature that has no\nanswer for the window — a slope of one point, a tone in a flat signal —\nis `null`. The spectral ones (`dominant_frequency`, `bands`) need a sample\nrate, which is `sample_rate_hz` when given and otherwise derived from the\n`time` field; without either they refuse to build. Nothing here keeps\nstate, so no bucket is needed.",
+      "properties": {
+        "bands": {
+          "description": "frequency bands whose power is wanted, each under its `as`",
+          "items": {
+            "$ref": "#/$defs/Band"
+          },
+          "type": "array"
+        },
+        "field": {
+          "description": "the numeric field the window is of",
+          "type": "string",
+          "x-message-field": true
+        },
+        "group_by": {
+          "description": "the fields that identify a series, the reducer's way. Leave it out for\nthe whole batch as one window",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "include": {
+          "description": "which features to compute, each written under its own name",
+          "items": {
+            "$ref": "#/$defs/FeatureKind"
+          },
+          "type": "array"
+        },
+        "on_missing": {
+          "$ref": "#/$defs/MissingFieldPolicy",
+          "description": "what to do about a reading missing the field or a group field"
+        },
+        "sample_rate_hz": {
+          "description": "the readings' sample rate in hertz, for the spectral features. Wins\nover one derived from `time`, for a source whose timestamps are coarse",
+          "format": "double",
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "time": {
+          "description": "the field carrying each reading's time — RFC 3339 or milliseconds since\nthe epoch. Gives `slope` and `duration` their seconds and the spectral\nfeatures their sample rate",
+          "type": [
+            "string",
+            "null"
+          ],
+          "x-message-field": true
+        }
+      },
+      "required": [
+        "field"
+      ],
+      "title": "features",
+      "type": "object"
     },
     "FileFormat": {
       "description": "How the messages in a file are laid out.\n\nBoth are JSON — the difference is whether the file is one document or one\ndocument per line. `ndjson` is the one to want for anything that streams:\nthe file is valid after every batch, so a run that is still going (or that\ndied) is still readable, and every tool that eats logs eats it.",
@@ -1395,16 +1953,103 @@ One pipeline: every input is merged into one stream, that stream runs through th
       "title": "http",
       "type": "object"
     },
+    "HttpResponseKind": {
+      "description": "What an `http` transform does with the reply.",
+      "oneOf": [
+        {
+          "const": "replace",
+          "description": "The reply is the new batch: a JSON array of messages under `body:\nbatch`, a message or an array of them under `body: message`. The\nservice decides what carries on.",
+          "type": "string"
+        },
+        {
+          "const": "merge",
+          "description": "The reply is written onto the message that caused it, under `as`. Under\n`body: batch` an array reply of the batch's length is written\nelement-wise, and any other reply onto every message. Nothing the\npipeline sent is lost.",
+          "type": "string"
+        }
+      ]
+    },
     "HttpTransformConfig": {
-      "description": "Posts the batch to an http endpoint as a JSON array and replaces it with the\nJSON array in the response — so the service on the other end is the\ntransform.",
+      "description": "Sends the batch to an http endpoint and carries on with what comes back —\nso the service on the other end is the transform. The round trip to a\nmodel: a `buffer` and a `features` in front of it make the request the\nseven numbers with the identifiers, and `response: merge` writes the\nanswer onto that message so the identifiers survive the trip.\n\n`body` says whether one request carries the whole batch as a JSON array\nor each message goes on its own; `wrap` puts that under a key\n(`{\"instances\": …}`) for an API that wants one. `response` says what the\nreply is: `replace` makes it the new batch — the JSON array it holds under\n`batch`, the message (or array of messages) it holds under `message` —\nand `merge` writes it onto the message under `as` instead. `unwrap` reads\nthe reply out from under a key first. Anything but a 2xx fails the batch\nwith the endpoint's own words quoted; a network failure or a 5xx is\nretried `retries` times with backoff before it does.",
       "properties": {
+        "as": {
+          "description": "for `response: merge`: the field the reply is written under",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "auth": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/HttpAuthConfig"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "what this transform presents to be allowed to send. Absent sends no\ncredential"
+        },
+        "body": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/HttpBodyKind"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "what one request carries. Defaults to `batch`"
+        },
+        "response": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/HttpResponseKind"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "what to do with the reply. Defaults to `replace`"
+        },
+        "retries": {
+          "description": "how many times a request that failed to reach the endpoint, or was\nanswered 5xx or 429, is tried again before the batch fails. Defaults to\n0. Each retry waits a little longer than the last, and the pipeline\nwaits with it",
+          "format": "uint32",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "timeout_seconds": {
+          "description": "how long one request may take before it is given up on, in seconds.\nDefaults to 30",
+          "format": "uint64",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "unwrap": {
+          "description": "a key to read the reply out from under, for an API that answers\n`{\"predictions\": …}`",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
         "url": {
-          "description": "endpoint to send the batch to",
+          "description": "endpoint to send to",
           "type": "string"
         },
         "verb": {
           "$ref": "#/$defs/HttpVerb",
-          "description": "http method. Accepted but not honoured yet: every request is a POST."
+          "description": "http method. `GET` and `DELETE` are refused — a request with no body\nwould send none of the messages"
+        },
+        "wrap": {
+          "description": "a key to put the body under, for an API that wants `{\"key\": …}`",
+          "type": [
+            "string",
+            "null"
+          ]
         }
       },
       "required": [
@@ -2617,6 +3262,19 @@ One pipeline: every input is merged into one stream, that stream runs through th
             "type"
           ],
           "type": "object"
+        },
+        {
+          "$ref": "#/$defs/TidepoolOutputConfig",
+          "properties": {
+            "type": {
+              "const": "tidepool",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type"
+          ],
+          "type": "object"
         }
       ],
       "type": "object"
@@ -2856,6 +3514,11 @@ One pipeline: every input is merged into one stream, that stream runs through th
           "const": "stddev",
           "description": "The population standard deviation. Numbers only.",
           "type": "string"
+        },
+        {
+          "const": "slope",
+          "description": "How fast the field is changing, per second, by a least-squares line\nagainst each message's time. Numbers only, and it needs the reducer's\n`time` setting — a slope with no time is a slope per nothing.",
+          "type": "string"
         }
       ]
     },
@@ -2879,6 +3542,14 @@ One pipeline: every input is merged into one stream, that stream runs through th
         "on_missing": {
           "$ref": "#/$defs/MissingFieldPolicy",
           "description": "what to do about a message missing one of the fields above"
+        },
+        "time": {
+          "description": "the field carrying each message's time — an RFC 3339 string or\nmilliseconds since the epoch. Needed by `slope`; a message missing it\nfails the batch. Leave it out and each message's time is when it\narrived.",
+          "type": [
+            "string",
+            "null"
+          ],
+          "x-message-field": true
         }
       },
       "required": [
@@ -2927,6 +3598,142 @@ One pipeline: every input is merged into one stream, that stream runs through th
         "field",
         "as"
       ],
+      "type": "object"
+    },
+    "ResampleMethod": {
+      "description": "How the readings that fell in one interval become the value at its grid\npoint, and what an interval with none in it gets.",
+      "oneOf": [
+        {
+          "const": "last",
+          "description": "The last reading in the interval. An empty interval emits nothing.",
+          "type": "string"
+        },
+        {
+          "const": "mean",
+          "description": "The mean of the readings in the interval. An empty interval emits\nnothing.",
+          "type": "string"
+        },
+        {
+          "const": "linear",
+          "description": "The value at the grid point by a straight line between the last\nreading before it and the first after — so a grid point is emitted\nonce the reading after it has arrived. Empty intervals in between are\nfilled by the same line.",
+          "type": "string"
+        },
+        {
+          "const": "forward_fill",
+          "description": "The last reading seen, carried forward: an empty interval repeats the\nlast value, for up to `max_gap_seconds`, and then stops. The one method\nthat emits from a quiet series — which is what makes a sparse\nchange-on-value signal into a regular one.",
+          "type": "string"
+        }
+      ]
+    },
+    "ResampleTransformConfig": {
+      "description": "Puts a series onto a regular grid: one message per key per `interval`\nseconds, at times that are multiples of it, whichever rate the readings\narrive at. The precondition every window model has, and the second real\nuser of the run loop's tick — a `forward_fill` series keeps emitting while\nits readings have gone quiet.\n\nThe message out carries the group fields under their leaf names, the grid\ntime under `time`'s name (or `time` when arrival time is used) as an RFC\n3339 string, and the value under `as` (the field's leaf when left out). A\ngrid point is emitted when a reading past it arrives, or — for `forward_fill`\nonly — when the clock passes it with nothing arriving.",
+      "properties": {
+        "as": {
+          "description": "the field the value is written under. The field's leaf when left out",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "field": {
+          "description": "the numeric field to resample",
+          "type": "string",
+          "x-message-field": true
+        },
+        "group_by": {
+          "description": "the fields that identify a series, the reducer's way. Leave it out for\none series",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "interval_seconds": {
+          "description": "the spacing of the grid, in seconds",
+          "format": "double",
+          "type": "number"
+        },
+        "max_gap_seconds": {
+          "description": "for `forward_fill`: how long a value is carried into empty intervals\nbefore the series is left to go quiet. Carried forever when left out",
+          "format": "double",
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "method": {
+          "$ref": "#/$defs/ResampleMethod",
+          "description": "how the readings in an interval become its value"
+        },
+        "on_missing": {
+          "$ref": "#/$defs/MissingFieldPolicy",
+          "description": "what to do about a message missing the field or a group field"
+        },
+        "time": {
+          "description": "the field carrying each message's time — RFC 3339 or milliseconds since\nthe epoch. Leave it out for arrival time, in which case empty intervals\nare noticed by the clock rather than by the next reading",
+          "type": [
+            "string",
+            "null"
+          ],
+          "x-message-field": true
+        }
+      },
+      "required": [
+        "field",
+        "interval_seconds",
+        "method"
+      ],
+      "title": "resample",
+      "type": "object"
+    },
+    "RollingTransformConfig": {
+      "description": "Writes onto each message aggregations over the last few messages of its\nseries — the last `size` of them, or the last `seconds`' worth, or both\nlimits at once. The reducer's `{function, field, as}` list, the reducer's\nfunctions; a second component rather than a `window` on `reduce` because\nthe cardinality differs — one message out per message in, not one per\ngroup per batch.\n\n`size` is always required, because it is the bound: a window by time alone\ngrows with the rate of the stream, and every piece of state has a bound.\n`seconds` on top of it also drops what is older than that, off the `time`\nfield. `count` needs a `field` here — it counts how many of the window\ncarried one, which is `size` once the window is warm and the warm-up check\nbefore that.",
+      "properties": {
+        "aggregations": {
+          "description": "what to compute over the window. At least one, each with a distinct `as`",
+          "items": {
+            "$ref": "#/$defs/Aggregation"
+          },
+          "type": "array"
+        },
+        "group_by": {
+          "description": "the fields that identify a series, the reducer's way. Leave it out for\none series",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "on_missing": {
+          "$ref": "#/$defs/MissingFieldPolicy",
+          "description": "what to do about a message missing an aggregated field or a group field"
+        },
+        "seconds": {
+          "description": "also drop from the window whatever is older than this many seconds,\noff the `time` field",
+          "format": "double",
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "size": {
+          "description": "how many messages the window holds at most",
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "time": {
+          "description": "the field carrying each message's time — RFC 3339 or milliseconds since\nthe epoch. Leave it out for arrival time",
+          "type": [
+            "string",
+            "null"
+          ],
+          "x-message-field": true
+        }
+      },
+      "required": [
+        "aggregations",
+        "size"
+      ],
+      "title": "rolling",
       "type": "object"
     },
     "RotationConfig": {
@@ -3077,6 +3884,155 @@ One pipeline: every input is merged into one stream, that stream runs through th
       "description": "A config value that may *reference* secrets rather than contain them.\n\nOn the wire it is an ordinary JSON string, but `${NAME}` placeholders in it\nare replaced with real values when the pipeline is built, against whatever\nsecret store the server was started with:\n\n```json\n{ \"type\": \"nats\", \"urls\": \"nats://app:${NATS_PASSWORD}@broker:4222\" }\n```\n\nThe unresolved form is the only one this type ever holds. That is what makes\nit safe to commit, safe to hand back from `GET /api/pipelines` and safe to show\nin the UI — a resolved value exists only inside the built runtime component,\nnever in a `Config`. Resolution deliberately lives in the root crate: this\ncrate compiles to wasm for the frontend, which must not be able to hold a\nresolved secret at all.\n\nA value with no `${...}` in it is passed through untouched, so fields that\nhold nothing sensitive need no special handling.",
       "type": "string"
     },
+    "SmoothMethod": {
+      "description": "How a value is smoothed against the ones before it.",
+      "oneOf": [
+        {
+          "description": "An exponentially weighted moving average — cheap, no window, follows\nthe data as closely as `alpha` says. Give `alpha` or `half_life`, not\nboth.",
+          "properties": {
+            "alpha": {
+              "description": "the weight of the newest value, 0 to 1",
+              "format": "double",
+              "type": [
+                "number",
+                "null"
+              ]
+            },
+            "half_life": {
+              "description": "the number of messages after which a value's weight has halved —\nthe spelling with an intuition behind it",
+              "format": "double",
+              "type": [
+                "number",
+                "null"
+              ]
+            },
+            "type": {
+              "const": "ewma",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "The median of the last `size` values, this one included. Removes\nsingle-sample spikes outright, which a mean only spreads out.",
+          "properties": {
+            "size": {
+              "description": "how many values the window holds",
+              "format": "uint",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "type": {
+              "const": "median",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "size"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "A Hampel filter: the value is kept unless it is further than\n`threshold` robust standard deviations from the window's median, in\nwhich case the median replaces it. The right first stage in front of\nany detector — it removes the outliers without smearing the signal.",
+          "properties": {
+            "size": {
+              "description": "how many values the window holds, this one included",
+              "format": "uint",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "threshold": {
+              "description": "how many scaled MADs from the median count as an outlier. `3`\nwhen left out",
+              "format": "double",
+              "type": [
+                "number",
+                "null"
+              ]
+            },
+            "type": {
+              "const": "hampel",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "size"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "A Savitzky–Golay filter: a polynomial of `order` fitted to the last\n`size` values by least squares, evaluated at the newest. Smooths while\nkeeping the shape of peaks that a moving average flattens. Trailing\nrather than centred, because a stream cannot see the future; until\nthe window holds more than `order` values the value passes untouched.",
+          "properties": {
+            "order": {
+              "description": "the degree of the polynomial, below `size`. `2` when left out",
+              "format": "uint",
+              "minimum": 0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "size": {
+              "description": "how many values the window holds, this one included",
+              "format": "uint",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "type": {
+              "const": "savitzky_golay",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "size"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "SmoothTransformConfig": {
+      "description": "Smooths a numeric field against the values before it in its series, writing\nthe result onto the message — over the field itself, or under `as`.",
+      "properties": {
+        "as": {
+          "description": "the field the smoothed value is written under. Leave it out to replace\nthe field itself",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "field": {
+          "description": "the numeric field to smooth",
+          "type": "string",
+          "x-message-field": true
+        },
+        "group_by": {
+          "description": "the fields that identify a series, the reducer's way. Leave it out for\none series",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "method": {
+          "$ref": "#/$defs/SmoothMethod",
+          "description": "how"
+        },
+        "on_missing": {
+          "$ref": "#/$defs/MissingFieldPolicy",
+          "description": "what to do about a message missing the field or a group field"
+        }
+      },
+      "required": [
+        "field",
+        "method"
+      ],
+      "title": "smooth",
+      "type": "object"
+    },
     "SplitterTransformConfig": {
       "description": "Cuts one batch into several smaller ones — the opposite of `buffer`.\n\nNote the current limitation: messages left over after the last whole chunk\nare dropped, so 4 messages with `out_size: 3` emit one batch, not two.",
       "properties": {
@@ -3128,6 +4084,55 @@ One pipeline: every input is merged into one stream, that stream runs through th
         "columns"
       ],
       "title": "index",
+      "type": "object"
+    },
+    "TidepoolOutputConfig": {
+      "description": "Writes every batch into a Tidepool table, one request per batch.\n\nThe table has to exist: Tidepool's project declares it, with its column\ntypes, and this output checks against that on start — every mapped column\nhas to be one of the table's, of a type it can write, and every column the\ntable requires has to be written. A mismatch fails the start rather than\nthe first batch.\n\n`columns` is spelled as the database outputs spell it. Leave it out to send\neach message as a row as it is, for messages already shaped like the table:\nTidepool checks every value and refuses a batch with any problem in it, so\nnothing is coerced on either side.\n\nA batch Tidepool refuses fails with its problems quoted by row and column.\nA busy server (`503`) or one that can't be reached is retried for up to\n`retry_seconds` under the same idempotency key, so a retry never writes a\nbatch twice.",
+      "properties": {
+        "columns": {
+          "description": "which message field goes in which column. Leave it out to send each\nmessage as a row as it is.",
+          "items": {
+            "$ref": "#/$defs/ColumnMapping"
+          },
+          "type": "array"
+        },
+        "connection": {
+          "description": "name of the tidepool connection to write through — see \"connections\"\nin the readme.",
+          "type": "string",
+          "x-connection": "tidepool"
+        },
+        "on_extra_fields": {
+          "$ref": "#/$defs/ExtraFieldPolicy",
+          "description": "what to do about a message carrying fields no column reads"
+        },
+        "retry_seconds": {
+          "description": "how long one batch keeps being retried while the server is busy or\nunreachable, in seconds. Defaults to 30.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "table": {
+          "description": "the table to write into, as Tidepool's project names it",
+          "type": "string"
+        },
+        "timeout_seconds": {
+          "description": "how long one request may take, in seconds. Defaults to 30.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "connection",
+        "table"
+      ],
+      "title": "tidepool",
       "type": "object"
     },
     "TransformConfig": {
@@ -3241,6 +4246,97 @@ One pipeline: every input is merged into one stream, that stream runs through th
           "properties": {
             "type": {
               "const": "script",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type"
+          ],
+          "type": "object"
+        },
+        {
+          "$ref": "#/$defs/DeadbandTransformConfig",
+          "properties": {
+            "type": {
+              "const": "deadband",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type"
+          ],
+          "type": "object"
+        },
+        {
+          "$ref": "#/$defs/DeriveTransformConfig",
+          "properties": {
+            "type": {
+              "const": "derive",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type"
+          ],
+          "type": "object"
+        },
+        {
+          "$ref": "#/$defs/RollingTransformConfig",
+          "properties": {
+            "type": {
+              "const": "rolling",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type"
+          ],
+          "type": "object"
+        },
+        {
+          "$ref": "#/$defs/SmoothTransformConfig",
+          "properties": {
+            "type": {
+              "const": "smooth",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type"
+          ],
+          "type": "object"
+        },
+        {
+          "$ref": "#/$defs/DetectTransformConfig",
+          "properties": {
+            "type": {
+              "const": "detect",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type"
+          ],
+          "type": "object"
+        },
+        {
+          "$ref": "#/$defs/ResampleTransformConfig",
+          "properties": {
+            "type": {
+              "const": "resample",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type"
+          ],
+          "type": "object"
+        },
+        {
+          "$ref": "#/$defs/FeaturesTransformConfig",
+          "properties": {
+            "type": {
+              "const": "features",
               "type": "string"
             }
           },
@@ -3479,6 +4575,19 @@ A `BTreeMap` rather than a list of `{id, ...}` objects: the name is the identity
           "properties": {
             "type": {
               "const": "indu",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type"
+          ],
+          "type": "object"
+        },
+        {
+          "$ref": "#/$defs/TidepoolConnection",
+          "properties": {
+            "type": {
+              "const": "tidepool",
               "type": "string"
             }
           },
@@ -3740,6 +4849,38 @@ A `BTreeMap` rather than a list of `{id, ...}` objects: the name is the identity
     "Secret": {
       "description": "A config value that may *reference* secrets rather than contain them.\n\nOn the wire it is an ordinary JSON string, but `${NAME}` placeholders in it\nare replaced with real values when the pipeline is built, against whatever\nsecret store the server was started with:\n\n```json\n{ \"type\": \"nats\", \"urls\": \"nats://app:${NATS_PASSWORD}@broker:4222\" }\n```\n\nThe unresolved form is the only one this type ever holds. That is what makes\nit safe to commit, safe to hand back from `GET /api/pipelines` and safe to show\nin the UI — a resolved value exists only inside the built runtime component,\nnever in a `Config`. Resolution deliberately lives in the root crate: this\ncrate compiles to wasm for the frontend, which must not be able to hold a\nresolved secret at all.\n\nA value with no `${...}` in it is passed through untouched, so fields that\nhold nothing sensitive need no special handling.",
       "type": "string"
+    },
+    "TidepoolConnection": {
+      "description": "A Tidepool server: where it listens, and the ingest token it wants.\n\nThe same split every connection makes: the server and its credential are\nthe connection's, the *table* belongs to the output that writes it. Tables\nare declared in Tidepool's own project, never created from here.",
+      "properties": {
+        "allow_http": {
+          "description": "allow a plaintext `http://` url while a `token` is set. Defaults to\nfalse, for the clickhouse connection's reason: the token goes with\nevery batch. Without a token there is nothing to send in the clear.",
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "token": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Secret"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "the ingest token (the server's `TIDEPOOL_INGEST_TOKEN`, or its admin\ntoken) as a `${NAME}` reference — see \"secrets\". Leave it out for a\nserver whose ingest is open."
+        },
+        "url": {
+          "description": "the server's url, e.g. `http://localhost:7070`.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "url"
+      ],
+      "title": "tidepool",
+      "type": "object"
     }
   },
   "$schema": "https://json-schema.org/draft/2020-12/schema",
@@ -4052,6 +5193,38 @@ The name is a field here rather than a path segment because it is part of what i
     "Secret": {
       "description": "A config value that may *reference* secrets rather than contain them.\n\nOn the wire it is an ordinary JSON string, but `${NAME}` placeholders in it\nare replaced with real values when the pipeline is built, against whatever\nsecret store the server was started with:\n\n```json\n{ \"type\": \"nats\", \"urls\": \"nats://app:${NATS_PASSWORD}@broker:4222\" }\n```\n\nThe unresolved form is the only one this type ever holds. That is what makes\nit safe to commit, safe to hand back from `GET /api/pipelines` and safe to show\nin the UI — a resolved value exists only inside the built runtime component,\nnever in a `Config`. Resolution deliberately lives in the root crate: this\ncrate compiles to wasm for the frontend, which must not be able to hold a\nresolved secret at all.\n\nA value with no `${...}` in it is passed through untouched, so fields that\nhold nothing sensitive need no special handling.",
       "type": "string"
+    },
+    "TidepoolConnection": {
+      "description": "A Tidepool server: where it listens, and the ingest token it wants.\n\nThe same split every connection makes: the server and its credential are\nthe connection's, the *table* belongs to the output that writes it. Tables\nare declared in Tidepool's own project, never created from here.",
+      "properties": {
+        "allow_http": {
+          "description": "allow a plaintext `http://` url while a `token` is set. Defaults to\nfalse, for the clickhouse connection's reason: the token goes with\nevery batch. Without a token there is nothing to send in the clear.",
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "token": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Secret"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "the ingest token (the server's `TIDEPOOL_INGEST_TOKEN`, or its admin\ntoken) as a `${NAME}` reference — see \"secrets\". Leave it out for a\nserver whose ingest is open."
+        },
+        "url": {
+          "description": "the server's url, e.g. `http://localhost:7070`.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "url"
+      ],
+      "title": "tidepool",
+      "type": "object"
     }
   },
   "$schema": "https://json-schema.org/draft/2020-12/schema",
@@ -4179,6 +5352,19 @@ The name is a field here rather than a path segment because it is part of what i
       "properties": {
         "type": {
           "const": "indu",
+          "type": "string"
+        }
+      },
+      "required": [
+        "type"
+      ],
+      "type": "object"
+    },
+    {
+      "$ref": "#/$defs/TidepoolConnection",
+      "properties": {
+        "type": {
+          "const": "tidepool",
           "type": "string"
         }
       },
@@ -4635,6 +5821,99 @@ Absent ids are the normal case, not a gap to be filled — the canvas lays those
 
 :::
 
+## `LoadedScript` {#schema-loadedscript}
+
+The text a running `script` transform was compiled from, and the modules it imported — what `GET /api/pipelines/{id}/transforms/{index}/script` answers.
+
+**The text the pipeline was built with, not the file as it stands.** A file source and its imports are read once, when the pipeline is built, and a running script never touches the filesystem again — so the code worth reading is the code that is running. Showing the disk instead would show a script the pipeline is not executing whenever someone has edited the file and not yet reverted, which is exactly when somebody goes looking. `changed_on_disk` is how the difference is said rather than hidden.
+
+::: details schema
+
+```json
+{
+  "$defs": {
+    "LoadedModule": {
+      "description": "One module a script imported, as it was when the pipeline was built.",
+      "properties": {
+        "changed_on_disk": {
+          "default": false,
+          "description": "True when the file no longer reads as `code`. See\n[`LoadedScript::changed_on_disk`].",
+          "type": "boolean"
+        },
+        "code": {
+          "description": "The rhai source the module was evaluated from.",
+          "type": "string"
+        },
+        "path": {
+          "description": "The file the module was read from, relative to the config file's\ndirectory, with the `.rhai` extension the import may have left off.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "path",
+        "code"
+      ],
+      "type": "object"
+    },
+    "ScriptScope": {
+      "description": "Whether a script is handed one message or the whole batch.\n\n`message` is the default and is what nearly everything wants: the budget is\nthen spent per message rather than per batch, the batch structure is\npreserved without the script having to rebuild it, and a script that emits\nnothing for one message has dropped exactly that message.\n\n`batch` is the escape hatch, and it is needed for the things that are about\nthe batch itself — deduplicating within it, repartitioning it, or computing\nsomething across it that `reduce` has no function for.",
+      "oneOf": [
+        {
+          "const": "message",
+          "description": "The script runs once per message, with the message in `msg`.",
+          "type": "string"
+        },
+        {
+          "const": "batch",
+          "description": "The script runs once per batch, with the messages in `batch` as an\narray. Emitting an array emits a batch of those messages.",
+          "type": "string"
+        }
+      ]
+    }
+  },
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "description": "The text a running `script` transform was compiled from, and the modules it\nimported — what `GET /api/pipelines/{id}/transforms/{index}/script` answers.\n\n**The text the pipeline was built with, not the file as it stands.** A file\nsource and its imports are read once, when the pipeline is built, and a\nrunning script never touches the filesystem again — so the code worth\nreading is the code that is running. Showing the disk instead would show a\nscript the pipeline is not executing whenever someone has edited the file\nand not yet reverted, which is exactly when somebody goes looking.\n`changed_on_disk` is how the difference is said rather than hidden.",
+  "properties": {
+    "changed_on_disk": {
+      "default": false,
+      "description": "True when `path` no longer reads as `code` — the file was edited, or can\nno longer be read, since the pipeline was built. Always false for an\ninline script, whose text is the config's. A revert picks the change up.",
+      "type": "boolean"
+    },
+    "code": {
+      "description": "The rhai source the transform compiled.",
+      "type": "string"
+    },
+    "modules": {
+      "default": [],
+      "description": "Every module the script imported, directly or through another module,\nin the order they were first resolved. Empty for a script with no\nimports.",
+      "items": {
+        "$ref": "#/$defs/LoadedModule"
+      },
+      "type": "array"
+    },
+    "path": {
+      "description": "The file the script was read from, relative to the config file's\ndirectory, or absent for an inline script.",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "scope": {
+      "$ref": "#/$defs/ScriptScope",
+      "description": "Whether the script is run per message or per batch."
+    }
+  },
+  "required": [
+    "scope",
+    "code"
+  ],
+  "title": "LoadedScript",
+  "type": "object"
+}
+```
+
+:::
+
 ## `LoginRequest` {#schema-loginrequest}
 
 What `POST /api/auth/login` takes.
@@ -4760,6 +6039,32 @@ Run a draft's transforms over some messages.
           "type": "string"
         }
       ]
+    },
+    "Band": {
+      "description": "The power in one frequency band, as a feature of its own.",
+      "properties": {
+        "as": {
+          "description": "the field the band's power is written under",
+          "type": "string"
+        },
+        "high_hz": {
+          "description": "the top of the band, in hertz, exclusive",
+          "format": "double",
+          "type": "number"
+        },
+        "low_hz": {
+          "description": "the bottom of the band, in hertz, inclusive",
+          "format": "double",
+          "type": "number"
+        }
+      },
+      "required": [
+        "low_hz",
+        "high_hz",
+        "as"
+      ],
+      "title": "band",
+      "type": "object"
     },
     "BufferGateConfig": {
       "description": "A condition on a state bucket, as a release trigger for the `buffer`\ntransform.\n\nThe conditions are tested against the bucket entry rendered as an object —\nthe names `remember` wrote under are its fields — so `field` is a dotted\npath exactly as it is everywhere else, and several conditions mean *all of\nthem*, exactly as they do on `remember`'s `when`.\n\nNote what this is not: it is a gate on the whole buffer, not a test applied\nto each held message. When it opens, everything held is handed on.",
@@ -4981,6 +6286,538 @@ Run a draft's transforms over some messages.
         }
       ]
     },
+    "DeadbandMode": {
+      "description": "Whether a deadband's `delta` is an amount or a fraction of the last value\nthat passed.",
+      "oneOf": [
+        {
+          "const": "absolute",
+          "description": "`delta` is in the field's own units: `0.5` is half a degree.",
+          "type": "string"
+        },
+        {
+          "const": "percent",
+          "description": "`delta` is a percentage of the last value that passed: `2` is two\npercent. A last value of zero passes everything, since a fraction of\nnothing is nothing.",
+          "type": "string"
+        }
+      ]
+    },
+    "DeadbandTransformConfig": {
+      "description": "Drops a message unless its field has moved far enough from the last one\nthat passed — the single most used transform in any historian pipeline,\nand a *stateful* filter, which is why `filter` cannot be it.\n\nThe first message per key always passes. After that a message passes when\n`field` differs from the last passed value by more than `delta`, or when\n`max_seconds` have gone by since anything passed, so a steady reading is\nstill confirmed now and then. `flatline_seconds` is the sensor-health half:\nwhen the value has not moved in that long the next message passes with\n`stuck: true` on it, once per flat stretch, so a stuck instrument is\ndistinguishable from a quiet one downstream.",
+      "properties": {
+        "delta": {
+          "description": "how far the value has to move to pass, in the field's units or as a\npercentage, by `mode`",
+          "format": "double",
+          "type": "number"
+        },
+        "field": {
+          "description": "the numeric field the band is on",
+          "type": "string",
+          "x-message-field": true
+        },
+        "flatline_seconds": {
+          "description": "after this many seconds with no movement, let the next message through\ncarrying `stuck: true` — once per flat stretch",
+          "format": "double",
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "group_by": {
+          "description": "the fields that identify a series, the reducer's way. Leave it out for\none series",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "max_seconds": {
+          "description": "pass a message anyway once this many seconds have gone by since the\nlast one that passed, so a steady value is still reported now and then",
+          "format": "double",
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "mode": {
+          "$ref": "#/$defs/DeadbandMode",
+          "description": "what `delta` is measured in"
+        },
+        "on_missing": {
+          "$ref": "#/$defs/MissingFieldPolicy",
+          "description": "what to do about a message missing the field or a group field"
+        },
+        "time": {
+          "description": "the field carrying each message's time — RFC 3339 or milliseconds since\nthe epoch. Leave it out for arrival time",
+          "type": [
+            "string",
+            "null"
+          ],
+          "x-message-field": true
+        }
+      },
+      "required": [
+        "field",
+        "delta"
+      ],
+      "title": "deadband",
+      "type": "object"
+    },
+    "Derivation": {
+      "description": "One derived value and the field it is written to.",
+      "properties": {
+        "as": {
+          "description": "the field the answer is written under",
+          "type": "string"
+        },
+        "field": {
+          "description": "the numeric field it is derived from",
+          "type": "string",
+          "x-message-field": true
+        },
+        "function": {
+          "$ref": "#/$defs/DeriveFnKind",
+          "description": "how the value is derived from this message and the previous one"
+        },
+        "wrap_at": {
+          "description": "for `counter`: the value the counter wraps back to zero at, so a drop\nis read as having run through the top rather than as a reset",
+          "format": "double",
+          "type": [
+            "number",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "function",
+        "field",
+        "as"
+      ],
+      "title": "derivation",
+      "type": "object"
+    },
+    "DeriveFnKind": {
+      "description": "How one message's value is combined with the previous one's.",
+      "oneOf": [
+        {
+          "const": "rate",
+          "description": "The change per second since the previous message, off the `time`\nfield. `null` on the first message and when no time has passed.",
+          "type": "string"
+        },
+        {
+          "const": "delta",
+          "description": "The change since the previous message. `null` on the first.",
+          "type": "string"
+        },
+        {
+          "const": "cumsum",
+          "description": "The running total of the field, from the first message on.",
+          "type": "string"
+        },
+        {
+          "const": "counter",
+          "description": "The running total of the *increases* — for a counter that resets or\nwraps. A drop below the previous value counts as a wrap when `wrap_at`\nis set (the increase runs through the top), and as a reset otherwise\n(the new value is the increase).",
+          "type": "string"
+        }
+      ]
+    },
+    "DeriveTransformConfig": {
+      "description": "Writes onto each message something that needs the previous one: a rate of\nchange, a delta, a running total, a wrap-tolerant counter. Not a `map`\noperation because a `map` sees one message at a time; this remembers the\nlast per key.\n\nSeveral derivations run at once and each is written under its own `as`, so\none pass gives both `delta` and `rate`. The first message per key has no\nprevious, and the derivations that need one write `null` for it.",
+      "properties": {
+        "derive": {
+          "description": "what to derive. At least one, each with a distinct `as`",
+          "items": {
+            "$ref": "#/$defs/Derivation"
+          },
+          "type": "array"
+        },
+        "group_by": {
+          "description": "the fields that identify a series, the reducer's way. Leave it out for\none series",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "on_missing": {
+          "$ref": "#/$defs/MissingFieldPolicy",
+          "description": "what to do about a message missing a derived field or a group field"
+        },
+        "time": {
+          "description": "the field carrying each message's time — RFC 3339 or milliseconds since\nthe epoch. Leave it out for arrival time",
+          "type": [
+            "string",
+            "null"
+          ],
+          "x-message-field": true
+        }
+      },
+      "required": [
+        "derive"
+      ],
+      "title": "derive",
+      "type": "object"
+    },
+    "DetectMethod": {
+      "description": "How an anomaly is decided.\n\nThe window methods compare a value against the values *before* it, never\nincluding it, so a spike does not pull the baseline it is measured against.\nThe chart methods freeze their baseline at the end of the warm-up, which is\nwhat a control chart is: a fixed idea of normal that the process is held to.",
+      "oneOf": [
+        {
+          "description": "Further than `threshold` standard deviations from the mean of the\nlast `size` values.",
+          "properties": {
+            "size": {
+              "description": "how many earlier values the baseline is drawn from",
+              "format": "uint",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "threshold": {
+              "description": "how many standard deviations count. `3` when left out",
+              "format": "double",
+              "type": [
+                "number",
+                "null"
+              ]
+            },
+            "type": {
+              "const": "zscore",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "size"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "The robust twin: further than `threshold` scaled median absolute\ndeviations from the median of the last `size` values. Prefer it when\nthe baseline itself contains outliers.",
+          "properties": {
+            "size": {
+              "description": "how many earlier values the baseline is drawn from",
+              "format": "uint",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "threshold": {
+              "description": "how many scaled MADs count. `3.5` when left out",
+              "format": "double",
+              "type": [
+                "number",
+                "null"
+              ]
+            },
+            "type": {
+              "const": "mad",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "size"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "A two-sided CUSUM: sums the drift above and below `target`, and flags\nwhen either sum passes `threshold`. Finds a small sustained shift a\nsingle-point test never sees. The sum that fired is reset.",
+          "properties": {
+            "drift": {
+              "description": "the slack per message that is not counted as drift, in the\nfield's units",
+              "format": "double",
+              "type": "number"
+            },
+            "target": {
+              "description": "the value the series is expected to sit at. Left out, the mean of\nthe warm-up is used",
+              "format": "double",
+              "type": [
+                "number",
+                "null"
+              ]
+            },
+            "threshold": {
+              "description": "the accumulated drift that counts",
+              "format": "double",
+              "type": "number"
+            },
+            "type": {
+              "const": "cusum",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "drift",
+            "threshold"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "An EWMA control chart: the smoothed value leaves a band of\n`threshold` standard deviations around the warm-up mean. Sensitive to\nsmall shifts, robust to single points.",
+          "properties": {
+            "alpha": {
+              "description": "the weight of the newest value, 0 to 1. `0.2` when left out",
+              "format": "double",
+              "type": [
+                "number",
+                "null"
+              ]
+            },
+            "threshold": {
+              "description": "the width of the band, in standard deviations. `3` when left out",
+              "format": "double",
+              "type": [
+                "number",
+                "null"
+              ]
+            },
+            "type": {
+              "const": "ewma_chart",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "The Western Electric rules against the warm-up mean and deviation: one\npoint beyond 3σ, two of three beyond 2σ on one side, four of five\nbeyond 1σ on one side, eight in a row on one side. The rule that fired\nis written beside the flag.",
+          "properties": {
+            "type": {
+              "const": "western_electric",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "The last `size` values are identical — a stuck instrument.",
+          "properties": {
+            "size": {
+              "description": "how many identical values in a row count",
+              "format": "uint",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "type": {
+              "const": "flatline",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "size"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "DetectMode": {
+      "description": "Whether every message comes out annotated, or only the anomalies.",
+      "oneOf": [
+        {
+          "const": "annotate",
+          "description": "Every message passes, carrying the flag and the score.",
+          "type": "string"
+        },
+        {
+          "const": "only_anomalies",
+          "description": "Only the anomalies pass, annotated. The stream becomes an alarm feed.",
+          "type": "string"
+        }
+      ]
+    },
+    "DetectTransformConfig": {
+      "description": "Flags anomalies in a numeric field against its own series — one component\nwith a `method`, the way `filter` is one component with a kind.\n\nWrites a boolean under `as` (`anomaly` when left out), and beside it\n`<as>_score` — how far outside normal the value was, in the method's own\nunits — so a downstream `filter` can be stricter than the threshold. Nothing\nis flagged during the warm-up of `min_samples` messages per key, because\nuntil then there is no idea of normal to be outside of.",
+      "properties": {
+        "as": {
+          "description": "the field the flag is written under; the score goes under `<as>_score`.\n`anomaly` when left out",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "field": {
+          "description": "the numeric field to watch",
+          "type": "string",
+          "x-message-field": true
+        },
+        "group_by": {
+          "description": "the fields that identify a series, the reducer's way. Leave it out for\none series",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "method": {
+          "$ref": "#/$defs/DetectMethod",
+          "description": "how an anomaly is decided"
+        },
+        "min_samples": {
+          "description": "how many messages per key to see before flagging anything. The\nmethod's window `size` when left out, or 30 for a method without one",
+          "format": "uint",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "mode": {
+          "$ref": "#/$defs/DetectMode",
+          "description": "whether everything comes out annotated or only the anomalies"
+        },
+        "on_missing": {
+          "$ref": "#/$defs/MissingFieldPolicy",
+          "description": "what to do about a message missing the field or a group field"
+        }
+      },
+      "required": [
+        "field",
+        "method"
+      ],
+      "title": "detect",
+      "type": "object"
+    },
+    "FeatureKind": {
+      "description": "One number that describes a window of readings.",
+      "oneOf": [
+        {
+          "const": "mean",
+          "description": "The arithmetic mean.",
+          "type": "string"
+        },
+        {
+          "const": "std",
+          "description": "The population standard deviation.",
+          "type": "string"
+        },
+        {
+          "const": "min",
+          "description": "The smallest value.",
+          "type": "string"
+        },
+        {
+          "const": "max",
+          "description": "The largest value.",
+          "type": "string"
+        },
+        {
+          "const": "range",
+          "description": "The largest less the smallest.",
+          "type": "string"
+        },
+        {
+          "const": "slope",
+          "description": "The least-squares slope — per second against the `time` field, per\nmessage without one.",
+          "type": "string"
+        },
+        {
+          "const": "skew",
+          "description": "Which way the tail points.",
+          "type": "string"
+        },
+        {
+          "const": "kurtosis",
+          "description": "How heavy the tails are (excess kurtosis).",
+          "type": "string"
+        },
+        {
+          "const": "rms",
+          "description": "The root mean square.",
+          "type": "string"
+        },
+        {
+          "const": "crest_factor",
+          "description": "The peak magnitude over the RMS — how spiky the window is.",
+          "type": "string"
+        },
+        {
+          "const": "zero_crossings",
+          "description": "How many times the signal crossed zero.",
+          "type": "string"
+        },
+        {
+          "const": "n_peaks",
+          "description": "How many local maxima there were.",
+          "type": "string"
+        },
+        {
+          "const": "autocorr1",
+          "description": "The autocorrelation at lag one — how smooth the signal is.",
+          "type": "string"
+        },
+        {
+          "const": "dominant_frequency",
+          "description": "The strongest frequency above DC, in hertz. Needs a sample rate: the\n`time` field, or `sample_rate_hz`.",
+          "type": "string"
+        },
+        {
+          "const": "count",
+          "description": "How many readings the window held.",
+          "type": "string"
+        },
+        {
+          "const": "duration",
+          "description": "From the first reading to the last, in seconds, off the `time` field.",
+          "type": "string"
+        }
+      ]
+    },
+    "FeaturesTransformConfig": {
+      "description": "Folds a window of readings into one descriptor message per group — the\nseven numbers with the identifiers that a model endpoint actually wants,\nrather than the four hundred raw readings. Pair it with a `buffer` on the\ninput, or it will only ever see one reading at a time.\n\nEach feature in `include` is written under its own name (`mean`, `rms`,\n`crest_factor` …), each `bands` entry under its `as`, and the `group_by`\nfields under their leaf names, the reducer's way. A feature that has no\nanswer for the window — a slope of one point, a tone in a flat signal —\nis `null`. The spectral ones (`dominant_frequency`, `bands`) need a sample\nrate, which is `sample_rate_hz` when given and otherwise derived from the\n`time` field; without either they refuse to build. Nothing here keeps\nstate, so no bucket is needed.",
+      "properties": {
+        "bands": {
+          "description": "frequency bands whose power is wanted, each under its `as`",
+          "items": {
+            "$ref": "#/$defs/Band"
+          },
+          "type": "array"
+        },
+        "field": {
+          "description": "the numeric field the window is of",
+          "type": "string",
+          "x-message-field": true
+        },
+        "group_by": {
+          "description": "the fields that identify a series, the reducer's way. Leave it out for\nthe whole batch as one window",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "include": {
+          "description": "which features to compute, each written under its own name",
+          "items": {
+            "$ref": "#/$defs/FeatureKind"
+          },
+          "type": "array"
+        },
+        "on_missing": {
+          "$ref": "#/$defs/MissingFieldPolicy",
+          "description": "what to do about a reading missing the field or a group field"
+        },
+        "sample_rate_hz": {
+          "description": "the readings' sample rate in hertz, for the spectral features. Wins\nover one derived from `time`, for a source whose timestamps are coarse",
+          "format": "double",
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "time": {
+          "description": "the field carrying each reading's time — RFC 3339 or milliseconds since\nthe epoch. Gives `slope` and `duration` their seconds and the spectral\nfeatures their sample rate",
+          "type": [
+            "string",
+            "null"
+          ],
+          "x-message-field": true
+        }
+      },
+      "required": [
+        "field"
+      ],
+      "title": "features",
+      "type": "object"
+    },
     "FilterTransformConfig": {
       "description": "Drops messages that don't match a condition, and drops the whole batch if\nnone of them do. Pick either the `Numeric` or the `String` form — the fields\ndiffer because the comparisons do.",
       "oneOf": [
@@ -5046,16 +6883,164 @@ Run a draft's transforms over some messages.
       "title": "filter",
       "type": "object"
     },
+    "HttpAuthConfig": {
+      "description": "A credential carried in a header — checked by the `http` input on a post to\na pipeline's endpoint, and presented by the `http` output on a request it\nsends.\n\nOne type for both directions because it is one fact: a fixed string in a\nnamed header. The two halves read it differently — the input compares what\narrived against this, the output sets it — and only the input has the rule\nabout `ALLOWED_HEADERS`, since only the input can write a header into the\nmessages.\n\nThis is the **data plane's** own credential and has nothing to do with the\naccounts in the settings file: those are people signing in to look at and\nedit the graph, this is one system pushing data into one pipeline. A machine\nposting readings should not need an account that can rewrite the config, and\na person with such an account should not thereby be able to post readings.\n\nThe token is a fixed string the sender repeats on every request, which makes\nit **only as private as the transport**. kayak speaks plain HTTP; putting\nTLS in front of it is the deployment's job, and without that the token is\nreadable by anything on the path. It is the same trade every log-ingest API\nmakes, and worth making deliberately rather than by accident.",
+      "oneOf": [
+        {
+          "description": "A token in the standard `Authorization` header, as\n`Authorization: Bearer <token>`. The one to reach for unless the system\non the other end can't use that header.",
+          "properties": {
+            "token": {
+              "$ref": "#/$defs/Secret",
+              "description": "the token. A `${NAME}` reference, so the config file holds the name\nand the secret store holds the value."
+            },
+            "type": {
+              "const": "bearer",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "token"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "A fixed value in a header of your choosing — for webhook senders and\nreceivers that can't use `Authorization` but can carry a header of their\nown, which is most of them.",
+          "properties": {
+            "name": {
+              "description": "the header's name, matched case-insensitively on the way in. On an\n`http` input it may not be one of the headers an `envelope` passes\nthrough, since that would write the credential into the messages.",
+              "type": "string"
+            },
+            "type": {
+              "const": "header",
+              "type": "string"
+            },
+            "value": {
+              "$ref": "#/$defs/Secret",
+              "description": "the exact value that header must have. A `${NAME}` reference, as\nabove."
+            }
+          },
+          "required": [
+            "type",
+            "name",
+            "value"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "HttpBodyKind": {
+      "description": "What the body of one request from an `http` output holds.\n\nA closed set of two, and the choice is the receiving API's rather than a\ntuning knob: an ingest endpoint that takes an array wants `batch`, a webhook\nthat takes one event per call wants `message`. There is no third spelling\n(an envelope with a count, say) because that is the receiver's shape, and\nshaping the request is the http transform's outstanding work, not this\ncomponent's.",
+      "oneOf": [
+        {
+          "const": "batch",
+          "description": "The whole batch as one JSON array, in one request. One round trip per\nbatch however many messages it holds, which is why it is the default.",
+          "type": "string"
+        },
+        {
+          "const": "message",
+          "description": "One request per message, each body the message itself. Requests go out\nin order and the first failure fails the batch, so the messages after it\nare not sent — the same all-or-nothing a broker publish loop has.",
+          "type": "string"
+        }
+      ]
+    },
+    "HttpResponseKind": {
+      "description": "What an `http` transform does with the reply.",
+      "oneOf": [
+        {
+          "const": "replace",
+          "description": "The reply is the new batch: a JSON array of messages under `body:\nbatch`, a message or an array of them under `body: message`. The\nservice decides what carries on.",
+          "type": "string"
+        },
+        {
+          "const": "merge",
+          "description": "The reply is written onto the message that caused it, under `as`. Under\n`body: batch` an array reply of the batch's length is written\nelement-wise, and any other reply onto every message. Nothing the\npipeline sent is lost.",
+          "type": "string"
+        }
+      ]
+    },
     "HttpTransformConfig": {
-      "description": "Posts the batch to an http endpoint as a JSON array and replaces it with the\nJSON array in the response — so the service on the other end is the\ntransform.",
+      "description": "Sends the batch to an http endpoint and carries on with what comes back —\nso the service on the other end is the transform. The round trip to a\nmodel: a `buffer` and a `features` in front of it make the request the\nseven numbers with the identifiers, and `response: merge` writes the\nanswer onto that message so the identifiers survive the trip.\n\n`body` says whether one request carries the whole batch as a JSON array\nor each message goes on its own; `wrap` puts that under a key\n(`{\"instances\": …}`) for an API that wants one. `response` says what the\nreply is: `replace` makes it the new batch — the JSON array it holds under\n`batch`, the message (or array of messages) it holds under `message` —\nand `merge` writes it onto the message under `as` instead. `unwrap` reads\nthe reply out from under a key first. Anything but a 2xx fails the batch\nwith the endpoint's own words quoted; a network failure or a 5xx is\nretried `retries` times with backoff before it does.",
       "properties": {
+        "as": {
+          "description": "for `response: merge`: the field the reply is written under",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "auth": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/HttpAuthConfig"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "what this transform presents to be allowed to send. Absent sends no\ncredential"
+        },
+        "body": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/HttpBodyKind"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "what one request carries. Defaults to `batch`"
+        },
+        "response": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/HttpResponseKind"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "what to do with the reply. Defaults to `replace`"
+        },
+        "retries": {
+          "description": "how many times a request that failed to reach the endpoint, or was\nanswered 5xx or 429, is tried again before the batch fails. Defaults to\n0. Each retry waits a little longer than the last, and the pipeline\nwaits with it",
+          "format": "uint32",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "timeout_seconds": {
+          "description": "how long one request may take before it is given up on, in seconds.\nDefaults to 30",
+          "format": "uint64",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "unwrap": {
+          "description": "a key to read the reply out from under, for an API that answers\n`{\"predictions\": …}`",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
         "url": {
-          "description": "endpoint to send the batch to",
+          "description": "endpoint to send to",
           "type": "string"
         },
         "verb": {
           "$ref": "#/$defs/HttpVerb",
-          "description": "http method. Accepted but not honoured yet: every request is a POST."
+          "description": "http method. `GET` and `DELETE` are refused — a request with no body\nwould send none of the messages"
+        },
+        "wrap": {
+          "description": "a key to put the body under, for an API that wants `{\"key\": …}`",
+          "type": [
+            "string",
+            "null"
+          ]
         }
       },
       "required": [
@@ -5616,6 +7601,11 @@ Run a draft's transforms over some messages.
           "const": "stddev",
           "description": "The population standard deviation. Numbers only.",
           "type": "string"
+        },
+        {
+          "const": "slope",
+          "description": "How fast the field is changing, per second, by a least-squares line\nagainst each message's time. Numbers only, and it needs the reducer's\n`time` setting — a slope with no time is a slope per nothing.",
+          "type": "string"
         }
       ]
     },
@@ -5639,6 +7629,14 @@ Run a draft's transforms over some messages.
         "on_missing": {
           "$ref": "#/$defs/MissingFieldPolicy",
           "description": "what to do about a message missing one of the fields above"
+        },
+        "time": {
+          "description": "the field carrying each message's time — an RFC 3339 string or\nmilliseconds since the epoch. Needed by `slope`; a message missing it\nfails the batch. Leave it out and each message's time is when it\narrived.",
+          "type": [
+            "string",
+            "null"
+          ],
+          "x-message-field": true
         }
       },
       "required": [
@@ -5687,6 +7685,142 @@ Run a draft's transforms over some messages.
         "field",
         "as"
       ],
+      "type": "object"
+    },
+    "ResampleMethod": {
+      "description": "How the readings that fell in one interval become the value at its grid\npoint, and what an interval with none in it gets.",
+      "oneOf": [
+        {
+          "const": "last",
+          "description": "The last reading in the interval. An empty interval emits nothing.",
+          "type": "string"
+        },
+        {
+          "const": "mean",
+          "description": "The mean of the readings in the interval. An empty interval emits\nnothing.",
+          "type": "string"
+        },
+        {
+          "const": "linear",
+          "description": "The value at the grid point by a straight line between the last\nreading before it and the first after — so a grid point is emitted\nonce the reading after it has arrived. Empty intervals in between are\nfilled by the same line.",
+          "type": "string"
+        },
+        {
+          "const": "forward_fill",
+          "description": "The last reading seen, carried forward: an empty interval repeats the\nlast value, for up to `max_gap_seconds`, and then stops. The one method\nthat emits from a quiet series — which is what makes a sparse\nchange-on-value signal into a regular one.",
+          "type": "string"
+        }
+      ]
+    },
+    "ResampleTransformConfig": {
+      "description": "Puts a series onto a regular grid: one message per key per `interval`\nseconds, at times that are multiples of it, whichever rate the readings\narrive at. The precondition every window model has, and the second real\nuser of the run loop's tick — a `forward_fill` series keeps emitting while\nits readings have gone quiet.\n\nThe message out carries the group fields under their leaf names, the grid\ntime under `time`'s name (or `time` when arrival time is used) as an RFC\n3339 string, and the value under `as` (the field's leaf when left out). A\ngrid point is emitted when a reading past it arrives, or — for `forward_fill`\nonly — when the clock passes it with nothing arriving.",
+      "properties": {
+        "as": {
+          "description": "the field the value is written under. The field's leaf when left out",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "field": {
+          "description": "the numeric field to resample",
+          "type": "string",
+          "x-message-field": true
+        },
+        "group_by": {
+          "description": "the fields that identify a series, the reducer's way. Leave it out for\none series",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "interval_seconds": {
+          "description": "the spacing of the grid, in seconds",
+          "format": "double",
+          "type": "number"
+        },
+        "max_gap_seconds": {
+          "description": "for `forward_fill`: how long a value is carried into empty intervals\nbefore the series is left to go quiet. Carried forever when left out",
+          "format": "double",
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "method": {
+          "$ref": "#/$defs/ResampleMethod",
+          "description": "how the readings in an interval become its value"
+        },
+        "on_missing": {
+          "$ref": "#/$defs/MissingFieldPolicy",
+          "description": "what to do about a message missing the field or a group field"
+        },
+        "time": {
+          "description": "the field carrying each message's time — RFC 3339 or milliseconds since\nthe epoch. Leave it out for arrival time, in which case empty intervals\nare noticed by the clock rather than by the next reading",
+          "type": [
+            "string",
+            "null"
+          ],
+          "x-message-field": true
+        }
+      },
+      "required": [
+        "field",
+        "interval_seconds",
+        "method"
+      ],
+      "title": "resample",
+      "type": "object"
+    },
+    "RollingTransformConfig": {
+      "description": "Writes onto each message aggregations over the last few messages of its\nseries — the last `size` of them, or the last `seconds`' worth, or both\nlimits at once. The reducer's `{function, field, as}` list, the reducer's\nfunctions; a second component rather than a `window` on `reduce` because\nthe cardinality differs — one message out per message in, not one per\ngroup per batch.\n\n`size` is always required, because it is the bound: a window by time alone\ngrows with the rate of the stream, and every piece of state has a bound.\n`seconds` on top of it also drops what is older than that, off the `time`\nfield. `count` needs a `field` here — it counts how many of the window\ncarried one, which is `size` once the window is warm and the warm-up check\nbefore that.",
+      "properties": {
+        "aggregations": {
+          "description": "what to compute over the window. At least one, each with a distinct `as`",
+          "items": {
+            "$ref": "#/$defs/Aggregation"
+          },
+          "type": "array"
+        },
+        "group_by": {
+          "description": "the fields that identify a series, the reducer's way. Leave it out for\none series",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "on_missing": {
+          "$ref": "#/$defs/MissingFieldPolicy",
+          "description": "what to do about a message missing an aggregated field or a group field"
+        },
+        "seconds": {
+          "description": "also drop from the window whatever is older than this many seconds,\noff the `time` field",
+          "format": "double",
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "size": {
+          "description": "how many messages the window holds at most",
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "time": {
+          "description": "the field carrying each message's time — RFC 3339 or milliseconds since\nthe epoch. Leave it out for arrival time",
+          "type": [
+            "string",
+            "null"
+          ],
+          "x-message-field": true
+        }
+      },
+      "required": [
+        "aggregations",
+        "size"
+      ],
+      "title": "rolling",
       "type": "object"
     },
     "ScriptScope": {
@@ -5771,6 +7905,159 @@ Run a draft's transforms over some messages.
         "source"
       ],
       "title": "script",
+      "type": "object"
+    },
+    "Secret": {
+      "description": "A config value that may *reference* secrets rather than contain them.\n\nOn the wire it is an ordinary JSON string, but `${NAME}` placeholders in it\nare replaced with real values when the pipeline is built, against whatever\nsecret store the server was started with:\n\n```json\n{ \"type\": \"nats\", \"urls\": \"nats://app:${NATS_PASSWORD}@broker:4222\" }\n```\n\nThe unresolved form is the only one this type ever holds. That is what makes\nit safe to commit, safe to hand back from `GET /api/pipelines` and safe to show\nin the UI — a resolved value exists only inside the built runtime component,\nnever in a `Config`. Resolution deliberately lives in the root crate: this\ncrate compiles to wasm for the frontend, which must not be able to hold a\nresolved secret at all.\n\nA value with no `${...}` in it is passed through untouched, so fields that\nhold nothing sensitive need no special handling.",
+      "type": "string"
+    },
+    "SmoothMethod": {
+      "description": "How a value is smoothed against the ones before it.",
+      "oneOf": [
+        {
+          "description": "An exponentially weighted moving average — cheap, no window, follows\nthe data as closely as `alpha` says. Give `alpha` or `half_life`, not\nboth.",
+          "properties": {
+            "alpha": {
+              "description": "the weight of the newest value, 0 to 1",
+              "format": "double",
+              "type": [
+                "number",
+                "null"
+              ]
+            },
+            "half_life": {
+              "description": "the number of messages after which a value's weight has halved —\nthe spelling with an intuition behind it",
+              "format": "double",
+              "type": [
+                "number",
+                "null"
+              ]
+            },
+            "type": {
+              "const": "ewma",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "The median of the last `size` values, this one included. Removes\nsingle-sample spikes outright, which a mean only spreads out.",
+          "properties": {
+            "size": {
+              "description": "how many values the window holds",
+              "format": "uint",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "type": {
+              "const": "median",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "size"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "A Hampel filter: the value is kept unless it is further than\n`threshold` robust standard deviations from the window's median, in\nwhich case the median replaces it. The right first stage in front of\nany detector — it removes the outliers without smearing the signal.",
+          "properties": {
+            "size": {
+              "description": "how many values the window holds, this one included",
+              "format": "uint",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "threshold": {
+              "description": "how many scaled MADs from the median count as an outlier. `3`\nwhen left out",
+              "format": "double",
+              "type": [
+                "number",
+                "null"
+              ]
+            },
+            "type": {
+              "const": "hampel",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "size"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "A Savitzky–Golay filter: a polynomial of `order` fitted to the last\n`size` values by least squares, evaluated at the newest. Smooths while\nkeeping the shape of peaks that a moving average flattens. Trailing\nrather than centred, because a stream cannot see the future; until\nthe window holds more than `order` values the value passes untouched.",
+          "properties": {
+            "order": {
+              "description": "the degree of the polynomial, below `size`. `2` when left out",
+              "format": "uint",
+              "minimum": 0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "size": {
+              "description": "how many values the window holds, this one included",
+              "format": "uint",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "type": {
+              "const": "savitzky_golay",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "size"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "SmoothTransformConfig": {
+      "description": "Smooths a numeric field against the values before it in its series, writing\nthe result onto the message — over the field itself, or under `as`.",
+      "properties": {
+        "as": {
+          "description": "the field the smoothed value is written under. Leave it out to replace\nthe field itself",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "field": {
+          "description": "the numeric field to smooth",
+          "type": "string",
+          "x-message-field": true
+        },
+        "group_by": {
+          "description": "the fields that identify a series, the reducer's way. Leave it out for\none series",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "method": {
+          "$ref": "#/$defs/SmoothMethod",
+          "description": "how"
+        },
+        "on_missing": {
+          "$ref": "#/$defs/MissingFieldPolicy",
+          "description": "what to do about a message missing the field or a group field"
+        }
+      },
+      "required": [
+        "field",
+        "method"
+      ],
+      "title": "smooth",
       "type": "object"
     },
     "SplitterTransformConfig": {
@@ -5908,6 +8195,97 @@ Run a draft's transforms over some messages.
           "properties": {
             "type": {
               "const": "script",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type"
+          ],
+          "type": "object"
+        },
+        {
+          "$ref": "#/$defs/DeadbandTransformConfig",
+          "properties": {
+            "type": {
+              "const": "deadband",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type"
+          ],
+          "type": "object"
+        },
+        {
+          "$ref": "#/$defs/DeriveTransformConfig",
+          "properties": {
+            "type": {
+              "const": "derive",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type"
+          ],
+          "type": "object"
+        },
+        {
+          "$ref": "#/$defs/RollingTransformConfig",
+          "properties": {
+            "type": {
+              "const": "rolling",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type"
+          ],
+          "type": "object"
+        },
+        {
+          "$ref": "#/$defs/SmoothTransformConfig",
+          "properties": {
+            "type": {
+              "const": "smooth",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type"
+          ],
+          "type": "object"
+        },
+        {
+          "$ref": "#/$defs/DetectTransformConfig",
+          "properties": {
+            "type": {
+              "const": "detect",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type"
+          ],
+          "type": "object"
+        },
+        {
+          "$ref": "#/$defs/ResampleTransformConfig",
+          "properties": {
+            "type": {
+              "const": "resample",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type"
+          ],
+          "type": "object"
+        },
+        {
+          "$ref": "#/$defs/FeaturesTransformConfig",
+          "properties": {
+            "type": {
+              "const": "features",
               "type": "string"
             }
           },
@@ -6181,6 +8559,32 @@ The same wire shape the run loop's `PipelineView` serializes to — this is the 
           "type": "string"
         }
       ]
+    },
+    "Band": {
+      "description": "The power in one frequency band, as a feature of its own.",
+      "properties": {
+        "as": {
+          "description": "the field the band's power is written under",
+          "type": "string"
+        },
+        "high_hz": {
+          "description": "the top of the band, in hertz, exclusive",
+          "format": "double",
+          "type": "number"
+        },
+        "low_hz": {
+          "description": "the bottom of the band, in hertz, inclusive",
+          "format": "double",
+          "type": "number"
+        }
+      },
+      "required": [
+        "low_hz",
+        "high_hz",
+        "as"
+      ],
+      "title": "band",
+      "type": "object"
     },
     "BufferConfig": {
       "description": "How an input's messages are gathered into batches before the transforms see\nthem.\n\nAll three shapes are the same two limits with different halves left off — a\ncount, a time, or both, whichever is reached first. **A buffer never emits an\nempty batch**: the clock starts when the first message of a batch arrives,\nnot when the window was asked for, so an input that goes quiet emits nothing\nrather than a tick of nothing.\n\n`size` is a floor rather than a ceiling, the same rule a file output's\n`max_rows` follows: an arriving batch is never split, so an input already\nproducing batches of its own (`max_batch` on kafka and nats) can overshoot.",
@@ -6672,6 +9076,397 @@ The same wire shape the run loop's `PipelineView` serializes to — this is the 
       ],
       "type": "object"
     },
+    "DeadbandMode": {
+      "description": "Whether a deadband's `delta` is an amount or a fraction of the last value\nthat passed.",
+      "oneOf": [
+        {
+          "const": "absolute",
+          "description": "`delta` is in the field's own units: `0.5` is half a degree.",
+          "type": "string"
+        },
+        {
+          "const": "percent",
+          "description": "`delta` is a percentage of the last value that passed: `2` is two\npercent. A last value of zero passes everything, since a fraction of\nnothing is nothing.",
+          "type": "string"
+        }
+      ]
+    },
+    "DeadbandTransformConfig": {
+      "description": "Drops a message unless its field has moved far enough from the last one\nthat passed — the single most used transform in any historian pipeline,\nand a *stateful* filter, which is why `filter` cannot be it.\n\nThe first message per key always passes. After that a message passes when\n`field` differs from the last passed value by more than `delta`, or when\n`max_seconds` have gone by since anything passed, so a steady reading is\nstill confirmed now and then. `flatline_seconds` is the sensor-health half:\nwhen the value has not moved in that long the next message passes with\n`stuck: true` on it, once per flat stretch, so a stuck instrument is\ndistinguishable from a quiet one downstream.",
+      "properties": {
+        "delta": {
+          "description": "how far the value has to move to pass, in the field's units or as a\npercentage, by `mode`",
+          "format": "double",
+          "type": "number"
+        },
+        "field": {
+          "description": "the numeric field the band is on",
+          "type": "string",
+          "x-message-field": true
+        },
+        "flatline_seconds": {
+          "description": "after this many seconds with no movement, let the next message through\ncarrying `stuck: true` — once per flat stretch",
+          "format": "double",
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "group_by": {
+          "description": "the fields that identify a series, the reducer's way. Leave it out for\none series",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "max_seconds": {
+          "description": "pass a message anyway once this many seconds have gone by since the\nlast one that passed, so a steady value is still reported now and then",
+          "format": "double",
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "mode": {
+          "$ref": "#/$defs/DeadbandMode",
+          "description": "what `delta` is measured in"
+        },
+        "on_missing": {
+          "$ref": "#/$defs/MissingFieldPolicy",
+          "description": "what to do about a message missing the field or a group field"
+        },
+        "time": {
+          "description": "the field carrying each message's time — RFC 3339 or milliseconds since\nthe epoch. Leave it out for arrival time",
+          "type": [
+            "string",
+            "null"
+          ],
+          "x-message-field": true
+        }
+      },
+      "required": [
+        "field",
+        "delta"
+      ],
+      "title": "deadband",
+      "type": "object"
+    },
+    "Derivation": {
+      "description": "One derived value and the field it is written to.",
+      "properties": {
+        "as": {
+          "description": "the field the answer is written under",
+          "type": "string"
+        },
+        "field": {
+          "description": "the numeric field it is derived from",
+          "type": "string",
+          "x-message-field": true
+        },
+        "function": {
+          "$ref": "#/$defs/DeriveFnKind",
+          "description": "how the value is derived from this message and the previous one"
+        },
+        "wrap_at": {
+          "description": "for `counter`: the value the counter wraps back to zero at, so a drop\nis read as having run through the top rather than as a reset",
+          "format": "double",
+          "type": [
+            "number",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "function",
+        "field",
+        "as"
+      ],
+      "title": "derivation",
+      "type": "object"
+    },
+    "DeriveFnKind": {
+      "description": "How one message's value is combined with the previous one's.",
+      "oneOf": [
+        {
+          "const": "rate",
+          "description": "The change per second since the previous message, off the `time`\nfield. `null` on the first message and when no time has passed.",
+          "type": "string"
+        },
+        {
+          "const": "delta",
+          "description": "The change since the previous message. `null` on the first.",
+          "type": "string"
+        },
+        {
+          "const": "cumsum",
+          "description": "The running total of the field, from the first message on.",
+          "type": "string"
+        },
+        {
+          "const": "counter",
+          "description": "The running total of the *increases* — for a counter that resets or\nwraps. A drop below the previous value counts as a wrap when `wrap_at`\nis set (the increase runs through the top), and as a reset otherwise\n(the new value is the increase).",
+          "type": "string"
+        }
+      ]
+    },
+    "DeriveTransformConfig": {
+      "description": "Writes onto each message something that needs the previous one: a rate of\nchange, a delta, a running total, a wrap-tolerant counter. Not a `map`\noperation because a `map` sees one message at a time; this remembers the\nlast per key.\n\nSeveral derivations run at once and each is written under its own `as`, so\none pass gives both `delta` and `rate`. The first message per key has no\nprevious, and the derivations that need one write `null` for it.",
+      "properties": {
+        "derive": {
+          "description": "what to derive. At least one, each with a distinct `as`",
+          "items": {
+            "$ref": "#/$defs/Derivation"
+          },
+          "type": "array"
+        },
+        "group_by": {
+          "description": "the fields that identify a series, the reducer's way. Leave it out for\none series",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "on_missing": {
+          "$ref": "#/$defs/MissingFieldPolicy",
+          "description": "what to do about a message missing a derived field or a group field"
+        },
+        "time": {
+          "description": "the field carrying each message's time — RFC 3339 or milliseconds since\nthe epoch. Leave it out for arrival time",
+          "type": [
+            "string",
+            "null"
+          ],
+          "x-message-field": true
+        }
+      },
+      "required": [
+        "derive"
+      ],
+      "title": "derive",
+      "type": "object"
+    },
+    "DetectMethod": {
+      "description": "How an anomaly is decided.\n\nThe window methods compare a value against the values *before* it, never\nincluding it, so a spike does not pull the baseline it is measured against.\nThe chart methods freeze their baseline at the end of the warm-up, which is\nwhat a control chart is: a fixed idea of normal that the process is held to.",
+      "oneOf": [
+        {
+          "description": "Further than `threshold` standard deviations from the mean of the\nlast `size` values.",
+          "properties": {
+            "size": {
+              "description": "how many earlier values the baseline is drawn from",
+              "format": "uint",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "threshold": {
+              "description": "how many standard deviations count. `3` when left out",
+              "format": "double",
+              "type": [
+                "number",
+                "null"
+              ]
+            },
+            "type": {
+              "const": "zscore",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "size"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "The robust twin: further than `threshold` scaled median absolute\ndeviations from the median of the last `size` values. Prefer it when\nthe baseline itself contains outliers.",
+          "properties": {
+            "size": {
+              "description": "how many earlier values the baseline is drawn from",
+              "format": "uint",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "threshold": {
+              "description": "how many scaled MADs count. `3.5` when left out",
+              "format": "double",
+              "type": [
+                "number",
+                "null"
+              ]
+            },
+            "type": {
+              "const": "mad",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "size"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "A two-sided CUSUM: sums the drift above and below `target`, and flags\nwhen either sum passes `threshold`. Finds a small sustained shift a\nsingle-point test never sees. The sum that fired is reset.",
+          "properties": {
+            "drift": {
+              "description": "the slack per message that is not counted as drift, in the\nfield's units",
+              "format": "double",
+              "type": "number"
+            },
+            "target": {
+              "description": "the value the series is expected to sit at. Left out, the mean of\nthe warm-up is used",
+              "format": "double",
+              "type": [
+                "number",
+                "null"
+              ]
+            },
+            "threshold": {
+              "description": "the accumulated drift that counts",
+              "format": "double",
+              "type": "number"
+            },
+            "type": {
+              "const": "cusum",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "drift",
+            "threshold"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "An EWMA control chart: the smoothed value leaves a band of\n`threshold` standard deviations around the warm-up mean. Sensitive to\nsmall shifts, robust to single points.",
+          "properties": {
+            "alpha": {
+              "description": "the weight of the newest value, 0 to 1. `0.2` when left out",
+              "format": "double",
+              "type": [
+                "number",
+                "null"
+              ]
+            },
+            "threshold": {
+              "description": "the width of the band, in standard deviations. `3` when left out",
+              "format": "double",
+              "type": [
+                "number",
+                "null"
+              ]
+            },
+            "type": {
+              "const": "ewma_chart",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "The Western Electric rules against the warm-up mean and deviation: one\npoint beyond 3σ, two of three beyond 2σ on one side, four of five\nbeyond 1σ on one side, eight in a row on one side. The rule that fired\nis written beside the flag.",
+          "properties": {
+            "type": {
+              "const": "western_electric",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "The last `size` values are identical — a stuck instrument.",
+          "properties": {
+            "size": {
+              "description": "how many identical values in a row count",
+              "format": "uint",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "type": {
+              "const": "flatline",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "size"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "DetectMode": {
+      "description": "Whether every message comes out annotated, or only the anomalies.",
+      "oneOf": [
+        {
+          "const": "annotate",
+          "description": "Every message passes, carrying the flag and the score.",
+          "type": "string"
+        },
+        {
+          "const": "only_anomalies",
+          "description": "Only the anomalies pass, annotated. The stream becomes an alarm feed.",
+          "type": "string"
+        }
+      ]
+    },
+    "DetectTransformConfig": {
+      "description": "Flags anomalies in a numeric field against its own series — one component\nwith a `method`, the way `filter` is one component with a kind.\n\nWrites a boolean under `as` (`anomaly` when left out), and beside it\n`<as>_score` — how far outside normal the value was, in the method's own\nunits — so a downstream `filter` can be stricter than the threshold. Nothing\nis flagged during the warm-up of `min_samples` messages per key, because\nuntil then there is no idea of normal to be outside of.",
+      "properties": {
+        "as": {
+          "description": "the field the flag is written under; the score goes under `<as>_score`.\n`anomaly` when left out",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "field": {
+          "description": "the numeric field to watch",
+          "type": "string",
+          "x-message-field": true
+        },
+        "group_by": {
+          "description": "the fields that identify a series, the reducer's way. Leave it out for\none series",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "method": {
+          "$ref": "#/$defs/DetectMethod",
+          "description": "how an anomaly is decided"
+        },
+        "min_samples": {
+          "description": "how many messages per key to see before flagging anything. The\nmethod's window `size` when left out, or 30 for a method without one",
+          "format": "uint",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "mode": {
+          "$ref": "#/$defs/DetectMode",
+          "description": "whether everything comes out annotated or only the anomalies"
+        },
+        "on_missing": {
+          "$ref": "#/$defs/MissingFieldPolicy",
+          "description": "what to do about a message missing the field or a group field"
+        }
+      },
+      "required": [
+        "field",
+        "method"
+      ],
+      "title": "detect",
+      "type": "object"
+    },
     "DummyConfig": {
       "description": "Emits one generated message on a fixed interval — a heartbeat for testing a\npipeline without a real source attached.\n\nEvery message carries a `value` and the `current_time` it was emitted at.\nWhat the `value` holds is the `payload` field's business: a number sampled\nfrom a sine wave, so a chart of it has a shape, or a random sentence, so a\ntext transform has something to chew on.",
       "properties": {
@@ -6796,6 +9591,147 @@ The same wire shape the run loop's `PipelineView` serializes to — this is the 
           "type": "string"
         }
       ]
+    },
+    "FeatureKind": {
+      "description": "One number that describes a window of readings.",
+      "oneOf": [
+        {
+          "const": "mean",
+          "description": "The arithmetic mean.",
+          "type": "string"
+        },
+        {
+          "const": "std",
+          "description": "The population standard deviation.",
+          "type": "string"
+        },
+        {
+          "const": "min",
+          "description": "The smallest value.",
+          "type": "string"
+        },
+        {
+          "const": "max",
+          "description": "The largest value.",
+          "type": "string"
+        },
+        {
+          "const": "range",
+          "description": "The largest less the smallest.",
+          "type": "string"
+        },
+        {
+          "const": "slope",
+          "description": "The least-squares slope — per second against the `time` field, per\nmessage without one.",
+          "type": "string"
+        },
+        {
+          "const": "skew",
+          "description": "Which way the tail points.",
+          "type": "string"
+        },
+        {
+          "const": "kurtosis",
+          "description": "How heavy the tails are (excess kurtosis).",
+          "type": "string"
+        },
+        {
+          "const": "rms",
+          "description": "The root mean square.",
+          "type": "string"
+        },
+        {
+          "const": "crest_factor",
+          "description": "The peak magnitude over the RMS — how spiky the window is.",
+          "type": "string"
+        },
+        {
+          "const": "zero_crossings",
+          "description": "How many times the signal crossed zero.",
+          "type": "string"
+        },
+        {
+          "const": "n_peaks",
+          "description": "How many local maxima there were.",
+          "type": "string"
+        },
+        {
+          "const": "autocorr1",
+          "description": "The autocorrelation at lag one — how smooth the signal is.",
+          "type": "string"
+        },
+        {
+          "const": "dominant_frequency",
+          "description": "The strongest frequency above DC, in hertz. Needs a sample rate: the\n`time` field, or `sample_rate_hz`.",
+          "type": "string"
+        },
+        {
+          "const": "count",
+          "description": "How many readings the window held.",
+          "type": "string"
+        },
+        {
+          "const": "duration",
+          "description": "From the first reading to the last, in seconds, off the `time` field.",
+          "type": "string"
+        }
+      ]
+    },
+    "FeaturesTransformConfig": {
+      "description": "Folds a window of readings into one descriptor message per group — the\nseven numbers with the identifiers that a model endpoint actually wants,\nrather than the four hundred raw readings. Pair it with a `buffer` on the\ninput, or it will only ever see one reading at a time.\n\nEach feature in `include` is written under its own name (`mean`, `rms`,\n`crest_factor` …), each `bands` entry under its `as`, and the `group_by`\nfields under their leaf names, the reducer's way. A feature that has no\nanswer for the window — a slope of one point, a tone in a flat signal —\nis `null`. The spectral ones (`dominant_frequency`, `bands`) need a sample\nrate, which is `sample_rate_hz` when given and otherwise derived from the\n`time` field; without either they refuse to build. Nothing here keeps\nstate, so no bucket is needed.",
+      "properties": {
+        "bands": {
+          "description": "frequency bands whose power is wanted, each under its `as`",
+          "items": {
+            "$ref": "#/$defs/Band"
+          },
+          "type": "array"
+        },
+        "field": {
+          "description": "the numeric field the window is of",
+          "type": "string",
+          "x-message-field": true
+        },
+        "group_by": {
+          "description": "the fields that identify a series, the reducer's way. Leave it out for\nthe whole batch as one window",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "include": {
+          "description": "which features to compute, each written under its own name",
+          "items": {
+            "$ref": "#/$defs/FeatureKind"
+          },
+          "type": "array"
+        },
+        "on_missing": {
+          "$ref": "#/$defs/MissingFieldPolicy",
+          "description": "what to do about a reading missing the field or a group field"
+        },
+        "sample_rate_hz": {
+          "description": "the readings' sample rate in hertz, for the spectral features. Wins\nover one derived from `time`, for a source whose timestamps are coarse",
+          "format": "double",
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "time": {
+          "description": "the field carrying each reading's time — RFC 3339 or milliseconds since\nthe epoch. Gives `slope` and `duration` their seconds and the spectral\nfeatures their sample rate",
+          "type": [
+            "string",
+            "null"
+          ],
+          "x-message-field": true
+        }
+      },
+      "required": [
+        "field"
+      ],
+      "title": "features",
+      "type": "object"
     },
     "FileFormat": {
       "description": "How the messages in a file are laid out.\n\nBoth are JSON — the difference is whether the file is one document or one\ndocument per line. `ndjson` is the one to want for anything that streams:\nthe file is valid after every batch, so a run that is still going (or that\ndied) is still readable, and every tool that eats logs eats it.",
@@ -7063,16 +9999,103 @@ The same wire shape the run loop's `PipelineView` serializes to — this is the 
       "title": "http",
       "type": "object"
     },
+    "HttpResponseKind": {
+      "description": "What an `http` transform does with the reply.",
+      "oneOf": [
+        {
+          "const": "replace",
+          "description": "The reply is the new batch: a JSON array of messages under `body:\nbatch`, a message or an array of them under `body: message`. The\nservice decides what carries on.",
+          "type": "string"
+        },
+        {
+          "const": "merge",
+          "description": "The reply is written onto the message that caused it, under `as`. Under\n`body: batch` an array reply of the batch's length is written\nelement-wise, and any other reply onto every message. Nothing the\npipeline sent is lost.",
+          "type": "string"
+        }
+      ]
+    },
     "HttpTransformConfig": {
-      "description": "Posts the batch to an http endpoint as a JSON array and replaces it with the\nJSON array in the response — so the service on the other end is the\ntransform.",
+      "description": "Sends the batch to an http endpoint and carries on with what comes back —\nso the service on the other end is the transform. The round trip to a\nmodel: a `buffer` and a `features` in front of it make the request the\nseven numbers with the identifiers, and `response: merge` writes the\nanswer onto that message so the identifiers survive the trip.\n\n`body` says whether one request carries the whole batch as a JSON array\nor each message goes on its own; `wrap` puts that under a key\n(`{\"instances\": …}`) for an API that wants one. `response` says what the\nreply is: `replace` makes it the new batch — the JSON array it holds under\n`batch`, the message (or array of messages) it holds under `message` —\nand `merge` writes it onto the message under `as` instead. `unwrap` reads\nthe reply out from under a key first. Anything but a 2xx fails the batch\nwith the endpoint's own words quoted; a network failure or a 5xx is\nretried `retries` times with backoff before it does.",
       "properties": {
+        "as": {
+          "description": "for `response: merge`: the field the reply is written under",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "auth": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/HttpAuthConfig"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "what this transform presents to be allowed to send. Absent sends no\ncredential"
+        },
+        "body": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/HttpBodyKind"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "what one request carries. Defaults to `batch`"
+        },
+        "response": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/HttpResponseKind"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "what to do with the reply. Defaults to `replace`"
+        },
+        "retries": {
+          "description": "how many times a request that failed to reach the endpoint, or was\nanswered 5xx or 429, is tried again before the batch fails. Defaults to\n0. Each retry waits a little longer than the last, and the pipeline\nwaits with it",
+          "format": "uint32",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "timeout_seconds": {
+          "description": "how long one request may take before it is given up on, in seconds.\nDefaults to 30",
+          "format": "uint64",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "unwrap": {
+          "description": "a key to read the reply out from under, for an API that answers\n`{\"predictions\": …}`",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
         "url": {
-          "description": "endpoint to send the batch to",
+          "description": "endpoint to send to",
           "type": "string"
         },
         "verb": {
           "$ref": "#/$defs/HttpVerb",
-          "description": "http method. Accepted but not honoured yet: every request is a POST."
+          "description": "http method. `GET` and `DELETE` are refused — a request with no body\nwould send none of the messages"
+        },
+        "wrap": {
+          "description": "a key to put the body under, for an API that wants `{\"key\": …}`",
+          "type": [
+            "string",
+            "null"
+          ]
         }
       },
       "required": [
@@ -8285,6 +11308,19 @@ The same wire shape the run loop's `PipelineView` serializes to — this is the 
             "type"
           ],
           "type": "object"
+        },
+        {
+          "$ref": "#/$defs/TidepoolOutputConfig",
+          "properties": {
+            "type": {
+              "const": "tidepool",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type"
+          ],
+          "type": "object"
         }
       ],
       "type": "object"
@@ -8524,6 +11560,11 @@ The same wire shape the run loop's `PipelineView` serializes to — this is the 
           "const": "stddev",
           "description": "The population standard deviation. Numbers only.",
           "type": "string"
+        },
+        {
+          "const": "slope",
+          "description": "How fast the field is changing, per second, by a least-squares line\nagainst each message's time. Numbers only, and it needs the reducer's\n`time` setting — a slope with no time is a slope per nothing.",
+          "type": "string"
         }
       ]
     },
@@ -8547,6 +11588,14 @@ The same wire shape the run loop's `PipelineView` serializes to — this is the 
         "on_missing": {
           "$ref": "#/$defs/MissingFieldPolicy",
           "description": "what to do about a message missing one of the fields above"
+        },
+        "time": {
+          "description": "the field carrying each message's time — an RFC 3339 string or\nmilliseconds since the epoch. Needed by `slope`; a message missing it\nfails the batch. Leave it out and each message's time is when it\narrived.",
+          "type": [
+            "string",
+            "null"
+          ],
+          "x-message-field": true
         }
       },
       "required": [
@@ -8595,6 +11644,142 @@ The same wire shape the run loop's `PipelineView` serializes to — this is the 
         "field",
         "as"
       ],
+      "type": "object"
+    },
+    "ResampleMethod": {
+      "description": "How the readings that fell in one interval become the value at its grid\npoint, and what an interval with none in it gets.",
+      "oneOf": [
+        {
+          "const": "last",
+          "description": "The last reading in the interval. An empty interval emits nothing.",
+          "type": "string"
+        },
+        {
+          "const": "mean",
+          "description": "The mean of the readings in the interval. An empty interval emits\nnothing.",
+          "type": "string"
+        },
+        {
+          "const": "linear",
+          "description": "The value at the grid point by a straight line between the last\nreading before it and the first after — so a grid point is emitted\nonce the reading after it has arrived. Empty intervals in between are\nfilled by the same line.",
+          "type": "string"
+        },
+        {
+          "const": "forward_fill",
+          "description": "The last reading seen, carried forward: an empty interval repeats the\nlast value, for up to `max_gap_seconds`, and then stops. The one method\nthat emits from a quiet series — which is what makes a sparse\nchange-on-value signal into a regular one.",
+          "type": "string"
+        }
+      ]
+    },
+    "ResampleTransformConfig": {
+      "description": "Puts a series onto a regular grid: one message per key per `interval`\nseconds, at times that are multiples of it, whichever rate the readings\narrive at. The precondition every window model has, and the second real\nuser of the run loop's tick — a `forward_fill` series keeps emitting while\nits readings have gone quiet.\n\nThe message out carries the group fields under their leaf names, the grid\ntime under `time`'s name (or `time` when arrival time is used) as an RFC\n3339 string, and the value under `as` (the field's leaf when left out). A\ngrid point is emitted when a reading past it arrives, or — for `forward_fill`\nonly — when the clock passes it with nothing arriving.",
+      "properties": {
+        "as": {
+          "description": "the field the value is written under. The field's leaf when left out",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "field": {
+          "description": "the numeric field to resample",
+          "type": "string",
+          "x-message-field": true
+        },
+        "group_by": {
+          "description": "the fields that identify a series, the reducer's way. Leave it out for\none series",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "interval_seconds": {
+          "description": "the spacing of the grid, in seconds",
+          "format": "double",
+          "type": "number"
+        },
+        "max_gap_seconds": {
+          "description": "for `forward_fill`: how long a value is carried into empty intervals\nbefore the series is left to go quiet. Carried forever when left out",
+          "format": "double",
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "method": {
+          "$ref": "#/$defs/ResampleMethod",
+          "description": "how the readings in an interval become its value"
+        },
+        "on_missing": {
+          "$ref": "#/$defs/MissingFieldPolicy",
+          "description": "what to do about a message missing the field or a group field"
+        },
+        "time": {
+          "description": "the field carrying each message's time — RFC 3339 or milliseconds since\nthe epoch. Leave it out for arrival time, in which case empty intervals\nare noticed by the clock rather than by the next reading",
+          "type": [
+            "string",
+            "null"
+          ],
+          "x-message-field": true
+        }
+      },
+      "required": [
+        "field",
+        "interval_seconds",
+        "method"
+      ],
+      "title": "resample",
+      "type": "object"
+    },
+    "RollingTransformConfig": {
+      "description": "Writes onto each message aggregations over the last few messages of its\nseries — the last `size` of them, or the last `seconds`' worth, or both\nlimits at once. The reducer's `{function, field, as}` list, the reducer's\nfunctions; a second component rather than a `window` on `reduce` because\nthe cardinality differs — one message out per message in, not one per\ngroup per batch.\n\n`size` is always required, because it is the bound: a window by time alone\ngrows with the rate of the stream, and every piece of state has a bound.\n`seconds` on top of it also drops what is older than that, off the `time`\nfield. `count` needs a `field` here — it counts how many of the window\ncarried one, which is `size` once the window is warm and the warm-up check\nbefore that.",
+      "properties": {
+        "aggregations": {
+          "description": "what to compute over the window. At least one, each with a distinct `as`",
+          "items": {
+            "$ref": "#/$defs/Aggregation"
+          },
+          "type": "array"
+        },
+        "group_by": {
+          "description": "the fields that identify a series, the reducer's way. Leave it out for\none series",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "on_missing": {
+          "$ref": "#/$defs/MissingFieldPolicy",
+          "description": "what to do about a message missing an aggregated field or a group field"
+        },
+        "seconds": {
+          "description": "also drop from the window whatever is older than this many seconds,\noff the `time` field",
+          "format": "double",
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "size": {
+          "description": "how many messages the window holds at most",
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "time": {
+          "description": "the field carrying each message's time — RFC 3339 or milliseconds since\nthe epoch. Leave it out for arrival time",
+          "type": [
+            "string",
+            "null"
+          ],
+          "x-message-field": true
+        }
+      },
+      "required": [
+        "aggregations",
+        "size"
+      ],
+      "title": "rolling",
       "type": "object"
     },
     "RotationConfig": {
@@ -8770,6 +11955,155 @@ The same wire shape the run loop's `PipelineView` serializes to — this is the 
       "description": "A config value that may *reference* secrets rather than contain them.\n\nOn the wire it is an ordinary JSON string, but `${NAME}` placeholders in it\nare replaced with real values when the pipeline is built, against whatever\nsecret store the server was started with:\n\n```json\n{ \"type\": \"nats\", \"urls\": \"nats://app:${NATS_PASSWORD}@broker:4222\" }\n```\n\nThe unresolved form is the only one this type ever holds. That is what makes\nit safe to commit, safe to hand back from `GET /api/pipelines` and safe to show\nin the UI — a resolved value exists only inside the built runtime component,\nnever in a `Config`. Resolution deliberately lives in the root crate: this\ncrate compiles to wasm for the frontend, which must not be able to hold a\nresolved secret at all.\n\nA value with no `${...}` in it is passed through untouched, so fields that\nhold nothing sensitive need no special handling.",
       "type": "string"
     },
+    "SmoothMethod": {
+      "description": "How a value is smoothed against the ones before it.",
+      "oneOf": [
+        {
+          "description": "An exponentially weighted moving average — cheap, no window, follows\nthe data as closely as `alpha` says. Give `alpha` or `half_life`, not\nboth.",
+          "properties": {
+            "alpha": {
+              "description": "the weight of the newest value, 0 to 1",
+              "format": "double",
+              "type": [
+                "number",
+                "null"
+              ]
+            },
+            "half_life": {
+              "description": "the number of messages after which a value's weight has halved —\nthe spelling with an intuition behind it",
+              "format": "double",
+              "type": [
+                "number",
+                "null"
+              ]
+            },
+            "type": {
+              "const": "ewma",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "The median of the last `size` values, this one included. Removes\nsingle-sample spikes outright, which a mean only spreads out.",
+          "properties": {
+            "size": {
+              "description": "how many values the window holds",
+              "format": "uint",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "type": {
+              "const": "median",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "size"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "A Hampel filter: the value is kept unless it is further than\n`threshold` robust standard deviations from the window's median, in\nwhich case the median replaces it. The right first stage in front of\nany detector — it removes the outliers without smearing the signal.",
+          "properties": {
+            "size": {
+              "description": "how many values the window holds, this one included",
+              "format": "uint",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "threshold": {
+              "description": "how many scaled MADs from the median count as an outlier. `3`\nwhen left out",
+              "format": "double",
+              "type": [
+                "number",
+                "null"
+              ]
+            },
+            "type": {
+              "const": "hampel",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "size"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "A Savitzky–Golay filter: a polynomial of `order` fitted to the last\n`size` values by least squares, evaluated at the newest. Smooths while\nkeeping the shape of peaks that a moving average flattens. Trailing\nrather than centred, because a stream cannot see the future; until\nthe window holds more than `order` values the value passes untouched.",
+          "properties": {
+            "order": {
+              "description": "the degree of the polynomial, below `size`. `2` when left out",
+              "format": "uint",
+              "minimum": 0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "size": {
+              "description": "how many values the window holds, this one included",
+              "format": "uint",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "type": {
+              "const": "savitzky_golay",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "size"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "SmoothTransformConfig": {
+      "description": "Smooths a numeric field against the values before it in its series, writing\nthe result onto the message — over the field itself, or under `as`.",
+      "properties": {
+        "as": {
+          "description": "the field the smoothed value is written under. Leave it out to replace\nthe field itself",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "field": {
+          "description": "the numeric field to smooth",
+          "type": "string",
+          "x-message-field": true
+        },
+        "group_by": {
+          "description": "the fields that identify a series, the reducer's way. Leave it out for\none series",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "method": {
+          "$ref": "#/$defs/SmoothMethod",
+          "description": "how"
+        },
+        "on_missing": {
+          "$ref": "#/$defs/MissingFieldPolicy",
+          "description": "what to do about a message missing the field or a group field"
+        }
+      },
+      "required": [
+        "field",
+        "method"
+      ],
+      "title": "smooth",
+      "type": "object"
+    },
     "SplitterTransformConfig": {
       "description": "Cuts one batch into several smaller ones — the opposite of `buffer`.\n\nNote the current limitation: messages left over after the last whole chunk\nare dropped, so 4 messages with `out_size: 3` emit one batch, not two.",
       "properties": {
@@ -8821,6 +12155,55 @@ The same wire shape the run loop's `PipelineView` serializes to — this is the 
         "columns"
       ],
       "title": "index",
+      "type": "object"
+    },
+    "TidepoolOutputConfig": {
+      "description": "Writes every batch into a Tidepool table, one request per batch.\n\nThe table has to exist: Tidepool's project declares it, with its column\ntypes, and this output checks against that on start — every mapped column\nhas to be one of the table's, of a type it can write, and every column the\ntable requires has to be written. A mismatch fails the start rather than\nthe first batch.\n\n`columns` is spelled as the database outputs spell it. Leave it out to send\neach message as a row as it is, for messages already shaped like the table:\nTidepool checks every value and refuses a batch with any problem in it, so\nnothing is coerced on either side.\n\nA batch Tidepool refuses fails with its problems quoted by row and column.\nA busy server (`503`) or one that can't be reached is retried for up to\n`retry_seconds` under the same idempotency key, so a retry never writes a\nbatch twice.",
+      "properties": {
+        "columns": {
+          "description": "which message field goes in which column. Leave it out to send each\nmessage as a row as it is.",
+          "items": {
+            "$ref": "#/$defs/ColumnMapping"
+          },
+          "type": "array"
+        },
+        "connection": {
+          "description": "name of the tidepool connection to write through — see \"connections\"\nin the readme.",
+          "type": "string",
+          "x-connection": "tidepool"
+        },
+        "on_extra_fields": {
+          "$ref": "#/$defs/ExtraFieldPolicy",
+          "description": "what to do about a message carrying fields no column reads"
+        },
+        "retry_seconds": {
+          "description": "how long one batch keeps being retried while the server is busy or\nunreachable, in seconds. Defaults to 30.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "table": {
+          "description": "the table to write into, as Tidepool's project names it",
+          "type": "string"
+        },
+        "timeout_seconds": {
+          "description": "how long one request may take, in seconds. Defaults to 30.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "connection",
+        "table"
+      ],
+      "title": "tidepool",
       "type": "object"
     },
     "TransformConfig": {
@@ -8934,6 +12317,97 @@ The same wire shape the run loop's `PipelineView` serializes to — this is the 
           "properties": {
             "type": {
               "const": "script",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type"
+          ],
+          "type": "object"
+        },
+        {
+          "$ref": "#/$defs/DeadbandTransformConfig",
+          "properties": {
+            "type": {
+              "const": "deadband",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type"
+          ],
+          "type": "object"
+        },
+        {
+          "$ref": "#/$defs/DeriveTransformConfig",
+          "properties": {
+            "type": {
+              "const": "derive",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type"
+          ],
+          "type": "object"
+        },
+        {
+          "$ref": "#/$defs/RollingTransformConfig",
+          "properties": {
+            "type": {
+              "const": "rolling",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type"
+          ],
+          "type": "object"
+        },
+        {
+          "$ref": "#/$defs/SmoothTransformConfig",
+          "properties": {
+            "type": {
+              "const": "smooth",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type"
+          ],
+          "type": "object"
+        },
+        {
+          "$ref": "#/$defs/DetectTransformConfig",
+          "properties": {
+            "type": {
+              "const": "detect",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type"
+          ],
+          "type": "object"
+        },
+        {
+          "$ref": "#/$defs/ResampleTransformConfig",
+          "properties": {
+            "type": {
+              "const": "resample",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type"
+          ],
+          "type": "object"
+        },
+        {
+          "$ref": "#/$defs/FeaturesTransformConfig",
+          "properties": {
+            "type": {
+              "const": "features",
               "type": "string"
             }
           },
