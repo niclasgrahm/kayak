@@ -365,6 +365,6 @@ mod tests {
         assert_eq!(Window::numbers(points), vec![3.0]);
         assert_eq!(Window::seconds(points), vec![5.0]);
         assert_eq!(Window::values(points), vec![&json!(3.0)]);
-        assert!(Window::points(&Value::Null).is_empty());
+        assert_eq!(Window::points(&Value::Null), &[] as &[Value]);
     }
 }
