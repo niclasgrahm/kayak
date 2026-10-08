@@ -59,4 +59,12 @@ pub trait Transform: Send + 'static {
     async fn flush(&mut self) -> anyhow::Result<Vec<Arc<MessageBatch>>> {
         Ok(vec![])
     }
+
+    /// The source this transform was compiled from, for one that holds code —
+    /// which is only `script`. Read once, when the pipeline is built, and kept
+    /// on the [`crate::pipeline::Pipeline`] so the API can show a running
+    /// script without reaching into a run loop that owns the transform.
+    fn loaded_script(&self) -> Option<Arc<kayak_core::script::LoadedScript>> {
+        None
+    }
 }

@@ -19,7 +19,7 @@
 use std::sync::Arc;
 
 use anyhow::{Context, Result};
-use kayak_core::script::ScriptTransformConfig;
+use kayak_core::script::{LoadedScript, ScriptSource, ScriptTransformConfig};
 
 use super::runner::{Bindings, ScriptRunner, StateBinding};
 use super::source;
@@ -31,6 +31,9 @@ use crate::{
 
 pub struct ScriptTransform {
     runner: ScriptRunner,
+    /// What it was compiled from, for the card's viewer — see
+    /// [`Transform::loaded_script`].
+    loaded: Arc<LoadedScript>,
 }
 
 impl BuildTransform for ScriptTransformConfig {
@@ -56,7 +59,18 @@ impl BuildTransform for ScriptTransformConfig {
             ScriptRunner::compile(&code, self.scope, self.max_operations, Bindings { state }, script_dir)
                 .map_err(|err| anyhow::anyhow!("the 'script' transform did not compile: {err}"))?;
 
-        Ok(Box::new(ScriptTransform { runner }))
+        let loaded = Arc::new(LoadedScript {
+            path: match &self.source {
+                ScriptSource::Inline { .. } => None,
+                ScriptSource::File { path } => Some(path.clone()),
+            },
+            scope: self.scope,
+            code,
+            modules: runner.modules().to_vec(),
+            changed_on_disk: false,
+        });
+
+        Ok(Box::new(ScriptTransform { runner, loaded }))
     }
 }
 
@@ -69,5 +83,9 @@ impl Transform for ScriptTransform {
         self.runner
             .run(&batch)
             .map_err(|err| anyhow::anyhow!("{}", err.located()))
+    }
+
+    fn loaded_script(&self) -> Option<Arc<LoadedScript>> {
+        Some(Arc::clone(&self.loaded))
     }
 }

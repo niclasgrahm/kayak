@@ -1560,6 +1560,22 @@ empty script at all, since the endpoint rightly 400s on one and "an inline
 script is empty" is a poor first thing to say to somebody who has just opened
 the editor.
 
+**Reading a running script is a separate, read-only path.** A card's
+transforms tab draws a script's `source` as a row of its own
+(`inspector::ScriptOrigin` — the one place `inspector.rs` names a component,
+because flattened inline code loses its newlines and a file path shows nothing),
+folding open to a peek that skips the opening comments (`rhai::first_code_line`)
+and opening `ScriptViewer`. The viewer is mounted by `Canvas`, not the card
+(`AppState::viewing_script`): a card is inside the transformed surface, where
+`position: fixed` would pan with it. Its text comes from `GET
+/api/pipelines/{id}/transforms/{index}/script`, which serves **what the pipeline
+was built with** — `Transform::loaded_script`, collected into
+`Pipeline::scripts` once at build — never the file as it stands; a running
+script never reads the disk, so the disk is not what is running.
+`source::mark_changes` compares the two under the build's own boundary and the
+answer is `changed_on_disk`. Imports are recorded by `ProjectResolver` as it
+reads them, keyed by *file* (`lib/x` and `lib/x.rhai` are one entry).
+
 The full-screen editor **unmounts the inline surface** rather than hiding it,
 which is what keeps the box uncontrolled: the two are reconciled with `source`
 by being built, and that happens exactly when a surface is created. Like a

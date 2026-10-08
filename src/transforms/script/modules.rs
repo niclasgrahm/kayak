@@ -32,8 +32,9 @@
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
+use kayak_core::script::LoadedModule;
 use rhai::{Engine, EvalAltResult, Module, Position, Shared};
 
 use super::source;
@@ -57,6 +58,11 @@ pub struct ProjectResolver {
     /// Modules this compile has already resolved, so a diamond — two scripts'
     /// worth of imports sharing a helper — is read and evaluated once.
     resolved: Mutex<HashMap<String, Shared<Module>>>,
+    /// The text of every module read, in the order it was first resolved —
+    /// what the card's viewer shows as the imports. Shared rather than owned
+    /// because the resolver is moved into the engine for the compile; the
+    /// runner keeps the other handle. See [`ProjectResolver::loaded`].
+    loaded: Arc<Mutex<Vec<LoadedModule>>>,
 }
 
 impl ProjectResolver {
@@ -66,7 +72,17 @@ impl ProjectResolver {
             script_dir: script_dir.to_path_buf(),
             resolving: Mutex::new(Vec::new()),
             resolved: Mutex::new(HashMap::new()),
+            loaded: Arc::new(Mutex::new(Vec::new())),
         }
+    }
+
+    /// A handle on the modules this resolver reads, to be taken before it is
+    /// handed to the engine. Read once the compile is over: what it holds then
+    /// is exactly what the compiled script embeds, because a self-contained
+    /// compile resolves every import it is going to.
+    #[must_use]
+    pub fn loaded(&self) -> Arc<Mutex<Vec<LoadedModule>>> {
+        Arc::clone(&self.loaded)
     }
 
     fn resolve_module(&self, engine: &Engine, path: &str) -> Result<Shared<Module>, String> {
@@ -107,6 +123,21 @@ impl ProjectResolver {
     fn read_and_eval(&self, engine: &Engine, path: &str) -> Result<Shared<Module>, String> {
         let text = source::read_module(path, &self.script_dir)
             .map_err(|err| format!("could not read the imported module '{path}': {err:#}"))?;
+        // Recorded on reading rather than on success: a module that fails to
+        // compile fails the whole build, so nothing ever reads the record then.
+        // Keyed by the file rather than by the import's spelling, which is what
+        // `resolved` is keyed by — `lib/base` and `lib/base.rhai` are one file
+        // read twice, and listing it twice would read as two modules.
+        let file = source::module_file(path);
+        let mut loaded = lock(&self.loaded);
+        if !loaded.iter().any(|module| module.path == file) {
+            loaded.push(LoadedModule {
+                path: file,
+                code: text.clone(),
+                changed_on_disk: false,
+            });
+        }
+        drop(loaded);
         let ast = engine
             .compile(&text)
             .map_err(|err| format!("the imported module '{path}' does not compile: {err}"))?;

@@ -5821,6 +5821,99 @@ Absent ids are the normal case, not a gap to be filled — the canvas lays those
 
 :::
 
+## `LoadedScript` {#schema-loadedscript}
+
+The text a running `script` transform was compiled from, and the modules it imported — what `GET /api/pipelines/{id}/transforms/{index}/script` answers.
+
+**The text the pipeline was built with, not the file as it stands.** A file source and its imports are read once, when the pipeline is built, and a running script never touches the filesystem again — so the code worth reading is the code that is running. Showing the disk instead would show a script the pipeline is not executing whenever someone has edited the file and not yet reverted, which is exactly when somebody goes looking. `changed_on_disk` is how the difference is said rather than hidden.
+
+::: details schema
+
+```json
+{
+  "$defs": {
+    "LoadedModule": {
+      "description": "One module a script imported, as it was when the pipeline was built.",
+      "properties": {
+        "changed_on_disk": {
+          "default": false,
+          "description": "True when the file no longer reads as `code`. See\n[`LoadedScript::changed_on_disk`].",
+          "type": "boolean"
+        },
+        "code": {
+          "description": "The rhai source the module was evaluated from.",
+          "type": "string"
+        },
+        "path": {
+          "description": "The file the module was read from, relative to the config file's\ndirectory, with the `.rhai` extension the import may have left off.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "path",
+        "code"
+      ],
+      "type": "object"
+    },
+    "ScriptScope": {
+      "description": "Whether a script is handed one message or the whole batch.\n\n`message` is the default and is what nearly everything wants: the budget is\nthen spent per message rather than per batch, the batch structure is\npreserved without the script having to rebuild it, and a script that emits\nnothing for one message has dropped exactly that message.\n\n`batch` is the escape hatch, and it is needed for the things that are about\nthe batch itself — deduplicating within it, repartitioning it, or computing\nsomething across it that `reduce` has no function for.",
+      "oneOf": [
+        {
+          "const": "message",
+          "description": "The script runs once per message, with the message in `msg`.",
+          "type": "string"
+        },
+        {
+          "const": "batch",
+          "description": "The script runs once per batch, with the messages in `batch` as an\narray. Emitting an array emits a batch of those messages.",
+          "type": "string"
+        }
+      ]
+    }
+  },
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "description": "The text a running `script` transform was compiled from, and the modules it\nimported — what `GET /api/pipelines/{id}/transforms/{index}/script` answers.\n\n**The text the pipeline was built with, not the file as it stands.** A file\nsource and its imports are read once, when the pipeline is built, and a\nrunning script never touches the filesystem again — so the code worth\nreading is the code that is running. Showing the disk instead would show a\nscript the pipeline is not executing whenever someone has edited the file\nand not yet reverted, which is exactly when somebody goes looking.\n`changed_on_disk` is how the difference is said rather than hidden.",
+  "properties": {
+    "changed_on_disk": {
+      "default": false,
+      "description": "True when `path` no longer reads as `code` — the file was edited, or can\nno longer be read, since the pipeline was built. Always false for an\ninline script, whose text is the config's. A revert picks the change up.",
+      "type": "boolean"
+    },
+    "code": {
+      "description": "The rhai source the transform compiled.",
+      "type": "string"
+    },
+    "modules": {
+      "default": [],
+      "description": "Every module the script imported, directly or through another module,\nin the order they were first resolved. Empty for a script with no\nimports.",
+      "items": {
+        "$ref": "#/$defs/LoadedModule"
+      },
+      "type": "array"
+    },
+    "path": {
+      "description": "The file the script was read from, relative to the config file's\ndirectory, or absent for an inline script.",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "scope": {
+      "$ref": "#/$defs/ScriptScope",
+      "description": "Whether the script is run per message or per batch."
+    }
+  },
+  "required": [
+    "scope",
+    "code"
+  ],
+  "title": "LoadedScript",
+  "type": "object"
+}
+```
+
+:::
+
 ## `LoginRequest` {#schema-loginrequest}
 
 What `POST /api/auth/login` takes.

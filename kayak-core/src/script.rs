@@ -143,6 +143,54 @@ impl ScriptScope {
     }
 }
 
+// ── what a running script was built from ────────────────────────────────────
+
+/// The text a running `script` transform was compiled from, and the modules it
+/// imported — what `GET /api/pipelines/{id}/transforms/{index}/script` answers.
+///
+/// **The text the pipeline was built with, not the file as it stands.** A file
+/// source and its imports are read once, when the pipeline is built, and a
+/// running script never touches the filesystem again — so the code worth
+/// reading is the code that is running. Showing the disk instead would show a
+/// script the pipeline is not executing whenever someone has edited the file
+/// and not yet reverted, which is exactly when somebody goes looking.
+/// `changed_on_disk` is how the difference is said rather than hidden.
+#[derive(Clone, Debug, Deserialize, Serialize, JsonSchema, PartialEq, Eq)]
+pub struct LoadedScript {
+    /// The file the script was read from, relative to the config file's
+    /// directory, or absent for an inline script.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub path: Option<String>,
+    /// Whether the script is run per message or per batch.
+    pub scope: ScriptScope,
+    /// The rhai source the transform compiled.
+    pub code: String,
+    /// Every module the script imported, directly or through another module,
+    /// in the order they were first resolved. Empty for a script with no
+    /// imports.
+    #[serde(default)]
+    pub modules: Vec<LoadedModule>,
+    /// True when `path` no longer reads as `code` — the file was edited, or can
+    /// no longer be read, since the pipeline was built. Always false for an
+    /// inline script, whose text is the config's. A revert picks the change up.
+    #[serde(default)]
+    pub changed_on_disk: bool,
+}
+
+/// One module a script imported, as it was when the pipeline was built.
+#[derive(Clone, Debug, Deserialize, Serialize, JsonSchema, PartialEq, Eq)]
+pub struct LoadedModule {
+    /// The file the module was read from, relative to the config file's
+    /// directory, with the `.rhai` extension the import may have left off.
+    pub path: String,
+    /// The rhai source the module was evaluated from.
+    pub code: String,
+    /// True when the file no longer reads as `code`. See
+    /// [`LoadedScript::changed_on_disk`].
+    #[serde(default)]
+    pub changed_on_disk: bool,
+}
+
 // ── what a script is given ──────────────────────────────────────────────────
 
 /// Whether a name is something a script *calls* or something it is *handed*.

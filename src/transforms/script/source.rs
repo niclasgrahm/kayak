@@ -26,7 +26,7 @@
 use std::path::{Component, Path, PathBuf};
 
 use anyhow::{Context, Result, bail, ensure};
-use kayak_core::script::ScriptSource;
+use kayak_core::script::{LoadedScript, ScriptSource};
 
 /// The script's text, wherever the config said to find it.
 pub fn read(source: &ScriptSource, script_dir: Option<&Path>) -> Result<String> {
@@ -40,6 +40,28 @@ pub fn read(source: &ScriptSource, script_dir: Option<&Path>) -> Result<String> 
             Ok(code.clone())
         }
         ScriptSource::File { path } => read_file(path, script_dir),
+    }
+}
+
+/// Say, on a record of what a script was built from, which of its files no
+/// longer read as they did. A file that cannot be read any more counts as
+/// changed: the record still says what is running, and "the file is not what
+/// this is" is the true half of what can be said.
+///
+/// Read through [`read`] and [`read_module`], so the comparison is made under
+/// exactly the boundary the build read under. An inline script has no file and
+/// is left alone, as is everything when there is no directory to read from.
+pub fn mark_changes(script: &mut LoadedScript, script_dir: Option<&Path>) {
+    let Some(dir) = script_dir else {
+        return;
+    };
+    if let Some(path) = &script.path {
+        let now = read(&ScriptSource::File { path: path.clone() }, Some(dir));
+        script.changed_on_disk = now.ok().as_deref() != Some(script.code.as_str());
+    }
+    for module in &mut script.modules {
+        let now = read_module(&module.path, dir);
+        module.changed_on_disk = now.ok().as_deref() != Some(module.code.as_str());
     }
 }
 
@@ -58,14 +80,21 @@ pub fn read(source: &ScriptSource, script_dir: Option<&Path>) -> Result<String> 
 /// commonly lives there, and a parse error quoting a file it should never have
 /// opened is a disclosure, not a diagnostic.
 pub fn read_module(path: &str, script_dir: &Path) -> Result<String> {
-    let with_extension;
-    let path = if Path::new(path.trim()).extension().is_some_and(|ext| ext == "rhai") {
-        path
+    read_file(&module_file(path), Some(script_dir))
+}
+
+/// The file an `import` path names: the path itself when it already ends in
+/// `.rhai`, otherwise the path with the extension appended. Shared with the
+/// record of what a script imported, so the viewer names the file that was
+/// read rather than the import's spelling of it.
+#[must_use]
+pub fn module_file(path: &str) -> String {
+    let path = path.trim();
+    if Path::new(path).extension().is_some_and(|ext| ext == "rhai") {
+        path.to_string()
     } else {
-        with_extension = format!("{}.rhai", path.trim());
-        &with_extension
-    };
-    read_file(path, Some(script_dir))
+        format!("{path}.rhai")
+    }
 }
 
 fn read_file(path: &str, script_dir: Option<&Path>) -> Result<String> {
@@ -254,6 +283,56 @@ mod tests {
             read_module("secrets.json", dir.path()).is_err(),
             "only .rhai files are reachable through an import"
         );
+        Ok(())
+    }
+
+    fn built(path: Option<&str>, code: &str, modules: &[(&str, &str)]) -> LoadedScript {
+        LoadedScript {
+            path: path.map(str::to_string),
+            scope: kayak_core::script::ScriptScope::Message,
+            code: code.to_string(),
+            modules: modules
+                .iter()
+                .map(|(path, code)| kayak_core::script::LoadedModule {
+                    path: (*path).to_string(),
+                    code: (*code).to_string(),
+                    changed_on_disk: false,
+                })
+                .collect(),
+            changed_on_disk: false,
+        }
+    }
+
+    /// Each file is compared on its own: an edited script and an untouched
+    /// module are reported as exactly that, and a module that has gone counts
+    /// as changed rather than as unknown.
+    #[test]
+    fn changes_on_disk_are_marked_file_by_file() -> Result<()> {
+        let dir = tempfile::tempdir()?;
+        std::fs::write(dir.path().join("main.rhai"), "emit(msg); // edited")?;
+        std::fs::write(dir.path().join("same.rhai"), "fn a() { 1 }")?;
+        let mut script = built(
+            Some("main.rhai"),
+            "emit(msg);",
+            &[("same.rhai", "fn a() { 1 }"), ("gone.rhai", "fn b() { 2 }")],
+        );
+
+        mark_changes(&mut script, Some(dir.path()));
+
+        assert!(script.changed_on_disk, "the script was edited");
+        assert!(!script.modules[0].changed_on_disk, "this module was not");
+        assert!(script.modules[1].changed_on_disk, "this one can't be read any more");
+        Ok(())
+    }
+
+    /// An inline script's text is the config's, so there is nothing on disk to
+    /// differ from — even when a file of some other name is right there.
+    #[test]
+    fn an_inline_script_is_never_changed_on_disk() -> Result<()> {
+        let dir = tempfile::tempdir()?;
+        let mut script = built(None, "emit(msg);", &[]);
+        mark_changes(&mut script, Some(dir.path()));
+        assert!(!script.changed_on_disk);
         Ok(())
     }
 

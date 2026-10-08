@@ -12,8 +12,9 @@
 //! Like `graph`, this is pure and unit-tested; `app.rs` only renders what it
 //! returns.
 
-use kayak_core::config::Config;
+use kayak_core::config::{Config, TransformConfig, TransformKind};
 use kayak_core::connections::ConnectionKind;
+use kayak_core::script::ScriptSource;
 use serde_json::Value;
 
 /// Shown when a config doesn't carry a `type` tag. Every current one does; this
@@ -34,6 +35,20 @@ pub struct Property {
 pub struct Section {
     pub kind: String,
     pub properties: Vec<Property>,
+    /// Where a `script` transform's code comes from, which the card draws as a
+    /// row of its own rather than as `source.*` properties. `None` for every
+    /// other component.
+    pub script: Option<ScriptOrigin>,
+}
+
+/// Where a script's text lives, as the card shows it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ScriptOrigin {
+    /// The code itself, from the config.
+    Inline(String),
+    /// A path relative to the config file's directory. The text is the
+    /// server's to read — see `GET /api/pipelines/{id}/transforms/{index}/script`.
+    File(String),
 }
 
 /// An inspector tab's label: the stage and how many components it holds.
@@ -88,11 +103,31 @@ pub fn output_sections(config: &Config) -> Vec<Section> {
 /// tab shows them in, since that's the whole point of a transform chain.
 #[must_use]
 pub fn transform_sections(config: &Config) -> Vec<Section> {
-    config
-        .transforms
-        .iter()
-        .map(|t| section_of(serde_json::to_value(t)))
-        .collect()
+    config.transforms.iter().map(transform_section).collect()
+}
+
+/// One transform's section — the generic flattening, except for a script.
+///
+/// The one place this file names a component, and the reason is that a
+/// script's `source` is not a setting: flattened, inline code becomes a single
+/// row with its newlines gone, cut off at the card's edge, and a file source
+/// shows a path whose contents the browser has no way to read. So its
+/// `source.*` rows are taken out and the origin is handed to the card, which
+/// draws it as something that opens. Everything else about the transform
+/// (`scope`, `max_operations`) is still flattened like any other field, so a
+/// field added to it still shows up untouched.
+fn transform_section(transform: &TransformConfig) -> Section {
+    let mut section = section_of(serde_json::to_value(transform));
+    if let TransformKind::Script(script) = &transform.kind {
+        section
+            .properties
+            .retain(|p| p.name != "source" && !p.name.starts_with("source."));
+        section.script = Some(match &script.source {
+            ScriptSource::Inline { code } => ScriptOrigin::Inline(code.clone()),
+            ScriptSource::File { path } => ScriptOrigin::File(path.clone()),
+        });
+    }
+    section
 }
 
 /// A config that can't be serialised has nothing to show, but it shouldn't take
@@ -106,6 +141,7 @@ fn section_from_json(json: &Value) -> Section {
         return Section {
             kind: UNKNOWN_KIND.to_string(),
             properties: Vec::new(),
+            script: None,
         };
     };
 
@@ -125,6 +161,7 @@ fn section_from_json(json: &Value) -> Section {
             .unwrap_or(UNKNOWN_KIND)
             .to_string(),
         properties,
+        script: None,
     }
 }
 
@@ -349,6 +386,71 @@ mod tests {
     }
 
     /// Transforms run in order, so the inspector has to list them in order.
+    fn script(source: ScriptSource) -> TransformKind {
+        TransformKind::Script(kayak_core::script::ScriptTransformConfig {
+            source,
+            scope: kayak_core::script::ScriptScope::Batch,
+            max_operations: None,
+        })
+    }
+
+    /// An inline script's code is handed to the card whole, newlines and all,
+    /// rather than flattened into a row it would be cut off in — and its other
+    /// settings are still rows like any component's.
+    #[test]
+    fn an_inline_script_hands_its_code_to_the_card() {
+        let sections = transform_sections(&config(
+            dummy_input(),
+            vec![script(ScriptSource::Inline {
+                code: "let a = 1;\nemit(batch);".to_string(),
+            })],
+            OutputKind::Stdout(StdoutOutputConfig {}),
+        ));
+        let section = only(sections);
+        assert_eq!(
+            section.script,
+            Some(ScriptOrigin::Inline("let a = 1;\nemit(batch);".to_string()))
+        );
+        assert!(
+            section.properties.iter().all(|p| !p.name.starts_with("source")),
+            "the source is the script row, not a property: {:?}",
+            section.properties
+        );
+        assert!(
+            section.properties.iter().any(|p| p.name == "scope" && p.value == "batch"),
+            "the rest of the config is still rows: {:?}",
+            section.properties
+        );
+    }
+
+    #[test]
+    fn a_file_script_hands_its_path_to_the_card() {
+        let sections = transform_sections(&config(
+            dummy_input(),
+            vec![script(ScriptSource::File {
+                path: "scripts/extremes.rhai".to_string(),
+            })],
+            OutputKind::Stdout(StdoutOutputConfig {}),
+        ));
+        let section = only(sections);
+        assert_eq!(
+            section.script,
+            Some(ScriptOrigin::File("scripts/extremes.rhai".to_string()))
+        );
+        assert!(section.properties.iter().all(|p| !p.name.starts_with("source")));
+    }
+
+    /// Every other transform is the generic flattening, untouched.
+    #[test]
+    fn only_a_script_has_a_script_row() {
+        let sections = transform_sections(&config(
+            dummy_input(),
+            vec![TransformKind::Splitter(SplitterTransformConfig { out_size: 3 })],
+            OutputKind::Stdout(StdoutOutputConfig {}),
+        ));
+        assert_eq!(only(sections).script, None);
+    }
+
     #[test]
     fn transform_sections_keep_the_configured_order() {
         let sections = transform_sections(&config(

@@ -552,6 +552,42 @@ pub fn caret_from_pixels(x: f64, y: f64, char_width: f64, line_height: f64) -> O
     })
 }
 
+/// The lines a script is *read* as, highlighted: [`highlight`] without the
+/// empty line after a final newline.
+///
+/// The editor needs that line — the caret can sit on it — but in a viewer it
+/// is a numbered line holding nothing, and a file ending in a newline (which is
+/// how every editor saves one) would read as a line longer than it is. The
+/// count agrees with `str::lines`, which is what the card's summary counts.
+#[must_use]
+pub fn displayed_lines(source: &str) -> Vec<Vec<Span>> {
+    let mut lines = highlight(source);
+    if source.ends_with('\n') && lines.last().is_some_and(Vec::is_empty) {
+        lines.pop();
+    }
+    lines
+}
+
+/// The line a short preview of a script should start on: the first that holds
+/// code, counted from zero.
+///
+/// A script file conventionally opens with a comment saying what it is for —
+/// the sample's do, at length — and a six-line peek of that is six lines of
+/// prose. What the peek is for is recognising the code, so it skips the opening
+/// comments and blank lines (block comments included, since it reads the
+/// highlighter's own idea of what a comment is). A script that is nothing but
+/// comments starts at the top, where there is at least something to show.
+#[must_use]
+pub fn first_code_line(source: &str) -> usize {
+    highlight(source)
+        .iter()
+        .position(|line| {
+            line.iter()
+                .any(|span| span.kind != Kind::Comment && !span.text.trim().is_empty())
+        })
+        .unwrap_or(0)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -901,5 +937,35 @@ mod tests {
         // a pointer in the padding, and a box that has not been measured yet
         assert_eq!(caret_from_pixels(-2.0, 5.0, 7.0, 18.0), None);
         assert_eq!(caret_from_pixels(10.0, 10.0, 0.0, 0.0), None);
+    }
+
+    /// The opening comment is skipped — line, block and the blank lines
+    /// between — so the peek starts on code.
+    #[test]
+    fn a_preview_starts_after_the_opening_comments() {
+        let source = "// what this is\n//\n\n/* and\n   more */\nimport \"x\" as x;\nmsg";
+        assert_eq!(first_code_line(source), 5);
+    }
+
+    /// A trailing comment on a line of code is still a line of code.
+    #[test]
+    fn a_line_with_code_and_a_comment_is_code() {
+        assert_eq!(first_code_line("emit(msg); // done"), 0);
+    }
+
+    #[test]
+    fn a_script_of_nothing_but_comments_starts_at_the_top() {
+        assert_eq!(first_code_line("// one\n// two"), 0);
+        assert_eq!(first_code_line(""), 0);
+    }
+
+    /// A file saved with a final newline reads as the lines it has, and a
+    /// blank line inside a script is still a line.
+    #[test]
+    fn a_final_newline_is_not_a_line_of_its_own() {
+        assert_eq!(displayed_lines("a\nb\n").len(), 2);
+        assert_eq!(displayed_lines("a\nb").len(), 2);
+        assert_eq!(displayed_lines("a\n\nb\n").len(), 3);
+        assert_eq!(displayed_lines("a\n\n").len(), 2, "only the last one goes");
     }
 }

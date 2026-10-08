@@ -3173,6 +3173,68 @@
           }
         ]
       },
+      "LoadedModule": {
+        "description": "One module a script imported, as it was when the pipeline was built.",
+        "properties": {
+          "changed_on_disk": {
+            "default": false,
+            "description": "True when the file no longer reads as `code`. See\n[`LoadedScript::changed_on_disk`].",
+            "type": "boolean"
+          },
+          "code": {
+            "description": "The rhai source the module was evaluated from.",
+            "type": "string"
+          },
+          "path": {
+            "description": "The file the module was read from, relative to the config file's\ndirectory, with the `.rhai` extension the import may have left off.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "path",
+          "code"
+        ],
+        "type": "object"
+      },
+      "LoadedScript": {
+        "description": "The text a running `script` transform was compiled from, and the modules it\nimported — what `GET /api/pipelines/{id}/transforms/{index}/script` answers.\n\n**The text the pipeline was built with, not the file as it stands.** A file\nsource and its imports are read once, when the pipeline is built, and a\nrunning script never touches the filesystem again — so the code worth\nreading is the code that is running. Showing the disk instead would show a\nscript the pipeline is not executing whenever someone has edited the file\nand not yet reverted, which is exactly when somebody goes looking.\n`changed_on_disk` is how the difference is said rather than hidden.",
+        "properties": {
+          "changed_on_disk": {
+            "default": false,
+            "description": "True when `path` no longer reads as `code` — the file was edited, or can\nno longer be read, since the pipeline was built. Always false for an\ninline script, whose text is the config's. A revert picks the change up.",
+            "type": "boolean"
+          },
+          "code": {
+            "description": "The rhai source the transform compiled.",
+            "type": "string"
+          },
+          "modules": {
+            "default": [],
+            "description": "Every module the script imported, directly or through another module,\nin the order they were first resolved. Empty for a script with no\nimports.",
+            "items": {
+              "$ref": "#/components/schemas/LoadedModule"
+            },
+            "type": "array"
+          },
+          "path": {
+            "description": "The file the script was read from, relative to the config file's\ndirectory, or absent for an inline script.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "scope": {
+            "$ref": "#/components/schemas/ScriptScope",
+            "description": "Whether the script is run per message or per batch."
+          }
+        },
+        "required": [
+          "scope",
+          "code"
+        ],
+        "title": "LoadedScript",
+        "type": "object"
+      },
       "LoginRequest": {
         "description": "What `POST /api/auth/login` takes.\n\nThe password is a plain `String` and not a\n[`Secret`](crate::config::Secret), which is the opposite of every other\npassword field in kayak and deliberately so: a `Secret` holds a `${NAME}`\n*reference* to a credential, and this is the credential itself, typed into a\nlogin box a moment ago. It exists for the length of one request and is never\nstored, serialized back or logged.",
         "properties": {
@@ -7144,6 +7206,77 @@
           "pipelines"
         ],
         "x-kayak-access": "public"
+      }
+    },
+    "/api/pipelines/{pipeline_id}/transforms/{index}/script": {
+      "get": {
+        "description": "The rhai source of one `script` transform in a running pipeline, and every module it imported — which is what a card's viewer reads, and the only way to see a `file` script from the browser at all.\n\nThis is the text the pipeline was **built** with, not the file as it stands now. A file source and its imports are read once, when the pipeline is built, and a running script never reads the filesystem again, so the code worth showing is the code that is running. When a file has been edited (or removed) since, `changed_on_disk` says so on the script or the module concerned; reloading the config from disk picks the change up.",
+        "operationId": "getPipelineScript",
+        "parameters": [
+          {
+            "description": "Id of the pipeline.",
+            "in": "path",
+            "name": "pipeline_id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "Position of the transform in the pipeline's chain, counted from zero.",
+            "in": "path",
+            "name": "index",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LoadedScript"
+                }
+              }
+            },
+            "description": "The script, as built."
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "No credentials, or credentials that were not recognised."
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "No pipeline of that id is running, or the transform at that position is not a `script` — or there is no transform there at all."
+          }
+        },
+        "security": [
+          {
+            "basicAuth": []
+          },
+          {
+            "cookieAuth": []
+          }
+        ],
+        "summary": "The script a running transform was built from",
+        "tags": [
+          "pipelines"
+        ],
+        "x-kayak-access": "read"
       }
     },
     "/api/reference": {

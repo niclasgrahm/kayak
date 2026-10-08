@@ -14,6 +14,13 @@ history, not here.
 
 ### Added
 
+- **A running script can be read from its card.** A `script` transform's
+  source is now a row of its own in the card's transforms tab — `inline · N
+  lines` or the file's path — that folds open to a short highlighted peek and
+  opens a read-only viewer with the whole script and every module it
+  imported. It shows the text the pipeline was *built* with, and says so when
+  a file has changed on disk since. Served by the new
+  `GET /api/pipelines/{id}/transforms/{index}/script`, at `read` access.
 - **A `tidepool` connection and a `tidepool` output.** kayak writes a
   pipeline's messages into a table of a Tidepool server, one NDJSON request
   per batch, with `columns` spelled as the database outputs spell them (or

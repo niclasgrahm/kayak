@@ -944,3 +944,127 @@ async fn a_batch_scoped_dry_run_can_repartition() -> anyhow::Result<()> {
     );
     Ok(())
 }
+
+/// A config beside a `scripts/` directory: one pipeline whose first transform
+/// is a file script importing a module, and whose second is not a script.
+fn scripted_project() -> anyhow::Result<(tempfile::TempDir, Router)> {
+    let dir = tempfile::tempdir()?;
+    std::fs::create_dir_all(dir.path().join("scripts/shared"))?;
+    std::fs::write(
+        dir.path().join("scripts/shared/util.rhai"),
+        "fn twice(x) { x * 2 }",
+    )?;
+    std::fs::write(
+        dir.path().join("scripts/double.rhai"),
+        "import \"scripts/shared/util\" as util;\nmsg.n = util::twice(msg.n);\nmsg",
+    )?;
+    let path = dir.path().join("config.json");
+    std::fs::write(
+        &path,
+        serde_json::to_string(&json!([{
+            "id": "doubler",
+            "inputs": [{ "type": "dummy", "duration": 3600 }],
+            "transforms": [
+                { "type": "script", "source": { "type": "file", "path": "scripts/double.rhai" } },
+                { "type": "buffer", "size": 2 }
+            ],
+            "outputs": [{ "type": "stdout" }]
+        }]))?,
+    )?;
+    let app = api_router(Arc::new(AppState::from_config(&path)?));
+    Ok((dir, app))
+}
+
+/// The point of the endpoint: a file script is readable from the browser, and
+/// so is every module it imported — with the import's spelling turned into the
+/// file it read.
+#[tokio::test]
+async fn a_file_script_is_served_with_its_imports() -> anyhow::Result<()> {
+    let (_dir, app) = scripted_project()?;
+    let (status, body) = send(&app, get("/api/pipelines/doubler/transforms/0/script")).await?;
+
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["path"], "scripts/double.rhai");
+    assert_eq!(body["scope"], "message");
+    assert!(
+        body["code"].as_str().is_some_and(|c| c.contains("util::twice")),
+        "{body}"
+    );
+    assert_eq!(
+        body["modules"],
+        json!([{
+            "path": "scripts/shared/util.rhai",
+            "code": "fn twice(x) { x * 2 }",
+            "changed_on_disk": false
+        }])
+    );
+    assert_eq!(body["changed_on_disk"], false);
+    Ok(())
+}
+
+/// What is shown is what is running. Editing the files afterwards changes
+/// nothing the pipeline executes until a revert, so the text stays the built
+/// one and the difference is *said* — on the script and on the module alike.
+#[tokio::test]
+async fn an_edited_file_is_reported_as_changed_and_the_built_text_is_kept() -> anyhow::Result<()> {
+    let (dir, app) = scripted_project()?;
+    std::fs::write(dir.path().join("scripts/double.rhai"), "msg")?;
+    std::fs::remove_file(dir.path().join("scripts/shared/util.rhai"))?;
+
+    let (status, body) = send(&app, get("/api/pipelines/doubler/transforms/0/script")).await?;
+
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert!(
+        body["code"].as_str().is_some_and(|c| c.contains("util::twice")),
+        "the running text, not the disk: {body}"
+    );
+    assert_eq!(body["changed_on_disk"], true);
+    assert_eq!(
+        body["modules"][0]["changed_on_disk"], true,
+        "a module that can no longer be read is not what is running: {body}"
+    );
+    Ok(())
+}
+
+/// An inline script is served too — the viewer has one code path, and the
+/// server's text is the built one for an inline script as much as a file's.
+#[tokio::test]
+async fn an_inline_script_is_served_without_a_path() -> anyhow::Result<()> {
+    let app = app();
+    let mut config = idle_config("inline");
+    config["transforms"] = json!([{
+        "type": "script",
+        "scope": "batch",
+        "source": { "type": "inline", "code": "emit(batch);" }
+    }]);
+    let (status, body) = post_stream(&app, &config).await?;
+    assert_eq!(status, StatusCode::CREATED, "{body}");
+
+    let (status, body) = send(&app, get("/api/pipelines/inline/transforms/0/script")).await?;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert!(body.get("path").is_none(), "an inline script has no file: {body}");
+    assert_eq!(body["code"], "emit(batch);");
+    assert_eq!(body["scope"], "batch");
+    assert_eq!(body["modules"], json!([]));
+    assert_eq!(body["changed_on_disk"], false);
+    Ok(())
+}
+
+/// Every way of asking about something that is not a running script is the
+/// documented 404 with an `ApiError` body — including a position that is not a
+/// number, which axum would otherwise answer with a plain-text 400.
+#[tokio::test]
+async fn asking_for_a_script_that_is_not_there_is_a_404() -> anyhow::Result<()> {
+    let (_dir, app) = scripted_project()?;
+    for uri in [
+        "/api/pipelines/doubler/transforms/1/script",
+        "/api/pipelines/doubler/transforms/9/script",
+        "/api/pipelines/doubler/transforms/two/script",
+        "/api/pipelines/nobody/transforms/0/script",
+    ] {
+        let (status, body) = send(&app, get(uri)).await?;
+        assert_eq!(status, StatusCode::NOT_FOUND, "{uri}: {body}");
+        assert!(body["error"].is_string(), "{uri}: expected an ApiError, got {body}");
+    }
+    Ok(())
+}
