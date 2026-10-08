@@ -354,7 +354,7 @@ pub fn comparison(current: &Report, baseline: &Report) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{Measurement, Report, bytes, comparison, rate, ratio_table};
+    use super::{Measurement, Ratio, Report, bytes, comparison, rate, ratio_table};
     use crate::manifest::Manifest;
 
     fn measurement(name: &str, per_sec: f64) -> Measurement {
@@ -401,7 +401,7 @@ mod tests {
     #[test]
     fn without_the_reference_there_are_no_ratios() {
         let r = report(vec![measurement("watched", 600.0)]);
-        assert!(r.ratios().is_empty());
+        assert_eq!(r.ratios(), [] as [Ratio; 0]);
         assert!(ratio_table(&r).contains("no ratios"));
     }
 
@@ -421,7 +421,7 @@ mod tests {
         let mut reference = measurement("batch100", 1000.0);
         reference.errors = 1;
         let r = report(vec![reference, measurement("watched", 600.0)]);
-        assert!(r.ratios().is_empty());
+        assert_eq!(r.ratios(), [] as [Ratio; 0]);
     }
 
     /// The marginal-transform ratio is the one taken against something other

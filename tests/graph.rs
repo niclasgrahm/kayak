@@ -94,7 +94,7 @@ async fn a_pipeline_input_with_an_unknown_upstream_is_an_invalid_config() -> any
         "expected InvalidConfig for an unknown upstream"
     );
     // the half-built pipeline must not be left in the map
-    assert!(state.get_pipeline_ids().is_empty());
+    assert_eq!(state.get_pipeline_ids(), [] as [String; 0]);
     Ok(())
 }
 
@@ -141,7 +141,7 @@ async fn deleting_a_pipeline_cancels_its_run_loop() -> anyhow::Result<()> {
 
     state.delete_pipeline("p1")?;
 
-    assert!(state.get_pipeline_ids().is_empty());
+    assert_eq!(state.get_pipeline_ids(), [] as [String; 0]);
     assert!(
         created.cancellation_token.is_cancelled(),
         "the run loop was never signalled to stop"

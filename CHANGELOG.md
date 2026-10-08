@@ -12,6 +12,14 @@ history, not here.
 
 ## Unreleased
 
+### Fixed
+
+- **The `indu` output's `at` in epoch milliseconds.** A number in the field
+  `at` names was sent as a string of digits, which Indu refuses as an
+  unparseable timestamp — every row, so every batch failed. It is now sent
+  as the RFC 3339 instant it names, as the docs always said it would be. A
+  string is passed through unchanged.
+
 ### Added
 
 - **An `indu` connection and an `indu` output.** kayak writes a pipeline's

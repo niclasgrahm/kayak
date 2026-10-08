@@ -158,7 +158,7 @@ async fn a_pipeline_that_emits_nothing_writes_no_file() -> anyhow::Result<()> {
     output.init().await?;
     output.emit(batch(vec![])).await?;
 
-    assert!(parts(&fixture.data_dir.join("events").join("orders"))?.is_empty());
+    assert_eq!(parts(&fixture.data_dir.join("events").join("orders"))?, [] as [(std::string::String, std::string::String); 0]);
     Ok(())
 }
 
