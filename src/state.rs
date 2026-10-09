@@ -35,6 +35,14 @@ pub enum PipelineError {
     /// distinct from it — one is fixed by creating the pipeline, the other by
     /// giving it the input that would serve the endpoint.
     NotAccepting(PipelineId),
+    /// The pipeline is running, but the transform asked about holds no script
+    /// — it is another kind, or there is no transform at that position. A 404
+    /// like [`PipelineError::NotFound`], and distinct from it for the reason
+    /// `NotAccepting` is: the pipeline is there, and saying it isn't would
+    /// send someone looking for the wrong mistake.
+    /// The position is carried as it was asked for, so a request for one that
+    /// isn't a number is answered in its own words.
+    NoScript(PipelineId, String),
     /// A pipeline's `http` input queue is full — it is not reading as fast as
     /// something is posting. A 503: try again, nothing was lost but this batch.
     Backpressure(PipelineId),
@@ -69,6 +77,10 @@ impl std::fmt::Display for PipelineError {
             Self::NotAccepting(id) => write!(
                 f,
                 "pipeline '{id}' has no http input, so nothing can be posted to it"
+            ),
+            Self::NoScript(id, index) => write!(
+                f,
+                "pipeline '{id}' has no script transform at position '{index}'"
             ),
             Self::Backpressure(id) => write!(
                 f,
@@ -955,6 +967,33 @@ impl AppState {
     pub fn script_directory(&self) -> Option<PathBuf> {
         self.config_path()
             .and_then(|path| path.parent().map(Path::to_path_buf))
+    }
+
+    /// The script the transform at `index` of a running pipeline was built
+    /// from, with `changed_on_disk` filled in against the files as they are now.
+    ///
+    /// The pipelines lock is held only to clone the record out; the files are
+    /// read after it is released, since a slow disk is no reason to stall every
+    /// other request that needs the map.
+    pub fn loaded_script(
+        &self,
+        id: &str,
+        index: usize,
+    ) -> Result<kayak_core::script::LoadedScript, PipelineError> {
+        let loaded = {
+            let pipelines = self.lock_pipelines();
+            let handle = pipelines
+                .get(id)
+                .ok_or_else(|| PipelineError::NotFound(id.to_string()))?;
+            handle
+                .shared
+                .loaded_script(index)
+                .ok_or_else(|| PipelineError::NoScript(id.to_string(), index.to_string()))?
+        };
+        let mut script = (*loaded).clone();
+        let dir = self.script_directory();
+        crate::transforms::script::source::mark_changes(&mut script, dir.as_deref());
+        Ok(script)
     }
 
     /// The directory a save writes into. Fixed for the life of the process.

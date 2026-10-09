@@ -53,6 +53,13 @@ pub struct Pipeline {
     /// across an `.await`.
     #[serde(skip)]
     status: Mutex<RunStatus>,
+    /// The source each transform was compiled from, by position in the chain —
+    /// `None` for every transform that holds no code. Set once, when the run
+    /// loop is built, and read by `GET /api/pipelines/{id}/transforms/{index}/
+    /// script`: the transforms themselves move into the run loop's task, and
+    /// what a card shows of a running script has to be what it was built from.
+    #[serde(skip)]
+    scripts: std::sync::OnceLock<Vec<Option<Arc<kayak_core::script::LoadedScript>>>>,
 }
 
 // impl Pipeline {
@@ -902,7 +909,15 @@ impl Pipeline {
             // because the run loop is what earns the promotion, in `run()`,
             // once every output has initialised.
             status: Mutex::new(RunStatus::Starting),
+            scripts: std::sync::OnceLock::new(),
         })
+    }
+
+    /// What the transform at `index` was compiled from, if it is one that
+    /// holds code and the pipeline has been built.
+    #[must_use]
+    pub fn loaded_script(&self, index: usize) -> Option<Arc<kayak_core::script::LoadedScript>> {
+        self.scripts.get()?.get(index)?.clone()
     }
 
     /// Where this pipeline's run loop has got to.
@@ -933,6 +948,11 @@ impl Pipeline {
         for t in self.config.transforms.iter().cloned() {
             transforms.push(t.build(&mut ctx)?);
         }
+        // Ignored when already set: a `Pipeline` is built into one run loop,
+        // and a second build of the same one would be of the same config.
+        let _ = self
+            .scripts
+            .set(transforms.iter().map(|t| t.loaded_script()).collect());
         // inputs first: a `pipeline` input registers itself on its upstream as
         // it builds, and an output that fails to build shouldn't leave half a
         // subscription behind — building it last keeps that window as small as

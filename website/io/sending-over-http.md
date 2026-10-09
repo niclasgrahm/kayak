@@ -38,7 +38,8 @@ Three things worth knowing:
   is quoted in the error (cut at 300 characters). That is what makes a webhook
   that is *rejecting* the data show up on the card rather than being written off
   as delivered. The reply is otherwise discarded — a service that answers with
-  something the pipeline should carry on with is the `http` **transform**, not
+  something the pipeline should carry on with is the
+  [`http` **transform**](/pipelines/model-round-trip), not
   this.
 - **A failing endpoint is not retried per batch.** The same backoff gate the
   nats, redis and clickhouse outputs use: after a failure the next batches fail

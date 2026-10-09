@@ -153,8 +153,8 @@ mod tests {
     #[test]
     fn capture_says_something_about_every_field() {
         let m = Manifest::capture();
-        assert!(!m.commit.is_empty());
-        assert!(!m.rustc.is_empty());
+        assert_ne!(m.commit, "");
+        assert_ne!(m.rustc, "");
         assert!(m.cores >= 1);
         assert!(m.taken_at > 0);
     }

@@ -12,6 +12,11 @@ order is the semantics** — `remember` is a tap that passes its batch on
 unchanged, and `recall` writes what was remembered onto the messages that come
 after.
 
+Six of them — `deadband`, `derive`, `rolling`, `smooth`, `detect` and
+`resample` — are the [streaming statistics](/pipelines/streaming-statistics)
+family: each keeps a little state per `group_by` key in the pipeline's state
+bucket, and each refuses to build in a pipeline that declares no `state`.
+
 Anything contradictory is refused when the pipeline is built rather than
 producing a strange message once per batch forever: a reducer with no
 aggregations, an `as` that would overwrite a group field, a `map` writing a

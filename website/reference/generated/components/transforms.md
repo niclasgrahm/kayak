@@ -44,12 +44,35 @@ Distinct from the `buffer` option on an input: that one batches what an input pr
 
 ## `http` {#transform-http}
 
-Posts the batch to an http endpoint as a JSON array and replaces it with the JSON array in the response — so the service on the other end is the transform.
+Sends the batch to an http endpoint and carries on with what comes back — so the service on the other end is the transform. The round trip to a model: a `buffer` and a `features` in front of it make the request the seven numbers with the identifiers, and `response: merge` writes the answer onto that message so the identifiers survive the trip.
+
+`body` says whether one request carries the whole batch as a JSON array or each message goes on its own; `wrap` puts that under a key (`{"instances": …}`) for an API that wants one. `response` says what the reply is: `replace` makes it the new batch — the JSON array it holds under `batch`, the message (or array of messages) it holds under `message` — and `merge` writes it onto the message under `as` instead. `unwrap` reads the reply out from under a key first. Anything but a 2xx fails the batch with the endpoint's own words quoted; a network failure or a 5xx is retried `retries` times with backoff before it does.
 
 | field | type | | description |
 | --- | --- | --- | --- |
-| `url` | `string` | <Badge type="warning" text="required" /> | endpoint to send the batch to |
-| `verb` | `GET` \| `POST` \| `PUT` \| `PATCH` \| `DELETE` | <Badge type="warning" text="required" /> | http method. Accepted but not honoured yet: every request is a POST. |
+| `url` | `string` | <Badge type="warning" text="required" /> | endpoint to send to |
+| `verb` | `GET` \| `POST` \| `PUT` \| `PATCH` \| `DELETE` | <Badge type="warning" text="required" /> | http method. `GET` and `DELETE` are refused — a request with no body would send none of the messages |
+| `as` | `string` | <Badge type="info" text="optional" /> | for `response: merge`: the field the reply is written under |
+| `auth` | `bearer \| header` | <Badge type="info" text="optional" /> | what this transform presents to be allowed to send. Absent sends no credential |
+| `body` | `batch` \| `message` | <Badge type="info" text="optional" /> | what one request carries. Defaults to `batch` |
+| `response` | `replace` \| `merge` | <Badge type="info" text="optional" /> | what to do with the reply. Defaults to `replace` |
+| `retries` | `integer` | <Badge type="info" text="optional" /> | how many times a request that failed to reach the endpoint, or was answered 5xx or 429, is tried again before the batch fails. Defaults to 0. Each retry waits a little longer than the last, and the pipeline waits with it |
+| `timeout_seconds` | `integer` | <Badge type="info" text="optional" /> | how long one request may take before it is given up on, in seconds. Defaults to 30 |
+| `unwrap` | `string` | <Badge type="info" text="optional" /> | a key to read the reply out from under, for an API that answers `{"predictions": …}` |
+| `wrap` | `string` | <Badge type="info" text="optional" /> | a key to put the body under, for an API that wants `{"key": …}` |
+
+**`auth` — `type: "bearer"`**
+
+| field | type | | description |
+| --- | --- | --- | --- |
+| `token` | `string` | <Badge type="warning" text="required" /> | the token. A `${NAME}` reference, so the config file holds the name and the secret store holds the value. |
+
+**`auth` — `type: "header"`**
+
+| field | type | | description |
+| --- | --- | --- | --- |
+| `name` | `string` | <Badge type="warning" text="required" /> | the header's name, matched case-insensitively on the way in. On an `http` input it may not be one of the headers an `envelope` passes through, since that would write the credential into the messages. |
+| `value` | `string` | <Badge type="warning" text="required" /> | the exact value that header must have. A `${NAME}` reference, as above. |
 
 
 ## `splitter` {#transform-splitter}
@@ -76,12 +99,13 @@ Each aggregation is a `function`, the `field` to apply it to and the `as` name t
 | `aggregations` | `list of aggregation` | <Badge type="warning" text="required" /> | what to compute. At least one, and each needs a distinct `as`. |
 | `group_by` | `list of string` | <Badge type="info" text="optional" /> | the fields whose combination defines a group. Omit it to reduce the whole batch at once. |
 | `on_missing` | `error` \| `skip` | <Badge type="info" text="optional" /> | what to do about a message missing one of the fields above |
+| `time` | `string` | <Badge type="info" text="optional" /> | the field carrying each message's time — an RFC 3339 string or milliseconds since the epoch. Needed by `slope`; a message missing it fails the batch. Leave it out and each message's time is when it arrived. |
 
 **`aggregations` — each entry**
 
 | field | type | | description |
 | --- | --- | --- | --- |
-| `function` | `sum` \| `avg` \| `min` \| `max` \| `count` \| `count_distinct` \| `first` \| `last` \| `collect` \| `median` \| `stddev` | <Badge type="warning" text="required" /> | how to combine the values |
+| `function` | `sum` \| `avg` \| `min` \| `max` \| `count` \| `count_distinct` \| `first` \| `last` \| `collect` \| `median` \| `stddev` \| `slope` | <Badge type="warning" text="required" /> | how to combine the values |
 | `as` | `string` | <Badge type="warning" text="required" /> | the field the emitted message carries this answer under. Two aggregations may not share one, and none may collide with a `group_by` field. |
 | `field` | `string` | <Badge type="info" text="optional" /> | the field to aggregate. Required by every function except `count`, which counts messages when it is left out. |
 
@@ -382,3 +406,207 @@ A script may **`import`** other rhai files — shared helpers, written once — 
 | field | type | | description |
 | --- | --- | --- | --- |
 | `path` | `string` | <Badge type="warning" text="required" /> | the path, relative to the config file's directory. It may not climb out of that directory. |
+
+
+## `deadband` {#transform-deadband}
+
+Drops a message unless its field has moved far enough from the last one that passed — the single most used transform in any historian pipeline, and a *stateful* filter, which is why `filter` cannot be it.
+
+The first message per key always passes. After that a message passes when `field` differs from the last passed value by more than `delta`, or when `max_seconds` have gone by since anything passed, so a steady reading is still confirmed now and then. `flatline_seconds` is the sensor-health half: when the value has not moved in that long the next message passes with `stuck: true` on it, once per flat stretch, so a stuck instrument is distinguishable from a quiet one downstream.
+
+| field | type | | description |
+| --- | --- | --- | --- |
+| `field` | `string` | <Badge type="warning" text="required" /> | the numeric field the band is on |
+| `delta` | `number` | <Badge type="warning" text="required" /> | how far the value has to move to pass, in the field's units or as a percentage, by `mode` |
+| `flatline_seconds` | `number` | <Badge type="info" text="optional" /> | after this many seconds with no movement, let the next message through carrying `stuck: true` — once per flat stretch |
+| `group_by` | `list of string` | <Badge type="info" text="optional" /> | the fields that identify a series, the reducer's way. Leave it out for one series |
+| `max_seconds` | `number` | <Badge type="info" text="optional" /> | pass a message anyway once this many seconds have gone by since the last one that passed, so a steady value is still reported now and then |
+| `mode` | `absolute` \| `percent` | <Badge type="info" text="optional" /> | what `delta` is measured in |
+| `on_missing` | `error` \| `skip` | <Badge type="info" text="optional" /> | what to do about a message missing the field or a group field |
+| `time` | `string` | <Badge type="info" text="optional" /> | the field carrying each message's time — RFC 3339 or milliseconds since the epoch. Leave it out for arrival time |
+
+
+## `derive` {#transform-derive}
+
+Writes onto each message something that needs the previous one: a rate of change, a delta, a running total, a wrap-tolerant counter. Not a `map` operation because a `map` sees one message at a time; this remembers the last per key.
+
+Several derivations run at once and each is written under its own `as`, so one pass gives both `delta` and `rate`. The first message per key has no previous, and the derivations that need one write `null` for it.
+
+| field | type | | description |
+| --- | --- | --- | --- |
+| `derive` | `list of derivation` | <Badge type="warning" text="required" /> | what to derive. At least one, each with a distinct `as` |
+| `group_by` | `list of string` | <Badge type="info" text="optional" /> | the fields that identify a series, the reducer's way. Leave it out for one series |
+| `on_missing` | `error` \| `skip` | <Badge type="info" text="optional" /> | what to do about a message missing a derived field or a group field |
+| `time` | `string` | <Badge type="info" text="optional" /> | the field carrying each message's time — RFC 3339 or milliseconds since the epoch. Leave it out for arrival time |
+
+**`derive` — each entry**
+
+| field | type | | description |
+| --- | --- | --- | --- |
+| `function` | `rate` \| `delta` \| `cumsum` \| `counter` | <Badge type="warning" text="required" /> | how the value is derived from this message and the previous one |
+| `field` | `string` | <Badge type="warning" text="required" /> | the numeric field it is derived from |
+| `as` | `string` | <Badge type="warning" text="required" /> | the field the answer is written under |
+| `wrap_at` | `number` | <Badge type="info" text="optional" /> | for `counter`: the value the counter wraps back to zero at, so a drop is read as having run through the top rather than as a reset |
+
+
+## `rolling` {#transform-rolling}
+
+Writes onto each message aggregations over the last few messages of its series — the last `size` of them, or the last `seconds`' worth, or both limits at once. The reducer's `{function, field, as}` list, the reducer's functions; a second component rather than a `window` on `reduce` because the cardinality differs — one message out per message in, not one per group per batch.
+
+`size` is always required, because it is the bound: a window by time alone grows with the rate of the stream, and every piece of state has a bound. `seconds` on top of it also drops what is older than that, off the `time` field. `count` needs a `field` here — it counts how many of the window carried one, which is `size` once the window is warm and the warm-up check before that.
+
+| field | type | | description |
+| --- | --- | --- | --- |
+| `aggregations` | `list of aggregation` | <Badge type="warning" text="required" /> | what to compute over the window. At least one, each with a distinct `as` |
+| `size` | `integer` | <Badge type="warning" text="required" /> | how many messages the window holds at most |
+| `group_by` | `list of string` | <Badge type="info" text="optional" /> | the fields that identify a series, the reducer's way. Leave it out for one series |
+| `on_missing` | `error` \| `skip` | <Badge type="info" text="optional" /> | what to do about a message missing an aggregated field or a group field |
+| `seconds` | `number` | <Badge type="info" text="optional" /> | also drop from the window whatever is older than this many seconds, off the `time` field |
+| `time` | `string` | <Badge type="info" text="optional" /> | the field carrying each message's time — RFC 3339 or milliseconds since the epoch. Leave it out for arrival time |
+
+**`aggregations` — each entry**
+
+| field | type | | description |
+| --- | --- | --- | --- |
+| `function` | `sum` \| `avg` \| `min` \| `max` \| `count` \| `count_distinct` \| `first` \| `last` \| `collect` \| `median` \| `stddev` \| `slope` | <Badge type="warning" text="required" /> | how to combine the values |
+| `as` | `string` | <Badge type="warning" text="required" /> | the field the emitted message carries this answer under. Two aggregations may not share one, and none may collide with a `group_by` field. |
+| `field` | `string` | <Badge type="info" text="optional" /> | the field to aggregate. Required by every function except `count`, which counts messages when it is left out. |
+
+
+## `smooth` {#transform-smooth}
+
+Smooths a numeric field against the values before it in its series, writing the result onto the message — over the field itself, or under `as`.
+
+| field | type | | description |
+| --- | --- | --- | --- |
+| `field` | `string` | <Badge type="warning" text="required" /> | the numeric field to smooth |
+| `method` | `ewma \| median \| hampel \| savitzky_golay` | <Badge type="warning" text="required" /> | how |
+| `as` | `string` | <Badge type="info" text="optional" /> | the field the smoothed value is written under. Leave it out to replace the field itself |
+| `group_by` | `list of string` | <Badge type="info" text="optional" /> | the fields that identify a series, the reducer's way. Leave it out for one series |
+| `on_missing` | `error` \| `skip` | <Badge type="info" text="optional" /> | what to do about a message missing the field or a group field |
+
+**`method` — `type: "ewma"`**
+
+| field | type | | description |
+| --- | --- | --- | --- |
+| `alpha` | `number` | <Badge type="info" text="optional" /> | the weight of the newest value, 0 to 1 |
+| `half_life` | `number` | <Badge type="info" text="optional" /> | the number of messages after which a value's weight has halved — the spelling with an intuition behind it |
+
+**`method` — `type: "median"`**
+
+| field | type | | description |
+| --- | --- | --- | --- |
+| `size` | `integer` | <Badge type="warning" text="required" /> | how many values the window holds |
+
+**`method` — `type: "hampel"`**
+
+| field | type | | description |
+| --- | --- | --- | --- |
+| `size` | `integer` | <Badge type="warning" text="required" /> | how many values the window holds, this one included |
+| `threshold` | `number` | <Badge type="info" text="optional" /> | how many scaled MADs from the median count as an outlier. `3` when left out |
+
+**`method` — `type: "savitzky_golay"`**
+
+| field | type | | description |
+| --- | --- | --- | --- |
+| `size` | `integer` | <Badge type="warning" text="required" /> | how many values the window holds, this one included |
+| `order` | `integer` | <Badge type="info" text="optional" /> | the degree of the polynomial, below `size`. `2` when left out |
+
+
+## `detect` {#transform-detect}
+
+Flags anomalies in a numeric field against its own series — one component with a `method`, the way `filter` is one component with a kind.
+
+Writes a boolean under `as` (`anomaly` when left out), and beside it `<as>_score` — how far outside normal the value was, in the method's own units — so a downstream `filter` can be stricter than the threshold. Nothing is flagged during the warm-up of `min_samples` messages per key, because until then there is no idea of normal to be outside of.
+
+| field | type | | description |
+| --- | --- | --- | --- |
+| `field` | `string` | <Badge type="warning" text="required" /> | the numeric field to watch |
+| `method` | `zscore \| mad \| cusum \| ewma_chart \| western_electric \| flatline` | <Badge type="warning" text="required" /> | how an anomaly is decided |
+| `as` | `string` | <Badge type="info" text="optional" /> | the field the flag is written under; the score goes under `<as>_score`. `anomaly` when left out |
+| `group_by` | `list of string` | <Badge type="info" text="optional" /> | the fields that identify a series, the reducer's way. Leave it out for one series |
+| `min_samples` | `integer` | <Badge type="info" text="optional" /> | how many messages per key to see before flagging anything. The method's window `size` when left out, or 30 for a method without one |
+| `mode` | `annotate` \| `only_anomalies` | <Badge type="info" text="optional" /> | whether everything comes out annotated or only the anomalies |
+| `on_missing` | `error` \| `skip` | <Badge type="info" text="optional" /> | what to do about a message missing the field or a group field |
+
+**`method` — `type: "zscore"`**
+
+| field | type | | description |
+| --- | --- | --- | --- |
+| `size` | `integer` | <Badge type="warning" text="required" /> | how many earlier values the baseline is drawn from |
+| `threshold` | `number` | <Badge type="info" text="optional" /> | how many standard deviations count. `3` when left out |
+
+**`method` — `type: "mad"`**
+
+| field | type | | description |
+| --- | --- | --- | --- |
+| `size` | `integer` | <Badge type="warning" text="required" /> | how many earlier values the baseline is drawn from |
+| `threshold` | `number` | <Badge type="info" text="optional" /> | how many scaled MADs count. `3.5` when left out |
+
+**`method` — `type: "cusum"`**
+
+| field | type | | description |
+| --- | --- | --- | --- |
+| `drift` | `number` | <Badge type="warning" text="required" /> | the slack per message that is not counted as drift, in the field's units |
+| `threshold` | `number` | <Badge type="warning" text="required" /> | the accumulated drift that counts |
+| `target` | `number` | <Badge type="info" text="optional" /> | the value the series is expected to sit at. Left out, the mean of the warm-up is used |
+
+**`method` — `type: "ewma_chart"`**
+
+| field | type | | description |
+| --- | --- | --- | --- |
+| `alpha` | `number` | <Badge type="info" text="optional" /> | the weight of the newest value, 0 to 1. `0.2` when left out |
+| `threshold` | `number` | <Badge type="info" text="optional" /> | the width of the band, in standard deviations. `3` when left out |
+
+**`method` — `type: "western_electric"`**
+
+This component takes no configuration.
+
+**`method` — `type: "flatline"`**
+
+| field | type | | description |
+| --- | --- | --- | --- |
+| `size` | `integer` | <Badge type="warning" text="required" /> | how many identical values in a row count |
+
+
+## `resample` {#transform-resample}
+
+Puts a series onto a regular grid: one message per key per `interval` seconds, at times that are multiples of it, whichever rate the readings arrive at. The precondition every window model has, and the second real user of the run loop's tick — a `forward_fill` series keeps emitting while its readings have gone quiet.
+
+The message out carries the group fields under their leaf names, the grid time under `time`'s name (or `time` when arrival time is used) as an RFC 3339 string, and the value under `as` (the field's leaf when left out). A grid point is emitted when a reading past it arrives, or — for `forward_fill` only — when the clock passes it with nothing arriving.
+
+| field | type | | description |
+| --- | --- | --- | --- |
+| `field` | `string` | <Badge type="warning" text="required" /> | the numeric field to resample |
+| `interval_seconds` | `number` | <Badge type="warning" text="required" /> | the spacing of the grid, in seconds |
+| `method` | `last` \| `mean` \| `linear` \| `forward_fill` | <Badge type="warning" text="required" /> | how the readings in an interval become its value |
+| `as` | `string` | <Badge type="info" text="optional" /> | the field the value is written under. The field's leaf when left out |
+| `group_by` | `list of string` | <Badge type="info" text="optional" /> | the fields that identify a series, the reducer's way. Leave it out for one series |
+| `max_gap_seconds` | `number` | <Badge type="info" text="optional" /> | for `forward_fill`: how long a value is carried into empty intervals before the series is left to go quiet. Carried forever when left out |
+| `on_missing` | `error` \| `skip` | <Badge type="info" text="optional" /> | what to do about a message missing the field or a group field |
+| `time` | `string` | <Badge type="info" text="optional" /> | the field carrying each message's time — RFC 3339 or milliseconds since the epoch. Leave it out for arrival time, in which case empty intervals are noticed by the clock rather than by the next reading |
+
+
+## `features` {#transform-features}
+
+Folds a window of readings into one descriptor message per group — the seven numbers with the identifiers that a model endpoint actually wants, rather than the four hundred raw readings. Pair it with a `buffer` on the input, or it will only ever see one reading at a time.
+
+Each feature in `include` is written under its own name (`mean`, `rms`, `crest_factor` …), each `bands` entry under its `as`, and the `group_by` fields under their leaf names, the reducer's way. A feature that has no answer for the window — a slope of one point, a tone in a flat signal — is `null`. The spectral ones (`dominant_frequency`, `bands`) need a sample rate, which is `sample_rate_hz` when given and otherwise derived from the `time` field; without either they refuse to build. Nothing here keeps state, so no bucket is needed.
+
+| field | type | | description |
+| --- | --- | --- | --- |
+| `field` | `string` | <Badge type="warning" text="required" /> | the numeric field the window is of |
+| `bands` | `list of band` | <Badge type="info" text="optional" /> | frequency bands whose power is wanted, each under its `as` |
+| `group_by` | `list of string` | <Badge type="info" text="optional" /> | the fields that identify a series, the reducer's way. Leave it out for the whole batch as one window |
+| `include` | `list of mean \| std \| min \| max \| range \| slope \| skew \| kurtosis \| rms \| crest_factor \| zero_crossings \| n_peaks \| autocorr1 \| dominant_frequency \| count \| duration` | <Badge type="info" text="optional" /> | which features to compute, each written under its own name |
+| `on_missing` | `error` \| `skip` | <Badge type="info" text="optional" /> | what to do about a reading missing the field or a group field |
+| `sample_rate_hz` | `number` | <Badge type="info" text="optional" /> | the readings' sample rate in hertz, for the spectral features. Wins over one derived from `time`, for a source whose timestamps are coarse |
+| `time` | `string` | <Badge type="info" text="optional" /> | the field carrying each reading's time — RFC 3339 or milliseconds since the epoch. Gives `slope` and `duration` their seconds and the spectral features their sample rate |
+
+**`bands` — each entry**
+
+| field | type | | description |
+| --- | --- | --- | --- |
+| `low_hz` | `number` | <Badge type="warning" text="required" /> | the bottom of the band, in hertz, inclusive |
+| `high_hz` | `number` | <Badge type="warning" text="required" /> | the top of the band, in hertz, exclusive |
+| `as` | `string` | <Badge type="warning" text="required" /> | the field the band's power is written under |

@@ -207,7 +207,7 @@ mod tests {
             input(serde_json::json!({"type": "dummy", "duration": 1})),
             &mut notes,
         );
-        assert!(notes.is_empty());
+        assert_eq!(notes, [] as [String; 0]);
     }
 
     /// A database still holds its rows, so a sample that would wait for new

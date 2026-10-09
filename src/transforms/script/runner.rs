@@ -98,6 +98,9 @@ pub struct ScriptRunner {
     /// Texts `warn()` has already reported, so a mistake is logged once rather
     /// than once per message.
     warned: Arc<Mutex<HashSet<String>>>,
+    /// The modules the compile read, as they were read. Kept only to be shown:
+    /// the AST already embeds what they evaluated to.
+    modules: Vec<kayak_core::script::LoadedModule>,
 }
 
 impl ScriptRunner {
@@ -130,14 +133,15 @@ impl ScriptRunner {
         // engine the runner keeps resolves nothing, so a dynamic import path —
         // the one kind the self-contained compile cannot embed — fails at run
         // time instead of reaching the filesystem.
-        match script_dir {
-            Some(dir) => {
-                engine.set_module_resolver(modules::ProjectResolver::new(dir));
-            }
-            None => {
-                engine.set_module_resolver(modules::NoProjectResolver);
-            }
-        }
+        let loaded = if let Some(dir) = script_dir {
+            let resolver = modules::ProjectResolver::new(dir);
+            let loaded = resolver.loaded();
+            engine.set_module_resolver(resolver);
+            Some(loaded)
+        } else {
+            engine.set_module_resolver(modules::NoProjectResolver);
+            None
+        };
         let ast = engine
             .compile_into_self_contained(&Scope::new(), code)
             .map_err(|err| {
@@ -147,13 +151,24 @@ impl ScriptRunner {
                 )
             })?;
         engine.set_module_resolver(rhai::module_resolvers::DummyModuleResolver::new());
+        let modules = loaded
+            .map(|loaded| std::mem::take(&mut *lock_modules(&loaded)))
+            .unwrap_or_default();
         Ok(Self {
             engine,
             ast,
             scope,
             emitted,
             warned,
+            modules,
         })
+    }
+
+    /// Every module the script imported, in the order they were first
+    /// resolved, as their files read when it was compiled.
+    #[must_use]
+    pub fn modules(&self) -> &[kayak_core::script::LoadedModule] {
+        &self.modules
     }
 
     /// Run the script over a batch, producing the batches it emitted.
@@ -365,6 +380,10 @@ fn build_engine(
         tracing::warn!("script: {text}");
     });
 
+    // ── numbers and times ───────────────────────────────────────────────────
+    // `pluck`, `mean`, `linfit` … and `parse_time`/`format_time`: see `math`.
+    super::math::register(&mut engine);
+
     register_state(&mut engine, bindings.state);
     engine
 }
@@ -436,6 +455,14 @@ fn unbound_state() -> String {
      `state: { bucket: <name> }` to the pipeline, and the bucket itself under `state` at \
      the top of the config"
         .to_string()
+}
+
+/// The record of what a compile imported. A poisoned lock means the compile
+/// panicked mid-import, and what it had recorded is still worth showing.
+fn lock_modules(
+    loaded: &Mutex<Vec<kayak_core::script::LoadedModule>>,
+) -> std::sync::MutexGuard<'_, Vec<kayak_core::script::LoadedModule>> {
+    loaded.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
 }
 
 #[cfg(test)]
@@ -676,6 +703,33 @@ mod tests {
             .into_iter()
             .map(|b| b.iter().map(|m| (**m).clone()).collect())
             .collect())
+    }
+
+    /// What the viewer shows as a script's imports: every module the compile
+    /// read, the import's spelling turned into the file, and a module two
+    /// others import listed once — in the order it was first resolved.
+    #[test]
+    fn a_compile_records_each_module_it_read_once() -> anyhow::Result<()> {
+        let dir = tempfile::tempdir()?;
+        std::fs::create_dir_all(dir.path().join("lib"))?;
+        std::fs::write(dir.path().join("lib/base.rhai"), "fn one() { 1 }")?;
+        std::fs::write(
+            dir.path().join("lib/a.rhai"),
+            "import \"lib/base\" as base; fn a() { base::one() }",
+        )?;
+        std::fs::write(
+            dir.path().join("lib/b.rhai"),
+            "import \"lib/base.rhai\" as base; fn b() { base::one() }",
+        )?;
+        let runner = compile_in(
+            dir.path(),
+            "import \"lib/a\" as a; import \"lib/b\" as b; msg.n = a::a() + b::b(); msg",
+        )?;
+
+        let paths: Vec<&str> = runner.modules().iter().map(|m| m.path.as_str()).collect();
+        assert_eq!(paths, ["lib/a.rhai", "lib/base.rhai", "lib/b.rhai"]);
+        assert_eq!(runner.modules()[1].code, "fn one() { 1 }");
+        Ok(())
     }
 
     /// The feature, whole: a script calls a function out of a module that

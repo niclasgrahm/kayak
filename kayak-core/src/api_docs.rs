@@ -33,7 +33,7 @@ use crate::history::PipelineHistory;
 use crate::layout::LayoutFile;
 use crate::dry_run::{PipelineDryRunRequest, PipelineDryRunResponse};
 use crate::sample::{SampleRequest, SampleResponse};
-use crate::script::{DryRunRequest, DryRunResponse};
+use crate::script::{DryRunRequest, DryRunResponse, LoadedScript};
 use crate::server_config::Role;
 use crate::state::{BucketContents, BucketSummary};
 use crate::{
@@ -107,6 +107,7 @@ pub enum Operation {
     IngestMessages,
     ListConnections,
     GetPipelineHistory,
+    GetPipelineScript,
     DryRunScript,
     SampleInput,
     DryRunPipeline,
@@ -140,6 +141,7 @@ impl Operation {
             Self::IngestMessages => "ingestMessages",
             Self::ListConnections => "listConnections",
             Self::GetPipelineHistory => "getPipelineHistory",
+            Self::GetPipelineScript => "getPipelineScript",
             Self::DryRunScript => "dryRunScript",
             Self::SampleInput => "sampleInput",
             Self::DryRunPipeline => "dryRunPipeline",
@@ -718,6 +720,53 @@ pub fn endpoints() -> Vec<ApiDoc> {
                 description: "The pipeline's history at the resolution asked for.",
                 body: Body::Json("PipelineHistory"),
             }],
+        },
+        ApiDoc {
+            path: "/api/pipelines/{pipeline_id}/transforms/{index}/script",
+            method: Method::Get,
+            operation: Operation::GetPipelineScript,
+            summary: "The script a running transform was built from",
+            description: "The rhai source of one `script` transform in a running \
+                          pipeline, and every module it imported — which is what a \
+                          card's viewer reads, and the only way to see a `file` \
+                          script from the browser at all.\n\n\
+                          This is the text the pipeline was **built** with, not the \
+                          file as it stands now. A file source and its imports are \
+                          read once, when the pipeline is built, and a running script \
+                          never reads the filesystem again, so the code worth showing \
+                          is the code that is running. When a file has been edited \
+                          (or removed) since, `changed_on_disk` says so on the script \
+                          or the module concerned; reloading the config from disk picks \
+                          the change up.",
+            tag: Tag::Pipelines,
+            access: Access::Read,
+            params: vec![
+                ParamDoc {
+                    name: "pipeline_id",
+                    description: "Id of the pipeline.",
+                },
+                ParamDoc {
+                    name: "index",
+                    description: "Position of the transform in the pipeline's chain, \
+                                  counted from zero.",
+                },
+            ],
+            query: vec![],
+            request: None,
+            responses: vec![
+                ResponseDoc {
+                    status: 200,
+                    description: "The script, as built.",
+                    body: Body::Json("LoadedScript"),
+                },
+                ResponseDoc {
+                    status: 404,
+                    description: "No pipeline of that id is running, or the transform \
+                                  at that position is not a `script` — or there is no \
+                                  transform there at all.",
+                    body: Body::Json("ApiError"),
+                },
+            ],
         },
         ApiDoc {
             path: "/api/connections",
@@ -1446,6 +1495,7 @@ pub fn schemas() -> BTreeMap<&'static str, Value> {
     schemas.insert("UiEvent", of(schema_for!(UiEvent)));
     schemas.insert("DryRunRequest", of(schema_for!(DryRunRequest)));
     schemas.insert("DryRunResponse", of(schema_for!(DryRunResponse)));
+    schemas.insert("LoadedScript", of(schema_for!(LoadedScript)));
     schemas.insert(
         "PipelineDryRunRequest",
         of(schema_for!(PipelineDryRunRequest)),
@@ -1675,6 +1725,11 @@ mod tests {
                 // thing a reader can already watch go past on `/events`, only
                 // after the fact
                 ("getPipelineHistory", "read"),
+                // the same level as `listPipelines`, which already hands an
+                // inline script's code to any reader: a file script is the
+                // same kind of thing kept somewhere else, and the path can only
+                // reach what the running pipeline was built from
+                ("getPipelineScript", "read"),
                 ("listConnections", "read"),
                 // executes code the caller supplied. It is sandboxed and its
                 // state is a scratch bucket, so it cannot reach the running

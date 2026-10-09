@@ -143,6 +143,54 @@ impl ScriptScope {
     }
 }
 
+// ── what a running script was built from ────────────────────────────────────
+
+/// The text a running `script` transform was compiled from, and the modules it
+/// imported — what `GET /api/pipelines/{id}/transforms/{index}/script` answers.
+///
+/// **The text the pipeline was built with, not the file as it stands.** A file
+/// source and its imports are read once, when the pipeline is built, and a
+/// running script never touches the filesystem again — so the code worth
+/// reading is the code that is running. Showing the disk instead would show a
+/// script the pipeline is not executing whenever someone has edited the file
+/// and not yet reverted, which is exactly when somebody goes looking.
+/// `changed_on_disk` is how the difference is said rather than hidden.
+#[derive(Clone, Debug, Deserialize, Serialize, JsonSchema, PartialEq, Eq)]
+pub struct LoadedScript {
+    /// The file the script was read from, relative to the config file's
+    /// directory, or absent for an inline script.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub path: Option<String>,
+    /// Whether the script is run per message or per batch.
+    pub scope: ScriptScope,
+    /// The rhai source the transform compiled.
+    pub code: String,
+    /// Every module the script imported, directly or through another module,
+    /// in the order they were first resolved. Empty for a script with no
+    /// imports.
+    #[serde(default)]
+    pub modules: Vec<LoadedModule>,
+    /// True when `path` no longer reads as `code` — the file was edited, or can
+    /// no longer be read, since the pipeline was built. Always false for an
+    /// inline script, whose text is the config's. A revert picks the change up.
+    #[serde(default)]
+    pub changed_on_disk: bool,
+}
+
+/// One module a script imported, as it was when the pipeline was built.
+#[derive(Clone, Debug, Deserialize, Serialize, JsonSchema, PartialEq, Eq)]
+pub struct LoadedModule {
+    /// The file the module was read from, relative to the config file's
+    /// directory, with the `.rhai` extension the import may have left off.
+    pub path: String,
+    /// The rhai source the module was evaluated from.
+    pub code: String,
+    /// True when the file no longer reads as `code`. See
+    /// [`LoadedScript::changed_on_disk`].
+    #[serde(default)]
+    pub changed_on_disk: bool,
+}
+
 // ── what a script is given ──────────────────────────────────────────────────
 
 /// Whether a name is something a script *calls* or something it is *handed*.
@@ -304,6 +352,245 @@ pub fn builtins() -> &'static [Builtin] {
             scope: None,
             summary: "the current time, in milliseconds since the epoch",
             detail: "The number to reach for when the field is arithmetic rather than a label.",
+        },
+        Builtin {
+            name: "parse_time",
+            signature: "parse_time(value)",
+            kind: BuiltinKind::Function,
+            scope: None,
+            summary: "a time read as milliseconds since the epoch",
+            detail: "The one rule for what a time is: an RFC 3339 string or a number of \
+                     milliseconds, the same `now()` and `now_millis()` write. Anything else \
+                     fails the message naming the value; `()` passes through as `()`, so a \
+                     missing field stays missing.",
+        },
+        Builtin {
+            name: "format_time",
+            signature: "format_time(millis)",
+            kind: BuiltinKind::Function,
+            scope: None,
+            summary: "milliseconds since the epoch as an RFC 3339 string",
+            detail: "UTC, to the millisecond — `parse_time` reads it back exactly.",
+        },
+        Builtin {
+            name: "pluck",
+            signature: "pluck(batch, path)",
+            kind: BuiltinKind::Function,
+            scope: None,
+            summary: "one field across an array of messages, as an array",
+            detail: "The bridge from a batch to the numbers in it: `pluck(batch, \"value\")`. \
+                     Messages that don't carry the field, or carry `null`, are left out — so \
+                     `pluck(batch, p).len() == batch.len()` is the check that none were. The \
+                     path is a dotted path, as everywhere else.",
+        },
+        Builtin {
+            name: "sum",
+            signature: "sum(array)",
+            kind: BuiltinKind::Function,
+            scope: None,
+            summary: "the total of an array of numbers",
+            detail: "`0.0` of nothing. Every function below takes an array of numbers, and a \
+                     value in it that isn't one fails the message — `pluck` already left out \
+                     the missing ones, and a present value that isn't a number is a stream that \
+                     isn't what the script claims.",
+        },
+        Builtin {
+            name: "mean",
+            signature: "mean(array)",
+            kind: BuiltinKind::Function,
+            scope: None,
+            summary: "the arithmetic mean, or `()` of nothing",
+            detail: "Every function here that has no answer for its input returns `()` rather \
+                     than a NaN — so `if mean(v) == ()` is the warm-up check, and no NaN can \
+                     travel silently through a comparison downstream.",
+        },
+        Builtin {
+            name: "median",
+            signature: "median(array)",
+            kind: BuiltinKind::Function,
+            scope: None,
+            summary: "the middle value, or the mean of the two middle ones",
+            detail: "`()` of nothing. The centre one wild reading cannot move.",
+        },
+        Builtin {
+            name: "min",
+            signature: "min(array)",
+            kind: BuiltinKind::Function,
+            scope: None,
+            summary: "the smallest of an array of numbers",
+            detail: "`()` of nothing. rhai's own `min(a, b)` over two numbers is still there.",
+        },
+        Builtin {
+            name: "max",
+            signature: "max(array)",
+            kind: BuiltinKind::Function,
+            scope: None,
+            summary: "the largest of an array of numbers",
+            detail: "`()` of nothing. rhai's own `max(a, b)` over two numbers is still there.",
+        },
+        Builtin {
+            name: "std",
+            signature: "std(array)",
+            kind: BuiltinKind::Function,
+            scope: None,
+            summary: "the population standard deviation",
+            detail: "Population, not sample: a window holds every reading that arrived in it. \
+                     The same rule the reducer's `stddev` follows. `()` of nothing.",
+        },
+        Builtin {
+            name: "variance",
+            signature: "variance(array)",
+            kind: BuiltinKind::Function,
+            scope: None,
+            summary: "the population variance",
+            detail: "`std` squared. `()` of nothing. Not `var`, which rhai reserves.",
+        },
+        Builtin {
+            name: "quantile",
+            signature: "quantile(array, q)",
+            kind: BuiltinKind::Function,
+            scope: None,
+            summary: "the value a fraction q of the way through the sorted numbers",
+            detail: "`quantile(v, 0.95)`. Linearly interpolated between the two values it falls \
+                     between, the way a spreadsheet does it. `()` of nothing, or of a `q` \
+                     outside 0 to 1.",
+        },
+        Builtin {
+            name: "mad",
+            signature: "mad(array)",
+            kind: BuiltinKind::Function,
+            scope: None,
+            summary: "the median absolute deviation from the median",
+            detail: "A spread one wild reading cannot move — the right scale for a robust \
+                     detector. Raw, not scaled by 1.4826. `()` of nothing.",
+        },
+        Builtin {
+            name: "zscore",
+            signature: "zscore(array)",
+            kind: BuiltinKind::Function,
+            scope: None,
+            summary: "each value as standard deviations from the mean, as an array",
+            detail: "`()` of nothing, and `()` of a series with no spread: every value is the \
+                     mean, and a list of zeroes would read as \"nothing unusual\" to a threshold.",
+        },
+        Builtin {
+            name: "skew",
+            signature: "skew(array)",
+            kind: BuiltinKind::Function,
+            scope: None,
+            summary: "which way the tail points: positive to the right",
+            detail: "The population skewness. `()` of fewer than two values or of no spread.",
+        },
+        Builtin {
+            name: "kurtosis",
+            signature: "kurtosis(array)",
+            kind: BuiltinKind::Function,
+            scope: None,
+            summary: "how heavy the tails are: 0 is normal, positive is heavier",
+            detail: "The *excess* kurtosis, so a normal distribution reads as 0. `()` of fewer \
+                     than two values or of no spread.",
+        },
+        Builtin {
+            name: "rms",
+            signature: "rms(array)",
+            kind: BuiltinKind::Function,
+            scope: None,
+            summary: "the root mean square",
+            detail: "The magnitude of a signal that swings either side of zero, where a mean \
+                     would cancel it out — vibration, current. `()` of nothing.",
+        },
+        Builtin {
+            name: "diff",
+            signature: "diff(array)",
+            kind: BuiltinKind::Function,
+            scope: None,
+            summary: "each value less the one before it",
+            detail: "One shorter than the input; empty of one value or none.",
+        },
+        Builtin {
+            name: "cumsum",
+            signature: "cumsum(array)",
+            kind: BuiltinKind::Function,
+            scope: None,
+            summary: "the running total, as an array the same length",
+            detail: "Empty of nothing.",
+        },
+        Builtin {
+            name: "ewma",
+            signature: "ewma(array, alpha)",
+            kind: BuiltinKind::Function,
+            scope: None,
+            summary: "an exponentially weighted moving average, as an array",
+            detail: "Seeded with the first value; each output is `alpha * x + (1 - alpha) * \
+                     previous`, so a larger `alpha` follows the data more closely. `()` of an \
+                     `alpha` outside 0 to 1.",
+        },
+        Builtin {
+            name: "linfit",
+            signature: "linfit(array)",
+            kind: BuiltinKind::Function,
+            scope: None,
+            summary: "the least-squares line: `#{slope, intercept, r2}`",
+            detail: "Against position — `x` is 0, 1, 2 … — so the slope is per message. \
+                     `linfit(xs, ys)` fits against your own `x`, which is how a slope per \
+                     second is had: `linfit(pluck(batch, \"t\"), pluck(batch, \"value\"))`. \
+                     `()` of fewer than two points or of every `x` the same.",
+        },
+        Builtin {
+            name: "autocorr",
+            signature: "autocorr(array, lag)",
+            kind: BuiltinKind::Function,
+            scope: None,
+            summary: "how much each value resembles the one lag steps before it, −1 to 1",
+            detail: "A value near 1 at some lag is a period of that length. `()` when the lag \
+                     leaves fewer than two pairs or the series has no spread.",
+        },
+        Builtin {
+            name: "peaks",
+            signature: "peaks(array)",
+            kind: BuiltinKind::Function,
+            scope: None,
+            summary: "the positions of the local maxima",
+            detail: "Every value strictly greater than both neighbours, so a flat top is not a \
+                     peak per sample and the two ends are never one. Empty when there are none.",
+        },
+        Builtin {
+            name: "histogram",
+            signature: "histogram(array, bins)",
+            kind: BuiltinKind::Function,
+            scope: None,
+            summary: "counts in equal-width buckets: `#{edges, counts}`",
+            detail: "`bins` buckets from the smallest value to the largest, the largest landing \
+                     in the last; `edges` is one longer than `counts`. `()` of nothing.",
+        },
+        Builtin {
+            name: "clamp",
+            signature: "clamp(x, low, high)",
+            kind: BuiltinKind::Function,
+            scope: None,
+            summary: "x held within low to high",
+            detail: "Integers stay integers and floats stay floats.",
+        },
+        Builtin {
+            name: "interp",
+            signature: "interp(xs, ys, x)",
+            kind: BuiltinKind::Function,
+            scope: None,
+            summary: "y at x, by straight lines between known points",
+            detail: "`xs` sorted ascending. Outside the range it holds the nearest end's value \
+                     rather than extrapolating — a calibration curve, a lookup table. `()` of \
+                     no points.",
+        },
+        Builtin {
+            name: "dtw",
+            signature: "dtw(a, b)",
+            kind: BuiltinKind::Function,
+            scope: None,
+            summary: "the dynamic-time-warping distance between two series",
+            detail: "How unlike two series are once one is allowed to run faster or slower \
+                     than the other — so two cycles of the same shape at different speeds are \
+                     close, where a point-by-point distance says they are not. Compare against \
+                     a remembered reference cycle. `()` when either is empty.",
         },
         Builtin {
             name: "warn",

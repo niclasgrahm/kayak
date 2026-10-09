@@ -2,7 +2,7 @@ use gloo_net::http::Request;
 use kayak_core::dry_run::{PipelineDryRunRequest, PipelineDryRunResponse};
 use kayak_core::history::{PipelineHistory, Resolution};
 use kayak_core::sample::{SampleRequest, SampleResponse};
-use kayak_core::script::{DryRunRequest, DryRunResponse};
+use kayak_core::script::{DryRunRequest, DryRunResponse, LoadedScript};
 use kayak_core::state::{BucketContents, BucketSummary};
 use kayak_core::{
     AuthDto, ConfigFormat, Connections, LayoutFile, LoginRequest, PipelineDto, SaveConfigRequest,
@@ -187,6 +187,23 @@ impl ApiClient {
         .send()
         .await?;
         Ok(resp.json::<PipelineHistory>().await?)
+    }
+
+    /// The script the transform at `index` of a running pipeline was built
+    /// from, with its imports. A 404 when there is no script there — the
+    /// pipeline was deleted, or the card is older than a revert that changed it.
+    pub async fn pipeline_script(&self, id: &str, index: usize) -> Result<LoadedScript, ApiError> {
+        let resp = Request::get(&format!(
+            "{}/api/pipelines/{id}/transforms/{index}/script",
+            self.base
+        ))
+        .send()
+        .await?;
+        if resp.ok() {
+            Ok(resp.json::<LoadedScript>().await?)
+        } else {
+            Err(rejection(resp).await)
+        }
     }
 
     pub async fn create_connection(&self, connection: &Value) -> Result<(), ApiError> {

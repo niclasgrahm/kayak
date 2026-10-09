@@ -3,11 +3,19 @@ use std::sync::Arc;
 use crate::{BuildCtx, inputs::MessageBatch};
 
 pub mod buffer;
+pub mod deadband;
+pub mod derive;
+pub mod detect;
+pub mod features;
 pub mod filter;
+pub mod keyed;
 pub mod http;
 pub mod map;
 pub mod reduce;
+pub mod resample;
+pub mod rolling;
 pub mod script;
+pub mod smooth;
 pub mod splitter;
 pub mod state;
 
@@ -50,5 +58,13 @@ pub trait Transform: Send + 'static {
     /// nothing — a wakeup is "look at me", not a promise.
     async fn flush(&mut self) -> anyhow::Result<Vec<Arc<MessageBatch>>> {
         Ok(vec![])
+    }
+
+    /// The source this transform was compiled from, for one that holds code —
+    /// which is only `script`. Read once, when the pipeline is built, and kept
+    /// on the [`crate::pipeline::Pipeline`] so the API can show a running
+    /// script without reaching into a run loop that owns the transform.
+    fn loaded_script(&self) -> Option<Arc<kayak_core::script::LoadedScript>> {
+        None
     }
 }

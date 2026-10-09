@@ -73,6 +73,13 @@ impl BuildTransformConfig for TransformConfig {
             TransformKind::Recall(c) => c.build(ctx),
             TransformKind::Map(c) => c.build(ctx),
             TransformKind::Script(c) => c.build(ctx),
+            TransformKind::Deadband(c) => c.build(ctx),
+            TransformKind::Derive(c) => c.build(ctx),
+            TransformKind::Rolling(c) => c.build(ctx),
+            TransformKind::Smooth(c) => c.build(ctx),
+            TransformKind::Detect(c) => c.build(ctx),
+            TransformKind::Resample(c) => c.build(ctx),
+            TransformKind::Features(c) => c.build(ctx),
         }
     }
 }
@@ -95,6 +102,7 @@ impl BuildOutputConfig for OutputConfig {
             OutputKind::Redis(c) => c.build(ctx),
             OutputKind::Http(c) => c.build(ctx),
             OutputKind::Indu(c) => c.build(ctx),
+            OutputKind::Tidepool(c) => c.build(ctx),
         }
     }
 }

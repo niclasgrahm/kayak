@@ -16,6 +16,7 @@ pub mod redis;
 pub mod rotate;
 pub mod s3;
 pub mod stdout;
+pub mod tidepool;
 
 pub trait BuildOutput {
     fn build(self, ctx: &mut BuildCtx) -> Result<Box<dyn OutputDestination>>;

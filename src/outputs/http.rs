@@ -18,68 +18,28 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, anyhow};
-use kayak_core::config::{HttpAuthConfig, HttpBodyKind, HttpOutputConfig, HttpVerb};
-use reqwest::header::{CONTENT_TYPE, HeaderName, HeaderValue};
+use kayak_core::config::{HttpBodyKind, HttpOutputConfig, HttpVerb};
+use reqwest::header::CONTENT_TYPE;
 use reqwest::{Client, Method, Url};
 
 use crate::{
     BuildCtx,
     backoff::Gate,
     inputs::MessageBatch,
+    outbound::{Credential, DEFAULT_TIMEOUT, describe, method_with_body, parse_url, truncate},
     outputs::{BuildOutput, OutputDestination},
 };
 
-/// How long a request may take before it is given up on, when the config
-/// doesn't say. Thirty seconds is generous for a webhook and is still a bound:
-/// without one, an endpoint that accepts a connection and then never answers
-/// holds the pipeline's run loop for as long as it likes.
-const DEFAULT_TIMEOUT: Duration = Duration::from_secs(30);
-
-/// How much of a rejecting endpoint's response body is quoted in the error.
-///
-/// The body is the only thing that says *why* a request was refused, which is
-/// why it is read at all — but an html error page is megabytes, and this text
-/// becomes an [`crate::history::ErrorSignature`] key as well as a line in the
-/// UI. Bounded here rather than at either of those.
-const MAX_DETAIL_BYTES: usize = 300;
-
 impl BuildOutput for HttpOutputConfig {
     fn build(self, ctx: &mut BuildCtx) -> Result<Box<dyn OutputDestination>> {
-        // parsed here rather than left to the first `send`: a typo in a url is
-        // a config mistake, and a pipeline that starts and then fails once a
-        // second says so much less clearly than one that refuses to build
-        let url = Url::parse(&self.url)
-            .with_context(|| format!("the http output's url '{}' is not a url", self.url))?;
-        anyhow::ensure!(
-            matches!(url.scheme(), "http" | "https"),
-            "the http output's url '{}' is not an http url; the scheme is '{}'",
-            self.url,
-            url.scheme()
-        );
-
-        let verb = self.verb.unwrap_or(HttpVerb::Post);
-        let method = match verb {
-            HttpVerb::Post => Method::POST,
-            HttpVerb::Put => Method::PUT,
-            HttpVerb::Patch => Method::PATCH,
-            // An output exists to send the messages somewhere. A request with
-            // no body has nowhere to put them, so this would be a pipeline
-            // making a round trip per batch and delivering nothing — refused
-            // here rather than discovered from an endpoint that never receives
-            // anything.
-            HttpVerb::Get | HttpVerb::Delete => {
-                anyhow::bail!(
-                    "the http output cannot use {verb}: a request with no body would send none \
-                     of the messages. Use POST, PUT or PATCH."
-                )
-            }
-        };
-
+        let url = parse_url("http output", &self.url)?;
+        let method = method_with_body("http output", self.verb.unwrap_or(HttpVerb::Post))?;
         let credential = self
             .auth
             .as_ref()
-            .map(|auth| Credential::build(auth, ctx))
+            .map(|auth| Credential::build("http output", auth, ctx))
             .transpose()?;
+
 
         let timeout = self
             .timeout_seconds
@@ -98,71 +58,6 @@ impl BuildOutput for HttpOutputConfig {
             client,
             gate: Gate::new(),
         }))
-    }
-}
-
-/// How a url is named in an error and in a log.
-///
-/// Userinfo is stripped, because `https://kayak:hunter2@example.com/hook` is a
-/// perfectly ordinary way to write a webhook url and an error message is
-/// exactly the place a password should not turn up. The rest is left alone —
-/// a query string is part of what someone needs to see to recognise which
-/// endpoint failed.
-fn describe(url: &Url) -> String {
-    let mut clean = url.clone();
-    if clean.password().is_some() {
-        let _ = clean.set_password(None);
-    }
-    if !clean.username().is_empty() {
-        let _ = clean.set_username("");
-    }
-    clean.to_string()
-}
-
-/// The header this output presents on every request, already resolved.
-///
-/// The value is marked sensitive, so anything that dumps a request's headers
-/// prints it as `Sensitive` rather than as the token. That is the outbound
-/// twin of the rule the input's [`crate::inputs::http::Credentials`] follows:
-/// the credential is held in exactly one place and never travels anywhere it
-/// could be written down.
-struct Credential {
-    name: HeaderName,
-    value: HeaderValue,
-}
-
-impl Credential {
-    fn build(config: &HttpAuthConfig, ctx: &BuildCtx) -> Result<Self> {
-        let (name, prefix, secret) = match config {
-            HttpAuthConfig::Bearer { token } => ("authorization", "Bearer ", token),
-            HttpAuthConfig::Header { name, value } => {
-                let trimmed = name.trim();
-                anyhow::ensure!(
-                    !trimmed.is_empty(),
-                    "an http output's `auth` header needs a name"
-                );
-                (trimmed, "", value)
-            }
-        };
-        // unlike the input's, this name is not checked against ALLOWED_HEADERS:
-        // that rule exists because an input's `envelope` copies headers into the
-        // messages, and nothing here reads a header at all
-        let name = HeaderName::try_from(name.to_ascii_lowercase())
-            .with_context(|| format!("'{name}' is not a valid http header name"))?;
-
-        let resolved = ctx.resolve(secret)?;
-        anyhow::ensure!(
-            !resolved.expose().is_empty(),
-            "the credential for an http output's `auth` is empty, so the requests would carry an \
-             empty header; check that '{resolved}' is set in the secret store"
-        );
-        // `expose` is one of the few places a real secret is reached; it goes
-        // straight into the header and is not held, logged or copied
-        let mut value = HeaderValue::try_from(format!("{prefix}{}", resolved.expose()))
-            .context("the credential for an http output's `auth` cannot be sent as a header")?;
-        value.set_sensitive(true);
-
-        Ok(Self { name, value })
     }
 }
 
@@ -217,19 +112,6 @@ impl HttpOutput {
             truncate(detail.trim())
         ))
     }
-}
-
-/// The first [`MAX_DETAIL_BYTES`] of an endpoint's complaint, cut on a
-/// character boundary.
-fn truncate(detail: &str) -> String {
-    if detail.len() <= MAX_DETAIL_BYTES {
-        return detail.to_string();
-    }
-    let end = (0..=MAX_DETAIL_BYTES)
-        .rev()
-        .find(|i| detail.is_char_boundary(*i))
-        .unwrap_or(0);
-    format!("{}…", &detail[..end])
 }
 
 #[async_trait::async_trait]
@@ -305,6 +187,8 @@ impl OutputDestination for HttpOutput {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::outbound::MAX_DETAIL_BYTES;
+    use kayak_core::config::HttpAuthConfig;
     use crate::testing::{MapSecretStore, batch};
     use axum::extract::State;
     use axum::http::{HeaderMap, StatusCode};

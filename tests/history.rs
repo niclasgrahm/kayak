@@ -198,8 +198,8 @@ async fn an_unknown_pipeline_is_an_empty_history_rather_than_a_404() -> anyhow::
     let state = Arc::new(AppState::new().with_history(history(3_600)));
     let (status, out) = get(state, "/api/pipelines/never-existed/history").await?;
     assert_eq!(status, StatusCode::OK);
-    assert!(out.buckets.is_empty());
-    assert!(out.errors.is_empty());
+    assert_eq!(out.buckets, [] as [kayak_core::HistoryBucket; 0]);
+    assert_eq!(out.errors, [] as [kayak_core::ErrorSignature; 0]);
     Ok(())
 }
 
