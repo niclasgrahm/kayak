@@ -12,6 +12,50 @@ history, not here.
 
 ## Unreleased
 
+### Changed
+
+- **`filter` takes a list of conditions.** It is now `{"type": "filter",
+  "conditions": [...], "invert": false}`, the same conditions `remember`'s
+  `when` and the `buffer` gate take, all of which must hold. A config in the
+  old one-comparison spelling (`{"type": "filter", "Numeric": {...}}`) still
+  loads, as a filter with that one condition, but is saved in the new
+  spelling from then on.
+
+### Added
+
+- **`detect` learns more carefully, and says what it judged against.**
+  `learn: normal_only` keeps a flagged reading out of its own baseline
+  (`zscore`, `mad`, `ewma`), with `readapt_after_seconds` as the way out for
+  a lasting change; `with_baseline` writes `<as>_expected` and `<as>_band`;
+  and a new `ewma` method follows normal with time constants for the mean
+  and the spread, with a `min_spread` floor.
+- **A `pivot` transform.** One reading per message in, rows out: remembers
+  the latest value of each of `names` per key and writes them all onto every
+  message — a machine's state, fault and counters as one row.
+- **A `throttle` transform.** At most one message per key every `seconds`,
+  by the message's own time or arrival; the rest are dropped, whole. Keyed
+  and bounded by the pipeline's state bucket like the other streaming
+  transforms.
+- **`when` and `reset_when` on every streaming transform** (`deadband`,
+  `throttle`, `derive`, `rolling`, `smooth`, `detect`, `resample`). `when`
+  picks the messages a transform applies to and passes the rest through
+  untouched — so a state message beside numeric readings no longer fails
+  the batch. `reset_when` starts a key's series over.
+- **More ways to say a condition.** `not_equal_to` for numbers and strings,
+  and `one_of` / `none_of` for testing a string field against a list. On
+  `filter`, `remember` and the `buffer` gate alike.
+- **`invert` on `filter`**: drop what the conditions match and keep the rest.
+- **`min` and `max` in `map`'s arithmetic**, so a clamp is two mappings, and
+  **`on_zero` on a division**: `null` or a value of your choosing instead of
+  failing the batch when the divisor field holds zero.
+- **A `time_bucket` mapping on `map`.** The start of the hour, day or shift
+  a time falls in, counted on a named time zone's wall clock — so grouping a
+  stateful transform by it starts its series over every period.
+- **`smooth`'s `ewma` by time.** `tau_seconds` beside `alpha` and
+  `half_life`, with a `time` field on `smooth`: a reading's weight follows
+  how long it lasted rather than how many readings came before it, which is
+  what an irregularly spaced series needs.
+
 ## 0.2.0 — 2026-10-08
 
 **Minor, not patch**, because one change stops an existing config loading:

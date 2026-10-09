@@ -64,6 +64,7 @@ impl BuildTransform for RollingTransformConfig {
             self.group_by,
             self.time,
             self.on_missing,
+            self.gate,
         )?;
         Ok(Box::new(RollingTransform {
             series,
@@ -158,6 +159,7 @@ mod tests {
 
     fn config(aggregations: Vec<Aggregation>, size: usize) -> RollingTransformConfig {
         RollingTransformConfig {
+            gate: kayak_core::streaming::Gate::default(),
             aggregations,
             size,
             seconds: None,

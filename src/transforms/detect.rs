@@ -19,9 +19,18 @@
 //! The score is in the method's own units — standard deviations for the
 //! z-score family, the accumulated drift for CUSUM — and `null` where the
 //! method has none (`flatline`) or where a zero spread made it infinite.
+//!
+//! The methods that keep learning (`zscore`, `mad`, `ewma`) take `learn`.
+//! Under `normal_only` a flagged reading is scored and then *not* learned
+//! from, so it cannot pull its own baseline — except in warm-up, which
+//! learns everything, and once a run of flagged readings has lasted
+//! `readapt_after_seconds`, from which point they are learned from until the
+//! baseline has caught up and they stop being flagged. That is one rule for
+//! every learning method rather than a jump of the level per method, and it
+//! is what keeps `normal_only` from flagging a genuine change for ever.
 
 use anyhow::{Result, bail};
-use kayak_core::streaming::{DetectMethod, DetectMode, DetectTransformConfig};
+use kayak_core::streaming::{DetectLearn, DetectMethod, DetectMode, DetectTransformConfig};
 use serde_json::{Value, json};
 use std::sync::Arc;
 
@@ -45,49 +54,28 @@ impl BuildTransform for DetectTransformConfig {
         if self.field.trim().is_empty() {
             bail!("a detect transform needs a 'field'");
         }
-        let positive = |name: &str, value: f64| -> Result<f64> {
-            if value <= 0.0 || !value.is_finite() {
-                bail!("a detect '{name}' has to be more than zero, not {value}");
-            }
-            Ok(value)
+        let (method, window) = resolve(&self.method)?;
+        let learns = matches!(method, Method::Zscore { .. } | Method::Mad { .. } | Method::Ewma { .. });
+        if self.learn == DetectLearn::NormalOnly && !learns {
+            bail!(
+                "'learn: normal_only' is for the methods that keep learning their baseline \
+                 (zscore, mad, ewma) — this one freezes its baseline after the warm-up, or has none"
+            );
+        }
+        let readapt_millis = match self.readapt_after_seconds {
+            None => None,
+            Some(_) if self.learn != DetectLearn::NormalOnly => bail!(
+                "'readapt_after_seconds' only means something beside 'learn: normal_only' — \
+                 with 'all', flagged readings are learned from already"
+            ),
+            Some(seconds) => Some(millis(positive("readapt_after_seconds", seconds)?)),
         };
-        let (method, window) = match &self.method {
-            DetectMethod::Zscore { size, threshold } => {
-                if *size < 2 {
-                    bail!("a zscore window needs a 'size' of at least two");
-                }
-                (Method::Zscore { size: *size, threshold: positive("threshold", threshold.unwrap_or(3.0))? }, Some(*size))
-            }
-            DetectMethod::Mad { size, threshold } => {
-                if *size < 3 {
-                    bail!("a mad window needs a 'size' of at least three");
-                }
-                (Method::Mad { size: *size, threshold: positive("threshold", threshold.unwrap_or(3.5))? }, Some(*size))
-            }
-            DetectMethod::Cusum { target, drift, threshold } => {
-                if *drift < 0.0 || !drift.is_finite() {
-                    bail!("a cusum 'drift' has to be zero or more");
-                }
-                (
-                    Method::Cusum { target: *target, drift: *drift, threshold: positive("threshold", *threshold)? },
-                    None,
-                )
-            }
-            DetectMethod::EwmaChart { alpha, threshold } => {
-                let alpha = alpha.unwrap_or(0.2);
-                if !(0.0 < alpha && alpha <= 1.0) {
-                    bail!("an ewma_chart 'alpha' is a weight above 0 and up to 1, not {alpha}");
-                }
-                (Method::EwmaChart { alpha, threshold: positive("threshold", threshold.unwrap_or(3.0))? }, None)
-            }
-            DetectMethod::WesternElectric {} => (Method::WesternElectric, None),
-            DetectMethod::Flatline { size } => {
-                if *size < 2 {
-                    bail!("a flatline needs a 'size' of at least two");
-                }
-                (Method::Flatline { size: *size }, Some(*size))
-            }
-        };
+        if self.time.is_some() && !matches!(method, Method::Ewma { .. }) && readapt_millis.is_none() {
+            bail!(
+                "detect's 'time' is only read by the ewma method and by 'readapt_after_seconds' — \
+                 every other method is about the order of the readings, not when they came"
+            );
+        }
         let min_samples = self.min_samples.unwrap_or_else(|| window.unwrap_or(DEFAULT_MIN_SAMPLES));
         if min_samples == 0 && matches!(method, Method::Cusum { target: None, .. } | Method::EwmaChart { .. } | Method::WesternElectric) {
             bail!("this detect method takes its baseline from the warm-up, so 'min_samples' cannot be zero");
@@ -101,8 +89,9 @@ impl BuildTransform for DetectTransformConfig {
             "detect",
             format!("detect:{output}"),
             self.group_by,
-            None,
+            self.time,
             self.on_missing,
+            self.gate,
         )?;
         Ok(Box::new(DetectTransform {
             series,
@@ -111,8 +100,88 @@ impl BuildTransform for DetectTransformConfig {
             mode: self.mode,
             min_samples,
             output,
+            with_baseline: self.with_baseline,
+            learning: Learning {
+                normal_only: self.learn == DetectLearn::NormalOnly,
+                readapt_millis,
+            },
         }))
     }
+}
+
+/// A number that has to be above zero, or the config's mistake named.
+fn positive(name: &str, value: f64) -> Result<f64> {
+    if value <= 0.0 || !value.is_finite() {
+        bail!("a detect '{name}' has to be more than zero, not {value}");
+    }
+    Ok(value)
+}
+
+/// The method with its defaults filled in and its spelling checked, and the
+/// window it holds when it holds one — the default warm-up.
+fn resolve(method: &DetectMethod) -> Result<(Method, Option<usize>)> {
+    Ok(match method {
+        DetectMethod::Zscore { size, threshold } => {
+            if *size < 2 {
+                bail!("a zscore window needs a 'size' of at least two");
+            }
+            (Method::Zscore { size: *size, threshold: positive("threshold", threshold.unwrap_or(3.0))? }, Some(*size))
+        }
+        DetectMethod::Mad { size, threshold } => {
+            if *size < 3 {
+                bail!("a mad window needs a 'size' of at least three");
+            }
+            (Method::Mad { size: *size, threshold: positive("threshold", threshold.unwrap_or(3.5))? }, Some(*size))
+        }
+        DetectMethod::Cusum { target, drift, threshold } => {
+            if *drift < 0.0 || !drift.is_finite() {
+                bail!("a cusum 'drift' has to be zero or more");
+            }
+            (
+                Method::Cusum { target: *target, drift: *drift, threshold: positive("threshold", *threshold)? },
+                None,
+            )
+        }
+        DetectMethod::EwmaChart { alpha, threshold } => {
+            let alpha = alpha.unwrap_or(0.2);
+            if !(0.0 < alpha && alpha <= 1.0) {
+                bail!("an ewma_chart 'alpha' is a weight above 0 and up to 1, not {alpha}");
+            }
+            (Method::EwmaChart { alpha, threshold: positive("threshold", threshold.unwrap_or(3.0))? }, None)
+        }
+        DetectMethod::WesternElectric {} => (Method::WesternElectric, None),
+        DetectMethod::Flatline { size } => {
+            if *size < 2 {
+                bail!("a flatline needs a 'size' of at least two");
+            }
+            (Method::Flatline { size: *size }, Some(*size))
+        }
+        DetectMethod::Ewma {
+            mean_tau_seconds,
+            spread_tau_seconds,
+            threshold,
+            min_spread,
+        } => {
+            let min_spread = min_spread.unwrap_or(0.0);
+            if min_spread < 0.0 || !min_spread.is_finite() {
+                bail!("an ewma 'min_spread' has to be zero or more, not {min_spread}");
+            }
+            (
+                Method::Ewma {
+                    mean_tau_millis: positive("mean_tau_seconds", *mean_tau_seconds)? * 1000.0,
+                    spread_tau_millis: positive("spread_tau_seconds", *spread_tau_seconds)? * 1000.0,
+                    threshold: positive("threshold", threshold.unwrap_or(3.0))?,
+                    min_spread,
+                },
+                None,
+            )
+        }
+    })
+}
+
+#[allow(clippy::cast_possible_truncation, reason = "seconds to millis, well within range")]
+fn millis(seconds: f64) -> i64 {
+    (seconds * 1000.0).round() as i64
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -123,6 +192,35 @@ enum Method {
     EwmaChart { alpha: f64, threshold: f64 },
     WesternElectric,
     Flatline { size: usize },
+    Ewma { mean_tau_millis: f64, spread_tau_millis: f64, threshold: f64, min_spread: f64 },
+}
+
+/// What a learning method learns from — `learn` and `readapt_after_seconds`,
+/// resolved.
+#[derive(Clone, Copy, Debug, Default)]
+struct Learning {
+    normal_only: bool,
+    readapt_millis: Option<i64>,
+}
+
+impl Learning {
+    /// Whether this reading is learned from, keeping the key's run of flagged
+    /// readings up to date on the way. Warm-up learns everything: there is no
+    /// normal yet for a reading to be outside of.
+    fn learns(self, state: &mut Value, anomaly: bool, warm: bool, now: i64) -> bool {
+        if !anomaly {
+            if let Some(object) = state.as_object_mut() {
+                object.remove("flagged_since");
+            }
+            return true;
+        }
+        if !self.normal_only || !warm {
+            return true;
+        }
+        let since = state["flagged_since"].as_i64().unwrap_or(now);
+        state["flagged_since"] = json!(since);
+        self.readapt_millis.is_some_and(|readapt| now - since >= readapt)
+    }
 }
 
 /// What one reading was judged to be.
@@ -132,20 +230,29 @@ struct Verdict {
     score: Option<f64>,
     /// Which Western Electric rule fired, when one did.
     rule: Option<u8>,
+    /// What normal was, in the field's units.
+    expected: Option<f64>,
+    /// How far from `expected` a reading had to be to be flagged.
+    band: Option<f64>,
 }
 
 impl Verdict {
     const fn quiet() -> Self {
-        Self { anomaly: false, score: None, rule: None }
+        Self { anomaly: false, score: None, rule: None, expected: None, band: None }
     }
 
     fn scored(score: f64, threshold: f64) -> Self {
-        Self { anomaly: score > threshold, score: Some(score), rule: None }
+        Self { anomaly: score > threshold, score: Some(score), ..Self::quiet() }
     }
 
     /// A departure from a baseline with no spread: flagged, unscored.
     const fn flat_departure(departed: bool) -> Self {
-        Self { anomaly: departed, score: None, rule: None }
+        Self { anomaly: departed, ..Self::quiet() }
+    }
+
+    /// The same verdict, saying what it was judged against.
+    const fn against(self, expected: f64, band: Option<f64>) -> Self {
+        Self { expected: Some(expected), band, ..self }
     }
 }
 
@@ -172,7 +279,8 @@ impl Method {
         clippy::float_cmp,
         reason = "exact equality is the question asked of a baseline with no spread"
     )]
-    fn judge(self, state: &mut Value, value: f64, min_samples: usize) -> Verdict {
+    #[allow(clippy::too_many_lines, reason = "one arm per method, each short")]
+    fn judge(self, state: &mut Value, value: f64, now: i64, min_samples: usize, learning: Learning) -> Verdict {
         if !state.is_object() {
             *state = json!({});
         }
@@ -183,29 +291,70 @@ impl Method {
         match self {
             Method::Zscore { size, threshold } => {
                 let before = Window::numbers(Window::points(&state["window"]));
-                Window::push(&mut state["window"], 0, json!(value), size, None);
-                if !warm || before.len() < 2 {
-                    return Verdict::quiet();
+                let verdict = if !warm || before.len() < 2 {
+                    Verdict::quiet()
+                } else {
+                    match (stats::mean(&before), stats::stddev(&before)) {
+                        (Some(mean), Some(std)) if std > 0.0 => {
+                            Verdict::scored((value - mean).abs() / std, threshold).against(mean, Some(threshold * std))
+                        }
+                        (Some(mean), _) => Verdict::flat_departure(value != mean).against(mean, Some(0.0)),
+                        _ => Verdict::quiet(),
+                    }
+                };
+                if learning.learns(state, verdict.anomaly, warm, now) {
+                    Window::push(&mut state["window"], 0, json!(value), size, None);
                 }
-                match (stats::mean(&before), stats::stddev(&before)) {
-                    (Some(mean), Some(std)) if std > 0.0 => Verdict::scored((value - mean).abs() / std, threshold),
-                    (Some(mean), _) => Verdict::flat_departure(value != mean),
-                    _ => Verdict::quiet(),
-                }
+                verdict
             }
             Method::Mad { size, threshold } => {
                 let before = Window::numbers(Window::points(&state["window"]));
-                Window::push(&mut state["window"], 0, json!(value), size, None);
-                if !warm || before.len() < 3 {
-                    return Verdict::quiet();
-                }
-                match (stats::median(&before), stats::mad(&before)) {
-                    (Some(median), Some(mad)) if mad > 0.0 => {
-                        Verdict::scored((value - median).abs() / (MAD_SCALE * mad), threshold)
+                let verdict = if !warm || before.len() < 3 {
+                    Verdict::quiet()
+                } else {
+                    match (stats::median(&before), stats::mad(&before)) {
+                        (Some(median), Some(mad)) if mad > 0.0 => {
+                            Verdict::scored((value - median).abs() / (MAD_SCALE * mad), threshold)
+                                .against(median, Some(threshold * MAD_SCALE * mad))
+                        }
+                        (Some(median), _) => Verdict::flat_departure(value != median).against(median, Some(0.0)),
+                        _ => Verdict::quiet(),
                     }
-                    (Some(median), _) => Verdict::flat_departure(value != median),
-                    _ => Verdict::quiet(),
+                };
+                if learning.learns(state, verdict.anomaly, warm, now) {
+                    Window::push(&mut state["window"], 0, json!(value), size, None);
                 }
+                verdict
+            }
+            Method::Ewma { mean_tau_millis, spread_tau_millis, threshold, min_spread } => {
+                let (Some(mean), Some(variance), Some(at)) =
+                    (state["mean"].as_f64(), state["variance"].as_f64(), state["at"].as_i64())
+                else {
+                    state["mean"] = json!(value);
+                    state["variance"] = json!(0.0);
+                    state["at"] = json!(now);
+                    return Verdict::quiet();
+                };
+                let spread = variance.sqrt().max(min_spread);
+                let verdict = if !warm {
+                    Verdict::quiet()
+                } else if spread > 0.0 {
+                    Verdict::scored((value - mean).abs() / spread, threshold).against(mean, Some(threshold * spread))
+                } else {
+                    Verdict::flat_departure(value != mean).against(mean, Some(0.0))
+                };
+                if learning.learns(state, verdict.anomaly, warm, now) {
+                    // a reading older than the last lasted no time at all
+                    #[allow(clippy::cast_precision_loss, reason = "a gap in millis")]
+                    let elapsed = (now - at).max(0) as f64;
+                    let diff = value - mean;
+                    let towards = 1.0 - (-elapsed / mean_tau_millis).exp();
+                    let widen = 1.0 - (-elapsed / spread_tau_millis).exp();
+                    state["mean"] = json!(mean + towards * diff);
+                    state["variance"] = json!((1.0 - widen) * (variance + widen * diff * diff));
+                }
+                state["at"] = json!(now.max(at));
+                verdict
             }
             Method::Cusum { target, drift, threshold } => {
                 let target = match target {
@@ -224,7 +373,9 @@ impl Method {
                 let anomaly = score >= threshold;
                 state["up"] = json!(if anomaly && up >= threshold { 0.0 } else { up });
                 state["down"] = json!(if anomaly && down >= threshold { 0.0 } else { down });
-                Verdict { anomaly, score: Some(score), rule: None }
+                // the threshold is on the accumulated drift, not on the value,
+                // so there is no band in the field's units to report
+                Verdict { anomaly, score: Some(score), ..Verdict::quiet() }.against(target, None)
             }
             Method::EwmaChart { alpha, threshold } => {
                 let Some((mean, std)) = baseline(state, value, min_samples) else {
@@ -240,9 +391,9 @@ impl Method {
                 }
                 let width = std * (alpha / (2.0 - alpha)).sqrt();
                 if width > 0.0 {
-                    Verdict::scored((smoothed - mean).abs() / width, threshold)
+                    Verdict::scored((smoothed - mean).abs() / width, threshold).against(mean, Some(threshold * width))
                 } else {
-                    Verdict::flat_departure(smoothed != mean)
+                    Verdict::flat_departure(smoothed != mean).against(mean, Some(0.0))
                 }
             }
             Method::WesternElectric => {
@@ -253,19 +404,22 @@ impl Method {
                     return Verdict::quiet();
                 }
                 if std <= 0.0 {
-                    return Verdict::flat_departure(value != mean);
+                    return Verdict::flat_departure(value != mean).against(mean, Some(0.0));
                 }
                 let z = (value - mean) / std;
                 Window::push(&mut state["run"], 0, json!(z), WESTERN_ELECTRIC_RUN, None);
                 let run = Window::numbers(Window::points(&state["run"]));
                 let rule = western_electric(&run);
-                Verdict { anomaly: rule.is_some(), score: Some(z.abs()), rule }
+                // the band is rule one's: the other three are about runs, and
+                // have no single distance to report
+                Verdict { anomaly: rule.is_some(), score: Some(z.abs()), rule, ..Verdict::quiet() }
+                    .against(mean, Some(3.0 * std))
             }
             Method::Flatline { size } => {
                 Window::push(&mut state["window"], 0, json!(value), size, None);
                 let window = Window::numbers(Window::points(&state["window"]));
                 let flat = warm && window.len() >= size && window.iter().all(|w| *w == value);
-                Verdict { anomaly: flat, score: None, rule: None }
+                Verdict::flat_departure(flat)
             }
         }
     }
@@ -306,6 +460,8 @@ pub struct DetectTransform {
     mode: DetectMode,
     min_samples: usize,
     output: String,
+    with_baseline: bool,
+    learning: Learning,
 }
 
 #[async_trait::async_trait]
@@ -325,9 +481,10 @@ impl Transform for DetectTransform {
                 }
                 continue;
             };
-            let verdict = self
-                .series
-                .update(&key, |state| self.method.judge(state, value, self.min_samples))?;
+            let now = self.series.millis(message)?;
+            let verdict = self.series.update(&key, |state| {
+                self.method.judge(state, value, now, self.min_samples, self.learning)
+            })?;
             if self.mode == DetectMode::OnlyAnomalies && !verdict.anomaly {
                 continue;
             }
@@ -336,6 +493,10 @@ impl Transform for DetectTransform {
             fields::set(&mut written, &format!("{}_score", self.output), verdict.score.map_or(Value::Null, Value::from))?;
             if matches!(self.method, Method::WesternElectric) {
                 fields::set(&mut written, &format!("{}_rule", self.output), verdict.rule.map_or(Value::Null, Value::from))?;
+            }
+            if self.with_baseline {
+                fields::set(&mut written, &format!("{}_expected", self.output), verdict.expected.map_or(Value::Null, Value::from))?;
+                fields::set(&mut written, &format!("{}_band", self.output), verdict.band.map_or(Value::Null, Value::from))?;
             }
             out.push(Arc::new(written));
         }
@@ -354,6 +515,7 @@ mod tests {
 
     fn config(method: DetectMethod, min_samples: Option<usize>) -> DetectTransformConfig {
         DetectTransformConfig {
+            gate: kayak_core::streaming::Gate::default(),
             field: "v".into(),
             method,
             mode: DetectMode::Annotate,
@@ -361,6 +523,10 @@ mod tests {
             output: None,
             group_by: vec![],
             on_missing: MissingFieldPolicy::Error,
+            with_baseline: false,
+            learn: DetectLearn::All,
+            readapt_after_seconds: None,
+            time: None,
         }
     }
 
@@ -474,6 +640,159 @@ mod tests {
             (DetectMethod::Flatline { size: 1 }, None),
         ] {
             assert!(config(method.clone(), min).build(&mut ctx).is_err(), "{method:?} should be refused");
+        }
+    }
+
+    /// Readings `(seconds, value)` with their time in `t`.
+    async fn flags_at(config: DetectTransformConfig, readings: &[(i64, f64)]) -> Result<Vec<Value>> {
+        let mut pipelines = std::collections::HashMap::new();
+        let mut ctx = ctx_with_bucket(&mut pipelines, None);
+        let mut transform = config.build(&mut ctx)?;
+        let messages = readings.iter().map(|(t, v)| json!({"t": t * 1000, "v": v})).collect();
+        let out = transform.apply(batch(messages)).await?;
+        Ok(out.iter().flat_map(|b| b.iter().map(|m| (**m).clone())).collect())
+    }
+
+    /// Ten readings around 10.5, then a step to 20 held for ten seconds.
+    fn a_step() -> Vec<(i64, f64)> {
+        let mut readings: Vec<(i64, f64)> = (0..10).map(|t| (t, if t % 2 == 0 { 10.0 } else { 11.0 })).collect();
+        readings.extend((10..20).map(|t| (t, 20.0)));
+        readings
+    }
+
+    fn zscore_learning(learn: DetectLearn, readapt_after_seconds: Option<f64>) -> DetectTransformConfig {
+        let mut config = config(DetectMethod::Zscore { size: 5, threshold: Some(3.0) }, Some(5));
+        config.learn = learn;
+        config.readapt_after_seconds = readapt_after_seconds;
+        config.time = readapt_after_seconds.map(|_| "t".to_string());
+        config
+    }
+
+    /// The point of `normal_only`: a flagged reading is kept out of the window,
+    /// so a step is flagged for as long as it lasts instead of being learned
+    /// as normal within a few readings.
+    #[tokio::test]
+    async fn normal_only_keeps_a_flagged_reading_out_of_its_own_baseline() -> Result<()> {
+        let step = &anomalies(&flags_at(zscore_learning(DetectLearn::All, None), &a_step()).await?)[10..];
+        assert!(step[0], "the step is flagged");
+        assert!(!step[9], "learning everything makes the step normal: {step:?}");
+
+        let step = &anomalies(&flags_at(zscore_learning(DetectLearn::NormalOnly, None), &a_step()).await?)[10..];
+        assert!(step.iter().all(|flagged| *flagged), "flagged for as long as it lasts: {step:?}");
+        Ok(())
+    }
+
+    /// `readapt_after_seconds` is the way out: three seconds into a run of
+    /// flagged readings they are learned from, until the baseline has caught
+    /// up and they stop being flagged.
+    #[tokio::test]
+    async fn readapt_learns_a_lasting_change_after_its_time() -> Result<()> {
+        let config = zscore_learning(DetectLearn::NormalOnly, Some(3.0));
+        let step = anomalies(&flags_at(config, &a_step()).await?)[10..].to_vec();
+        assert_eq!(&step[..3], &[true, true, true], "{step:?}");
+        assert!(!step[9], "the new level became normal: {step:?}");
+        Ok(())
+    }
+
+    /// `with_baseline` writes what normal was and how far from it counted, in
+    /// the field's units — `null` while there is no baseline yet.
+    #[tokio::test]
+    async fn with_baseline_writes_what_a_reading_was_judged_against() -> Result<()> {
+        let mut config = config(DetectMethod::Zscore { size: 5, threshold: Some(3.0) }, Some(5));
+        config.with_baseline = true;
+        let out = flags(config, &[10.0, 11.0, 10.0, 11.0, 10.0, 30.0]).await?;
+        assert_eq!(out[0]["anomaly_expected"], Value::Null, "warm-up has no baseline");
+        assert_eq!(out[0]["anomaly_band"], Value::Null);
+        let expected = out[5]["anomaly_expected"].as_f64().unwrap_or_default();
+        let band = out[5]["anomaly_band"].as_f64().unwrap_or_default();
+        assert!((expected - 10.4).abs() < 1e-9, "{expected}");
+        assert!((band - 3.0 * 0.24f64.sqrt()).abs() < 1e-9, "{band}");
+        assert_eq!(out[5]["anomaly"], json!(true));
+
+        // and nothing extra without it
+        let out = flags(config_without_baseline(), &[1.0, 2.0]).await?;
+        assert!(out[1].get("anomaly_expected").is_none());
+        Ok(())
+    }
+
+    fn config_without_baseline() -> DetectTransformConfig {
+        config(DetectMethod::Zscore { size: 5, threshold: None }, Some(1))
+    }
+
+    fn ewma(min_spread: Option<f64>, learn: DetectLearn) -> DetectTransformConfig {
+        let mut config = config(
+            DetectMethod::Ewma {
+                mean_tau_seconds: 10.0,
+                spread_tau_seconds: 60.0,
+                threshold: Some(4.0),
+                min_spread,
+            },
+            Some(3),
+        );
+        config.learn = learn;
+        config.with_baseline = true;
+        config.time = Some("t".into());
+        config
+    }
+
+    /// The mean follows by time: one τ after the last reading it has moved
+    /// 1 − 1/e of the way, whatever the count of readings.
+    #[tokio::test]
+    async fn the_ewma_baseline_follows_by_time() -> Result<()> {
+        let mut config = ewma(Some(100.0), DetectLearn::All);
+        config.min_samples = Some(1);
+        let out = flags_at(config, &[(0, 0.0), (10, 1.0), (20, 1.0)]).await?;
+        let after_one_tau = out[2]["anomaly_expected"].as_f64().unwrap_or_default();
+        assert!((after_one_tau - (1.0 - (-1.0f64).exp())).abs() < 1e-12, "{after_one_tau}");
+        Ok(())
+    }
+
+    /// `min_spread` is the smallest deviation believed: a signal that has been
+    /// perfectly flat does not flag its first small wobble.
+    #[tokio::test]
+    async fn min_spread_keeps_a_flat_signals_first_wobble_quiet() -> Result<()> {
+        let readings: Vec<(i64, f64)> = (0..6).map(|t| (t, 5.0)).chain([(6, 5.5)]).collect();
+        let strict = anomalies(&flags_at(ewma(None, DetectLearn::All), &readings).await?);
+        assert!(strict[6], "with no floor, any departure from a flat baseline is flagged");
+        let floored = anomalies(&flags_at(ewma(Some(1.0), DetectLearn::All), &readings).await?);
+        assert!(!floored[6], "half a unit is inside four of a floor of one");
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn an_ewma_spike_under_normal_only_does_not_move_normal() -> Result<()> {
+        let readings = [(0, 5.0), (1, 5.0), (2, 5.0), (3, 5.0), (4, 100.0), (5, 5.0)];
+        let out = flags_at(ewma(Some(0.5), DetectLearn::NormalOnly), &readings).await?;
+        assert_eq!(out[4]["anomaly"], json!(true));
+        assert_eq!(out[5]["anomaly_expected"], out[4]["anomaly_expected"], "the spike was learned from");
+        let out = flags_at(ewma(Some(0.5), DetectLearn::All), &readings).await?;
+        assert_ne!(out[5]["anomaly_expected"], out[4]["anomaly_expected"]);
+        Ok(())
+    }
+
+    #[test]
+    fn learning_settings_that_mean_nothing_are_refused() {
+        let mut pipelines = std::collections::HashMap::new();
+        let mut ctx = ctx_with_bucket(&mut pipelines, None);
+        let mut frozen = config(DetectMethod::EwmaChart { alpha: None, threshold: None }, None);
+        frozen.learn = DetectLearn::NormalOnly;
+        let readapt_without_normal_only = zscore_learning(DetectLearn::All, Some(3.0));
+        let mut time_unread = config(DetectMethod::Zscore { size: 5, threshold: None }, None);
+        time_unread.time = Some("t".into());
+        let mut no_tau = ewma(None, DetectLearn::All);
+        no_tau.method = DetectMethod::Ewma {
+            mean_tau_seconds: 0.0,
+            spread_tau_seconds: 60.0,
+            threshold: None,
+            min_spread: None,
+        };
+        for (what, config) in [
+            ("normal_only on a frozen baseline", frozen),
+            ("readapt without normal_only", readapt_without_normal_only),
+            ("a time nothing reads", time_unread),
+            ("a zero time constant", no_tau),
+        ] {
+            assert!(config.build(&mut ctx).is_err(), "{what} was accepted");
         }
     }
 }

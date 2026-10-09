@@ -11,7 +11,9 @@ Several derivations run at once and each is written under its own `as`, so one p
 | `derive` | `list of derivation` | <Badge type="warning" text="required" /> | what to derive. At least one, each with a distinct `as` |
 | `group_by` | `list of string` | <Badge type="info" text="optional" /> | the fields that identify a series, the reducer's way. Leave it out for one series |
 | `on_missing` | `error` \| `skip` | <Badge type="info" text="optional" /> | what to do about a message missing a derived field or a group field |
+| `reset_when` | `list of numeric \| string \| one_of \| none_of` | <Badge type="info" text="optional" /> | a message passing all of these clears its key's state first, so the series starts over. Checked before `when` |
 | `time` | `string` | <Badge type="info" text="optional" /> | the field carrying each message's time — RFC 3339 or milliseconds since the epoch. Leave it out for arrival time |
+| `when` | `list of numeric \| string \| one_of \| none_of` | <Badge type="info" text="optional" /> | only messages passing all of these are applied; the rest pass through untouched. Leave it out for every message |
 
 **`derive` — each entry**
 
@@ -21,3 +23,63 @@ Several derivations run at once and each is written under its own `as`, so one p
 | `field` | `string` | <Badge type="warning" text="required" /> | the numeric field it is derived from |
 | `as` | `string` | <Badge type="warning" text="required" /> | the field the answer is written under |
 | `wrap_at` | `number` | <Badge type="info" text="optional" /> | for `counter`: the value the counter wraps back to zero at, so a drop is read as having run through the top rather than as a reset |
+
+**`reset_when` — each entry — `type: "numeric"`**
+
+| field | type | | description |
+| --- | --- | --- | --- |
+| `field` | `string` | <Badge type="warning" text="required" /> | the field to test — a dotted path, like anywhere else |
+| `operator` | `greater_than` \| `less_than` \| `equal_to` \| `not_equal_to` | <Badge type="warning" text="required" /> | how the field is compared |
+| `value` | `number` | <Badge type="warning" text="required" /> | the number it is compared to |
+
+**`reset_when` — each entry — `type: "string"`**
+
+| field | type | | description |
+| --- | --- | --- | --- |
+| `field` | `string` | <Badge type="warning" text="required" /> | the field to test — a dotted path, like anywhere else |
+| `operator` | `equal_to` \| `not_equal_to` \| `contains` | <Badge type="warning" text="required" /> | how the field is compared |
+| `value` | `string` | <Badge type="warning" text="required" /> | the string it is compared to |
+
+**`reset_when` — each entry — `type: "one_of"`**
+
+| field | type | | description |
+| --- | --- | --- | --- |
+| `field` | `string` | <Badge type="warning" text="required" /> | the field to test — a dotted path, like anywhere else |
+| `values` | `list of string` | <Badge type="warning" text="required" /> | the strings that match |
+
+**`reset_when` — each entry — `type: "none_of"`**
+
+| field | type | | description |
+| --- | --- | --- | --- |
+| `field` | `string` | <Badge type="warning" text="required" /> | the field to test — a dotted path, like anywhere else |
+| `values` | `list of string` | <Badge type="warning" text="required" /> | the strings that do not match |
+
+**`when` — each entry — `type: "numeric"`**
+
+| field | type | | description |
+| --- | --- | --- | --- |
+| `field` | `string` | <Badge type="warning" text="required" /> | the field to test — a dotted path, like anywhere else |
+| `operator` | `greater_than` \| `less_than` \| `equal_to` \| `not_equal_to` | <Badge type="warning" text="required" /> | how the field is compared |
+| `value` | `number` | <Badge type="warning" text="required" /> | the number it is compared to |
+
+**`when` — each entry — `type: "string"`**
+
+| field | type | | description |
+| --- | --- | --- | --- |
+| `field` | `string` | <Badge type="warning" text="required" /> | the field to test — a dotted path, like anywhere else |
+| `operator` | `equal_to` \| `not_equal_to` \| `contains` | <Badge type="warning" text="required" /> | how the field is compared |
+| `value` | `string` | <Badge type="warning" text="required" /> | the string it is compared to |
+
+**`when` — each entry — `type: "one_of"`**
+
+| field | type | | description |
+| --- | --- | --- | --- |
+| `field` | `string` | <Badge type="warning" text="required" /> | the field to test — a dotted path, like anywhere else |
+| `values` | `list of string` | <Badge type="warning" text="required" /> | the strings that match |
+
+**`when` — each entry — `type: "none_of"`**
+
+| field | type | | description |
+| --- | --- | --- | --- |
+| `field` | `string` | <Badge type="warning" text="required" /> | the field to test — a dotted path, like anywhere else |
+| `values` | `list of string` | <Badge type="warning" text="required" /> | the strings that do not match |

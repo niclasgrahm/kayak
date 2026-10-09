@@ -21,7 +21,7 @@ Distinct from the `buffer` option on an input: that one batches what an input pr
 
 | field | type | | description |
 | --- | --- | --- | --- |
-| `conditions` | `list of numeric \| string` | <Badge type="warning" text="required" /> | what has to be true of that key for the buffer to be released. All of them, and at least one — a gate with no conditions would be a buffer that releases on every write to the bucket. |
+| `conditions` | `list of numeric \| string \| one_of \| none_of` | <Badge type="warning" text="required" /> | what has to be true of that key for the buffer to be released. All of them, and at least one — a gate with no conditions would be a buffer that releases on every write to the bucket. |
 | `bucket` | `string` | <Badge type="info" text="optional" /> | which bucket to watch. Defaults to the one this pipeline's `state` names; a pipeline with no `state` of its own has to name it here. |
 | `key` | `string` | <Badge type="info" text="optional" /> | which key in that bucket to read. A literal key, not a field path — this is one gate for the whole buffer, so there is no message to take a key from. Leave it out for the bucket-wide value, which is what `remember` writes when its pipeline's `state` has no `key`. |
 
@@ -30,13 +30,27 @@ Distinct from the `buffer` option on an input: that one batches what an input pr
 | field | type | | description |
 | --- | --- | --- | --- |
 | `field` | `string` | <Badge type="warning" text="required" /> | the field to test — a dotted path, like anywhere else |
-| `operator` | `greater_than` \| `less_than` \| `equal_to` | <Badge type="warning" text="required" /> | How a number is compared to the one in the config. |
-| `value` | `number` | <Badge type="warning" text="required" /> |  |
+| `operator` | `greater_than` \| `less_than` \| `equal_to` \| `not_equal_to` | <Badge type="warning" text="required" /> | how the field is compared |
+| `value` | `number` | <Badge type="warning" text="required" /> | the number it is compared to |
 
 **`until`.`conditions` — each entry — `type: "string"`**
 
 | field | type | | description |
 | --- | --- | --- | --- |
 | `field` | `string` | <Badge type="warning" text="required" /> | the field to test — a dotted path, like anywhere else |
-| `operator` | `equal_to` \| `contains` | <Badge type="warning" text="required" /> | How a string is compared to the one in the config. |
-| `value` | `string` | <Badge type="warning" text="required" /> |  |
+| `operator` | `equal_to` \| `not_equal_to` \| `contains` | <Badge type="warning" text="required" /> | how the field is compared |
+| `value` | `string` | <Badge type="warning" text="required" /> | the string it is compared to |
+
+**`until`.`conditions` — each entry — `type: "one_of"`**
+
+| field | type | | description |
+| --- | --- | --- | --- |
+| `field` | `string` | <Badge type="warning" text="required" /> | the field to test — a dotted path, like anywhere else |
+| `values` | `list of string` | <Badge type="warning" text="required" /> | the strings that match |
+
+**`until`.`conditions` — each entry — `type: "none_of"`**
+
+| field | type | | description |
+| --- | --- | --- | --- |
+| `field` | `string` | <Badge type="warning" text="required" /> | the field to test — a dotted path, like anywhere else |
+| `values` | `list of string` | <Badge type="warning" text="required" /> | the strings that do not match |

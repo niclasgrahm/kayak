@@ -40,9 +40,9 @@ Four things the field types decide:
   the choice first and then whichever fields it implies. Pick `tumbling` and the
   `size` box is replaced by a `window_seconds` box; nothing you filled in for the
   other one is sent;
-- an enum-shaped component (the `filter` transform) gets a `form` picker for its
-  `Numeric` / `String` variants, and its fields follow the choice — the same
-  idea one level up.
+- a list whose rows are each a choice — a `filter`'s `conditions`, a
+  `remember`'s `when` — is both of the above at once: rows you add and remove,
+  each with its own `type` picker and the fields that choice implies.
 
 Between them that is the whole config surface: there is no field anywhere that
 has to be filled in as raw JSON, and a test fails if a new one ever is.

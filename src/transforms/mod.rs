@@ -11,6 +11,7 @@ pub mod filter;
 pub mod keyed;
 pub mod http;
 pub mod map;
+pub mod pivot;
 pub mod reduce;
 pub mod resample;
 pub mod rolling;
@@ -18,6 +19,7 @@ pub mod script;
 pub mod smooth;
 pub mod splitter;
 pub mod state;
+pub mod throttle;
 
 pub trait BuildTransform {
     fn build(self, ctx: &mut BuildCtx) -> anyhow::Result<Box<dyn Transform>>;

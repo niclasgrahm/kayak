@@ -1,9 +1,9 @@
 # streaming statistics
 
-Six transforms that each keep a little state per key and do arithmetic over
+Seven transforms that each keep a little state per key and do arithmetic over
 it as readings arrive — the first tier of statistics in the stream, and the
 one that needs no dependency at all. Most of the value for the industrial
-cases lives here: edge data reduction (`deadband`, `resample`), sensor health
+cases lives here: edge data reduction (`deadband`, `throttle`, `resample`), sensor health
 (`deadband`'s flatline, `detect`), rates off counters (`derive`), and the
 rolling averages and control charts a plant floor has always run (`rolling`,
 `smooth`, `detect`).
@@ -27,6 +27,10 @@ Every one of them is configured the same way, and the sameness is the design:
   without its key: `error` fails the batch (the default, as it is the
   reducer's), `skip` passes the message through untouched. A value that is
   present and isn't a number is an error whatever `on_missing` says.
+- **`when` and `reset_when`** are [conditions](/pipelines/state), the list
+  `filter` and `remember` take. A message `when` doesn't match passes through
+  untouched and leaves the state alone; a message `reset_when` matches clears
+  its key's state first, so the series starts over. More on both below.
 
 ```json
 {
@@ -50,6 +54,38 @@ Clean the spikes, throw away the readings that didn't move, flag the ones that
 moved too much — with one bucket declared at the top of the file and one key
 named three times.
 
+## when, and starting over
+
+A stream rarely carries one kind of message. An industrial feed sends a
+machine's *state* (`RUNNING`, `OFF`) beside its readings, as messages of their
+own, and a state is a string — which every transform here would reject as a
+present non-number. `when` says which messages a transform is about; the rest
+pass through it untouched, so the state is still there for what comes after:
+
+```yaml
+- type: smooth
+  field: value
+  method: { type: ewma, tau_seconds: 180 }
+  time: ts
+  as: smoothed
+  when:
+    - { type: string, field: sensor, operator: equal_to, value: pump_vibration }
+  reset_when:
+    - { type: string, field: value, operator: equal_to, value: "OFF" }
+```
+
+`reset_when` is the other half: a message it matches clears its key's state,
+so the series starts over from the next reading rather than averaging across a
+machine that was switched off, or a part that was replaced. It is checked
+before `when` and whatever `when` says — here the state message resets the
+average and is itself passed through. Both are lists of the same conditions
+`filter` takes, and all of a list has to hold.
+
+Neither condition is about the key: a message `when` doesn't match needs no
+`group_by` field, since the transform has nothing to say about it. Under
+`resample`, which emits grid points rather than the messages it is given, a
+message `when` doesn't match is simply not part of the series.
+
 ## deadband
 
 Drops a message unless the field moved by more than `delta` — in the field's
@@ -65,6 +101,32 @@ value has not moved in that long, the next message passes carrying
 `stuck: true`, once per flat stretch, so a stuck instrument is distinguishable
 downstream from a quiet one. The stretch is measured from the last *change*,
 so a `max_seconds` confirmation of a stuck value does not reset it.
+
+## throttle
+
+Passes at most one message per key every `seconds` and drops the rest. The
+first message per key passes, and after that the first one at least `seconds`
+after the last that passed:
+
+```yaml
+- type: throttle
+  seconds: 5
+  group_by: [machine]
+  time: ts
+```
+
+Where `deadband` decides by the *value*, `throttle` decides by the clock alone,
+so the messages it lets through are whole — every field intact. That makes it
+the one to put in front of an output writing several fields per message, which
+is the usual reason for wanting it: a computation that can answer on every
+reading, feeding a sink that only needs to hear every few seconds.
+
+The interval runs from the message that passed, not from a clock grid, and
+nothing is held back to be sent later — a key that goes quiet mid-interval sends
+nothing more until its next message, and a message earlier than the last one
+passed (a late reading, under a `time` field) is dropped. When what matters is
+the *last* value of each interval, or a quiet key should still report, that is
+[`resample`](#resample).
 
 ## derive
 
@@ -106,7 +168,7 @@ Smooths a field against the values before it, over the field itself or under
 
 | | |
 |---|---|
-| `ewma` | exponentially weighted, by `alpha` or by `half_life` in messages — cheap, no window |
+| `ewma` | exponentially weighted, by `alpha` or `half_life` in messages, or by `tau_seconds` in time — cheap, no window |
 | `median` | the median of the last `size`, this one included — removes single-sample spikes outright |
 | `hampel` | keep the value unless it is `threshold` scaled MADs from the window's median, else the median — the right first stage in front of any detector |
 | `savitzky_golay` | a polynomial of `order` fitted to the last `size`, evaluated at the newest — keeps the shape of peaks a moving average flattens |
@@ -115,10 +177,29 @@ The Savitzky–Golay here is *trailing*, because a stream cannot see the future,
 and until the window holds more than `order` values the reading passes
 untouched.
 
+`alpha` and `half_life` count readings, which is only right for a series that
+arrives at a steady rate. **`tau_seconds` counts time**: each reading moves the
+average `1 − e^(−Δt/τ)` of the way towards it, for the Δt since the reading
+before, so ten readings a second apart move it exactly as far as one reading
+ten seconds after the last. That is the spelling for a sensor that reports on
+change, or a feed that stalls and catches up:
+
+```yaml
+- type: smooth
+  field: value
+  method: { type: ewma, tau_seconds: 180 }   # a three-minute time constant
+  time: ts
+  as: smoothed
+```
+
+`time` is read by that method and no other — the rest are about the order of
+the readings, not when they came — so `smooth` refuses a `time` beside them
+rather than ignoring it. A reading older than the last one moves nothing.
+
 ## detect
 
 Flags anomalies in a field against its own series — one component with a
-`method`, the way `filter` is one component with a kind. It writes a boolean
+`method`, the way `smooth` is. It writes a boolean
 under `as` (`anomaly` when left out) and `<as>_score` beside it, how far
 outside normal the reading was in the method's own units, so a `filter`
 downstream can be stricter than the threshold. `mode: only_anomalies` turns
@@ -140,6 +221,47 @@ because until then there is no idea of normal to be outside of. Two families:
 
 `flatline` is the sixth: the last `size` values identical, a stuck instrument
 seen from the detector's side.
+
+`ewma` is the seventh, and a window method without a window: normal is an
+exponentially weighted mean and spread, each following the series with a time
+constant of its own (`mean_tau_seconds`, `spread_tau_seconds`), so it suits a
+series that drifts slowly and arrives irregularly. `min_spread` is the smallest
+deviation it will believe, in the field's units — without one, a signal that
+has been perfectly flat flags its first wobble. It reads `time`.
+
+### what normal learns from
+
+The methods that keep learning — `zscore`, `mad` and `ewma` — learn from every
+reading by default, anomalies included, so a lasting change becomes the new
+normal as fast as the baseline follows anything. `learn: normal_only` keeps a
+flagged reading out of its own baseline instead, so a step is flagged for as
+long as it lasts. That needs a way out, or a machine that genuinely moved to a
+new level is flagged for ever: `readapt_after_seconds` says how long a run of
+flagged readings may last before they are learned from anyway, until the
+baseline has caught up.
+
+```yaml
+- type: detect
+  field: value
+  method: { type: ewma, mean_tau_seconds: 120, spread_tau_seconds: 600,
+            threshold: 4, min_spread: 1.0 }
+  min_samples: 120
+  learn: normal_only
+  readapt_after_seconds: 300
+  with_baseline: true
+  time: ts
+  group_by: [sensor]
+```
+
+`with_baseline: true` writes what the reading was judged against beside the
+flag and the score: `<as>_expected`, what normal was, and `<as>_band`, how far
+from it counted — both in the field's own units, which is what a chart drawing
+a normal band around a signal needs. They are `null` during warm-up, and where
+a method has nothing in those units to say (`cusum`'s threshold is on the
+accumulated drift, so its band is `null`; `flatline` has neither).
+
+`time` on `detect` is read by `ewma` and `readapt_after_seconds` only, and
+refused beside anything else, the way `smooth` refuses it.
 
 ## resample
 

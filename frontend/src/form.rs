@@ -1789,12 +1789,48 @@ mod tests {
         Ok(())
     }
 
-    /// The `filter` transform's fields live on its variants, and the wire
+    /// An enum-shaped component, written out by hand: `filter` was the one
+    /// real one until it took a list of conditions, and the form still builds
+    /// the shape — see `kayak_core::docs::VariantDoc`.
+    fn enum_shaped() -> ComponentDoc {
+        use kayak_core::docs::VariantDoc;
+        let field = |name: &str, field_type: FieldType| FieldDoc {
+            name: name.to_string(),
+            type_name: String::new(),
+            field_type,
+            description: None,
+            required: true,
+        };
+        let variant = |name: &str, operators: &[&str], value: FieldType| VariantDoc {
+            name: name.to_string(),
+            fields: vec![
+                field("field", FieldType::MessageField),
+                field(
+                    "operator",
+                    FieldType::Enum(operators.iter().map(ToString::to_string).collect()),
+                ),
+                field("value", value),
+            ],
+        };
+        ComponentDoc {
+            kind: "compare".to_string(),
+            family: Family::Transform,
+            description: None,
+            fields: vec![],
+            variants: vec![
+                variant("Numeric", &["greater_than", "less_than"], FieldType::Number),
+                variant("String", &["equal_to", "contains"], FieldType::Text),
+            ],
+            metadata: vec![],
+        }
+    }
+
+    /// An enum-shaped component's fields live on its variants, and the wire
     /// format hangs them off the variant name.
     #[test]
     fn an_enum_shaped_component_is_built_from_the_selected_variant() -> anyhow::Result<()> {
-        let filter = component(Family::Transform, "filter");
-        let mut draft = draft_of(&filter);
+        let shaped = enum_shaped();
+        let mut draft = draft_of(&shaped);
         assert_eq!(
             draft.variant.as_deref(),
             Some("Numeric"),
@@ -1809,11 +1845,11 @@ mod tests {
         ] {
             draft.values.insert(name.to_string(), value.to_string());
         }
-        let json = component_json(&filter, &draft).map_err(|e| anyhow::anyhow!("{e:?}"))?;
+        let json = component_json(&shaped, &draft).map_err(|e| anyhow::anyhow!("{e:?}"))?;
         assert_eq!(
             json,
             json!({
-                "type": "filter",
+                "type": "compare",
                 "String": {"field": "level", "operator": "contains", "value": "warn"}
             })
         );
@@ -1824,9 +1860,9 @@ mod tests {
     /// `String`'s is text, so the fields can't be shared.
     #[test]
     fn the_rendered_fields_follow_the_selected_variant() {
-        let filter = component(Family::Transform, "filter");
-        let numeric = fields_of(&filter, Some("Numeric"));
-        let string = fields_of(&filter, Some("String"));
+        let shaped = enum_shaped();
+        let numeric = fields_of(&shaped, Some("Numeric"));
+        let string = fields_of(&shaped, Some("String"));
         let value_type = |fields: &[FieldDoc]| {
             fields
                 .iter()
@@ -1835,6 +1871,44 @@ mod tests {
         };
         assert_eq!(value_type(&numeric), Some(FieldType::Number));
         assert_eq!(value_type(&string), Some(FieldType::Text));
+    }
+
+    /// A filter is rows of conditions like any list of unions, and what the
+    /// form builds is a filter the server accepts — including the list-valued
+    /// `none_of`.
+    #[test]
+    fn a_filter_is_built_from_its_condition_rows() -> anyhow::Result<()> {
+        let filter = component(Family::Transform, "filter");
+        let draft = filled(
+            Family::Transform,
+            "filter",
+            &[
+                ("conditions", "2"),
+                ("conditions.0.type", "string"),
+                ("conditions.0.field", "sensor"),
+                ("conditions.0.operator", "not_equal_to"),
+                ("conditions.0.value", "state"),
+                ("conditions.1.type", "none_of"),
+                ("conditions.1.field", "state"),
+                ("conditions.1.values", "2"),
+                ("conditions.1.values.0", "OFF"),
+                ("conditions.1.values.1", "UNKNOWN"),
+            ],
+        );
+        let json = component_json(&filter, &draft).map_err(|e| anyhow::anyhow!("{e:?}"))?;
+        assert_eq!(
+            json,
+            json!({
+                "type": "filter",
+                "conditions": [
+                    {"type": "string", "field": "sensor", "operator": "not_equal_to", "value": "state"},
+                    {"type": "none_of", "field": "state", "values": ["OFF", "UNKNOWN"]}
+                ]
+            })
+        );
+        let parsed: kayak_core::config::TransformConfig = serde_json::from_value(json)?;
+        assert!(matches!(parsed.kind, kayak_core::config::TransformKind::Filter(_)));
+        Ok(())
     }
 
     /// The end to end shape: this is the body of `POST /api/pipelines`, and it

@@ -28,7 +28,7 @@ use kayak::state::{PipelineHandle, UiEvent};
 use kayak::testing::{LoadInput, NullOutput, stub_config};
 use kayak::transforms::Transform;
 use kayak_core::config::{
-    FilterKind, FilterTransformConfig, InputConfig, InputKind, NumericFilterOperatorKind,
+    Condition, FilterTransformConfig, InputConfig, InputKind, NumericFilterOperatorKind,
     PipelineConfig, TransformConfig, TransformKind,
 };
 use kayak_core::mapping::{MapTransformConfig, Mapping};
@@ -130,11 +130,12 @@ fn transforms(chain: Chain) -> Result<Vec<Box<dyn Transform>>> {
         // "> 0", so every message passes — see `Chain::Filter`.
         Chain::Filter(n) => std::iter::repeat_n(
             TransformKind::Filter(FilterTransformConfig {
-                filter: FilterKind::Numeric {
+                conditions: vec![Condition::Numeric {
                     field: "value".to_string(),
                     operator: NumericFilterOperatorKind::GreaterThan,
                     value: 0.0,
-                },
+                }],
+                invert: false,
             }),
             n,
         )
@@ -149,6 +150,7 @@ fn transforms(chain: Chain) -> Result<Vec<Box<dyn Transform>>> {
             on_missing: kayak_core::mapping::MapMissingPolicy::Error,
         })],
         Chain::Rolling => vec![TransformKind::Rolling(RollingTransformConfig {
+            gate: kayak_core::streaming::Gate::default(),
             aggregations: vec![kayak_core::config::Aggregation {
                 function: kayak_core::config::ReduceFnKind::Avg,
                 output: "value_avg".to_string(),

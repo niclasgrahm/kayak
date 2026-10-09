@@ -12,6 +12,9 @@
     },
     "heartbeat_stats": {
       "max_keys": 8
+    },
+    "line1_tags": {
+      "max_keys": 1
     }
   },
   "pipelines": [
@@ -138,7 +141,21 @@
           "max_batch": 100
         }
       ],
-      "transforms": [],
+      "state": {
+        "bucket": "line1_tags"
+      },
+      "transforms": [
+        {
+          "type": "pivot",
+          "name": "name",
+          "value": "value",
+          "names": [
+            "line1_units",
+            "line2_units",
+            "tank_level"
+          ]
+        }
+      ],
       "outputs": [
         {
           "type": "stdout"
@@ -627,11 +644,14 @@
       "transforms": [
         {
           "type": "filter",
-          "Numeric": {
-            "field": "value",
-            "operator": "greater_than",
-            "value": 90.0
-          }
+          "conditions": [
+            {
+              "type": "numeric",
+              "field": "value",
+              "operator": "greater_than",
+              "value": 90.0
+            }
+          ]
         }
       ],
       "outputs": [
@@ -995,11 +1015,14 @@
       "transforms": [
         {
           "type": "filter",
-          "Numeric": {
-            "field": "latency_ms",
-            "operator": "greater_than",
-            "value": 400.0
-          }
+          "conditions": [
+            {
+              "type": "numeric",
+              "field": "latency_ms",
+              "operator": "greater_than",
+              "value": 400.0
+            }
+          ]
         }
       ],
       "outputs": [
@@ -1194,6 +1217,10 @@
             "size": 20,
             "threshold": 3.0
           }
+        },
+        {
+          "type": "throttle",
+          "seconds": 10.0
         }
       ],
       "outputs": [
@@ -1363,11 +1390,14 @@
       "transforms": [
         {
           "type": "filter",
-          "Numeric": {
-            "field": "value",
-            "operator": "greater_than",
-            "value": 8.0
-          }
+          "conditions": [
+            {
+              "type": "numeric",
+              "field": "value",
+              "operator": "greater_than",
+              "value": 8.0
+            }
+          ]
         },
         {
           "type": "map",

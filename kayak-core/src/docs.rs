@@ -181,8 +181,10 @@ pub struct FieldDoc {
     pub required: bool,
 }
 
-/// A component config that is a tagged enum rather than a flat struct — the
-/// `filter` transform, whose fields depend on which kind of filter it is.
+/// One variant's fields: a [`UnionDoc`]'s, or those of a component config that
+/// is a tagged enum rather than a flat struct. No component is spelled the
+/// second way today — `filter` was, until it took a list of conditions — but
+/// the reflection reads the shape, and the tests pin it against a stand-in.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct VariantDoc {
     pub name: String,
@@ -778,6 +780,67 @@ fn tag_of(branches: &[Value]) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::{NumericFilterOperatorKind, StringFilterOperatorKind};
+
+    /// An enum-shaped component: a config whose fields hang off an externally
+    /// tagged variant beside the component's own `type`. `filter` was spelled
+    /// this way until it took a list of conditions, and no component is now;
+    /// the reflection still supports the shape, so it is pinned against this
+    /// stand-in rather than left untested.
+    #[derive(JsonSchema)]
+    #[serde(tag = "type", rename_all = "snake_case")]
+    #[allow(dead_code, reason = "only ever reflected")]
+    enum ShapedKind {
+        Compare(CompareConfig),
+    }
+
+    /// Compares a field, one way or the other.
+    #[derive(JsonSchema)]
+    #[schemars(title = "compare")]
+    #[allow(dead_code, reason = "only ever reflected")]
+    struct CompareConfig {
+        #[serde(flatten)]
+        kind: CompareKind,
+    }
+
+    #[derive(JsonSchema)]
+    #[allow(dead_code, reason = "only ever reflected")]
+    enum CompareKind {
+        Numeric {
+            /// the field to compare
+            #[schemars(extend("x-message-field" = true))]
+            field: String,
+            operator: NumericFilterOperatorKind,
+            value: f64,
+        },
+        String {
+            /// the field to compare
+            #[schemars(extend("x-message-field" = true))]
+            field: String,
+            operator: StringFilterOperatorKind,
+            value: String,
+        },
+    }
+
+    fn enum_shaped() -> ComponentDoc {
+        let schema = serde_json::to_value(schemars::schema_for!(ShapedKind)).unwrap_or_default();
+        match components_of(&schema, Family::Transform).into_iter().next() {
+            Some(c) => c,
+            None => panic!("the stand-in did not reflect as a component"),
+        }
+    }
+
+    /// The element of a component's list-of-unions field, e.g. a `filter`'s
+    /// `conditions`, as the union it is.
+    fn union_element(component: &ComponentDoc, name: &str) -> UnionDoc {
+        let FieldType::List(element) = &field(component, name).field_type else {
+            panic!("'{name}' is not a list");
+        };
+        let FieldType::Union(union) = &element.field_type else {
+            panic!("'{name}' is not a list of unions");
+        };
+        union.clone()
+    }
 
     /// The first component with this tag, which is the input one where a tag is
     /// shared. `nats` names an input, an output *and* a connection, so anything
@@ -1159,6 +1222,7 @@ mod tests {
                 "cast",
                 "concat",
                 "arithmetic",
+                "time_bucket",
                 "drop"
             ]
         );
@@ -1188,19 +1252,19 @@ mod tests {
         assert_eq!(literal.fields[0].field_type, FieldType::Text);
     }
 
-    /// The `filter` transform's fields depend on which filter it is, so they're
-    /// documented per variant rather than as one flat list.
+    /// An enum-shaped component's fields depend on which variant it is, so
+    /// they're documented per variant rather than as one flat list.
     #[test]
     fn an_enum_shaped_component_documents_its_variants() {
-        let filter = component("filter");
+        let shaped = enum_shaped();
         assert!(
-            filter.fields.is_empty(),
-            "filter's fields belong to its variants"
+            shaped.fields.is_empty(),
+            "the fields belong to the variants"
         );
-        let names: Vec<&str> = filter.variants.iter().map(|v| v.name.as_str()).collect();
+        let names: Vec<&str> = shaped.variants.iter().map(|v| v.name.as_str()).collect();
         assert_eq!(names, ["Numeric", "String"]);
 
-        let numeric = &filter.variants[0];
+        let numeric = &shaped.variants[0];
         assert_eq!(
             numeric
                 .fields
@@ -1211,9 +1275,23 @@ mod tests {
         );
         assert_eq!(
             numeric.fields[1].type_name,
-            "greater_than | less_than | equal_to"
+            "greater_than | less_than | equal_to | not_equal_to"
         );
         assert_eq!(numeric.fields[2].type_name, "number");
+    }
+
+    /// `filter` is a list of conditions — the same union `remember`'s `when`
+    /// takes — so the form for it is the generic one, with no variant to pick.
+    #[test]
+    fn a_filter_is_a_list_of_conditions() {
+        let filter = component("filter");
+        assert!(filter.variants.is_empty(), "filter is no longer enum-shaped");
+        assert!(field(&filter, "conditions").required);
+        assert!(!field(&filter, "invert").required);
+
+        let conditions = union_element(&filter, "conditions");
+        let tags: Vec<&str> = conditions.variants.iter().map(|v| v.name.as_str()).collect();
+        assert_eq!(tags, ["numeric", "string", "one_of", "none_of"]);
     }
 
     /// The form in the UI is generated from these, so a field that comes back
@@ -1233,11 +1311,10 @@ mod tests {
             field(&component("dummy"), "duration").field_type,
             FieldType::Integer
         );
-        let filter = component("filter");
-        let numeric = &filter.variants[0];
+        let numeric = &enum_shaped().variants[0];
         match numeric.fields.iter().find(|f| f.name == "value") {
             Some(f) => assert_eq!(f.field_type, FieldType::Number),
-            None => panic!("the numeric filter has no 'value' field"),
+            None => panic!("the numeric variant has no 'value' field"),
         }
     }
 
@@ -1266,13 +1343,15 @@ mod tests {
     /// suggest the wrong answer.
     #[test]
     fn a_field_that_names_a_field_of_the_messages_says_so() {
-        let numeric = &component("filter").variants[0];
-        let compared = numeric
-            .fields
-            .iter()
-            .find(|f| f.name == "field")
-            .expect("the numeric filter compares a field");
-        assert_eq!(compared.field_type, FieldType::MessageField);
+        let conditions = union_element(&component("filter"), "conditions");
+        for variant in &conditions.variants {
+            let compared = variant
+                .fields
+                .iter()
+                .find(|f| f.name == "field")
+                .unwrap_or_else(|| panic!("the {} condition compares no field", variant.name));
+            assert_eq!(compared.field_type, FieldType::MessageField, "{}", variant.name);
+        }
 
         let reducer = in_family("reducer", Family::Transform);
         let aggregations = field(&reducer, "aggregations");
@@ -1710,12 +1789,12 @@ mod tests {
 
     #[test]
     fn search_matches_a_variant_field_of_an_enum_shaped_component() {
-        let filter = component("filter");
+        let shaped = enum_shaped();
         assert!(
-            filter.matches("operator"),
+            shaped.matches("operator"),
             "should reach into variant fields"
         );
-        assert!(filter.matches("numeric"), "should match a variant name");
+        assert!(shaped.matches("numeric"), "should match a variant name");
     }
 
     /// The mapping is a list of forms rather than a JSON box, which is the

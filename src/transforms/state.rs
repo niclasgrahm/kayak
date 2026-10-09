@@ -101,6 +101,7 @@ pub(crate) fn matches(conditions: &[Condition], message: &Value) -> bool {
                 NumericFilterOperatorKind::GreaterThan => found > *value,
                 NumericFilterOperatorKind::LessThan => found < *value,
                 NumericFilterOperatorKind::EqualTo => (found - *value).abs() < f64::EPSILON,
+                NumericFilterOperatorKind::NotEqualTo => (found - *value).abs() >= f64::EPSILON,
             }),
         Condition::String {
             field,
@@ -110,8 +111,15 @@ pub(crate) fn matches(conditions: &[Condition], message: &Value) -> bool {
             .and_then(Value::as_str)
             .is_some_and(|found| match operator {
                 StringFilterOperatorKind::EqualTo => found == value,
+                StringFilterOperatorKind::NotEqualTo => found != value,
                 StringFilterOperatorKind::Contains => found.contains(value),
             }),
+        Condition::OneOf { field, values } => fields::get(message, field)
+            .and_then(Value::as_str)
+            .is_some_and(|found| values.iter().any(|v| v == found)),
+        Condition::NoneOf { field, values } => fields::get(message, field)
+            .and_then(Value::as_str)
+            .is_some_and(|found| values.iter().all(|v| v != found)),
     })
 }
 

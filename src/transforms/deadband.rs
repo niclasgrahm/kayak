@@ -52,6 +52,7 @@ impl BuildTransform for DeadbandTransformConfig {
             self.group_by,
             self.time,
             self.on_missing,
+            self.gate,
         )?;
         Ok(Box::new(DeadbandTransform {
             series,
@@ -162,6 +163,7 @@ mod tests {
 
     fn config(delta: f64) -> DeadbandTransformConfig {
         DeadbandTransformConfig {
+            gate: kayak_core::streaming::Gate::default(),
             field: "v".into(),
             delta,
             mode: DeadbandMode::Absolute,

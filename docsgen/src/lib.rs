@@ -149,7 +149,7 @@ fn component_section(component: &ComponentDoc) -> String {
         out.push_str(&field_table(&component.fields));
         out.push_str(&nested(&component.fields));
     } else {
-        // an enum-shaped component — the `filter` transform. Its fields live on
+        // an enum-shaped component (none today; `filter` was). Its fields live on
         // the variants, and the variant is *externally* tagged: it is a key
         // beside the component's own `type`, holding the fields as its value.
         // Spelling that out is the whole point of the header, so don't shorten
@@ -626,17 +626,25 @@ mod tests {
 
     #[test]
     fn an_enum_shaped_component_shows_where_its_variant_key_goes() {
-        // `filter` is externally tagged: the variant is a key *beside* `type`,
-        // not a value of it, and a header saying otherwise is a config that
-        // does not parse.
-        let filter = all_components()
-            .into_iter()
-            .find(|c| c.kind == "filter")
-            .map(|c| component_section(&c))
-            .unwrap_or_default();
+        // an enum-shaped component is externally tagged: the variant is a key
+        // *beside* `type`, not a value of it, and a header saying otherwise is
+        // a config that does not parse. No component is spelled that way
+        // today (`filter` was), so this one is written out by hand.
+        let shaped = ComponentDoc {
+            kind: "compare".to_string(),
+            family: Family::Transform,
+            description: None,
+            fields: vec![],
+            variants: vec![kayak_core::docs::VariantDoc {
+                name: "Numeric".to_string(),
+                fields: vec![],
+            }],
+            metadata: vec![],
+        };
+        let section = component_section(&shaped);
         assert!(
-            filter.contains("{\"type\": \"filter\", \"Numeric\": { … }}"),
-            "{filter}"
+            section.contains("{\"type\": \"compare\", \"Numeric\": { … }}"),
+            "{section}"
         );
     }
 

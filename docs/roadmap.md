@@ -656,6 +656,97 @@ is a matrix someone has to write down. **Matrix profile** — discords and
 motifs, expensive and niche. **Event-time windows with watermarks** — already
 ruled out under the machine-cycle scenario; nothing here changes that argument.
 
+## composing instead of scripting
+
+Came out of reading (2026-10-09) the three rhai scripts behind the indu demo
+apps (OEE, pump health, anomaly detection — `deploy/single-server/kayak/
+config.yaml` in the indud repo) and asking which of what they do could be
+stock transforms instead. The test each entry passed is that it names an idea
+general stream and time-series tools already have — Vector's `throttle`,
+Telegraf's `pivot`, every TSDB's `time_bucket` — rather than one that exists
+because of those three apps. What deliberately did *not* make the list: an
+`oee` transform (a formula, not a stream concept — it stays a script, and is
+worth shipping as a documented recipe instead), a remaining-useful-life
+transform (clamped `map` arithmetic covers it, `forecast` above is the general
+version), and `dwell`, time-in-state (a real idea, but OEE is its only user so
+far, and its shape should be settled by a second one).
+
+With the list below, `pump_health` and `anomaly_detection` become chains of
+stock transforms; `oee` stays scripted but shorter. Smallest first:
+
+- [x] **`filter` gains the `Condition` vocabulary.**
+      (done 2026-10-09: `filter` *is* a `conditions` list plus `invert` now,
+      evaluated by the same `transforms::state::matches` as `remember`;
+      `not_equal_to` on both comparison kinds and `one_of`/`none_of` as
+      `Condition` variants of their own. The old `{"Numeric": {...}}`
+      spelling is still read and saved in the new one. The enum-shaped
+      component machinery in `docs.rs`/`form.rs`/docsgen lost its only user
+      and is pinned against a stand-in. The original entry:) `not_equal` and
+      `in` / `not_in` operators, a list of conditions that must all hold, and
+      `invert` to drop what matches instead of keeping it. There is no "not
+      equal" at all today, and `filter` is the one component that tests a
+      field without using the `Condition` type `remember` and the `buffer`
+      gate already share. The existing single-condition spelling must keep
+      parsing byte-for-byte.
+- [x] **`map`: `min` and `max` operators, and an `on_zero` policy for
+      `divide`.** (done 2026-10-09: `OnZero` is `error | null | value`,
+      refused at build on any operator but `divide`; a literal zero divisor
+      is still refused whatever it says.) Clamping is two mappings, each still one operation, so the
+      "map reshapes, it does not compute" line holds. `on_zero` decides
+      whether a divisor that turns out to be zero fails the batch (today, and
+      the default), writes `null`, or writes a given value.
+- [x] **`smooth`'s `ewma` by time.** (done 2026-10-09: state is `{prev,
+      at}`; a late reading moves nothing; `time` is refused on every other
+      method.) `tau_seconds` beside `alpha` and
+      `half_life`, with a `time` field on the transform: the weight of the new
+      value is `1 − e^(−Δt/τ)`, so irregularly spaced readings are smoothed by
+      how long they lasted rather than by how many there were. An EWMA that
+      counts messages is only right at a fixed rate, which real streams
+      rarely have.
+- [x] **`throttle`.** (done 2026-10-09: the interval runs from the message
+      that passed; a late message is dropped and moves nothing; in the
+      sample as the last stage of `heartbeat_trend`.) At most one message per key every `seconds`, by the
+      message's own time or arrival; the rest are dropped. Keyed like the
+      other stateful transforms. `resample` carries one field and `deadband`
+      with an enormous `delta` is a hack — this is the honest spelling of
+      "don't write to the sink more than every five seconds".
+- [x] **`when` and `reset_when` on every keyed transform.** (done
+      2026-10-09: `streaming::Gate`, flattened into all seven, enforced in
+      `Series::key` so no transform implements it.) A `Condition`
+      list, handled once in `src/transforms/keyed.rs`: a message that does not
+      match `when` passes through untouched and leaves the state alone, and
+      one that matches `reset_when` clears that key's state before it is
+      applied. Without `when` a stream carrying more than one kind of message
+      — a state reading beside the numeric ones — cannot reach a numeric
+      transform at all, because a present non-number is an error.
+- [x] **a `time_bucket` mapping on `map`.** (done 2026-10-09: spelled
+      `every_seconds`/`offset_seconds`/`timezone`/`format`, floored on the
+      zone's wall clock; a skipped start resolves to the end of the gap, a
+      repeated one to the first.) Truncates a time to a period,
+      with an offset and an IANA time zone (`every: 8h, offset: 6h, tz:
+      Europe/Stockholm` is a shift calendar). Combined with `group_by` it
+      makes "reset per hour, day or shift" fall out of the per-key state the
+      buckets already bound and evict, with no new window concept. Costs
+      `chrono-tz`. The OEE script's hardcoded UTC+2 is the bug this fixes.
+- [x] **`pivot`, narrow to wide.** (done 2026-10-09: `names` is required,
+      as the bound; in the sample on `opcua_line1`.) Keyed: remembers the latest value of
+      `value` under the name `name` holds, and writes every remembered value
+      onto each message. One message per reading is the default shape of
+      industrial and IoT data, and most downstream logic wants a row;
+      `remember`/`recall` can do it today at one `remember` per name.
+- [x] **`detect`, split into generic pieces.** (done 2026-10-09:
+      `with_baseline`, `learn`, `readapt_after_seconds` — which learns from
+      the run rather than jumping the level, one rule for every learning
+      method — and the `ewma` method; `detect` reads `time` for those two
+      and refuses it otherwise.) Every method writes the
+      baseline it judged against (`expected`, `band`) when asked; `learn: all
+      | normal_only` on the methods that learn, so an anomaly does not pull
+      its own baseline (today the `zscore` window takes every reading,
+      `detect.rs` pushes after scoring); `readapt_after_seconds` as the safety
+      valve without which `normal_only` flags a genuine level shift forever;
+      and an `ewma` method with time constants for the mean and the spread
+      plus a `min_spread` floor.
+
 ## known issues
 
 Found during the error-handling pass on 2026-08-03. Each one needs a decision,

@@ -221,6 +221,14 @@
       "text": "deadband"
     },
     {
+      "link": "/reference/transforms#transform-throttle",
+      "text": "throttle"
+    },
+    {
+      "link": "/reference/transforms#transform-pivot",
+      "text": "pivot"
+    },
+    {
       "link": "/reference/transforms#transform-derive",
       "text": "derive"
     },

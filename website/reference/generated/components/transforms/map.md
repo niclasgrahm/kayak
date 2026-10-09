@@ -12,7 +12,7 @@ The message is passed through unchanged, with the mappings laid over it, unless 
 
 | field | type | | description |
 | --- | --- | --- | --- |
-| `mappings` | `list of copy \| constant \| coalesce \| cast \| concat \| arithmetic \| drop` | <Badge type="warning" text="required" /> | what to write, in the order it is written. At least one, and no two may write the same field. |
+| `mappings` | `list of copy \| constant \| coalesce \| cast \| concat \| arithmetic \| time_bucket \| drop` | <Badge type="warning" text="required" /> | what to write, in the order it is written. At least one, and no two may write the same field. |
 | `keep` | `all` \| `mapped` | <Badge type="info" text="optional" /> | whether fields nothing mapped survive |
 | `on_missing` | `error` \| `omit` \| `null` | <Badge type="info" text="optional" /> | what to do about a message missing a field a mapping reads. A `default` on the mapping itself is answered first, and is the better way to say that one particular field is expected to be absent. |
 
@@ -160,9 +160,10 @@ This component takes no configuration.
 | field | type | | description |
 | --- | --- | --- | --- |
 | `left` | `field \| value` | <Badge type="warning" text="required" /> | the left-hand operand |
-| `operator` | `add` \| `subtract` \| `multiply` \| `divide` | <Badge type="warning" text="required" /> | what to do with them |
+| `operator` | `add` \| `subtract` \| `multiply` \| `divide` \| `min` \| `max` | <Badge type="warning" text="required" /> | what to do with them |
 | `right` | `field \| value` | <Badge type="warning" text="required" /> | the right-hand operand |
 | `as` | `string` | <Badge type="warning" text="required" /> | the field to write the answer to |
+| `on_zero` | `error \| null \| value` | <Badge type="info" text="optional" /> | for `divide`: what a right-hand field holding zero produces. Fails the batch when left out |
 
 **`mappings` — each entry.`left` — `type: "field"`**
 
@@ -187,6 +188,31 @@ This component takes no configuration.
 | field | type | | description |
 | --- | --- | --- | --- |
 | `value` | `number` | <Badge type="warning" text="required" /> | the number |
+
+**`mappings` — each entry.`on_zero` — `type: "error"`**
+
+This component takes no configuration.
+
+**`mappings` — each entry.`on_zero` — `type: "null"`**
+
+This component takes no configuration.
+
+**`mappings` — each entry.`on_zero` — `type: "value"`**
+
+| field | type | | description |
+| --- | --- | --- | --- |
+| `value` | `number` | <Badge type="warning" text="required" /> | the answer to write instead |
+
+**`mappings` — each entry — `type: "time_bucket"`**
+
+| field | type | | description |
+| --- | --- | --- | --- |
+| `from` | `string` | <Badge type="warning" text="required" /> | the field holding the time — an RFC 3339 string or milliseconds since the epoch |
+| `every_seconds` | `integer` | <Badge type="warning" text="required" /> | how long a bucket is, in seconds |
+| `as` | `string` | <Badge type="warning" text="required" /> | the field to write the bucket's start to |
+| `format` | `rfc3339` \| `millis` | <Badge type="info" text="optional" /> | how the bucket's start is written. `rfc3339` when left out |
+| `offset_seconds` | `integer` | <Badge type="info" text="optional" /> | how far past the line-up the buckets start, in seconds — less than `every_seconds` |
+| `timezone` | `string` | <Badge type="info" text="optional" /> | the IANA time zone whose clock the periods are counted on, e.g. `Europe/Stockholm`. UTC when left out |
 
 **`mappings` — each entry — `type: "drop"`**
 
