@@ -243,7 +243,7 @@ mod tests {
             })),
             &mut notes,
         );
-        assert!(notes.is_empty());
+        assert_eq!(notes, Vec::<String>::new());
     }
 
     /// The pipeline's own group is what must not be joined — see the note in
