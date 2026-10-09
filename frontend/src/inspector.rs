@@ -61,6 +61,91 @@ pub fn tab_label(stage: &str, count: usize) -> String {
     format!("{stage} ({count})")
 }
 
+/// A folded section's one line: what it is set to, in the order the rows would
+/// show it, without the names.
+///
+/// Values rather than `name: value` pairs because the line is cut at the card's
+/// edge, and the values are what tell two steps of the same kind apart — the
+/// names are the same for every `detect`. The full rows are a click away, and
+/// [`detail`] puts them in the heading's tooltip meanwhile.
+#[must_use]
+pub fn summary(section: &Section) -> String {
+    let script = section.script.as_ref().map(|origin| match origin {
+        ScriptOrigin::Inline(_) => "inline script".to_string(),
+        ScriptOrigin::File(path) => path.clone(),
+    });
+    script
+        .into_iter()
+        .chain(section.properties.iter().map(|p| p.value.clone()))
+        .collect::<Vec<_>>()
+        .join(" · ")
+}
+
+/// Every row of a section as `name: value` lines — the tooltip of a folded
+/// heading, so a step can be read without opening it.
+#[must_use]
+pub fn detail(section: &Section) -> String {
+    section
+        .properties
+        .iter()
+        .map(|p| format!("{}: {}", p.name, p.value))
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// Which of one tab's sections are open.
+///
+/// A tab with one section starts with it open, since folding the only thing
+/// there is would be a click for nothing. A tab with several starts folded,
+/// one line each, which is what lets a five-step chain fit the pane at all —
+/// the pane is a fixed height on a card, and five open steps are a scroll.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Folds {
+    open: Vec<bool>,
+}
+
+impl Folds {
+    #[must_use]
+    pub fn new(count: usize) -> Self {
+        Self {
+            open: vec![count == 1; count],
+        }
+    }
+
+    /// Whether section `index` is open. A section past the end is not.
+    #[must_use]
+    pub fn is_open(&self, index: usize) -> bool {
+        self.open.get(index).copied().unwrap_or(false)
+    }
+
+    pub fn toggle(&mut self, index: usize) {
+        if let Some(open) = self.open.get_mut(index) {
+            *open = !*open;
+        }
+    }
+
+    /// Open section `index`, leaving it open if it already was — what picking
+    /// a step from the chain does, since a pick that could close the step it
+    /// named would hide the thing asked for.
+    pub fn reveal(&mut self, index: usize) {
+        if let Some(open) = self.open.get_mut(index) {
+            *open = true;
+        }
+    }
+
+    /// Whether every section is open. An empty tab has nothing folded, so it
+    /// counts as open — it offers "collapse all", which does nothing, rather
+    /// than "expand all", which would claim there is something to expand.
+    #[must_use]
+    pub fn all_open(&self) -> bool {
+        self.open.iter().all(|open| *open)
+    }
+
+    pub fn set_all(&mut self, open: bool) {
+        self.open.fill(open);
+    }
+}
+
 /// One section per input. Order is the configured order, which says nothing
 /// about the order batches arrive in — inputs are merged, not chained — but is
 /// at least stable between renders.
@@ -238,6 +323,73 @@ mod tests {
             Ok([section]) => section,
             Err(sections) => panic!("expected exactly one section, got {}", sections.len()),
         }
+    }
+
+    fn section(properties: &[(&str, &str)]) -> Section {
+        Section {
+            kind: "detect".into(),
+            properties: properties
+                .iter()
+                .map(|(name, value)| Property {
+                    name: (*name).into(),
+                    value: (*value).into(),
+                })
+                .collect(),
+            script: None,
+        }
+    }
+
+    #[test]
+    fn a_summary_is_the_values_in_order() {
+        let detect = section(&[("field", "value"), ("method", "zscore"), ("threshold", "3")]);
+        assert_eq!(summary(&detect), "value · zscore · 3");
+        assert_eq!(detail(&detect), "field: value\nmethod: zscore\nthreshold: 3");
+        assert_eq!(summary(&section(&[])), "");
+    }
+
+    #[test]
+    fn a_scripts_summary_starts_with_where_its_code_lives() {
+        let mut script = section(&[("scope", "message")]);
+        script.script = Some(ScriptOrigin::File("lib/clean.rhai".into()));
+        assert_eq!(summary(&script), "lib/clean.rhai · message");
+        script.script = Some(ScriptOrigin::Inline("emit(msg);".into()));
+        assert_eq!(summary(&script), "inline script · message");
+    }
+
+    #[test]
+    fn a_lone_section_starts_open_and_several_start_folded() {
+        assert!(Folds::new(1).is_open(0));
+        let chain = Folds::new(5);
+        assert!((0..5).all(|i| !chain.is_open(i)));
+        assert!(!chain.all_open());
+        // nothing to fold is not something to expand
+        assert!(Folds::new(0).all_open());
+    }
+
+    #[test]
+    fn folding_toggles_and_revealing_only_opens() {
+        let mut folds = Folds::new(3);
+        folds.toggle(1);
+        assert!(folds.is_open(1));
+        folds.reveal(1);
+        assert!(folds.is_open(1), "revealing an open step must not close it");
+        folds.toggle(1);
+        assert!(!folds.is_open(1));
+        folds.reveal(2);
+        assert!(folds.is_open(2));
+        // out of range is ignored rather than a panic
+        folds.toggle(9);
+        folds.reveal(9);
+        assert!(!folds.is_open(9));
+    }
+
+    #[test]
+    fn everything_opens_and_closes_at_once() {
+        let mut folds = Folds::new(4);
+        folds.set_all(true);
+        assert!(folds.all_open());
+        folds.set_all(false);
+        assert!((0..4).all(|i| !folds.is_open(i)));
     }
 
     fn input_section(config: &Config) -> Section {

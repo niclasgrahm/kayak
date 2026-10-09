@@ -34,6 +34,7 @@ use crate::graph::{
 };
 use crate::inspector;
 use crate::log;
+use crate::source;
 use crate::pretty;
 use crate::project;
 use crate::selection::{self, Selection};
@@ -1451,6 +1452,12 @@ pub fn CanvasPage() -> impl IntoView {
                         format!("{0}px {0}px", GRID * c.zoom)
                     }
                     on:wheel=move |ev| {
+                        // a pane under the pointer that can scroll, or a
+                        // maximized card, keeps the wheel: no zoom, and no
+                        // `prevent_default` either, so the browser scrolls it
+                        if !wheel_zooms_at(&ev, &canvas_ref) {
+                            return;
+                        }
                         ev.prevent_default();
                         canvas_state.interrupt_focus();
                         let (ox, oy) = canvas_offset(&canvas_ref, ev.client_x(), ev.client_y());
@@ -1576,6 +1583,33 @@ fn started_on_a_card(ev: &leptos::ev::MouseEvent) -> bool {
         .and_then(|t| t.dyn_into::<leptos::web_sys::Element>().ok())
         .and_then(|el| el.closest(".card").ok().flatten())
         .is_some()
+}
+
+/// Whether a wheel over the canvas should zoom it — see
+/// [`crate::graph::wheel_zooms`] for the rule. This is only the DOM half: it
+/// walks from the event's target up to the canvas, describing each element.
+fn wheel_zooms_at(ev: &leptos::ev::WheelEvent, canvas: &NodeRef<leptos::html::Div>) -> bool {
+    use wasm_bindgen::JsCast;
+    let canvas: Option<leptos::web_sys::Element> = canvas.get_untracked().map(Into::into);
+    let mut current = ev
+        .target()
+        .and_then(|t| t.dyn_into::<leptos::web_sys::Element>().ok());
+    let ancestors = std::iter::from_fn(move || {
+        let el = current.take()?;
+        if canvas.as_ref() == Some(&el) {
+            return None;
+        }
+        current = el.parent_element();
+        let class = el.class_name();
+        let has = |name: &str| class.split_whitespace().any(|c| c == name);
+        Some(crate::graph::WheelAncestor {
+            scroll_pane: has(crate::graph::WHEEL_SCROLLS),
+            overflows: el.scroll_height() > el.client_height()
+                || el.scroll_width() > el.client_width(),
+            maximized_card: has("card") && has("maximized"),
+        })
+    });
+    crate::graph::wheel_zooms(ancestors)
 }
 
 /// Pointer position relative to the canvas' top-left corner. Falls back to the
@@ -5935,38 +5969,60 @@ enum Tab {
     Outputs,
 }
 
-/// A card's config, as a tabbed property list rather than raw JSON.
+/// A card's config, as a tabbed property list rather than raw JSON — or, on a
+/// maximized card, as the whole chain laid out left to right.
 ///
-/// The config of a running pipeline never changes, so all three tabs are built
-/// once and only the selected one is rendered.
+/// The config of a running pipeline never changes, so the sections are built
+/// once and only what is on screen is rendered.
 #[component]
 fn Inspector(
     config: Config,
     /// Which pipeline this is — a script row asks the server for the text the
     /// pipeline was built with, and needs to say whose.
     pipeline_id: PipelineId,
+    /// Whether the card fills the canvas. A maximized card has the room to
+    /// show every stage at once, so it does, and the tabs go.
+    maximized: Memo<bool>,
+    /// Fields or text, and where in the text a heading asked to go.
+    source: CardSource,
 ) -> impl IntoView {
-    let inputs = inspector::input_sections(&config);
-    let outputs = inspector::output_sections(&config);
-    let transforms = inspector::transform_sections(&config);
+    let inputs = StoredValue::new(inspector::input_sections(&config));
+    let outputs = StoredValue::new(inspector::output_sections(&config));
+    let transforms = StoredValue::new(inspector::transform_sections(&config));
+    let pipeline_id = StoredValue::new(pipeline_id);
 
     // the count belongs on the tab: any of the three stages can now hold more
     // than one component, and how many is worth seeing without clicking
     let tabs = [
-        (Tab::Inputs, inspector::tab_label("inputs", inputs.len())),
+        (
+            Tab::Inputs,
+            inspector::tab_label("inputs", inputs.with_value(Vec::len)),
+        ),
         (
             Tab::Transforms,
-            inspector::tab_label("transforms", transforms.len()),
+            inspector::tab_label("transforms", transforms.with_value(Vec::len)),
         ),
-        (Tab::Outputs, inspector::tab_label("outputs", outputs.len())),
+        (
+            Tab::Outputs,
+            inspector::tab_label("outputs", outputs.with_value(Vec::len)),
+        ),
     ];
 
     let tab = RwSignal::new(Tab::Inputs);
+    // One set of folds per tab, held here rather than in the pane, so
+    // switching tabs and back leaves open what was open.
+    let folds = StageFolds {
+        inputs: RwSignal::new(inspector::Folds::new(inputs.with_value(Vec::len))),
+        transforms: RwSignal::new(inspector::Folds::new(transforms.with_value(Vec::len))),
+        outputs: RwSignal::new(inspector::Folds::new(outputs.with_value(Vec::len))),
+    };
+    let pane_ref = NodeRef::<leptos::html::Div>::new();
 
-    view! {
-        <div class="inspector">
+    let tabbed = move || {
+        view! {
             <div class="tabs">
                 {tabs
+                    .clone()
                     .into_iter()
                     .map(|(which, label)| {
                         view! {
@@ -5981,22 +6037,458 @@ fn Inspector(
                     })
                     .collect_view()}
             </div>
-            <div class="pane">
-                {move || match tab.get() {
-                    // no ordinals on inputs and outputs: they are a set, not a
-                    // chain — every input is merged and every output gets every
-                    // batch, so numbering them would imply an order that isn't
-                    // there. a transform's position *is* behaviour, so it keeps
-                    // its number.
-                    Tab::Inputs => sections(&inputs, "no inputs", None),
-                    Tab::Outputs => sections(&outputs, "no outputs", None),
-                    Tab::Transforms => {
-                        sections(&transforms, "no transforms", Some(&pipeline_id))
+            {move || {
+                let which = tab.get();
+                let stage_folds = folds.of(which);
+                let count = match which {
+                    Tab::Inputs => inputs.with_value(Vec::len),
+                    Tab::Transforms => transforms.with_value(Vec::len),
+                    Tab::Outputs => outputs.with_value(Vec::len),
+                };
+                // only a chain has an order worth drawing; inputs and outputs
+                // are sets, so their bar is the toggle alone
+                let chain = (which == Tab::Transforms)
+                    .then(|| {
+                        transforms.with_value(|t| t.iter().map(|s| s.kind.clone()).collect())
+                    });
+                (count >= 2).then(|| view! { <PaneBar folds=stage_folds chain pane=pane_ref /> })
+            }}
+            <div class="pane wheel-scrolls" node_ref=pane_ref>
+                {move || {
+                    let which = tab.get();
+                    let stage_folds = Some(folds.of(which));
+                    match which {
+                        // no ordinals on inputs and outputs: they are a set,
+                        // not a chain — every input is merged and every output
+                        // gets every batch, so numbering them would imply an
+                        // order that isn't there. a transform's position *is*
+                        // behaviour, so it keeps its number.
+                        Tab::Inputs => inputs.with_value(|s| {
+                            sections(s, Stage::INPUTS, None, stage_folds)
+                        }),
+                        Tab::Outputs => outputs.with_value(|s| {
+                            sections(s, Stage::OUTPUTS, None, stage_folds)
+                        }),
+                        Tab::Transforms => transforms.with_value(|s| {
+                            pipeline_id.with_value(|id| {
+                                sections(s, Stage::TRANSFORMS, Some(id), stage_folds)
+                            })
+                        }),
+                    }
+                }}
+            </div>
+        }
+    };
+
+    // Every stage side by side, in the order a batch goes through them. Inputs
+    // and outputs are one column each, because they are sets; each transform
+    // is a column of its own, because the chain is the point.
+    let flow_ref = NodeRef::<leptos::html::Div>::new();
+    let flow = move || {
+        let steps = transforms.get_value();
+        view! {
+            <div
+                class="flow wheel-scrolls"
+                node_ref=flow_ref
+                on:wheel=move |ev| {
+                    let Some(el) = flow_ref.get_untracked() else {
+                        return;
+                    };
+                    let dy = crate::graph::wheel_delta_pixels(ev.delta_y(), ev.delta_mode());
+                    if let Some(dx) = crate::graph::sideways_scroll(
+                        ev.delta_x(),
+                        dy,
+                        el.scroll_width() > el.client_width(),
+                        el.scroll_height() > el.client_height(),
+                    ) {
+                        ev.prevent_default();
+                        #[allow(clippy::cast_possible_truncation)]
+                        el.set_scroll_left(el.scroll_left() + dx.round() as i32);
+                    }
+                }
+            >
+                <div class="flow-stage">
+                    <div class="flow-label">"inputs"</div>
+                    {inputs.with_value(|s| sections(s, Stage::INPUTS, None, None))}
+                </div>
+                {steps
+                    .into_iter()
+                    .enumerate()
+                    .map(|(index, section)| {
+                        let target = ScriptTarget {
+                            pipeline: pipeline_id.get_value(),
+                            index,
+                        };
+                        view! {
+                            <span class="flow-arrow" aria-hidden="true">"→"</span>
+                            <div class="flow-stage">
+                                <div class="flow-label">{format!("step {}", index + 1)}</div>
+                                <SectionView section target place=Some((Stage::TRANSFORMS.key, index)) />
+                            </div>
+                        }
+                    })
+                    .collect_view()}
+                <span class="flow-arrow" aria-hidden="true">"→"</span>
+                <div class="flow-stage">
+                    <div class="flow-label">"outputs"</div>
+                    {outputs.with_value(|s| sections(s, Stage::OUTPUTS, None, None))}
+                </div>
+            </div>
+        }
+    };
+
+    view! {
+        <div class="inspector" class:flowing=move || maximized.get()>
+            {move || match source.view.get() {
+                ConfigView::Source(format) => {
+                    view! {
+                        <SourceView
+                            pipeline_id=pipeline_id.get_value()
+                            format
+                            focus=source.focus
+                        />
+                    }
+                        .into_any()
+                }
+                ConfigView::Fields if maximized.get() => flow().into_any(),
+                ConfigView::Fields => tabbed().into_any(),
+            }}
+        </div>
+    }
+}
+
+/// One of a pipeline's three stages, as the config spells it and as an empty
+/// tab says it.
+#[derive(Clone, Copy)]
+struct Stage {
+    /// The config's own key for the stage's list — what the source view looks
+    /// a component up under.
+    key: &'static str,
+    empty: &'static str,
+}
+
+impl Stage {
+    const INPUTS: Self = Self {
+        key: "inputs",
+        empty: "no inputs",
+    };
+    const TRANSFORMS: Self = Self {
+        key: "transforms",
+        empty: "no transforms",
+    };
+    const OUTPUTS: Self = Self {
+        key: "outputs",
+        empty: "no outputs",
+    };
+}
+
+/// How a card's config section shows the config: as fields, or as the text a
+/// config file would hold.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ConfigView {
+    Fields,
+    Source(ConfigFormat),
+}
+
+/// A component in the source text: the stage's key and its position in it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct SourceFocus {
+    key: &'static str,
+    index: usize,
+}
+
+/// A card's choice between fields and text, shared by the switch on the
+/// config heading and the `{ }` on each component's heading.
+///
+/// Like `maximized`, a way of looking at a card rather than a fact about it,
+/// so it lives as long as the card does and goes nowhere else.
+#[derive(Clone, Copy)]
+struct CardSource {
+    view: RwSignal<ConfigView>,
+    /// Where the text should open, when a heading asked for a component.
+    focus: RwSignal<Option<SourceFocus>>,
+    /// The format the text was last shown in, which is what a heading's `{ }`
+    /// opens — YAML until someone picks JSON, as the easier of the two to read.
+    last: RwSignal<ConfigFormat>,
+}
+
+impl CardSource {
+    fn new() -> Self {
+        Self {
+            view: RwSignal::new(ConfigView::Fields),
+            focus: RwSignal::new(None),
+            last: RwSignal::new(ConfigFormat::Yaml),
+        }
+    }
+
+    /// What the switch does: show this, from the top.
+    fn show(self, view: ConfigView) {
+        if let ConfigView::Source(format) = view {
+            self.last.set(format);
+        }
+        self.focus.set(None);
+        self.view.set(view);
+    }
+
+    /// What a heading's `{ }` does: the text, at that component.
+    fn jump(self, key: &'static str, index: usize) {
+        self.focus.set(Some(SourceFocus { key, index }));
+        self.view.set(ConfigView::Source(self.last.get_untracked()));
+    }
+}
+
+/// The `fields | yaml | json` switch on a card's config heading.
+#[component]
+fn ConfigViewSwitch(source: CardSource) -> impl IntoView {
+    let options = [
+        ("fields", ConfigView::Fields),
+        ("yaml", ConfigView::Source(ConfigFormat::Yaml)),
+        ("json", ConfigView::Source(ConfigFormat::Json)),
+    ];
+    view! {
+        <div class="view-switch" role="group" aria-label="show the config as">
+            {options
+                .into_iter()
+                .map(|(label, which)| {
+                    let pressed = move || source.view.get() == which;
+                    view! {
+                        <button
+                            class:active=pressed
+                            aria-pressed=move || pressed().to_string()
+                            // the heading is inside the card, so a press on it
+                            // must not reach the canvas' pan handler behind it
+                            on:mousedown=move |ev| ev.stop_propagation()
+                            on:click=move |_| source.show(which)
+                        >
+                            {label}
+                        </button>
+                    }
+                })
+                .collect_view()}
+        </div>
+    }
+}
+
+/// A pipeline's config as text, coloured, with a copy button — the config the
+/// pipeline is running, as the server renders it.
+///
+/// Fetched when it is built, which is when the switch is turned to it; the
+/// text never changes under a running pipeline (an edit rebuilds the card), so
+/// there is nothing to refetch. Read through an `Effect` into a signal rather
+/// than a `LocalResource`, which would re-suspend the canvas' `<Suspense>` —
+/// see the note about polling in the sidebar.
+#[component]
+fn SourceView(
+    pipeline_id: PipelineId,
+    format: ConfigFormat,
+    focus: RwSignal<Option<SourceFocus>>,
+) -> impl IntoView {
+    let fetched = RwSignal::new(None::<Result<String, String>>);
+    let id = StoredValue::new(pipeline_id);
+    Effect::new(move |_| {
+        leptos::task::spawn_local(async move {
+            let result = ApiClient {
+                base: String::new(),
+            }
+            .pipeline_config(&id.get_value(), format)
+            .await;
+            fetched.set(Some(
+                result
+                    .map(|source| source.text)
+                    .map_err(|err| err.to_string()),
+            ));
+        });
+    });
+
+    let lines = Memo::new(move |_| {
+        fetched.with(|f| match f {
+            Some(Ok(text)) => source::highlight(text, format),
+            _ => Vec::new(),
+        })
+    });
+    let focused = Memo::new(move |_| {
+        let at = focus.get()?;
+        lines.with(|lines| source::item_lines(lines, format, at.key, at.index))
+    });
+
+    // Scrolled to on the frame after the lines are drawn, for the reason
+    // `scroll_to_section` gives — and with `scroll_top` for the same reason.
+    let body_ref = NodeRef::<leptos::html::Div>::new();
+    Effect::new(move |_| {
+        let Some(range) = focused.get() else {
+            return;
+        };
+        request_animation_frame(move || {
+            use wasm_bindgen::JsCast;
+            let Some(body) = body_ref.get_untracked() else {
+                return;
+            };
+            let selector = format!("[data-line=\"{}\"]", range.start);
+            if let Ok(Some(line)) = body.query_selector(&selector)
+                && let Ok(line) = line.dyn_into::<leptos::web_sys::HtmlElement>()
+            {
+                body.set_scroll_top(line.offset_top());
+            }
+        });
+    });
+
+    let UseClipboardReturn { copy, copied, .. } = use_clipboard();
+    view! {
+        <div class="source" on:mousedown=move |ev: leptos::ev::MouseEvent| ev.stop_propagation()>
+            <div class="source-bar">
+                <span title="the config this pipeline was built with, which is not \
+                             necessarily what is in the file until it is saved">
+                    "as running"
+                </span>
+                <button
+                    class="clear"
+                    title="copy the config to the clipboard"
+                    disabled=move || !matches!(fetched.get(), Some(Ok(_)))
+                    on:click=move |_| {
+                        if let Some(Ok(text)) = fetched.get_untracked() {
+                            copy(&text);
+                        }
+                    }
+                >
+                    {move || if copied.get() { "copied".to_string() } else { format!("copy {format}") }}
+                </button>
+            </div>
+            <div class="source-body wheel-scrolls" node_ref=body_ref>
+                {move || match fetched.get() {
+                    None => view! { <div class="empty">"loading…"</div> }.into_any(),
+                    Some(Err(err)) => {
+                        view! { <div class="empty error">{format!("could not load the config: {err}")}</div> }
+                            .into_any()
+                    }
+                    Some(Ok(_)) => {
+                        lines
+                            .get()
+                            .into_iter()
+                            .enumerate()
+                            .map(|(i, spans)| {
+                                view! {
+                                    <div
+                                        class="source-line"
+                                        class:focused=move || {
+                                            focused.get().is_some_and(|r| r.contains(&i))
+                                        }
+                                        data-line=i
+                                    >
+                                        <span class="gutter">{i + 1}</span>
+                                        <span class="code">
+                                            {spans
+                                                .into_iter()
+                                                .map(|s| view! { <span class=s.kind.class()>{s.text}</span> })
+                                                .collect_view()}
+                                        </span>
+                                    </div>
+                                }
+                            })
+                            .collect_view()
+                            .into_any()
                     }
                 }}
             </div>
         </div>
     }
+}
+
+/// The folds of all three tabs.
+#[derive(Clone, Copy)]
+struct StageFolds {
+    inputs: RwSignal<inspector::Folds>,
+    transforms: RwSignal<inspector::Folds>,
+    outputs: RwSignal<inspector::Folds>,
+}
+
+impl StageFolds {
+    fn of(self, tab: Tab) -> RwSignal<inspector::Folds> {
+        match tab {
+            Tab::Inputs => self.inputs,
+            Tab::Transforms => self.transforms,
+            Tab::Outputs => self.outputs,
+        }
+    }
+}
+
+/// The strip between the tabs and the pane, on a tab with more than one
+/// section: the chain's steps in order, for the transforms tab, and a way to
+/// open or fold everything.
+///
+/// The chips are the chain at a glance — its order, which a column of folded
+/// rows also shows but less compactly — and a way to get to one step: picking
+/// it opens it and scrolls the pane to it.
+#[component]
+fn PaneBar(
+    folds: RwSignal<inspector::Folds>,
+    /// The kinds of the chain's steps, in order, or `None` for a set.
+    chain: Option<Vec<String>>,
+    pane: NodeRef<leptos::html::Div>,
+) -> impl IntoView {
+    let all_open = move || folds.with(inspector::Folds::all_open);
+    let steps = chain.unwrap_or_default();
+    let last = steps.len().saturating_sub(1);
+    view! {
+        <div class="pane-bar">
+            {steps
+                .into_iter()
+                .enumerate()
+                .map(|(index, kind)| {
+                    let label = format!("show step {}, {kind}", index + 1);
+                    view! {
+                        <button
+                            class="step-chip"
+                            class:open=move || folds.with(|f| f.is_open(index))
+                            title=label.clone()
+                            aria-label=label
+                            on:click=move |_| {
+                                folds.update(|f| f.reveal(index));
+                                scroll_to_section(pane, index);
+                            }
+                        >
+                            <span class="ordinal">{index + 1}</span>
+                            {kind}
+                        </button>
+                        {(index < last)
+                            .then(|| view! { <span class="step-arrow" aria-hidden="true">"→"</span> })}
+                    }
+                })
+                .collect_view()}
+            <button
+                class="fold-all"
+                on:click=move |_| {
+                    let open = !all_open();
+                    folds.update(|f| f.set_all(open));
+                }
+            >
+                {move || if all_open() { "collapse all" } else { "expand all" }}
+            </button>
+        </div>
+    }
+}
+
+/// Scroll a card's pane so section `index` is at its top. On the next frame,
+/// because the section has only just been told to open and the pane's height
+/// is not what it will be until it has.
+///
+/// The pane's own `scroll_top` rather than `scroll_into_view`: the latter
+/// scrolls *every* scrollable ancestor, and the canvas is one — an
+/// `overflow: hidden` box is still scrollable from script — so it would shift
+/// the whole canvas under the cards. The pane is `position: relative`, which is
+/// what makes a section's `offset_top` a distance from the pane's top.
+fn scroll_to_section(pane: NodeRef<leptos::html::Div>, index: usize) {
+    request_animation_frame(move || {
+        use wasm_bindgen::JsCast;
+        let Some(pane) = pane.get_untracked() else {
+            return;
+        };
+        let Ok(Some(section)) = pane.query_selector(&format!("[data-section=\"{index}\"]")) else {
+            return;
+        };
+        if let Ok(section) = section.dyn_into::<leptos::web_sys::HtmlElement>() {
+            pane.set_scroll_top(section.offset_top());
+        }
+    });
 }
 
 /// One tab's worth of sections, or a placeholder if the stage is empty. Empty
@@ -6006,28 +6498,35 @@ fn Inspector(
 ///
 /// `chain` is the pipeline for the one stage that is a chain — transforms —
 /// and `None` for a set. It numbers the sections, and it is what a script row
-/// needs to ask the server for that transform's text.
+/// needs to ask the server for that transform's text. `folds` makes the
+/// sections foldable; without it every one is open, which is the maximized
+/// layout.
 fn sections(
     sections: &[inspector::Section],
-    empty: &'static str,
+    stage: Stage,
     chain: Option<&PipelineId>,
+    folds: Option<RwSignal<inspector::Folds>>,
 ) -> AnyView {
     if sections.is_empty() {
-        return view! { <div class="empty">{empty}</div> }.into_any();
+        return view! { <div class="empty">{stage.empty}</div> }.into_any();
     }
     sections
         .iter()
         .cloned()
         .enumerate()
-        .map(|(i, section)| match chain {
-            Some(pipeline) => {
-                let target = ScriptTarget {
-                    pipeline: pipeline.clone(),
-                    index: i,
-                };
-                view! { <SectionView section ordinal=i + 1 target /> }.into_any()
+        .map(|(i, section)| {
+            let fold = folds.map(|folds| (folds, i));
+            let place = Some((stage.key, i));
+            match chain {
+                Some(pipeline) => {
+                    let target = ScriptTarget {
+                        pipeline: pipeline.clone(),
+                        index: i,
+                    };
+                    view! { <SectionView section ordinal=i + 1 target fold place /> }.into_any()
+                }
+                None => view! { <SectionView section fold place /> }.into_any(),
             }
-            None => view! { <SectionView section /> }.into_any(),
         })
         .collect_view()
         .into_any()
@@ -6035,6 +6534,9 @@ fn sections(
 
 /// One component: a kind heading and its settings. `ordinal` numbers a
 /// transform by its place in the chain — order is behaviour there.
+///
+/// With a `fold`, the heading is a button that folds the settings away and
+/// says in one line what they are; without one, the settings are always shown.
 #[component]
 fn SectionView(
     section: inspector::Section,
@@ -6042,22 +6544,48 @@ fn SectionView(
     /// Where this component sits in a chain, for a script row to ask about.
     #[prop(optional, into)]
     target: Option<ScriptTarget>,
+    /// The tab's folds and this section's place in them.
+    #[prop(default = None)]
+    fold: Option<(RwSignal<inspector::Folds>, usize)>,
+    /// Where this component is in the config — its stage's key and position —
+    /// for the `{ }` that opens the source text at it. Only on a card, which is
+    /// what provides the [`CardSource`] it opens.
+    #[prop(default = None)]
+    place: Option<(&'static str, usize)>,
 ) -> impl IntoView {
+    let to_source = place.zip(use_context::<CardSource>()).map(|((key, index), source)| {
+        view! {
+            <button
+                class="to-source"
+                title="show this in the config's text"
+                aria-label="show this in the config's text"
+                on:click=move |_| source.jump(key, index)
+            >
+                "{ }"
+            </button>
+        }
+    });
     let heading = ordinal.map_or_else(
         || section.kind.clone(),
         |n| format!("{n}. {kind}", kind = section.kind),
     );
-    let properties = section.properties;
-    let script = section.script.zip(target).map(|(origin, target)| {
-        view! { <ScriptSourceRow origin target /> }
-    });
-    // A script with nothing but its source has no "no settings" to say: the
-    // row above is its setting.
-    let has_script = script.is_some();
+    let summary = inspector::summary(&section);
+    let detail = inspector::detail(&section);
+    let properties = StoredValue::new(section.properties);
+    let script = StoredValue::new(section.script.zip(target));
+    let is_open = move || fold.is_none_or(|(folds, i)| folds.with(|f| f.is_open(i)));
 
-    view! {
-        <div class="section">
-            <div class="section-kind">{heading}</div>
+    // Built when the section opens, not before: a folded section is one line
+    // and nothing else, and its rows are not in the page.
+    let body = move || {
+        let script = script
+            .get_value()
+            .map(|(origin, target)| view! { <ScriptSourceRow origin target /> });
+        // A script with nothing but its source has no "no settings" to say:
+        // the row above is its setting.
+        let has_script = script.is_some();
+        let properties = properties.get_value();
+        view! {
             {script}
             {if properties.is_empty() && has_script {
                 ().into_any()
@@ -6080,6 +6608,34 @@ fn SectionView(
                     .collect_view()
                     .into_any()
             }}
+        }
+    };
+
+    view! {
+        <div class="section" data-section=fold.map(|(_, i)| i)>
+            <div class="section-heading">
+            {match fold {
+                Some((folds, i)) => {
+                    view! {
+                        <button
+                            class="section-kind foldable"
+                            class:open=is_open
+                            aria-expanded=move || is_open().to_string()
+                            title=detail
+                            on:click=move |_| folds.update(|f| f.toggle(i))
+                        >
+                            <span class="caret">{move || if is_open() { "▾" } else { "▸" }}</span>
+                            <span class="kind">{heading}</span>
+                            <span class="summary">{summary}</span>
+                        </button>
+                    }
+                        .into_any()
+                }
+                None => view! { <div class="section-kind">{heading}</div> }.into_any(),
+            }}
+            {to_source}
+            </div>
+            <Show when=is_open>{body}</Show>
         </div>
     }
 }
@@ -6888,28 +7444,14 @@ fn MessageLog(
                 </button>
             </div>
             <div
-                class="log-body"
+                // `wheel-scrolls`: the wheel scrolls this rather than zooming
+                // the canvas while there is anything to scroll — see
+                // `graph::wheel_zooms`
+                class="log-body wheel-scrolls"
                 node_ref=body_ref
                 on:scroll=move |_| {
                     if let Some(el) = body_ref.get_untracked() {
                         following.set(at_bottom(&el));
-                    }
-                }
-                // A wheel over a log that has somewhere to scroll is that log's,
-                // and the canvas never hears it. The canvas' handler is a
-                // `prevent_default` that zooms, so leaving the event to bubble
-                // is what stopped the browser scrolling this pane at all.
-                //
-                // Whether there is anything to scroll is the whole test, rather
-                // than which way the wheel went: chaining on to the zoom at the
-                // end of a log turns overscrolling one card into a lurch of the
-                // whole canvas. A log with nothing to scroll isn't a scrollable
-                // pane at all, so that one falls through and zooms.
-                on:wheel=move |ev| {
-                    if let Some(el) = body_ref.get_untracked()
-                        && el.scroll_height() > el.client_height()
-                    {
-                        ev.stop_propagation();
                     }
                 }
             >
@@ -6980,10 +7522,19 @@ fn CardSection(
     /// the log and to nothing else.
     class: &'static str,
     open: RwSignal<bool>,
+    /// A control beside the heading, shown while the section is open — the
+    /// config's `fields | yaml | json` switch. Beside rather than inside,
+    /// because the heading is itself a button.
+    #[prop(optional, into)]
+    accessory: Option<ViewFn>,
     children: ChildrenFn,
 ) -> impl IntoView {
+    let accessory = accessory.map(|accessory| {
+        view! { <Show when=move || open.get()>{accessory.run()}</Show> }
+    });
     view! {
         <div class=format!("card-section {class}") class:open=move || open.get()>
+            <div class="section-head-row">
             <button
                 class="section-head"
                 // the heading is inside the card, so a press on it must not
@@ -7001,6 +7552,8 @@ fn CardSection(
                 <span class="chevron">{move || if open.get() { "▾" } else { "▸" }}</span>
                 <span class="section-name">{name}</span>
             </button>
+            {accessory}
+            </div>
             <Show when=move || open.get()>{children()}</Show>
         </div>
     }
@@ -7254,6 +7807,11 @@ pub fn Card(pipeline_id: PipelineId, config: Config, status: RunStatus) -> impl 
     // running pipeline never changes, so this is the same one every time.
     let config = StoredValue::new(config);
     let id = pipeline_id.clone();
+
+    // Fields or text: provided as well as passed, so a component's heading —
+    // several components down — can open the text at itself.
+    let card_source = CardSource::new();
+    provide_context(card_source);
 
     let maximized_id = pipeline_id.clone();
     let is_maximized =
@@ -7607,8 +8165,18 @@ pub fn Card(pipeline_id: PipelineId, config: Config, status: RunStatus) -> impl 
                     {move || if is_maximized.get() { "⤡" } else { "⤢" }}
                 </button>
             </header>
-            <CardSection name="config" class="section-config" open=config_open>
-                <Inspector config=config.get_value() pipeline_id=stored_id.get_value() />
+            <CardSection
+                name="config"
+                class="section-config"
+                open=config_open
+                accessory=move || view! { <ConfigViewSwitch source=card_source /> }
+            >
+                <Inspector
+                    config=config.get_value()
+                    pipeline_id=stored_id.get_value()
+                    maximized=is_maximized
+                    source=card_source
+                />
             </CardSection>
             <CardSection name="stats" class="section-stats" open=stats_open>
                 <ThroughputChart stats reseed />

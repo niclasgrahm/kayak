@@ -78,12 +78,16 @@ which input carried it.
 
 | gesture | does |
 | --- | --- |
-| wheel / trackpad scroll | zoom about the cursor, 20%–250% (shown in the navbar) |
+| wheel / trackpad scroll | zoom about the cursor, 20%–250% (shown in the navbar) — except over a card's pane that has somewhere to scroll, or anywhere on a maximized card |
 | drag empty canvas | pan |
 | click a name in the sidebar | glide the camera to centre that pipeline |
 | `flat` / `tree` in the sidebar header | switch between the pipelines in id order and the same set nested under the upstreams that feed them |
 | type in the sidebar's search box | narrow the list; in tree mode a match keeps the chain above it |
 | click a card's `config` / `stats` / `logs` heading | fold that part away, or bring it back — a shut part stops being fed |
+| click a component's heading in the config | open or fold its settings; folded, it is one line saying what they are |
+| a step's chip above the transforms | open that step and scroll to it |
+| `fields` / `yaml` / `json` on the config heading | show the config as rows, or as the text a config file would hold, with a copy button |
+| `{ }` beside a component's heading | open the text at that component |
 | `▸` at the left of a log row (on hover) | open that row's payload, pretty-printed — the log pauses so it can be read |
 | `5s` / `1m` / `5m` on a card's chart | change the bar width, and so how far back the chart reaches |
 | `edit` in the navbar | switch out of read-only, revealing the controls below |
@@ -178,8 +182,17 @@ geometry, pure and unit tested like `log.rs`; the chart itself is two `<path>`
 elements in a fixed viewBox, which is what makes it cheap enough to redraw on
 every card once a second.
 
-The **config** part is a tabbed property list — inputs / transforms / outputs —
-and the **logs** part is the live message log. The log carries failures as well
+The **config** part is a tabbed property list — inputs / transforms / outputs.
+A tab with more than one component starts with each folded to a line of its
+values, so a long chain fits the pane; the transforms tab adds a row of chips,
+the chain at a glance, each opening its step. On a maximized card the tabs give
+way to every stage side by side, in the order a batch goes through them. The
+switch on the heading turns the whole part into the pipeline's config as text,
+YAML or JSON, fetched from `GET /api/pipelines/{id}/config` — the config it is
+*running*, rendered by the code a save uses, so it is spelled exactly as the
+saved file would spell it.
+
+The **logs** part is the live message log. The log carries failures as well
 as messages: a `UiEvent` is either a `batch` or an `error`, and an error is
 logged in red as
 `<stage> error: <cause>` on the card of the pipeline it happened in. That covers
@@ -224,7 +237,10 @@ its tooltip says how many events went past — and resuming jumps back to the
 newest line rather than leaving the reader stranded mid-history. And a wheel
 over a log that has somewhere to scroll scrolls it instead of zooming the
 canvas; over one with nothing to scroll it falls through and zooms, since a
-pane that doesn't scroll shouldn't swallow the gesture.
+pane that doesn't scroll shouldn't swallow the gesture. That rule is the
+canvas', not the log's (`graph::wheel_zooms`): any pane marked `wheel-scrolls`
+— the log, the config pane, the config's text — gets it, and a maximized card
+keeps every wheel, since there is nothing behind it to zoom.
 
 All the geometry — layout, edge paths, zoom anchoring, the camera glide — lives
 in `frontend/src/graph.rs` as pure functions with unit tests, and the same goes

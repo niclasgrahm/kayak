@@ -598,6 +598,9 @@ textarea {
 }
 
 .pane {
+  // so a section's `offset_top` is measured from here — see
+  // `scroll_to_section`
+  position: relative;
   padding: 6px;
   // tall enough that switching tabs doesn't resize the card much, capped so a
   // long transform chain scrolls instead of dominating the graph
@@ -610,15 +613,291 @@ textarea {
   margin-top: 6px;
 }
 
+.section-heading {
+  display: flex;
+  gap: 2px;
+  margin-bottom: 4px;
+
+  > .section-kind {
+    flex: 1;
+    min-width: 0;
+  }
+}
+
+// Opens the config's text at this component. Beside the heading rather than in
+// it, because a foldable heading is already a button.
+.to-source {
+  appearance: none;
+  flex: none;
+  background: var(--bg-hover);
+  border: none;
+  border-radius: 2px;
+  color: var(--text-dim);
+  cursor: pointer;
+  font-family: var(--font-mono);
+  font-size: 10px;
+  padding: 0 5px;
+
+  &:hover {
+    background: #39404c;
+    color: var(--text);
+  }
+}
+
 .section-kind {
   background: var(--bg-hover);
   border-radius: 2px;
   padding: 2px 6px;
-  margin-bottom: 4px;
   font-size: 10px;
   font-weight: 600;
   letter-spacing: 0.06em;
   text-transform: uppercase;
+}
+
+// A heading that folds its section away. It keeps the look of the plain
+// heading it replaces, and adds the caret and — folded — a dim one-line
+// summary of what the rows would say.
+button.section-kind.foldable {
+  appearance: none;
+  border: none;
+  width: 100%;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--text);
+  font-family: inherit;
+  text-align: left;
+  cursor: pointer;
+
+  &:hover {
+    background: #39404c;
+  }
+
+  .caret {
+    flex: none;
+    width: 8px;
+    color: var(--text-dim);
+  }
+  .kind {
+    flex: none;
+  }
+  // open, the rows say it all
+  &.open .summary {
+    display: none;
+  }
+  .summary {
+    flex: 1;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    color: var(--text-dim);
+    font-family: var(--font-mono);
+    font-weight: 400;
+    letter-spacing: 0;
+    text-transform: none;
+  }
+}
+
+// Folded, the sections are a list of one-liners, so they sit close together;
+// the gap between open ones is `.section + .section`'s.
+.pane .section:has(.section-kind.foldable:not(.open)) + .section {
+  margin-top: 2px;
+}
+
+// The config as the file would hold it. Coloured with the payload palette
+// (`.json-*`, which `source.rs` reuses for YAML too), so a config and the
+// messages it produces read as one language.
+.source {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  border-top: 1px solid var(--border);
+}
+
+.source-bar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 3px 8px;
+  background: var(--bg-titlebar);
+  border-bottom: 1px solid var(--border);
+  color: var(--text-dim);
+  font-size: 10px;
+
+  .clear {
+    appearance: none;
+    margin-left: auto;
+    background: transparent;
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    color: var(--text-dim);
+    cursor: pointer;
+    font: inherit;
+    font-size: 10px;
+    padding: 0 6px;
+
+    &:hover:not(:disabled) {
+      background: var(--bg-hover);
+      color: var(--text);
+    }
+    &:disabled {
+      cursor: default;
+      opacity: 0.5;
+    }
+  }
+}
+
+.source-body {
+  max-height: 260px;
+  overflow: auto;
+  padding: 4px 0;
+  background: var(--bg-canvas);
+  font-family: var(--font-mono);
+  font-size: 11px;
+  line-height: 16px;
+
+  .empty {
+    padding: 4px 8px;
+  }
+}
+
+.source-line {
+  display: flex;
+  padding-right: 8px;
+
+  &.focused {
+    background: rgba(105, 156, 232, 0.14);
+  }
+
+  .gutter {
+    flex: none;
+    width: 3.5ch;
+    padding-right: 1ch;
+    text-align: right;
+    color: #4a505b;
+    user-select: none;
+  }
+  .code {
+    white-space: pre;
+  }
+}
+
+// a maximized card has the height to show a whole config
+.card.maximized .source-body {
+  max-height: 60vh;
+}
+
+// The chain at a glance, between the tabs and the pane, and the way to open or
+// fold everything at once.
+.pane-bar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px 2px;
+  padding: 5px 6px;
+  border-bottom: 1px solid var(--border);
+
+  .step-chip {
+    appearance: none;
+    background: var(--bg-canvas);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    color: var(--text-dim);
+    cursor: pointer;
+    font-family: var(--font-mono);
+    font-size: 10px;
+    padding: 0 7px;
+
+    .ordinal {
+      margin-right: 4px;
+      opacity: 0.7;
+    }
+    &:hover {
+      background: var(--bg-hover);
+      color: var(--text);
+    }
+    &.open {
+      border-color: var(--accent);
+      background: rgba(105, 156, 232, 0.18);
+      color: var(--text);
+    }
+  }
+
+  .step-arrow {
+    color: #4a505b;
+    font-size: 10px;
+  }
+
+  .fold-all {
+    appearance: none;
+    background: none;
+    border: none;
+    color: var(--text-dim);
+    cursor: pointer;
+    font: inherit;
+    font-size: 10px;
+    margin-left: auto;
+    padding: 0 2px;
+
+    &:hover {
+      color: var(--text);
+    }
+  }
+}
+
+// A maximized card's config: every stage side by side, in the order a batch
+// goes through them. The columns are a fixed width and the row scrolls
+// sideways, so a long chain stays a row rather than wrapping into a grid that
+// no longer reads as an order.
+.flow {
+  display: flex;
+  align-items: stretch;
+  padding: 8px;
+  max-height: 45vh;
+  overflow: auto;
+
+  .flow-stage {
+    flex: none;
+    width: 200px;
+    padding: 6px;
+    background: var(--bg-panel);
+    border: 1px solid var(--border);
+    border-radius: 3px;
+  }
+
+  // inputs and outputs are the ends of the row, so they are drawn as its
+  // frame rather than as two more steps
+  .flow-stage:first-child,
+  .flow-stage:last-child {
+    background: var(--bg-titlebar);
+  }
+
+  .flow-label {
+    color: var(--text-dim);
+    font-size: 10px;
+    margin-bottom: 4px;
+  }
+
+  .flow-arrow {
+    flex: none;
+    align-self: center;
+    width: 18px;
+    text-align: center;
+    color: #4a505b;
+  }
+
+  // a column is narrow, so a row is a name over its value rather than beside
+  // it — a half-column value would cut every url
+  .property {
+    grid-template-columns: 1fr;
+    gap: 1px;
+    margin-bottom: 3px;
+
+    .name {
+      font-size: 10px;
+    }
+  }
 }
 
 .property {
@@ -804,8 +1083,47 @@ textarea {
   // On the heading rather than between the sections: the card's own title bar
   // already draws a line under itself, and a second one under it would read as
   // a border around nothing.
-  + .card-section > .section-head {
+  + .card-section > .section-head-row {
     border-top: 1px solid var(--border);
+  }
+}
+
+// The heading and whatever sits beside it — the config's view switch. A row of
+// its own because the heading is a button and the switch is buttons.
+.section-head-row {
+  display: flex;
+  align-items: center;
+}
+
+// `fields | yaml | json` on the config heading: a segmented control, recessed
+// like a property value so it reads as a setting of the section rather than as
+// part of its title.
+.view-switch {
+  display: flex;
+  flex: none;
+  margin-right: 6px;
+  background: var(--bg-titlebar);
+  border: 1px solid var(--border);
+  border-radius: 3px;
+  overflow: hidden;
+
+  button {
+    appearance: none;
+    background: transparent;
+    border: none;
+    color: var(--text-dim);
+    cursor: pointer;
+    font: inherit;
+    font-size: 10px;
+    padding: 0 7px;
+
+    &:hover {
+      color: var(--text);
+    }
+    &.active {
+      background: var(--bg-hover);
+      color: var(--text);
+    }
   }
 }
 
@@ -813,7 +1131,8 @@ textarea {
   appearance: none;
   background: transparent;
   border: none;
-  width: 100%;
+  flex: 1;
+  min-width: 0;
   display: flex;
   align-items: center;
   gap: 5px;

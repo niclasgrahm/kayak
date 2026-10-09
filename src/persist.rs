@@ -110,6 +110,23 @@ pub fn render(file: ConfigFile, format: ConfigFormat) -> anyhow::Result<String> 
     }
 }
 
+/// One pipeline, written in `format` exactly as its entry in a rendered file
+/// would be — the same serializers [`render`] uses, so the source view of a
+/// card can't spell a pipeline differently from a save.
+///
+/// No trailing newline: this is a fragment shown on its own, not a file.
+pub fn render_pipeline(config: &Config, format: ConfigFormat) -> anyhow::Result<String> {
+    let text = match format {
+        ConfigFormat::Json => serde_json::to_string_pretty(config),
+        ConfigFormat::Yaml => {
+            return serde_norway::to_string(config)
+                .map(|yaml| yaml.trim_end().to_string())
+                .context("failed to serialize the pipeline");
+        }
+    };
+    text.context("failed to serialize the pipeline")
+}
+
 /// A config file's contents — the buckets and the pipelines.
 ///
 /// The counterpart of [`render`], and the only place either format is parsed —
@@ -393,6 +410,28 @@ mod tests {
     /// The point of the YAML support: a file a human would rather write, that
     /// still describes the same pipelines. The tagged `type` field survives,
     /// which is the part `#[serde(flatten)]` could plausibly break.
+    #[test]
+    fn one_pipeline_renders_as_its_entry_in_the_file_would() -> anyhow::Result<()> {
+        let config = &pipeline("child", &["root"]);
+        for format in [ConfigFormat::Json, ConfigFormat::Yaml] {
+            let text = render_pipeline(config, format)?;
+            // parses back to the same pipeline, through the file's own reader
+            // for the format — a one-entry file is what a pasted fragment
+            // becomes
+            let back: Config = match format {
+                ConfigFormat::Json => serde_json::from_str(&text)?,
+                ConfigFormat::Yaml => serde_norway::from_str(&text)?,
+            };
+            assert_eq!(
+                serde_json::to_value(&back)?,
+                serde_json::to_value(config)?,
+                "{format}"
+            );
+            assert!(!text.ends_with('\n'), "a fragment, not a file: {format}");
+        }
+        Ok(())
+    }
+
     #[test]
     fn a_yaml_file_is_a_block_sequence_that_parses_back() -> anyhow::Result<()> {
         let rendered = render(

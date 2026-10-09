@@ -4817,6 +4817,25 @@
         ],
         "type": "object"
       },
+      "PipelineSource": {
+        "description": "One running pipeline's config, written out the way a config file would\nwrite it — what a card's source view shows and copies.",
+        "properties": {
+          "format": {
+            "$ref": "#/components/schemas/ConfigFormat",
+            "description": "The format `text` is in: the one asked for, or else the config file's."
+          },
+          "text": {
+            "description": "The pipeline as one entry of a config file would hold it, `id` filled\nin.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "format",
+          "text"
+        ],
+        "title": "PipelineSource",
+        "type": "object"
+      },
       "PipelineState": {
         "description": "A pipeline's binding to a bucket: which one, and what its messages are keyed\nby.\n\nThe key lives here rather than on the bucket because it is a property of\n*this stream* — the same machine id arrives as `_meta.machine_id` from a\nnats subscription and as `machine_id` after a reducer has flattened it, and\nboth are correct. The cost is that two pipelines sharing a bucket can key it\ndifferently with nothing to catch them, which is the sharp edge of sharing\nand is documented rather than prevented.",
         "properties": {
@@ -7827,6 +7846,77 @@
           "pipelines"
         ],
         "x-kayak-access": "admin"
+      }
+    },
+    "/api/pipelines/{pipeline_id}/config": {
+      "get": {
+        "description": "The config of a running pipeline rendered as text, in YAML or JSON — what a card's source view shows and copies. It is rendered by the same code a save writes the config file with, so it is spelled exactly as that pipeline's entry in a saved file would be, with the `id` filled in.\n\nThis is the config the pipeline is **running**, which is not necessarily what is on disk: the graph can be edited without being saved. Credentials are the unresolved `${NAME}` templates they are configured as, and live on the connections the config names rather than in it.",
+        "operationId": "getPipelineConfig",
+        "parameters": [
+          {
+            "description": "Id of the pipeline.",
+            "in": "path",
+            "name": "pipeline_id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "`yaml` or `json`. Without one — or with one that is neither — the config file's own format, and JSON for a server with no config file. The response says which it is.",
+            "in": "query",
+            "name": "format",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PipelineSource"
+                }
+              }
+            },
+            "description": "The pipeline's config as text."
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "No credentials, or credentials that were not recognised."
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "No pipeline of that id is running."
+          }
+        },
+        "security": [
+          {
+            "basicAuth": []
+          },
+          {
+            "cookieAuth": []
+          }
+        ],
+        "summary": "One pipeline's config, as a config file would write it",
+        "tags": [
+          "pipelines"
+        ],
+        "x-kayak-access": "read"
       }
     },
     "/api/pipelines/{pipeline_id}/history": {

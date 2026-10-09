@@ -1068,3 +1068,70 @@ async fn asking_for_a_script_that_is_not_there_is_a_404() -> anyhow::Result<()> 
     }
     Ok(())
 }
+
+/// A card's source view: one pipeline's config as text, in either format,
+/// parsing back to the config that was posted — with the id filled in, as a
+/// saved file would have it.
+#[tokio::test]
+async fn a_pipelines_config_is_served_as_yaml_or_json() -> anyhow::Result<()> {
+    let app = app();
+    let config = idle_config("idle");
+    let (status, body) = post_stream(&app, &config).await?;
+    assert_eq!(status, StatusCode::CREATED, "{body}");
+
+    let (status, body) = send(&app, get("/api/pipelines/idle/config?format=yaml")).await?;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["format"], "yaml");
+    let text = body["text"].as_str().unwrap_or_default();
+    assert!(text.starts_with("id: idle"), "{text}");
+    let yaml: Value = serde_norway::from_str(text)?;
+    assert_eq!(yaml["inputs"], config["inputs"]);
+
+    let (status, body) = send(&app, get("/api/pipelines/idle/config?format=json")).await?;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["format"], "json");
+    let json: Value = serde_json::from_str(body["text"].as_str().unwrap_or_default())?;
+    assert_eq!(json["id"], "idle");
+    assert_eq!(json["outputs"], config["outputs"]);
+    Ok(())
+}
+
+/// Without a format, or with one that is neither, the server's own: JSON when
+/// there is no config file to take it from.
+#[tokio::test]
+async fn a_config_without_a_readable_format_comes_back_in_the_default() -> anyhow::Result<()> {
+    let app = app();
+    let (status, body) = post_stream(&app, &idle_config("idle")).await?;
+    assert_eq!(status, StatusCode::CREATED, "{body}");
+    for uri in ["/api/pipelines/idle/config", "/api/pipelines/idle/config?format=toml"] {
+        let (status, body) = send(&app, get(uri)).await?;
+        assert_eq!(status, StatusCode::OK, "{uri}: {body}");
+        assert_eq!(body["format"], "json", "{uri}");
+    }
+    Ok(())
+}
+
+/// A server loaded from a YAML file answers in YAML when not told otherwise —
+/// the file's format is the one its pipelines are written in.
+#[tokio::test]
+async fn a_yaml_config_file_makes_yaml_the_default() -> anyhow::Result<()> {
+    let dir = tempfile::tempdir()?;
+    let path = dir.path().join("config.yaml");
+    std::fs::write(
+        &path,
+        "- id: idle\n  inputs:\n  - type: dummy\n    duration: 3600\n  outputs:\n  - type: stdout\n",
+    )?;
+    let app = api_router(Arc::new(AppState::from_config(&path)?));
+    let (status, body) = send(&app, get("/api/pipelines/idle/config")).await?;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["format"], "yaml");
+    Ok(())
+}
+
+#[tokio::test]
+async fn the_config_of_a_pipeline_that_is_not_there_is_a_404() -> anyhow::Result<()> {
+    let (status, body) = send(&app(), get("/api/pipelines/nobody/config")).await?;
+    assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
+    assert!(body["error"].is_string(), "expected an ApiError, got {body}");
+    Ok(())
+}

@@ -25,7 +25,7 @@ pub mod streaming;
 
 pub use columns::{ColumnMapping, ColumnType, ExtraFieldPolicy, MissingColumnPolicy, TableIndex};
 pub use connections::{ConnectionId, ConnectionKind, Connections};
-pub use format::ConfigFormat;
+pub use format::{ConfigFormat, PipelineSource};
 pub use history::{ErrorSignature, HistoryBucket, PipelineHistory, Resolution};
 pub use layout::{EdgeEnd, LayoutFile, PipelineLayout, PortLayout, Side};
 pub use schema::{InferredField, InferredType, MessageSchema, TextFormat};

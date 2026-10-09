@@ -996,6 +996,37 @@ impl AppState {
         Ok(script)
     }
 
+    /// One running pipeline's config as text — see
+    /// `Operation::GetPipelineConfig`. Without a `format`, the config file's,
+    /// and JSON when there is no file.
+    ///
+    /// The config is cloned out under the pipelines lock and rendered after it
+    /// is released, the same shape [`AppState::loaded_script`] has.
+    pub fn pipeline_source(
+        &self,
+        id: &str,
+        format: Option<ConfigFormat>,
+    ) -> anyhow::Result<kayak_core::PipelineSource> {
+        let config = {
+            let pipelines = self.lock_pipelines();
+            let handle = pipelines
+                .get(id)
+                .ok_or_else(|| PipelineError::NotFound(id.to_string()))?;
+            Config {
+                id: Some(handle.shared.id.clone()),
+                ..handle.shared.config.clone()
+            }
+        };
+        let format = format.unwrap_or_else(|| {
+            self.config_path()
+                .map_or(ConfigFormat::Json, |path| crate::persist::format_of(&path))
+        });
+        Ok(kayak_core::PipelineSource {
+            format,
+            text: crate::persist::render_pipeline(&config, format)?,
+        })
+    }
+
     /// The directory a save writes into. Fixed for the life of the process.
     #[must_use]
     pub fn save_directory(&self) -> &Path {

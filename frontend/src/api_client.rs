@@ -5,7 +5,8 @@ use kayak_core::sample::{SampleRequest, SampleResponse};
 use kayak_core::script::{DryRunRequest, DryRunResponse, LoadedScript};
 use kayak_core::state::{BucketContents, BucketSummary};
 use kayak_core::{
-    AuthDto, ConfigFormat, Connections, LayoutFile, LoginRequest, PipelineDto, SaveConfigRequest,
+    AuthDto, ConfigFormat, Connections, LayoutFile, LoginRequest, PipelineDto, PipelineSource,
+    SaveConfigRequest,
     TokenLoginRequest,
     SaveConfigResponse, SettingsDto,
 };
@@ -201,6 +202,26 @@ impl ApiClient {
         .await?;
         if resp.ok() {
             Ok(resp.json::<LoadedScript>().await?)
+        } else {
+            Err(rejection(resp).await)
+        }
+    }
+
+    /// A running pipeline's config as text, in `format`, rendered by the
+    /// server the way a save would write it.
+    pub async fn pipeline_config(
+        &self,
+        id: &str,
+        format: ConfigFormat,
+    ) -> Result<PipelineSource, ApiError> {
+        let resp = Request::get(&format!(
+            "{}/api/pipelines/{id}/config?format={format}",
+            self.base
+        ))
+        .send()
+        .await?;
+        if resp.ok() {
+            Ok(resp.json::<PipelineSource>().await?)
         } else {
             Err(rejection(resp).await)
         }

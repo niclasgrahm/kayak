@@ -42,6 +42,36 @@ pub async fn get_pipelines(
     Ok((StatusCode::OK, Json(pipelines)))
 }
 
+/// The `?format=` on the config endpoint. Lenient for the history
+/// endpoint's reason: it picks between two spellings of one config, so an
+/// unreadable value gets the default rather than a 400.
+#[derive(Debug, Default, serde::Deserialize)]
+#[serde(default)]
+pub struct SourceQuery {
+    format: Option<String>,
+}
+
+impl SourceQuery {
+    fn format(&self) -> Option<kayak_core::ConfigFormat> {
+        match self.format.as_deref().map(str::to_ascii_lowercase).as_deref() {
+            Some("yaml" | "yml") => Some(kayak_core::ConfigFormat::Yaml),
+            Some("json") => Some(kayak_core::ConfigFormat::Json),
+            _ => None,
+        }
+    }
+}
+
+/// One pipeline's config as text — see `Operation::GetPipelineConfig` in
+/// `kayak_core::api_docs`.
+#[allow(clippy::unused_async)]
+pub async fn get_pipeline_config(
+    State(state): State<Arc<AppState>>,
+    Path(pipeline_id): Path<String>,
+    axum::extract::Query(query): axum::extract::Query<SourceQuery>,
+) -> Result<impl IntoResponse, AppError> {
+    Ok(Json(state.pipeline_source(&pipeline_id, query.format())?))
+}
+
 /// Post messages into a pipeline's `http` input — see `Operation::IngestMessages`
 /// in `kayak_core::api_docs`.
 pub async fn ingest_messages(

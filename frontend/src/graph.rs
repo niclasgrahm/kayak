@@ -1241,6 +1241,64 @@ pub fn wheel_delta_pixels(delta: f64, delta_mode: u32) -> f64 {
     }
 }
 
+/// The class that marks a pane inside a card as one the wheel scrolls rather
+/// than zooms — the log, the config pane, the source view. Opt-in rather than
+/// read off `overflow`, because a card is `overflow: hidden` and overflows
+/// whenever its height is pinned, and that is not something a wheel can scroll.
+pub const WHEEL_SCROLLS: &str = "wheel-scrolls";
+
+/// One element between a wheel event's target and the canvas, as far as
+/// [`wheel_zooms`] needs to know about it.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct WheelAncestor {
+    /// Marked with [`WHEEL_SCROLLS`].
+    pub scroll_pane: bool,
+    /// Has more content than room, in either direction.
+    pub overflows: bool,
+    /// Is a maximized card.
+    pub maximized_card: bool,
+}
+
+/// Whether a wheel over the canvas zooms it, given everything from the event's
+/// target up to the canvas.
+///
+/// A pane that has somewhere to scroll keeps the wheel, which is the bug this
+/// exists for: the canvas used to `prevent_default` every wheel and zoom, so a
+/// card's transform chain could not be scrolled at all. Whether there is
+/// anything to scroll is the whole test rather than which way the wheel went —
+/// chaining on to the zoom at the end of a pane turns overscrolling one card
+/// into a lurch of the whole canvas — and a pane with nothing to scroll falls
+/// through and zooms.
+///
+/// A maximized card keeps every wheel, scrollable or not: it fills the canvas,
+/// so there is nothing behind it to zoom, and zooming anyway rescales the card
+/// itself (its geometry is divided by the zoom) — which reads as the card's
+/// *contents* zooming.
+#[must_use]
+pub fn wheel_zooms(ancestors: impl IntoIterator<Item = WheelAncestor>) -> bool {
+    !ancestors
+        .into_iter()
+        .any(|a| a.maximized_card || (a.scroll_pane && a.overflows))
+}
+
+/// How far to scroll a row that only scrolls sideways — a maximized card's
+/// chain — for a wheel that only goes up and down, or `None` to leave the
+/// wheel to the browser.
+///
+/// A mouse wheel has no sideways axis, so without this the row could only be
+/// moved by its scrollbar or with shift held. A wheel that has a sideways part
+/// of its own (a trackpad) is left alone, and so is a row that also scrolls
+/// vertically, where up and down already mean something.
+#[must_use]
+pub fn sideways_scroll(
+    delta_x: f64,
+    delta_y: f64,
+    overflows_x: bool,
+    overflows_y: bool,
+) -> Option<f64> {
+    (overflows_x && !overflows_y && delta_x == 0.0 && delta_y != 0.0).then_some(delta_y)
+}
+
 /// Time constant of the camera glide: each `FOCUS_TAU_MS` covers ~63% of the
 /// remaining distance. The tail is what you actually feel, so the total is
 /// several times this — about 350ms for a screen-sized move at 45ms.
@@ -2792,6 +2850,57 @@ mod tests {
             maxed,
             "zooming past the limit should be a no-op, not a pan"
         );
+    }
+
+    #[test]
+    fn a_pane_with_somewhere_to_scroll_keeps_the_wheel() {
+        let pane = WheelAncestor {
+            scroll_pane: true,
+            overflows: true,
+            ..WheelAncestor::default()
+        };
+        // the pane sits a few elements above the target: a property row, its
+        // section, then the pane, then the card
+        let card = WheelAncestor::default();
+        assert!(!wheel_zooms([WheelAncestor::default(), pane, card]));
+    }
+
+    #[test]
+    fn a_pane_with_nothing_to_scroll_lets_the_canvas_zoom() {
+        let short_pane = WheelAncestor {
+            scroll_pane: true,
+            ..WheelAncestor::default()
+        };
+        assert!(wheel_zooms([short_pane, WheelAncestor::default()]));
+        // and overflowing without the mark is not scrollable — a pinned card
+        // overflows its own `overflow: hidden` box
+        let pinned_card = WheelAncestor {
+            overflows: true,
+            ..WheelAncestor::default()
+        };
+        assert!(wheel_zooms([pinned_card]));
+        assert!(wheel_zooms([]));
+    }
+
+    #[test]
+    fn a_maximized_card_never_lets_the_canvas_zoom() {
+        let maximized = WheelAncestor {
+            maximized_card: true,
+            ..WheelAncestor::default()
+        };
+        assert!(!wheel_zooms([WheelAncestor::default(), maximized]));
+    }
+
+    #[test]
+    fn a_vertical_wheel_scrolls_a_sideways_row_sideways() {
+        assert_eq!(sideways_scroll(0.0, 40.0, true, false), Some(40.0));
+        assert_eq!(sideways_scroll(0.0, -40.0, true, false), Some(-40.0));
+        // a trackpad's own sideways motion is the browser's
+        assert_eq!(sideways_scroll(12.0, 40.0, true, false), None);
+        // nothing to scroll sideways, or up and down already means something
+        assert_eq!(sideways_scroll(0.0, 40.0, false, false), None);
+        assert_eq!(sideways_scroll(0.0, 40.0, true, true), None);
+        assert_eq!(sideways_scroll(0.0, 0.0, true, false), None);
     }
 
     #[test]

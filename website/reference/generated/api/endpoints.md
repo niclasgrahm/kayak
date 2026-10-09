@@ -154,6 +154,35 @@ This is the text the pipeline was **built** with, not the file as it stands now.
 | `200` | [LoadedScript](#schema-loadedscript) | The script, as built. |
 | `404` | [ApiError](#schema-apierror) | No pipeline of that id is running, or the transform at that position is not a `script` — or there is no transform there at all. |
 
+### `GET /api/pipelines/{pipeline_id}/config` {#get-api-pipelines--pipeline_id--config}
+
+One pipeline's config, as a config file would write it
+
+<Badge type="warning" text="read" /> <Badge type="info" text="getPipelineConfig" /> — Any signed-in user.
+
+The config of a running pipeline rendered as text, in YAML or JSON — what a card's source view shows and copies. It is rendered by the same code a save writes the config file with, so it is spelled exactly as that pipeline's entry in a saved file would be, with the `id` filled in.
+
+This is the config the pipeline is **running**, which is not necessarily what is on disk: the graph can be edited without being saved. Credentials are the unresolved `${NAME}` templates they are configured as, and live on the connections the config names rather than in it.
+
+**path parameters**
+
+| name | description |
+| --- | --- |
+| `pipeline_id` | Id of the pipeline. |
+
+**query parameters** — all optional, so a bare request to this path is a working request.
+
+| name | description |
+| --- | --- |
+| `format` | `yaml` or `json`. Without one — or with one that is neither — the config file's own format, and JSON for a server with no config file. The response says which it is. |
+
+**responses**
+
+| status | body | description |
+| --- | --- | --- |
+| `200` | [PipelineSource](#schema-pipelinesource) | The pipeline's config as text. |
+| `404` | [ApiError](#schema-apierror) | No pipeline of that id is running. |
+
 ### `POST /api/scripts/dry-run` {#post-api-scripts-dry-run}
 
 Run a script over some messages, without creating a pipeline
