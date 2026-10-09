@@ -12,6 +12,20 @@ history, not here.
 
 ## Unreleased
 
+## 0.2.0 — 2026-10-08
+
+**Minor, not patch**, because one change stops an existing config loading:
+the `http` transform now refuses `verb: GET` and `verb: DELETE` at build
+time (see *Changed*). Everything else is additions and one fix.
+
+### Changed
+
+- **The `http` transform honours `verb`, and refuses `GET` and `DELETE`.**
+  It used to accept `verb` and always `POST`. A request with no body sends
+  none of the messages, so a pipeline configured with either now fails to
+  start, saying why, instead of quietly posting. Remove the `verb` or set
+  `POST`/`PUT`/`PATCH`.
+
 ### Fixed
 
 - **The `indu` output's `at` in epoch milliseconds.** A number in the field
@@ -22,6 +36,40 @@ history, not here.
 
 ### Added
 
+- **`postgres` and `clickhouse` inputs.** Every other input is pushed to;
+  these ask. Each runs a `table` or a `query` on a timer and hands each row
+  on as a message — the whole relation every tick (`mode: snapshot`, for
+  reference data) or only the rows above a watermark on a column that grows
+  (`mode: incremental`, paged, `start_from: newest | oldest`, optional
+  `lag_secs`). The watermark is kept in memory, so `ack: on_delivery` is
+  refused.
+- **An `http_poll` input.** The same snapshot for a system that only has an
+  api: a `GET` every `interval_secs`, the whole reply handed on each time —
+  one message per element of an array, `items` a JSON pointer into a reply
+  that wraps its records. `auth` is the http output's.
+- **Six streaming-statistics transforms: `deadband`, `derive`, `rolling`,
+  `smooth`, `detect`, `resample`.** Each keeps a series per `group_by` key in
+  the pipeline's declared state bucket, so a pipeline using one needs a
+  `state` block. `deadband` passes a message only when its value moved;
+  `derive` writes rates, deltas, running totals and wrap-tolerant counters;
+  `rolling` writes the reducer's aggregations over a sliding window onto each
+  message; `smooth` is ewma, median, Hampel or a trailing Savitzky–Golay;
+  `detect` flags anomalies by z-score, MAD, CUSUM, an ewma chart, the Western
+  Electric rules or a flatline; `resample` puts a series on a regular grid.
+  See "streaming statistics" on the site.
+- **A `features` transform.** A window of readings becomes the handful of
+  numbers a model wants — waveform descriptors and, with a sample rate, the
+  spectrum and named frequency bands — one message per group.
+- **The `http` transform does a round trip.** `response: merge` writes the
+  reply under `as` onto the message that asked, so the identifiers survive
+  (`replace`, the old behaviour, stays the default); `body: batch | message`,
+  `auth`, `timeout_seconds` and `retries` with backoff are new.
+- **Time on the message, and statistics in a script.** A time is read off a
+  message one way everywhere — RFC 3339 or epoch milliseconds, an error for
+  anything else. The reducer gains `slope` (per second, against a `time`
+  field), and scripts gain `parse_time`/`format_time` and the numbers:
+  `pluck`, `mean`, `median`, `std`, `variance`, `quantile`, `zscore`,
+  `linfit`, `peaks`, `histogram` and more. See "time and numbers" on the site.
 - **A running script can be read from its card.** A `script` transform's
   source is now a row of its own in the card's transforms tab — `inline · N
   lines` or the file's path — that folds open to a short highlighted peek and
