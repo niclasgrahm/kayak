@@ -29,6 +29,7 @@ use serde_json::Value;
 use crate::config::Config;
 use crate::connections::{Connections, CreateConnectionRequest};
 use crate::docs::ComponentDoc;
+use crate::format::PipelineSource;
 use crate::history::PipelineHistory;
 use crate::layout::LayoutFile;
 use crate::dry_run::{PipelineDryRunRequest, PipelineDryRunResponse};
@@ -108,6 +109,7 @@ pub enum Operation {
     ListConnections,
     GetPipelineHistory,
     GetPipelineScript,
+    GetPipelineConfig,
     DryRunScript,
     SampleInput,
     DryRunPipeline,
@@ -142,6 +144,7 @@ impl Operation {
             Self::ListConnections => "listConnections",
             Self::GetPipelineHistory => "getPipelineHistory",
             Self::GetPipelineScript => "getPipelineScript",
+            Self::GetPipelineConfig => "getPipelineConfig",
             Self::DryRunScript => "dryRunScript",
             Self::SampleInput => "sampleInput",
             Self::DryRunPipeline => "dryRunPipeline",
@@ -764,6 +767,48 @@ pub fn endpoints() -> Vec<ApiDoc> {
                     description: "No pipeline of that id is running, or the transform \
                                   at that position is not a `script` — or there is no \
                                   transform there at all.",
+                    body: Body::Json("ApiError"),
+                },
+            ],
+        },
+        ApiDoc {
+            path: "/api/pipelines/{pipeline_id}/config",
+            method: Method::Get,
+            operation: Operation::GetPipelineConfig,
+            summary: "One pipeline's config, as a config file would write it",
+            description: "The config of a running pipeline rendered as text, in YAML \
+                          or JSON — what a card's source view shows and copies. It \
+                          is rendered by the same code a save writes the config file \
+                          with, so it is spelled exactly as that pipeline's entry in \
+                          a saved file would be, with the `id` filled in.\n\n\
+                          This is the config the pipeline is **running**, which is \
+                          not necessarily what is on disk: the graph can be edited \
+                          without being saved. Credentials are the unresolved \
+                          `${NAME}` templates they are configured as, and live on \
+                          the connections the config names rather than in it.",
+            tag: Tag::Pipelines,
+            access: Access::Read,
+            params: vec![ParamDoc {
+                name: "pipeline_id",
+                description: "Id of the pipeline.",
+            }],
+            query: vec![ParamDoc {
+                name: "format",
+                description: "`yaml` or `json`. Without one — or with one that is \
+                              neither — the config file's own format, and JSON for \
+                              a server with no config file. The response says which \
+                              it is.",
+            }],
+            request: None,
+            responses: vec![
+                ResponseDoc {
+                    status: 200,
+                    description: "The pipeline's config as text.",
+                    body: Body::Json("PipelineSource"),
+                },
+                ResponseDoc {
+                    status: 404,
+                    description: "No pipeline of that id is running.",
                     body: Body::Json("ApiError"),
                 },
             ],
@@ -1496,6 +1541,7 @@ pub fn schemas() -> BTreeMap<&'static str, Value> {
     schemas.insert("DryRunRequest", of(schema_for!(DryRunRequest)));
     schemas.insert("DryRunResponse", of(schema_for!(DryRunResponse)));
     schemas.insert("LoadedScript", of(schema_for!(LoadedScript)));
+    schemas.insert("PipelineSource", of(schema_for!(PipelineSource)));
     schemas.insert(
         "PipelineDryRunRequest",
         of(schema_for!(PipelineDryRunRequest)),
@@ -1730,6 +1776,9 @@ mod tests {
                 // same kind of thing kept somewhere else, and the path can only
                 // reach what the running pipeline was built from
                 ("getPipelineScript", "read"),
+                // the same configs `listPipelines` already hands any reader,
+                // in another spelling
+                ("getPipelineConfig", "read"),
                 ("listConnections", "read"),
                 // executes code the caller supplied. It is sandboxed and its
                 // state is a scratch bucket, so it cannot reach the running

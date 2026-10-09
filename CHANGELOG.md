@@ -12,6 +12,20 @@ history, not here.
 
 ## Unreleased
 
+### Added
+
+- **A card's config can be read whole.** Components on a tab with several
+  fold to one line each, the transforms tab shows the chain as chips, and a
+  maximized card lays every stage out side by side. A `fields | yaml | json`
+  switch on the config heading shows the pipeline's config as text, with a
+  copy button, served by a new `GET /api/pipelines/{id}/config`.
+
+### Fixed
+
+- **A card's config pane scrolls.** The wheel over it used to zoom the
+  canvas, so a long transform chain could not be read; over a maximized card
+  it zoomed the card's contents.
+
 ## 0.2.1 — 2026-10-09
 
 **Patch, not minor**: every config that loaded on 0.2.0 still loads. The one

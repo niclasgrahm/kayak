@@ -23,6 +23,7 @@ pub mod project;
 pub mod rhai;
 pub mod selection;
 pub mod sidebar;
+pub mod source;
 pub mod stats;
 
 #[cfg(feature = "hydrate")]

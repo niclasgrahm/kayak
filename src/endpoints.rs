@@ -28,7 +28,9 @@ use crate::handlers::{
         history::get_pipeline_history,
         layout::{get_layout, put_layout},
         openapi::{api_reference, get_openapi},
-        pipeline::{create_pipeline, delete_pipeline, get_pipelines, ingest_messages},
+        pipeline::{
+            create_pipeline, delete_pipeline, get_pipeline_config, get_pipelines, ingest_messages,
+        },
         sample::sample_input,
         script::{dry_run_script, get_pipeline_script},
         settings::{get_settings, revert_config, save_config},
@@ -90,6 +92,7 @@ fn handler_for(doc: &ApiDoc) -> MethodRouter<Arc<AppState>> {
         Operation::ListConnections => route_of(method, get_connections),
         Operation::GetPipelineHistory => route_of(method, get_pipeline_history),
         Operation::GetPipelineScript => route_of(method, get_pipeline_script),
+        Operation::GetPipelineConfig => route_of(method, get_pipeline_config),
         Operation::DryRunScript => route_of(method, dry_run_script),
         Operation::SampleInput => route_of(method, sample_input),
         Operation::DryRunPipeline => route_of(method, dry_run_pipeline),

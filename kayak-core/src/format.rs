@@ -76,6 +76,17 @@ impl ConfigFormat {
     }
 }
 
+/// One running pipeline's config, written out the way a config file would
+/// write it — what a card's source view shows and copies.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq, JsonSchema)]
+pub struct PipelineSource {
+    /// The format `text` is in: the one asked for, or else the config file's.
+    pub format: ConfigFormat,
+    /// The pipeline as one entry of a config file would hold it, `id` filled
+    /// in.
+    pub text: String,
+}
+
 impl std::fmt::Display for ConfigFormat {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(match self {

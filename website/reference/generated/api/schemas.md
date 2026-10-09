@@ -14617,6 +14617,47 @@ What `GET /api/pipelines/{id}/history` answers with.
 
 :::
 
+## `PipelineSource` {#schema-pipelinesource}
+
+One running pipeline's config, written out the way a config file would write it — what a card's source view shows and copies.
+
+::: details schema
+
+```json
+{
+  "$defs": {
+    "ConfigFormat": {
+      "description": "The two ways a config file can be written.\n\nJSON is the default because it is what every existing file and every example\nin the repository uses; a file only gets read as YAML if it says so.",
+      "enum": [
+        "json",
+        "yaml"
+      ],
+      "type": "string"
+    }
+  },
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "description": "One running pipeline's config, written out the way a config file would\nwrite it — what a card's source view shows and copies.",
+  "properties": {
+    "format": {
+      "$ref": "#/$defs/ConfigFormat",
+      "description": "The format `text` is in: the one asked for, or else the config file's."
+    },
+    "text": {
+      "description": "The pipeline as one entry of a config file would hold it, `id` filled\nin.",
+      "type": "string"
+    }
+  },
+  "required": [
+    "format",
+    "text"
+  ],
+  "title": "PipelineSource",
+  "type": "object"
+}
+```
+
+:::
+
 ## `SampleRequest` {#schema-samplerequest}
 
 Take a few messages from an input, without creating a pipeline.
