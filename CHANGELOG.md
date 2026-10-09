@@ -12,6 +12,13 @@ history, not here.
 
 ## Unreleased
 
+## 0.2.1 — 2026-10-09
+
+**Patch, not minor**: every config that loaded on 0.2.0 still loads. The one
+change of shape — `filter` taking a list of conditions — reads the old
+single-comparison spelling too. Everything else is additions, all of them so
+that a chain of stock transforms can say what used to need a script.
+
 ### Changed
 
 - **`filter` takes a list of conditions.** It is now `{"type": "filter",
