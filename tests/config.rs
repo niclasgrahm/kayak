@@ -102,6 +102,29 @@ fn input_samples() -> Vec<(&'static str, Value)> {
                 "deadband": 0.5
             }),
         ),
+        (
+            "postgres",
+            json!({
+                "type": "postgres",
+                "connection": "local-postgres",
+                "table": "readings",
+                "columns": ["id", "sensor", "value"],
+                "interval_secs": 5,
+                "mode": {"type": "incremental", "field": "id", "start_from": "oldest", "lag_secs": 2},
+                "page_size": 500,
+                "max_batch": 100
+            }),
+        ),
+        (
+            "clickhouse",
+            json!({
+                "type": "clickhouse",
+                "connection": "local-clickhouse",
+                "query": "SELECT * FROM readings WHERE site = 'a'",
+                "interval_secs": 60,
+                "mode": {"type": "snapshot"}
+            }),
+        ),
     ]
 }
 

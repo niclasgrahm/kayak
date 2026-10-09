@@ -142,6 +142,14 @@ pub fn for_input(kind: &str) -> Option<Sampling> {
         // fan-outs above, the platform backfills each series' latest reading
         // on subscribe, so a quiet sensor still samples its last value.
         "indu" => Sampling::Ready,
+        // A query, and the one kind of input that *can* show what was
+        // published before the sample started: the rows are still in the
+        // table. Reading them takes nothing away from a running pipeline — a
+        // second reader is a second query. When the input starts from the
+        // newest rows the sampler starts it from the oldest instead, and says
+        // so at the time, since a quiet table would otherwise sample empty
+        // with a table full of rows behind it.
+        "postgres" | "clickhouse" => Sampling::Ready,
         // A consumer group is shared state: joining the pipeline's would
         // rebalance it and commit offsets on its behalf, i.e. take messages
         // away from the thing it is supposed to be showing.
