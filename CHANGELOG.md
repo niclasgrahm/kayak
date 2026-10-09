@@ -12,6 +12,11 @@ history, not here.
 
 ## Unreleased
 
+## 0.2.2 — 2026-10-09
+
+**Patch**: additions and a fix, nothing an existing config has to change
+for.
+
 ### Added
 
 - **A card's config can be read whole.** Components on a tab with several
