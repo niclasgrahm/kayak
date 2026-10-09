@@ -31,7 +31,7 @@
 use anyhow::{Context, Result, anyhow, bail};
 use kayak_core::mapping::{
     ArithmeticOperator, CastType, ConcatPart, KeepPolicy, MapMissingPolicy, MapTransformConfig,
-    Mapping, Operand,
+    Mapping, OnZero, Operand, TimeFormat,
 };
 use serde_json::{Map, Value};
 use std::collections::HashSet;
@@ -127,12 +127,22 @@ fn check(mapping: &Mapping, position: &str, keep: KeepPolicy) -> Result<()> {
             left,
             operator,
             right,
+            on_zero,
             ..
         } => {
             for (operand, side) in [(left, "left"), (right, "right")] {
                 if let Operand::Field { field } = operand {
                     blank(field, side)?;
                 }
+            }
+            // only a division has a zero to be about; saying what one does on
+            // an addition is a setting that would never be read
+            if *operator != ArithmeticOperator::Divide && !on_zero.is_default() {
+                bail!(
+                    "{position} sets 'on_zero', which only means something to 'divide', not to \
+                     '{}'",
+                    operator.symbol()
+                );
             }
             // a literal zero divisor cannot ever be anything else, so it is a
             // config mistake rather than a bad message. A *field* that turns
@@ -141,6 +151,29 @@ fn check(mapping: &Mapping, position: &str, keep: KeepPolicy) -> Result<()> {
                 && matches!(right, Operand::Value { value } if *value == 0.0)
             {
                 bail!("{position} divides by a literal zero");
+            }
+        }
+        Mapping::TimeBucket {
+            from,
+            every_seconds,
+            offset_seconds,
+            timezone,
+            ..
+        } => {
+            blank(from, "from")?;
+            if *every_seconds == 0 {
+                bail!("{position} needs an 'every_seconds' of at least one");
+            }
+            if offset_seconds.is_some_and(|offset| offset >= *every_seconds) {
+                bail!(
+                    "{position} has an 'offset_seconds' of {} — it has to be less than \
+                     'every_seconds' ({every_seconds}), or it is the same bucket boundary as a \
+                     smaller one",
+                    offset_seconds.unwrap_or_default()
+                );
+            }
+            if let Some(zone) = timezone {
+                zone_of(zone).with_context(|| position.to_string())?;
             }
         }
         Mapping::Drop { from } => {
@@ -283,11 +316,37 @@ impl MapTransform {
                 operator,
                 right,
                 output,
+                on_zero,
             } => (
                 output.as_str(),
                 None,
-                arithmetic(working, left, *operator, right)?,
+                arithmetic(working, left, *operator, right, on_zero)?,
             ),
+            Mapping::TimeBucket {
+                from,
+                every_seconds,
+                offset_seconds,
+                timezone,
+                format,
+                output,
+            } => {
+                let value = match present(working, from) {
+                    // as with a cast: a time that is there and unreadable is
+                    // a wrong stream, whatever `on_missing` says
+                    Some(value) => Some(
+                        bucket_start(
+                            value,
+                            *every_seconds,
+                            offset_seconds.unwrap_or(0),
+                            timezone.as_deref(),
+                            format.unwrap_or(TimeFormat::Rfc3339),
+                        )
+                        .with_context(|| format!("field '{from}' cannot be put in a time bucket"))?,
+                    ),
+                    None => None,
+                };
+                (output.as_str(), None, value)
+            }
             Mapping::Drop { .. } | Mapping::Constant { .. } => unreachable!("handled above"),
         };
 
@@ -372,6 +431,59 @@ fn concat(message: &Value, parts: &[ConcatPart]) -> Result<Option<String>> {
     Ok(Some(joined))
 }
 
+/// The time zone a name means, or why it means none.
+fn zone_of(name: &str) -> Result<chrono_tz::Tz> {
+    name.trim()
+        .parse::<chrono_tz::Tz>()
+        .map_err(|_| anyhow!("'{name}' is not an IANA time zone, like 'Europe/Stockholm' or 'UTC'"))
+}
+
+/// The start of the bucket a time falls in, written as `format` says.
+///
+/// The arithmetic is on the zone's *wall clock*: the time is turned into a
+/// local date and time, floored there, and the floor turned back into an
+/// instant. That is what keeps a 06:00 shift at 06:00 across a clock change.
+/// The two awkward local times a clock change makes are settled the
+/// predictable way — a start that happens twice is the first of them, and one
+/// that never happens (it fell in the skipped hour) is the first instant after
+/// the gap.
+fn bucket_start(
+    value: &Value,
+    every_seconds: u64,
+    offset_seconds: u64,
+    timezone: Option<&str>,
+    format: TimeFormat,
+) -> Result<Value> {
+    use chrono::{DateTime, Duration, TimeZone};
+
+    let instant = crate::time::parse(value)?;
+    let zone = timezone.map(zone_of).transpose()?.unwrap_or(chrono_tz::UTC);
+    let local = instant.with_timezone(&zone).naive_local();
+    let every = i64::try_from(every_seconds).context("'every_seconds' is too large")?;
+    let offset = i64::try_from(offset_seconds).context("'offset_seconds' is too large")?;
+    let since = local.and_utc().timestamp() - offset;
+    let floor = since.div_euclid(every) * every + offset;
+    let start = DateTime::from_timestamp(floor, 0)
+        .map(|t| t.naive_utc())
+        .ok_or_else(|| anyhow!("{floor} seconds is out of range for a time"))?;
+    let resolved = zone
+        .from_local_datetime(&start)
+        .earliest()
+        .or_else(|| {
+            // in a gap: walk forward to the first local time that exists.
+            // Gaps are an hour, rarely two; a day bounds the walk.
+            (1..=24 * 60)
+                .map(|minutes| start + Duration::minutes(minutes))
+                .find_map(|later| zone.from_local_datetime(&later).earliest())
+        })
+        .ok_or_else(|| anyhow!("{start} does not exist in {zone}"))?;
+    let millis = resolved.timestamp_millis();
+    match format {
+        TimeFormat::Rfc3339 => crate::time::format(millis).map(Value::String),
+        TimeFormat::Millis => Ok(Value::from(millis)),
+    }
+}
+
 /// One arithmetic operation. `None` if either operand reads a field that is
 /// missing.
 fn arithmetic(
@@ -379,18 +491,30 @@ fn arithmetic(
     left: &Operand,
     operator: ArithmeticOperator,
     right: &Operand,
+    on_zero: &OnZero,
 ) -> Result<Option<Value>> {
     let (Some(left), Some(right)) = (operand(message, left)?, operand(message, right)?) else {
         return Ok(None);
     };
     if operator == ArithmeticOperator::Divide && right == 0.0 {
-        bail!("division by zero: the right-hand operand is 0");
+        return match on_zero {
+            OnZero::Error => bail!(
+                "division by zero: the right-hand operand is 0. Set the mapping's 'on_zero' to \
+                 'null' or a value to mean it"
+            ),
+            OnZero::Null => Ok(Some(Value::Null)),
+            OnZero::Value { value } => serde_json::Number::from_f64(*value)
+                .map(|number| Some(Value::Number(number)))
+                .ok_or_else(|| anyhow!("'on_zero' is {value}, which is not a number JSON can hold")),
+        };
     }
     let answer = match operator {
         ArithmeticOperator::Add => left + right,
         ArithmeticOperator::Subtract => left - right,
         ArithmeticOperator::Multiply => left * right,
         ArithmeticOperator::Divide => left / right,
+        ArithmeticOperator::Min => left.min(right),
+        ArithmeticOperator::Max => left.max(right),
     };
     let number = serde_json::Number::from_f64(answer).ok_or_else(|| {
         anyhow!("{left} {} {right} is not a number JSON can hold", operator.symbol())
@@ -565,7 +689,7 @@ mod tests {
     use crate::transforms::{BuildTransform, Transform};
     use kayak_core::mapping::{
         ArithmeticOperator, CastType, ConcatPart, KeepPolicy, Literal, MapMissingPolicy,
-        MapTransformConfig, Mapping, Operand,
+        MapTransformConfig, Mapping, OnZero, Operand, TimeFormat,
     };
     use serde_json::{Value, json};
     use std::sync::Arc;
@@ -660,6 +784,7 @@ mod tests {
                     operator: ArithmeticOperator::Subtract,
                     right: Operand::Value { value: 32.0 },
                     output: "_offset".into(),
+                    on_zero: OnZero::Error,
                 },
                 Mapping::Arithmetic {
                     left: Operand::Field {
@@ -668,6 +793,7 @@ mod tests {
                     operator: ArithmeticOperator::Divide,
                     right: Operand::Value { value: 1.8 },
                     output: "celsius".into(),
+                    on_zero: OnZero::Error,
                 },
                 Mapping::Drop {
                     from: vec!["_offset".into()],
@@ -939,6 +1065,7 @@ mod tests {
                     operator: ArithmeticOperator::Divide,
                     right: Operand::Value { value: 0.0 },
                     output: "x".into(),
+                    on_zero: OnZero::Error,
                 }]),
             ),
         ];
@@ -966,5 +1093,217 @@ mod tests {
     #[allow(dead_code, reason = "a compile-time assertion, never called")]
     fn map_transform_is_send(transform: MapTransform) -> impl Send {
         transform
+    }
+
+    fn arithmetic(left: &str, operator: ArithmeticOperator, right: Operand, on_zero: OnZero) -> Mapping {
+        Mapping::Arithmetic {
+            left: Operand::Field { field: left.into() },
+            operator,
+            right,
+            output: "out".into(),
+            on_zero,
+        }
+    }
+
+    /// `min` with a literal is a ceiling and `max` a floor, so two mappings
+    /// clamp a value into a range — still one operation each, through an
+    /// intermediate field the way any two-step arithmetic goes.
+    #[test]
+    fn min_and_max_clamp_through_two_mappings() -> anyhow::Result<()> {
+        let clamp = || {
+            config(vec![
+                Mapping::Arithmetic {
+                    left: Operand::Field { field: "health".into() },
+                    operator: ArithmeticOperator::Min,
+                    right: Operand::Value { value: 100.0 },
+                    output: "_capped".into(),
+                    on_zero: OnZero::Error,
+                },
+                Mapping::Arithmetic {
+                    left: Operand::Field { field: "_capped".into() },
+                    operator: ArithmeticOperator::Max,
+                    right: Operand::Value { value: 0.0 },
+                    output: "clamped".into(),
+                    on_zero: OnZero::Error,
+                },
+            ])
+        };
+        assert_eq!(run(clamp(), json!({ "health": 140.0 }))?["clamped"], json!(100.0));
+        assert_eq!(run(clamp(), json!({ "health": -3.5 }))?["clamped"], json!(0.0));
+        assert_eq!(run(clamp(), json!({ "health": 42.0 }))?["clamped"], json!(42.0));
+        Ok(())
+    }
+
+    #[test]
+    fn min_and_max_of_two_fields() -> anyhow::Result<()> {
+        let message = json!({ "a": 3, "b": 7.5 });
+        let both = |operator| config(vec![arithmetic("a", operator, Operand::Field { field: "b".into() }, OnZero::Error)]);
+        assert_eq!(run(both(ArithmeticOperator::Min), message.clone())?["out"], json!(3.0));
+        assert_eq!(run(both(ArithmeticOperator::Max), message)?["out"], json!(7.5));
+        Ok(())
+    }
+
+    /// A zero divisor fails the batch unless `on_zero` says what it means —
+    /// `null`, or a number of the config's choosing.
+    #[test]
+    fn on_zero_decides_what_a_zero_divisor_writes() -> anyhow::Result<()> {
+        let divide = |on_zero| {
+            config(vec![arithmetic(
+                "good",
+                ArithmeticOperator::Divide,
+                Operand::Field { field: "parts".into() },
+                on_zero,
+            )])
+        };
+        let empty = json!({ "good": 0, "parts": 0 });
+
+        let error = run(divide(OnZero::Error), empty.clone())
+            .err()
+            .map(|e| format!("{e:#}"))
+            .unwrap_or_default();
+        assert!(error.contains("on_zero"), "{error}");
+
+        assert_eq!(run(divide(OnZero::Null), empty.clone())?["out"], Value::Null);
+        assert_eq!(run(divide(OnZero::Value { value: 1.0 }), empty)?["out"], json!(1.0));
+        // and a divisor that isn't zero is divided as ever
+        assert_eq!(
+            run(divide(OnZero::Value { value: 1.0 }), json!({ "good": 3, "parts": 4 }))?["out"],
+            json!(0.75)
+        );
+        Ok(())
+    }
+
+    /// `on_zero` on anything but a division would never be read, so it is a
+    /// config mistake and refused at build.
+    #[test]
+    fn on_zero_is_refused_on_anything_but_divide() {
+        let error = build(config(vec![arithmetic(
+            "a",
+            ArithmeticOperator::Multiply,
+            Operand::Value { value: 2.0 },
+            OnZero::Null,
+        )]))
+        .err()
+        .map(|e| e.to_string())
+        .unwrap_or_default();
+        assert!(error.contains("on_zero"), "{error}");
+    }
+
+    /// A literal zero divisor is still refused, `on_zero` or not: it can never
+    /// be anything but zero, so `on_zero` would be the whole answer.
+    #[test]
+    fn a_literal_zero_divisor_is_refused_even_with_on_zero() {
+        assert!(
+            build(config(vec![arithmetic(
+                "a",
+                ArithmeticOperator::Divide,
+                Operand::Value { value: 0.0 },
+                OnZero::Null,
+            )]))
+            .is_err()
+        );
+    }
+
+    fn bucket(every: u64, offset: Option<u64>, zone: Option<&str>, format: Option<TimeFormat>) -> Mapping {
+        Mapping::TimeBucket {
+            from: "t".into(),
+            every_seconds: every,
+            offset_seconds: offset,
+            timezone: zone.map(Into::into),
+            format,
+            output: "bucket".into(),
+        }
+    }
+
+    /// The bucket a time lands in, by a mapping.
+    fn bucketed(mapping: Mapping, t: &Value) -> anyhow::Result<Value> {
+        Ok(run(config(vec![mapping]), json!({ "t": t }))?["bucket"].clone())
+    }
+
+    const SHIFT: u64 = 8 * 3600;
+    const SIX_AM: u64 = 6 * 3600;
+
+    #[test]
+    fn a_time_is_floored_to_its_bucket() -> anyhow::Result<()> {
+        assert_eq!(
+            bucketed(bucket(3600, None, None, None), &json!("2026-10-09T10:37:12.345Z"))?,
+            json!("2026-10-09T10:00:00.000Z")
+        );
+        // epoch millis in, epoch millis out
+        assert_eq!(
+            bucketed(bucket(60, None, None, Some(TimeFormat::Millis)), &json!(1_000_000_123_456_i64))?,
+            json!(1_000_000_080_000_i64)
+        );
+        Ok(())
+    }
+
+    /// The point of counting on the zone's clock: the morning shift starts at
+    /// 06:00 local summer and winter alike, which is two different UTC hours.
+    #[test]
+    fn a_shift_calendar_follows_the_local_clock() -> anyhow::Result<()> {
+        let shifts = || bucket(SHIFT, Some(SIX_AM), Some("Europe/Stockholm"), None);
+        // 07:30 CEST → the 06:00 CEST shift
+        assert_eq!(bucketed(shifts(), &json!("2026-07-01T05:30:00Z"))?, json!("2026-07-01T04:00:00.000Z"));
+        // 06:30 CET → the 06:00 CET shift
+        assert_eq!(bucketed(shifts(), &json!("2026-12-01T05:30:00Z"))?, json!("2026-12-01T05:00:00.000Z"));
+        // 01:00 on the 2nd, local → the night shift that began at 22:00 on the 1st
+        assert_eq!(bucketed(shifts(), &json!("2026-07-01T23:00:00Z"))?, json!("2026-07-01T20:00:00.000Z"));
+        Ok(())
+    }
+
+    /// The night the clocks go back holds a nine-hour night shift: it starts
+    /// at 22:00 summer time and ends at 06:00 winter time.
+    #[test]
+    fn the_night_the_clocks_change_holds_a_longer_shift() -> anyhow::Result<()> {
+        let shifts = || bucket(SHIFT, Some(SIX_AM), Some("Europe/Stockholm"), None);
+        // 05:30 CET on the 25th, after the change → still the night shift
+        assert_eq!(bucketed(shifts(), &json!("2026-10-25T04:30:00Z"))?, json!("2026-10-24T20:00:00.000Z"));
+        // 06:00 CET → the morning shift, nine hours after the night one began
+        assert_eq!(bucketed(shifts(), &json!("2026-10-25T05:00:00Z"))?, json!("2026-10-25T05:00:00.000Z"));
+        Ok(())
+    }
+
+    /// A bucket start in the hour that is skipped in spring starts at the end
+    /// of the gap; one in the hour that happens twice in autumn starts at the
+    /// first of them.
+    #[test]
+    fn a_start_in_a_skipped_or_repeated_hour_is_settled_predictably() -> anyhow::Result<()> {
+        let at_two = || bucket(86_400, Some(2 * 3600), Some("Europe/Stockholm"), None);
+        // 29 March: 02:00 does not exist, 03:00 CEST is 01:00Z
+        assert_eq!(bucketed(at_two(), &json!("2026-03-29T10:00:00Z"))?, json!("2026-03-29T01:00:00.000Z"));
+        // 25 October: 02:00 happens twice, and the first is 02:00 CEST, 00:00Z
+        assert_eq!(bucketed(at_two(), &json!("2026-10-25T10:00:00Z"))?, json!("2026-10-25T00:00:00.000Z"));
+        Ok(())
+    }
+
+    #[test]
+    fn a_missing_time_follows_on_missing_and_a_bad_one_is_an_error() -> anyhow::Result<()> {
+        let mut lax = config(vec![bucket(3600, None, None, None)]);
+        lax.on_missing = MapMissingPolicy::Omit;
+        assert_eq!(run(lax, json!({ "other": 1 }))?, json!({ "other": 1 }));
+
+        let mut lax = config(vec![bucket(3600, None, None, None)]);
+        lax.on_missing = MapMissingPolicy::Omit;
+        let error = run(lax, json!({ "t": "yesterday" }))
+            .err()
+            .map(|e| format!("{e:#}"))
+            .unwrap_or_default();
+        assert!(error.contains("yesterday"), "{error}");
+        Ok(())
+    }
+
+    #[test]
+    fn a_bucket_that_cannot_mean_anything_is_refused() {
+        for mapping in [
+            bucket(0, None, None, None),
+            bucket(3600, Some(3600), None, None),
+            bucket(3600, None, Some("Europe/Atlantis"), None),
+        ] {
+            let error = build(config(vec![mapping.clone()]))
+                .err()
+                .map(|e| format!("{e:#}"))
+                .unwrap_or_default();
+            assert!(!error.is_empty(), "{mapping:?} was accepted");
+        }
     }
 }

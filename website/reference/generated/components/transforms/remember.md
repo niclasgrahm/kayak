@@ -11,7 +11,7 @@ Needs a `state` on the pipeline; it fails to build without one.
 | field | type | | description |
 | --- | --- | --- | --- |
 | `remember` | `list of object` | <Badge type="warning" text="required" /> | what to take from a matching message. At least one, each with a distinct `as`. |
-| `when` | `list of numeric \| string` | <Badge type="info" text="optional" /> | which messages to remember from — all of these have to match. Leave it out to remember from every message, which is right for a stream carrying one kind of thing and wrong for one carrying several. |
+| `when` | `list of numeric \| string \| one_of \| none_of` | <Badge type="info" text="optional" /> | which messages to remember from — all of these have to match. Leave it out to remember from every message, which is right for a stream carrying one kind of thing and wrong for one carrying several. |
 
 **`remember` — each entry**
 
@@ -25,13 +25,27 @@ Needs a `state` on the pipeline; it fails to build without one.
 | field | type | | description |
 | --- | --- | --- | --- |
 | `field` | `string` | <Badge type="warning" text="required" /> | the field to test — a dotted path, like anywhere else |
-| `operator` | `greater_than` \| `less_than` \| `equal_to` | <Badge type="warning" text="required" /> | How a number is compared to the one in the config. |
-| `value` | `number` | <Badge type="warning" text="required" /> |  |
+| `operator` | `greater_than` \| `less_than` \| `equal_to` \| `not_equal_to` | <Badge type="warning" text="required" /> | how the field is compared |
+| `value` | `number` | <Badge type="warning" text="required" /> | the number it is compared to |
 
 **`when` — each entry — `type: "string"`**
 
 | field | type | | description |
 | --- | --- | --- | --- |
 | `field` | `string` | <Badge type="warning" text="required" /> | the field to test — a dotted path, like anywhere else |
-| `operator` | `equal_to` \| `contains` | <Badge type="warning" text="required" /> | How a string is compared to the one in the config. |
-| `value` | `string` | <Badge type="warning" text="required" /> |  |
+| `operator` | `equal_to` \| `not_equal_to` \| `contains` | <Badge type="warning" text="required" /> | how the field is compared |
+| `value` | `string` | <Badge type="warning" text="required" /> | the string it is compared to |
+
+**`when` — each entry — `type: "one_of"`**
+
+| field | type | | description |
+| --- | --- | --- | --- |
+| `field` | `string` | <Badge type="warning" text="required" /> | the field to test — a dotted path, like anywhere else |
+| `values` | `list of string` | <Badge type="warning" text="required" /> | the strings that match |
+
+**`when` — each entry — `type: "none_of"`**
+
+| field | type | | description |
+| --- | --- | --- | --- |
+| `field` | `string` | <Badge type="warning" text="required" /> | the field to test — a dotted path, like anywhere else |
+| `values` | `list of string` | <Badge type="warning" text="required" /> | the strings that do not match |

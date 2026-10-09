@@ -72,6 +72,7 @@ impl BuildTransform for ResampleTransformConfig {
             self.group_by,
             self.time,
             self.on_missing,
+            self.gate,
         )?;
         Ok(Box::new(ResampleTransform {
             series,
@@ -316,6 +317,7 @@ mod tests {
 
     fn config(method: ResampleMethod) -> ResampleTransformConfig {
         ResampleTransformConfig {
+            gate: kayak_core::streaming::Gate::default(),
             field: "v".into(),
             interval_seconds: 10.0,
             method,

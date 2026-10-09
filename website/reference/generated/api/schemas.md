@@ -417,7 +417,7 @@ One component: everything `/docs` shows about it.
       "type": "object"
     },
     "VariantDoc": {
-      "description": "A component config that is a tagged enum rather than a flat struct — the\n`filter` transform, whose fields depend on which kind of filter it is.",
+      "description": "One variant's fields: a [`UnionDoc`]'s, or those of a component config that\nis a tagged enum rather than a flat struct. No component is spelled the\nsecond way today — `filter` was, until it took a list of conditions — but\nthe reflection reads the shape, and the tests pin it against a stand-in.",
       "properties": {
         "fields": {
           "items": {
@@ -558,7 +558,17 @@ One pipeline: every input is merged into one stream, that stream runs through th
         },
         {
           "const": "divide",
-          "description": "left ÷ right. A literal zero on the right is refused when the pipeline\nis built; a *field* that turns out to be zero fails the batch.",
+          "description": "left ÷ right. A literal zero on the right is refused when the pipeline\nis built; what a *field* that turns out to be zero does is `on_zero`.",
+          "type": "string"
+        },
+        {
+          "const": "min",
+          "description": "the smaller of left and right — with a literal on one side, a ceiling",
+          "type": "string"
+        },
+        {
+          "const": "max",
+          "description": "the larger of left and right — with a literal on one side, a floor",
           "type": "string"
         }
       ]
@@ -1039,23 +1049,26 @@ One pipeline: every input is merged into one stream, that stream runs through th
       ]
     },
     "Condition": {
-      "description": "One test a message either passes or doesn't.\n\nThe same comparisons the `filter` transform makes, spelled as a tagged union\nso that a *list* of them can be configured and rendered as a form. Several\nconditions are read as \"all of these\" — there is no `or` and no nesting,\nbecause the moment either exists this is an expression language with a\nsyntax to design, and everything so far has been reachable without one.",
+      "description": "One test a message either passes or doesn't.\n\nWhat `filter` keeps, what `remember` remembers from, and what opens a\n`buffer`'s gate — one vocabulary, spelled as a tagged union so that a\n*list* of them can be configured and rendered as a form. Several\nconditions are read as \"all of these\" — there is no `or` and no nesting,\nbecause the moment either exists this is an expression language with a\nsyntax to design, and everything so far has been reachable without one.",
       "oneOf": [
         {
           "description": "Compares a field to a number. A message whose field is missing or isn't\na number does not match.",
           "properties": {
             "field": {
               "description": "the field to test — a dotted path, like anywhere else",
-              "type": "string"
+              "type": "string",
+              "x-message-field": true
             },
             "operator": {
-              "$ref": "#/$defs/NumericFilterOperatorKind"
+              "$ref": "#/$defs/NumericFilterOperatorKind",
+              "description": "how the field is compared"
             },
             "type": {
               "const": "numeric",
               "type": "string"
             },
             "value": {
+              "description": "the number it is compared to",
               "format": "double",
               "type": "number"
             }
@@ -1073,16 +1086,19 @@ One pipeline: every input is merged into one stream, that stream runs through th
           "properties": {
             "field": {
               "description": "the field to test — a dotted path, like anywhere else",
-              "type": "string"
+              "type": "string",
+              "x-message-field": true
             },
             "operator": {
-              "$ref": "#/$defs/StringFilterOperatorKind"
+              "$ref": "#/$defs/StringFilterOperatorKind",
+              "description": "how the field is compared"
             },
             "type": {
               "const": "string",
               "type": "string"
             },
             "value": {
+              "description": "the string it is compared to",
               "type": "string"
             }
           },
@@ -1091,6 +1107,60 @@ One pipeline: every input is merged into one stream, that stream runs through th
             "field",
             "operator",
             "value"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "The field is a string equal to one of `values`. A message whose field\nis missing or isn't a string does not match.",
+          "properties": {
+            "field": {
+              "description": "the field to test — a dotted path, like anywhere else",
+              "type": "string",
+              "x-message-field": true
+            },
+            "type": {
+              "const": "one_of",
+              "type": "string"
+            },
+            "values": {
+              "description": "the strings that match",
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            }
+          },
+          "required": [
+            "type",
+            "field",
+            "values"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "The field is a string equal to none of `values`. A message whose field\nis missing or isn't a string does not match this either — absence is\nnot a value, so it is in no list and outside none.",
+          "properties": {
+            "field": {
+              "description": "the field to test — a dotted path, like anywhere else",
+              "type": "string",
+              "x-message-field": true
+            },
+            "type": {
+              "const": "none_of",
+              "type": "string"
+            },
+            "values": {
+              "description": "the strings that do not match",
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            }
+          },
+          "required": [
+            "type",
+            "field",
+            "values"
           ],
           "type": "object"
         }
@@ -1155,6 +1225,13 @@ One pipeline: every input is merged into one stream, that stream runs through th
           "$ref": "#/$defs/MissingFieldPolicy",
           "description": "what to do about a message missing the field or a group field"
         },
+        "reset_when": {
+          "description": "a message passing all of these clears its key's state first, so the\nseries starts over. Checked before `when`",
+          "items": {
+            "$ref": "#/$defs/Condition"
+          },
+          "type": "array"
+        },
         "time": {
           "description": "the field carrying each message's time — RFC 3339 or milliseconds since\nthe epoch. Leave it out for arrival time",
           "type": [
@@ -1162,6 +1239,13 @@ One pipeline: every input is merged into one stream, that stream runs through th
             "null"
           ],
           "x-message-field": true
+        },
+        "when": {
+          "description": "only messages passing all of these are applied; the rest pass through\nuntouched. Leave it out for every message",
+          "items": {
+            "$ref": "#/$defs/Condition"
+          },
+          "type": "array"
         }
       },
       "required": [
@@ -1250,6 +1334,13 @@ One pipeline: every input is merged into one stream, that stream runs through th
           "$ref": "#/$defs/MissingFieldPolicy",
           "description": "what to do about a message missing a derived field or a group field"
         },
+        "reset_when": {
+          "description": "a message passing all of these clears its key's state first, so the\nseries starts over. Checked before `when`",
+          "items": {
+            "$ref": "#/$defs/Condition"
+          },
+          "type": "array"
+        },
         "time": {
           "description": "the field carrying each message's time — RFC 3339 or milliseconds since\nthe epoch. Leave it out for arrival time",
           "type": [
@@ -1257,6 +1348,13 @@ One pipeline: every input is merged into one stream, that stream runs through th
             "null"
           ],
           "x-message-field": true
+        },
+        "when": {
+          "description": "only messages passing all of these are applied; the rest pass through\nuntouched. Leave it out for every message",
+          "items": {
+            "$ref": "#/$defs/Condition"
+          },
+          "type": "array"
         }
       },
       "required": [
@@ -1264,6 +1362,21 @@ One pipeline: every input is merged into one stream, that stream runs through th
       ],
       "title": "derive",
       "type": "object"
+    },
+    "DetectLearn": {
+      "description": "What a `detect` that keeps learning its baseline learns from.",
+      "oneOf": [
+        {
+          "const": "all",
+          "description": "Every reading, anomalies included — so a lasting change becomes the\nnew normal as fast as the baseline follows anything.",
+          "type": "string"
+        },
+        {
+          "const": "normal_only",
+          "description": "Only the readings that were not flagged, so an anomaly cannot pull the\nbaseline it is measured against. Pair it with `readapt_after_seconds`,\nor a genuine change of level is flagged for ever.",
+          "type": "string"
+        }
+      ]
     },
     "DetectMethod": {
       "description": "How an anomaly is decided.\n\nThe window methods compare a value against the values *before* it, never\nincluding it, so a spike does not pull the baseline it is measured against.\nThe chart methods freeze their baseline at the end of the warm-up, which is\nwhat a control chart is: a fixed idea of normal that the process is held to.",
@@ -1418,6 +1531,47 @@ One pipeline: every input is merged into one stream, that stream runs through th
             "size"
           ],
           "type": "object"
+        },
+        {
+          "description": "Further than `threshold` deviations from a baseline that keeps\nlearning: an exponentially weighted mean and spread, each with a time\nconstant of its own. The window methods' answer for a series that\ndrifts slowly and arrives irregularly — no window to hold, and a\nreading's weight follows how long it lasted. Reads the transform's\n`time`.",
+          "properties": {
+            "mean_tau_seconds": {
+              "description": "the time constant of the mean, in seconds: how quickly normal\nfollows the series",
+              "format": "double",
+              "type": "number"
+            },
+            "min_spread": {
+              "description": "the smallest deviation believed, in the field's own units — a\nsignal that has been very quiet otherwise flags its first wobble.\n`0` when left out",
+              "format": "double",
+              "type": [
+                "number",
+                "null"
+              ]
+            },
+            "spread_tau_seconds": {
+              "description": "the time constant of the spread, in seconds — usually longer than\nthe mean's, so a burst of noise does not widen the band at once",
+              "format": "double",
+              "type": "number"
+            },
+            "threshold": {
+              "description": "how many deviations count. `3` when left out",
+              "format": "double",
+              "type": [
+                "number",
+                "null"
+              ]
+            },
+            "type": {
+              "const": "ewma",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "mean_tau_seconds",
+            "spread_tau_seconds"
+          ],
+          "type": "object"
         }
       ]
     },
@@ -1437,7 +1591,7 @@ One pipeline: every input is merged into one stream, that stream runs through th
       ]
     },
     "DetectTransformConfig": {
-      "description": "Flags anomalies in a numeric field against its own series — one component\nwith a `method`, the way `filter` is one component with a kind.\n\nWrites a boolean under `as` (`anomaly` when left out), and beside it\n`<as>_score` — how far outside normal the value was, in the method's own\nunits — so a downstream `filter` can be stricter than the threshold. Nothing\nis flagged during the warm-up of `min_samples` messages per key, because\nuntil then there is no idea of normal to be outside of.",
+      "description": "Flags anomalies in a numeric field against its own series — one component\nwith a `method`, the way `smooth` is.\n\nWrites a boolean under `as` (`anomaly` when left out), and beside it\n`<as>_score` — how far outside normal the value was, in the method's own\nunits — so a downstream `filter` can be stricter than the threshold. Nothing\nis flagged during the warm-up of `min_samples` messages per key, because\nuntil then there is no idea of normal to be outside of.",
       "properties": {
         "as": {
           "description": "the field the flag is written under; the score goes under `<as>_score`.\n`anomaly` when left out",
@@ -1457,6 +1611,10 @@ One pipeline: every input is merged into one stream, that stream runs through th
             "type": "string"
           },
           "type": "array"
+        },
+        "learn": {
+          "$ref": "#/$defs/DetectLearn",
+          "description": "for `zscore`, `mad` and `ewma`, which keep learning: whether flagged\nreadings are learned from too. `all` when left out"
         },
         "method": {
           "$ref": "#/$defs/DetectMethod",
@@ -1478,6 +1636,40 @@ One pipeline: every input is merged into one stream, that stream runs through th
         "on_missing": {
           "$ref": "#/$defs/MissingFieldPolicy",
           "description": "what to do about a message missing the field or a group field"
+        },
+        "readapt_after_seconds": {
+          "description": "with `learn: normal_only`: once readings have been flagged for this\nmany seconds in a row, learn from them anyway, so a lasting change\nbecomes the new normal",
+          "format": "double",
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "reset_when": {
+          "description": "a message passing all of these clears its key's state first, so the\nseries starts over. Checked before `when`",
+          "items": {
+            "$ref": "#/$defs/Condition"
+          },
+          "type": "array"
+        },
+        "time": {
+          "description": "the field carrying each message's time — RFC 3339 or milliseconds since\nthe epoch — for the `ewma` method and `readapt_after_seconds`. Leave it\nout for arrival time",
+          "type": [
+            "string",
+            "null"
+          ],
+          "x-message-field": true
+        },
+        "when": {
+          "description": "only messages passing all of these are applied; the rest pass through\nuntouched. Leave it out for every message",
+          "items": {
+            "$ref": "#/$defs/Condition"
+          },
+          "type": "array"
+        },
+        "with_baseline": {
+          "description": "also write the baseline the reading was judged against: what normal\nwas under `<as>_expected`, and how far from it counts under\n`<as>_band`, both in the field's units. `null` where a method has none",
+          "type": "boolean"
         }
       },
       "required": [
@@ -1811,66 +2003,22 @@ One pipeline: every input is merged into one stream, that stream runs through th
       "type": "object"
     },
     "FilterTransformConfig": {
-      "description": "Drops messages that don't match a condition, and drops the whole batch if\nnone of them do. Pick either the `Numeric` or the `String` form — the fields\ndiffer because the comparisons do.",
-      "oneOf": [
-        {
-          "properties": {
-            "Numeric": {
-              "properties": {
-                "field": {
-                  "description": "the field to filter on",
-                  "type": "string",
-                  "x-message-field": true
-                },
-                "operator": {
-                  "$ref": "#/$defs/NumericFilterOperatorKind"
-                },
-                "value": {
-                  "format": "double",
-                  "type": "number"
-                }
-              },
-              "required": [
-                "field",
-                "operator",
-                "value"
-              ],
-              "type": "object"
-            }
+      "description": "Keeps the messages that pass every one of `conditions` and drops the rest\n— or, with `invert`, drops the ones that pass and keeps the rest. A batch\nwith nothing left in it is dropped whole.\n\nA message missing a field a condition tests, or carrying it as the wrong\ntype, does not pass that condition. So `invert` keeps such a message: it\ndrops only what the conditions positively match.",
+      "properties": {
+        "conditions": {
+          "description": "what a message has to pass — all of them, and at least one",
+          "items": {
+            "$ref": "#/$defs/Condition"
           },
-          "required": [
-            "Numeric"
-          ],
-          "type": "object"
+          "type": "array"
         },
-        {
-          "properties": {
-            "String": {
-              "properties": {
-                "field": {
-                  "type": "string",
-                  "x-message-field": true
-                },
-                "operator": {
-                  "$ref": "#/$defs/StringFilterOperatorKind"
-                },
-                "value": {
-                  "type": "string"
-                }
-              },
-              "required": [
-                "field",
-                "operator",
-                "value"
-              ],
-              "type": "object"
-            }
-          },
-          "required": [
-            "String"
-          ],
-          "type": "object"
+        "invert": {
+          "description": "drop the messages that pass instead of keeping them",
+          "type": "boolean"
         }
+      },
+      "required": [
+        "conditions"
       ],
       "title": "filter",
       "type": "object"
@@ -2881,6 +3029,10 @@ One pipeline: every input is merged into one stream, that stream runs through th
               "$ref": "#/$defs/Operand",
               "description": "the left-hand operand"
             },
+            "on_zero": {
+              "$ref": "#/$defs/OnZero",
+              "description": "for `divide`: what a right-hand field holding zero produces. Fails\nthe batch when left out"
+            },
             "operator": {
               "$ref": "#/$defs/ArithmeticOperator",
               "description": "what to do with them"
@@ -2899,6 +3051,63 @@ One pipeline: every input is merged into one stream, that stream runs through th
             "left",
             "operator",
             "right",
+            "as"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "The start of the calendar period a time falls in — the hour, the day,\nthe shift — written as a field of its own.\n\nWhat it is for is `group_by`: a stateful transform grouped by the\nbucket keeps a series per period, so \"per shift\" and \"since midnight\"\nneed no window of their own, and the bucket store's idle timeout\nforgets the old periods. Periods are counted in the time zone's wall\nclock, so a shift that starts at 06:00 starts at 06:00 summer and\nwinter alike, and the night a clock changes holds a 7- or 9-hour shift.\nBuckets line up with local midnight on 1 January 1970, moved on by\n`offset_seconds`: `every_seconds: 28800, offset_seconds: 21600` is\n06:00, 14:00 and 22:00. A week counts from a Thursday, so starting one\non a Monday is an offset of four days.",
+          "properties": {
+            "as": {
+              "description": "the field to write the bucket's start to",
+              "type": "string"
+            },
+            "every_seconds": {
+              "description": "how long a bucket is, in seconds",
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "format": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/TimeFormat"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "how the bucket's start is written. `rfc3339` when left out"
+            },
+            "from": {
+              "description": "the field holding the time — an RFC 3339 string or milliseconds\nsince the epoch",
+              "type": "string"
+            },
+            "offset_seconds": {
+              "description": "how far past the line-up the buckets start, in seconds — less than\n`every_seconds`",
+              "format": "uint64",
+              "minimum": 0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "timezone": {
+              "description": "the IANA time zone whose clock the periods are counted on, e.g.\n`Europe/Stockholm`. UTC when left out",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "type": {
+              "const": "time_bucket",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "from",
+            "every_seconds",
             "as"
           ],
           "type": "object"
@@ -3113,9 +3322,60 @@ One pipeline: every input is merged into one stream, that stream runs through th
       "enum": [
         "greater_than",
         "less_than",
-        "equal_to"
+        "equal_to",
+        "not_equal_to"
       ],
       "type": "string"
+    },
+    "OnZero": {
+      "description": "What a `divide` does when the field it divides by holds zero.\n\nA ratio over an empty period — parts per minute before the first minute —\nis the usual way that happens, and which answer is right depends on what\nreads it: a chart wants nothing there, a sum downstream wants a number.",
+      "oneOf": [
+        {
+          "description": "Fail the batch, naming the division. A zero nobody expected is a\nstream that isn't what the config claims.",
+          "properties": {
+            "type": {
+              "const": "error",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "Write `null` as the answer.",
+          "properties": {
+            "type": {
+              "const": "null",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "Write this number as the answer.",
+          "properties": {
+            "type": {
+              "const": "value",
+              "type": "string"
+            },
+            "value": {
+              "description": "the answer to write instead",
+              "format": "double",
+              "type": "number"
+            }
+          },
+          "required": [
+            "type",
+            "value"
+          ],
+          "type": "object"
+        }
+      ]
     },
     "OpcuaBrowseConfig": {
       "description": "Everything under a node in the server's address space, found by browsing it\nwhen the pipeline starts.\n\nThe convenient half of naming nodes, and the one with a cost worth knowing:\nwhat this pipeline reads is then decided by the server's address space *at\nthe moment the pipeline starts*, so a tag added to the machine tomorrow is\npicked up by a restart and a tag removed silently stops arriving. An\nexplicit `nodes` list is the one that says in the config file exactly what\nis being read. The two combine — browse a folder and name the handful of\ntags elsewhere that belong with it.",
@@ -3475,6 +3735,67 @@ One pipeline: every input is merged into one stream, that stream runs through th
         "bucket"
       ],
       "title": "pipeline state",
+      "type": "object"
+    },
+    "PivotTransformConfig": {
+      "description": "Turns a stream of one-reading-per-message into rows: remembers the latest\nvalue of each of `names` per key, and writes all of them onto every\nmessage.\n\nThe usual shape of industrial and IoT data is one message per reading —\n`{\"sensor\": \"state\", \"value\": \"RUNNING\"}`, then `{\"sensor\": \"fault\",\n\"value\": \"NONE\"}` — and most logic downstream wants the machine as one\nrow: `{\"state\": \"RUNNING\", \"fault\": \"NONE\", ...}`. A message whose `name`\nfield holds one of `names` updates that one first, so it always carries its\nown reading; then every value remembered for its key is written onto it,\nat the top level or under `into`. A name not seen yet for a key is left\nout rather than written as `null`. One message in, one message out.\n\n`names` is required, and is what bounds the state: a stream naming a new\nthing in every message would otherwise grow one key's row without end. A\nmessage naming something else contributes nothing, and still gets the row.",
+      "properties": {
+        "group_by": {
+          "description": "the fields that identify a row, the reducer's way. Leave it out for one\nrow",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "into": {
+          "description": "an object field to write them under. Leave it out to write them at the\ntop level",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "name": {
+          "description": "the field whose value says which of `names` a message is a reading of",
+          "type": "string",
+          "x-message-field": true
+        },
+        "names": {
+          "description": "the names to remember and write, each as a field of its own. At least\none",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "on_missing": {
+          "$ref": "#/$defs/MissingFieldPolicy",
+          "description": "what to do about a message missing a group field, or naming one of\n`names` without carrying a `value`"
+        },
+        "reset_when": {
+          "description": "a message passing all of these clears its key's state first, so the\nseries starts over. Checked before `when`",
+          "items": {
+            "$ref": "#/$defs/Condition"
+          },
+          "type": "array"
+        },
+        "value": {
+          "description": "the field holding the reading — any JSON, a string state as much as a\nnumber",
+          "type": "string",
+          "x-message-field": true
+        },
+        "when": {
+          "description": "only messages passing all of these are applied; the rest pass through\nuntouched. Leave it out for every message",
+          "items": {
+            "$ref": "#/$defs/Condition"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "name",
+        "value",
+        "names"
+      ],
+      "title": "pivot",
       "type": "object"
     },
     "PollMode": {
@@ -3952,6 +4273,13 @@ One pipeline: every input is merged into one stream, that stream runs through th
           "$ref": "#/$defs/MissingFieldPolicy",
           "description": "what to do about a message missing the field or a group field"
         },
+        "reset_when": {
+          "description": "a message passing all of these clears its key's state first, so the\nseries starts over. Checked before `when`",
+          "items": {
+            "$ref": "#/$defs/Condition"
+          },
+          "type": "array"
+        },
         "time": {
           "description": "the field carrying each message's time — RFC 3339 or milliseconds since\nthe epoch. Leave it out for arrival time, in which case empty intervals\nare noticed by the clock rather than by the next reading",
           "type": [
@@ -3959,6 +4287,13 @@ One pipeline: every input is merged into one stream, that stream runs through th
             "null"
           ],
           "x-message-field": true
+        },
+        "when": {
+          "description": "only messages passing all of these are applied; the rest pass through\nuntouched. Leave it out for every message",
+          "items": {
+            "$ref": "#/$defs/Condition"
+          },
+          "type": "array"
         }
       },
       "required": [
@@ -3990,6 +4325,13 @@ One pipeline: every input is merged into one stream, that stream runs through th
           "$ref": "#/$defs/MissingFieldPolicy",
           "description": "what to do about a message missing an aggregated field or a group field"
         },
+        "reset_when": {
+          "description": "a message passing all of these clears its key's state first, so the\nseries starts over. Checked before `when`",
+          "items": {
+            "$ref": "#/$defs/Condition"
+          },
+          "type": "array"
+        },
         "seconds": {
           "description": "also drop from the window whatever is older than this many seconds,\noff the `time` field",
           "format": "double",
@@ -4011,6 +4353,13 @@ One pipeline: every input is merged into one stream, that stream runs through th
             "null"
           ],
           "x-message-field": true
+        },
+        "when": {
+          "description": "only messages passing all of these are applied; the rest pass through\nuntouched. Leave it out for every message",
+          "items": {
+            "$ref": "#/$defs/Condition"
+          },
+          "type": "array"
         }
       },
       "required": [
@@ -4172,7 +4521,7 @@ One pipeline: every input is merged into one stream, that stream runs through th
       "description": "How a value is smoothed against the ones before it.",
       "oneOf": [
         {
-          "description": "An exponentially weighted moving average — cheap, no window, follows\nthe data as closely as `alpha` says. Give `alpha` or `half_life`, not\nboth.",
+          "description": "An exponentially weighted moving average — cheap, no window, follows\nthe data as closely as it is told to. Give exactly one of `alpha`,\n`half_life` or `tau_seconds`.\n\nThe first two count *messages*, which is only right when they arrive\nat a steady rate. `tau_seconds` counts time: a value's weight is\n`1 − e^(−Δt/τ)` for the Δt since the previous one, so a reading after a\nlong gap counts for more than one a moment after the last — what a\nsensor that reports on change, or a stream that stalls, needs.",
           "properties": {
             "alpha": {
               "description": "the weight of the newest value, 0 to 1",
@@ -4184,6 +4533,14 @@ One pipeline: every input is merged into one stream, that stream runs through th
             },
             "half_life": {
               "description": "the number of messages after which a value's weight has halved —\nthe spelling with an intuition behind it",
+              "format": "double",
+              "type": [
+                "number",
+                "null"
+              ]
+            },
+            "tau_seconds": {
+              "description": "the time constant in seconds: after this long, an old value's\nweight has fallen to about 37%. Reads the transform's `time`",
               "format": "double",
               "type": [
                 "number",
@@ -4280,7 +4637,7 @@ One pipeline: every input is merged into one stream, that stream runs through th
       ]
     },
     "SmoothTransformConfig": {
-      "description": "Smooths a numeric field against the values before it in its series, writing\nthe result onto the message — over the field itself, or under `as`.",
+      "description": "Smooths a numeric field against the values before it in its series, writing\nthe result onto the message — over the field itself, or under `as`.\n\nEvery method but an `ewma` by `tau_seconds` is about *order*: the last few\nvalues, however far apart. So `time` is only accepted beside that one, and\nrefused elsewhere rather than ignored.",
       "properties": {
         "as": {
           "description": "the field the smoothed value is written under. Leave it out to replace\nthe field itself",
@@ -4308,6 +4665,28 @@ One pipeline: every input is merged into one stream, that stream runs through th
         "on_missing": {
           "$ref": "#/$defs/MissingFieldPolicy",
           "description": "what to do about a message missing the field or a group field"
+        },
+        "reset_when": {
+          "description": "a message passing all of these clears its key's state first, so the\nseries starts over. Checked before `when`",
+          "items": {
+            "$ref": "#/$defs/Condition"
+          },
+          "type": "array"
+        },
+        "time": {
+          "description": "for an `ewma` by `tau_seconds`: the field carrying each message's time\n— RFC 3339 or milliseconds since the epoch. Leave it out for arrival\ntime",
+          "type": [
+            "string",
+            "null"
+          ],
+          "x-message-field": true
+        },
+        "when": {
+          "description": "only messages passing all of these are applied; the rest pass through\nuntouched. Leave it out for every message",
+          "items": {
+            "$ref": "#/$defs/Condition"
+          },
+          "type": "array"
         }
       },
       "required": [
@@ -4357,6 +4736,7 @@ One pipeline: every input is merged into one stream, that stream runs through th
       "description": "How a string is compared to the one in the config.",
       "enum": [
         "equal_to",
+        "not_equal_to",
         "contains"
       ],
       "type": "string"
@@ -4383,6 +4763,54 @@ One pipeline: every input is merged into one stream, that stream runs through th
         "columns"
       ],
       "title": "index",
+      "type": "object"
+    },
+    "ThrottleTransformConfig": {
+      "description": "Passes at most one message per key every `seconds` and drops the rest —\nthe honest spelling of \"don't write to the sink more often than this\".\n\nThe first message per key passes, and so does the first one at least\n`seconds` after the last that passed; everything in between is dropped\nwhole. The interval runs from the message that passed, not from a clock\ngrid, and nothing is held back to be sent later: a key that goes quiet\nmid-interval sends nothing more until its next message. Where the *last*\nvalue of an interval is what matters, or a quiet key should still report,\nthat is `resample`.\n\nUnlike `deadband` it never looks at a value, so the messages it passes are\nwhole messages, every field intact — which is what makes it the right\nthing in front of an output writing several fields per message.",
+      "properties": {
+        "group_by": {
+          "description": "the fields that identify a series, the reducer's way. Leave it out for\none series",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "on_missing": {
+          "$ref": "#/$defs/MissingFieldPolicy",
+          "description": "what to do about a message missing a group field"
+        },
+        "reset_when": {
+          "description": "a message passing all of these clears its key's state first, so the\nseries starts over. Checked before `when`",
+          "items": {
+            "$ref": "#/$defs/Condition"
+          },
+          "type": "array"
+        },
+        "seconds": {
+          "description": "the least time between two messages passed for one key, in seconds",
+          "format": "double",
+          "type": "number"
+        },
+        "time": {
+          "description": "the field carrying each message's time — RFC 3339 or milliseconds since\nthe epoch. Leave it out for arrival time",
+          "type": [
+            "string",
+            "null"
+          ],
+          "x-message-field": true
+        },
+        "when": {
+          "description": "only messages passing all of these are applied; the rest pass through\nuntouched. Leave it out for every message",
+          "items": {
+            "$ref": "#/$defs/Condition"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "seconds"
+      ],
+      "title": "throttle",
       "type": "object"
     },
     "TidepoolOutputConfig": {
@@ -4433,6 +4861,21 @@ One pipeline: every input is merged into one stream, that stream runs through th
       ],
       "title": "tidepool",
       "type": "object"
+    },
+    "TimeFormat": {
+      "description": "How a [`Mapping::TimeBucket`] writes a time.",
+      "oneOf": [
+        {
+          "const": "rfc3339",
+          "description": "An RFC 3339 string in UTC, to the millisecond — the spelling every\ntime kayak writes uses.",
+          "type": "string"
+        },
+        {
+          "const": "millis",
+          "description": "Milliseconds since the epoch, as a number.",
+          "type": "string"
+        }
+      ]
     },
     "TransformConfig": {
       "oneOf": [
@@ -4558,6 +5001,32 @@ One pipeline: every input is merged into one stream, that stream runs through th
           "properties": {
             "type": {
               "const": "deadband",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type"
+          ],
+          "type": "object"
+        },
+        {
+          "$ref": "#/$defs/ThrottleTransformConfig",
+          "properties": {
+            "type": {
+              "const": "throttle",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type"
+          ],
+          "type": "object"
+        },
+        {
+          "$ref": "#/$defs/PivotTransformConfig",
+          "properties": {
+            "type": {
+              "const": "pivot",
               "type": "string"
             }
           },
@@ -6334,7 +6803,17 @@ Run a draft's transforms over some messages.
         },
         {
           "const": "divide",
-          "description": "left ÷ right. A literal zero on the right is refused when the pipeline\nis built; a *field* that turns out to be zero fails the batch.",
+          "description": "left ÷ right. A literal zero on the right is refused when the pipeline\nis built; what a *field* that turns out to be zero does is `on_zero`.",
+          "type": "string"
+        },
+        {
+          "const": "min",
+          "description": "the smaller of left and right — with a literal on one side, a ceiling",
+          "type": "string"
+        },
+        {
+          "const": "max",
+          "description": "the larger of left and right — with a literal on one side, a floor",
           "type": "string"
         }
       ]
@@ -6528,23 +7007,26 @@ Run a draft's transforms over some messages.
       ]
     },
     "Condition": {
-      "description": "One test a message either passes or doesn't.\n\nThe same comparisons the `filter` transform makes, spelled as a tagged union\nso that a *list* of them can be configured and rendered as a form. Several\nconditions are read as \"all of these\" — there is no `or` and no nesting,\nbecause the moment either exists this is an expression language with a\nsyntax to design, and everything so far has been reachable without one.",
+      "description": "One test a message either passes or doesn't.\n\nWhat `filter` keeps, what `remember` remembers from, and what opens a\n`buffer`'s gate — one vocabulary, spelled as a tagged union so that a\n*list* of them can be configured and rendered as a form. Several\nconditions are read as \"all of these\" — there is no `or` and no nesting,\nbecause the moment either exists this is an expression language with a\nsyntax to design, and everything so far has been reachable without one.",
       "oneOf": [
         {
           "description": "Compares a field to a number. A message whose field is missing or isn't\na number does not match.",
           "properties": {
             "field": {
               "description": "the field to test — a dotted path, like anywhere else",
-              "type": "string"
+              "type": "string",
+              "x-message-field": true
             },
             "operator": {
-              "$ref": "#/$defs/NumericFilterOperatorKind"
+              "$ref": "#/$defs/NumericFilterOperatorKind",
+              "description": "how the field is compared"
             },
             "type": {
               "const": "numeric",
               "type": "string"
             },
             "value": {
+              "description": "the number it is compared to",
               "format": "double",
               "type": "number"
             }
@@ -6562,16 +7044,19 @@ Run a draft's transforms over some messages.
           "properties": {
             "field": {
               "description": "the field to test — a dotted path, like anywhere else",
-              "type": "string"
+              "type": "string",
+              "x-message-field": true
             },
             "operator": {
-              "$ref": "#/$defs/StringFilterOperatorKind"
+              "$ref": "#/$defs/StringFilterOperatorKind",
+              "description": "how the field is compared"
             },
             "type": {
               "const": "string",
               "type": "string"
             },
             "value": {
+              "description": "the string it is compared to",
               "type": "string"
             }
           },
@@ -6580,6 +7065,60 @@ Run a draft's transforms over some messages.
             "field",
             "operator",
             "value"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "The field is a string equal to one of `values`. A message whose field\nis missing or isn't a string does not match.",
+          "properties": {
+            "field": {
+              "description": "the field to test — a dotted path, like anywhere else",
+              "type": "string",
+              "x-message-field": true
+            },
+            "type": {
+              "const": "one_of",
+              "type": "string"
+            },
+            "values": {
+              "description": "the strings that match",
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            }
+          },
+          "required": [
+            "type",
+            "field",
+            "values"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "The field is a string equal to none of `values`. A message whose field\nis missing or isn't a string does not match this either — absence is\nnot a value, so it is in no list and outside none.",
+          "properties": {
+            "field": {
+              "description": "the field to test — a dotted path, like anywhere else",
+              "type": "string",
+              "x-message-field": true
+            },
+            "type": {
+              "const": "none_of",
+              "type": "string"
+            },
+            "values": {
+              "description": "the strings that do not match",
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            }
+          },
+          "required": [
+            "type",
+            "field",
+            "values"
           ],
           "type": "object"
         }
@@ -6644,6 +7183,13 @@ Run a draft's transforms over some messages.
           "$ref": "#/$defs/MissingFieldPolicy",
           "description": "what to do about a message missing the field or a group field"
         },
+        "reset_when": {
+          "description": "a message passing all of these clears its key's state first, so the\nseries starts over. Checked before `when`",
+          "items": {
+            "$ref": "#/$defs/Condition"
+          },
+          "type": "array"
+        },
         "time": {
           "description": "the field carrying each message's time — RFC 3339 or milliseconds since\nthe epoch. Leave it out for arrival time",
           "type": [
@@ -6651,6 +7197,13 @@ Run a draft's transforms over some messages.
             "null"
           ],
           "x-message-field": true
+        },
+        "when": {
+          "description": "only messages passing all of these are applied; the rest pass through\nuntouched. Leave it out for every message",
+          "items": {
+            "$ref": "#/$defs/Condition"
+          },
+          "type": "array"
         }
       },
       "required": [
@@ -6739,6 +7292,13 @@ Run a draft's transforms over some messages.
           "$ref": "#/$defs/MissingFieldPolicy",
           "description": "what to do about a message missing a derived field or a group field"
         },
+        "reset_when": {
+          "description": "a message passing all of these clears its key's state first, so the\nseries starts over. Checked before `when`",
+          "items": {
+            "$ref": "#/$defs/Condition"
+          },
+          "type": "array"
+        },
         "time": {
           "description": "the field carrying each message's time — RFC 3339 or milliseconds since\nthe epoch. Leave it out for arrival time",
           "type": [
@@ -6746,6 +7306,13 @@ Run a draft's transforms over some messages.
             "null"
           ],
           "x-message-field": true
+        },
+        "when": {
+          "description": "only messages passing all of these are applied; the rest pass through\nuntouched. Leave it out for every message",
+          "items": {
+            "$ref": "#/$defs/Condition"
+          },
+          "type": "array"
         }
       },
       "required": [
@@ -6753,6 +7320,21 @@ Run a draft's transforms over some messages.
       ],
       "title": "derive",
       "type": "object"
+    },
+    "DetectLearn": {
+      "description": "What a `detect` that keeps learning its baseline learns from.",
+      "oneOf": [
+        {
+          "const": "all",
+          "description": "Every reading, anomalies included — so a lasting change becomes the\nnew normal as fast as the baseline follows anything.",
+          "type": "string"
+        },
+        {
+          "const": "normal_only",
+          "description": "Only the readings that were not flagged, so an anomaly cannot pull the\nbaseline it is measured against. Pair it with `readapt_after_seconds`,\nor a genuine change of level is flagged for ever.",
+          "type": "string"
+        }
+      ]
     },
     "DetectMethod": {
       "description": "How an anomaly is decided.\n\nThe window methods compare a value against the values *before* it, never\nincluding it, so a spike does not pull the baseline it is measured against.\nThe chart methods freeze their baseline at the end of the warm-up, which is\nwhat a control chart is: a fixed idea of normal that the process is held to.",
@@ -6907,6 +7489,47 @@ Run a draft's transforms over some messages.
             "size"
           ],
           "type": "object"
+        },
+        {
+          "description": "Further than `threshold` deviations from a baseline that keeps\nlearning: an exponentially weighted mean and spread, each with a time\nconstant of its own. The window methods' answer for a series that\ndrifts slowly and arrives irregularly — no window to hold, and a\nreading's weight follows how long it lasted. Reads the transform's\n`time`.",
+          "properties": {
+            "mean_tau_seconds": {
+              "description": "the time constant of the mean, in seconds: how quickly normal\nfollows the series",
+              "format": "double",
+              "type": "number"
+            },
+            "min_spread": {
+              "description": "the smallest deviation believed, in the field's own units — a\nsignal that has been very quiet otherwise flags its first wobble.\n`0` when left out",
+              "format": "double",
+              "type": [
+                "number",
+                "null"
+              ]
+            },
+            "spread_tau_seconds": {
+              "description": "the time constant of the spread, in seconds — usually longer than\nthe mean's, so a burst of noise does not widen the band at once",
+              "format": "double",
+              "type": "number"
+            },
+            "threshold": {
+              "description": "how many deviations count. `3` when left out",
+              "format": "double",
+              "type": [
+                "number",
+                "null"
+              ]
+            },
+            "type": {
+              "const": "ewma",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "mean_tau_seconds",
+            "spread_tau_seconds"
+          ],
+          "type": "object"
         }
       ]
     },
@@ -6926,7 +7549,7 @@ Run a draft's transforms over some messages.
       ]
     },
     "DetectTransformConfig": {
-      "description": "Flags anomalies in a numeric field against its own series — one component\nwith a `method`, the way `filter` is one component with a kind.\n\nWrites a boolean under `as` (`anomaly` when left out), and beside it\n`<as>_score` — how far outside normal the value was, in the method's own\nunits — so a downstream `filter` can be stricter than the threshold. Nothing\nis flagged during the warm-up of `min_samples` messages per key, because\nuntil then there is no idea of normal to be outside of.",
+      "description": "Flags anomalies in a numeric field against its own series — one component\nwith a `method`, the way `smooth` is.\n\nWrites a boolean under `as` (`anomaly` when left out), and beside it\n`<as>_score` — how far outside normal the value was, in the method's own\nunits — so a downstream `filter` can be stricter than the threshold. Nothing\nis flagged during the warm-up of `min_samples` messages per key, because\nuntil then there is no idea of normal to be outside of.",
       "properties": {
         "as": {
           "description": "the field the flag is written under; the score goes under `<as>_score`.\n`anomaly` when left out",
@@ -6946,6 +7569,10 @@ Run a draft's transforms over some messages.
             "type": "string"
           },
           "type": "array"
+        },
+        "learn": {
+          "$ref": "#/$defs/DetectLearn",
+          "description": "for `zscore`, `mad` and `ewma`, which keep learning: whether flagged\nreadings are learned from too. `all` when left out"
         },
         "method": {
           "$ref": "#/$defs/DetectMethod",
@@ -6967,6 +7594,40 @@ Run a draft's transforms over some messages.
         "on_missing": {
           "$ref": "#/$defs/MissingFieldPolicy",
           "description": "what to do about a message missing the field or a group field"
+        },
+        "readapt_after_seconds": {
+          "description": "with `learn: normal_only`: once readings have been flagged for this\nmany seconds in a row, learn from them anyway, so a lasting change\nbecomes the new normal",
+          "format": "double",
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "reset_when": {
+          "description": "a message passing all of these clears its key's state first, so the\nseries starts over. Checked before `when`",
+          "items": {
+            "$ref": "#/$defs/Condition"
+          },
+          "type": "array"
+        },
+        "time": {
+          "description": "the field carrying each message's time — RFC 3339 or milliseconds since\nthe epoch — for the `ewma` method and `readapt_after_seconds`. Leave it\nout for arrival time",
+          "type": [
+            "string",
+            "null"
+          ],
+          "x-message-field": true
+        },
+        "when": {
+          "description": "only messages passing all of these are applied; the rest pass through\nuntouched. Leave it out for every message",
+          "items": {
+            "$ref": "#/$defs/Condition"
+          },
+          "type": "array"
+        },
+        "with_baseline": {
+          "description": "also write the baseline the reading was judged against: what normal\nwas under `<as>_expected`, and how far from it counts under\n`<as>_band`, both in the field's units. `null` where a method has none",
+          "type": "boolean"
         }
       },
       "required": [
@@ -7118,66 +7779,22 @@ Run a draft's transforms over some messages.
       "type": "object"
     },
     "FilterTransformConfig": {
-      "description": "Drops messages that don't match a condition, and drops the whole batch if\nnone of them do. Pick either the `Numeric` or the `String` form — the fields\ndiffer because the comparisons do.",
-      "oneOf": [
-        {
-          "properties": {
-            "Numeric": {
-              "properties": {
-                "field": {
-                  "description": "the field to filter on",
-                  "type": "string",
-                  "x-message-field": true
-                },
-                "operator": {
-                  "$ref": "#/$defs/NumericFilterOperatorKind"
-                },
-                "value": {
-                  "format": "double",
-                  "type": "number"
-                }
-              },
-              "required": [
-                "field",
-                "operator",
-                "value"
-              ],
-              "type": "object"
-            }
+      "description": "Keeps the messages that pass every one of `conditions` and drops the rest\n— or, with `invert`, drops the ones that pass and keeps the rest. A batch\nwith nothing left in it is dropped whole.\n\nA message missing a field a condition tests, or carrying it as the wrong\ntype, does not pass that condition. So `invert` keeps such a message: it\ndrops only what the conditions positively match.",
+      "properties": {
+        "conditions": {
+          "description": "what a message has to pass — all of them, and at least one",
+          "items": {
+            "$ref": "#/$defs/Condition"
           },
-          "required": [
-            "Numeric"
-          ],
-          "type": "object"
+          "type": "array"
         },
-        {
-          "properties": {
-            "String": {
-              "properties": {
-                "field": {
-                  "type": "string",
-                  "x-message-field": true
-                },
-                "operator": {
-                  "$ref": "#/$defs/StringFilterOperatorKind"
-                },
-                "value": {
-                  "type": "string"
-                }
-              },
-              "required": [
-                "field",
-                "operator",
-                "value"
-              ],
-              "type": "object"
-            }
-          },
-          "required": [
-            "String"
-          ],
-          "type": "object"
+        "invert": {
+          "description": "drop the messages that pass instead of keeping them",
+          "type": "boolean"
         }
+      },
+      "required": [
+        "conditions"
       ],
       "title": "filter",
       "type": "object"
@@ -7670,6 +8287,10 @@ Run a draft's transforms over some messages.
               "$ref": "#/$defs/Operand",
               "description": "the left-hand operand"
             },
+            "on_zero": {
+              "$ref": "#/$defs/OnZero",
+              "description": "for `divide`: what a right-hand field holding zero produces. Fails\nthe batch when left out"
+            },
             "operator": {
               "$ref": "#/$defs/ArithmeticOperator",
               "description": "what to do with them"
@@ -7688,6 +8309,63 @@ Run a draft's transforms over some messages.
             "left",
             "operator",
             "right",
+            "as"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "The start of the calendar period a time falls in — the hour, the day,\nthe shift — written as a field of its own.\n\nWhat it is for is `group_by`: a stateful transform grouped by the\nbucket keeps a series per period, so \"per shift\" and \"since midnight\"\nneed no window of their own, and the bucket store's idle timeout\nforgets the old periods. Periods are counted in the time zone's wall\nclock, so a shift that starts at 06:00 starts at 06:00 summer and\nwinter alike, and the night a clock changes holds a 7- or 9-hour shift.\nBuckets line up with local midnight on 1 January 1970, moved on by\n`offset_seconds`: `every_seconds: 28800, offset_seconds: 21600` is\n06:00, 14:00 and 22:00. A week counts from a Thursday, so starting one\non a Monday is an offset of four days.",
+          "properties": {
+            "as": {
+              "description": "the field to write the bucket's start to",
+              "type": "string"
+            },
+            "every_seconds": {
+              "description": "how long a bucket is, in seconds",
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "format": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/TimeFormat"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "how the bucket's start is written. `rfc3339` when left out"
+            },
+            "from": {
+              "description": "the field holding the time — an RFC 3339 string or milliseconds\nsince the epoch",
+              "type": "string"
+            },
+            "offset_seconds": {
+              "description": "how far past the line-up the buckets start, in seconds — less than\n`every_seconds`",
+              "format": "uint64",
+              "minimum": 0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "timezone": {
+              "description": "the IANA time zone whose clock the periods are counted on, e.g.\n`Europe/Stockholm`. UTC when left out",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "type": {
+              "const": "time_bucket",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "from",
+            "every_seconds",
             "as"
           ],
           "type": "object"
@@ -7735,9 +8413,60 @@ Run a draft's transforms over some messages.
       "enum": [
         "greater_than",
         "less_than",
-        "equal_to"
+        "equal_to",
+        "not_equal_to"
       ],
       "type": "string"
+    },
+    "OnZero": {
+      "description": "What a `divide` does when the field it divides by holds zero.\n\nA ratio over an empty period — parts per minute before the first minute —\nis the usual way that happens, and which answer is right depends on what\nreads it: a chart wants nothing there, a sum downstream wants a number.",
+      "oneOf": [
+        {
+          "description": "Fail the batch, naming the division. A zero nobody expected is a\nstream that isn't what the config claims.",
+          "properties": {
+            "type": {
+              "const": "error",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "Write `null` as the answer.",
+          "properties": {
+            "type": {
+              "const": "null",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "Write this number as the answer.",
+          "properties": {
+            "type": {
+              "const": "value",
+              "type": "string"
+            },
+            "value": {
+              "description": "the answer to write instead",
+              "format": "double",
+              "type": "number"
+            }
+          },
+          "required": [
+            "type",
+            "value"
+          ],
+          "type": "object"
+        }
+      ]
     },
     "Operand": {
       "description": "One side of an [`Mapping::Arithmetic`]: a field to read, or a fixed number.",
@@ -7800,6 +8529,67 @@ Run a draft's transforms over some messages.
         "bucket"
       ],
       "title": "pipeline state",
+      "type": "object"
+    },
+    "PivotTransformConfig": {
+      "description": "Turns a stream of one-reading-per-message into rows: remembers the latest\nvalue of each of `names` per key, and writes all of them onto every\nmessage.\n\nThe usual shape of industrial and IoT data is one message per reading —\n`{\"sensor\": \"state\", \"value\": \"RUNNING\"}`, then `{\"sensor\": \"fault\",\n\"value\": \"NONE\"}` — and most logic downstream wants the machine as one\nrow: `{\"state\": \"RUNNING\", \"fault\": \"NONE\", ...}`. A message whose `name`\nfield holds one of `names` updates that one first, so it always carries its\nown reading; then every value remembered for its key is written onto it,\nat the top level or under `into`. A name not seen yet for a key is left\nout rather than written as `null`. One message in, one message out.\n\n`names` is required, and is what bounds the state: a stream naming a new\nthing in every message would otherwise grow one key's row without end. A\nmessage naming something else contributes nothing, and still gets the row.",
+      "properties": {
+        "group_by": {
+          "description": "the fields that identify a row, the reducer's way. Leave it out for one\nrow",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "into": {
+          "description": "an object field to write them under. Leave it out to write them at the\ntop level",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "name": {
+          "description": "the field whose value says which of `names` a message is a reading of",
+          "type": "string",
+          "x-message-field": true
+        },
+        "names": {
+          "description": "the names to remember and write, each as a field of its own. At least\none",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "on_missing": {
+          "$ref": "#/$defs/MissingFieldPolicy",
+          "description": "what to do about a message missing a group field, or naming one of\n`names` without carrying a `value`"
+        },
+        "reset_when": {
+          "description": "a message passing all of these clears its key's state first, so the\nseries starts over. Checked before `when`",
+          "items": {
+            "$ref": "#/$defs/Condition"
+          },
+          "type": "array"
+        },
+        "value": {
+          "description": "the field holding the reading — any JSON, a string state as much as a\nnumber",
+          "type": "string",
+          "x-message-field": true
+        },
+        "when": {
+          "description": "only messages passing all of these are applied; the rest pass through\nuntouched. Leave it out for every message",
+          "items": {
+            "$ref": "#/$defs/Condition"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "name",
+        "value",
+        "names"
+      ],
+      "title": "pivot",
       "type": "object"
     },
     "RecallMissingPolicy": {
@@ -8054,6 +8844,13 @@ Run a draft's transforms over some messages.
           "$ref": "#/$defs/MissingFieldPolicy",
           "description": "what to do about a message missing the field or a group field"
         },
+        "reset_when": {
+          "description": "a message passing all of these clears its key's state first, so the\nseries starts over. Checked before `when`",
+          "items": {
+            "$ref": "#/$defs/Condition"
+          },
+          "type": "array"
+        },
         "time": {
           "description": "the field carrying each message's time — RFC 3339 or milliseconds since\nthe epoch. Leave it out for arrival time, in which case empty intervals\nare noticed by the clock rather than by the next reading",
           "type": [
@@ -8061,6 +8858,13 @@ Run a draft's transforms over some messages.
             "null"
           ],
           "x-message-field": true
+        },
+        "when": {
+          "description": "only messages passing all of these are applied; the rest pass through\nuntouched. Leave it out for every message",
+          "items": {
+            "$ref": "#/$defs/Condition"
+          },
+          "type": "array"
         }
       },
       "required": [
@@ -8092,6 +8896,13 @@ Run a draft's transforms over some messages.
           "$ref": "#/$defs/MissingFieldPolicy",
           "description": "what to do about a message missing an aggregated field or a group field"
         },
+        "reset_when": {
+          "description": "a message passing all of these clears its key's state first, so the\nseries starts over. Checked before `when`",
+          "items": {
+            "$ref": "#/$defs/Condition"
+          },
+          "type": "array"
+        },
         "seconds": {
           "description": "also drop from the window whatever is older than this many seconds,\noff the `time` field",
           "format": "double",
@@ -8113,6 +8924,13 @@ Run a draft's transforms over some messages.
             "null"
           ],
           "x-message-field": true
+        },
+        "when": {
+          "description": "only messages passing all of these are applied; the rest pass through\nuntouched. Leave it out for every message",
+          "items": {
+            "$ref": "#/$defs/Condition"
+          },
+          "type": "array"
         }
       },
       "required": [
@@ -8214,7 +9032,7 @@ Run a draft's transforms over some messages.
       "description": "How a value is smoothed against the ones before it.",
       "oneOf": [
         {
-          "description": "An exponentially weighted moving average — cheap, no window, follows\nthe data as closely as `alpha` says. Give `alpha` or `half_life`, not\nboth.",
+          "description": "An exponentially weighted moving average — cheap, no window, follows\nthe data as closely as it is told to. Give exactly one of `alpha`,\n`half_life` or `tau_seconds`.\n\nThe first two count *messages*, which is only right when they arrive\nat a steady rate. `tau_seconds` counts time: a value's weight is\n`1 − e^(−Δt/τ)` for the Δt since the previous one, so a reading after a\nlong gap counts for more than one a moment after the last — what a\nsensor that reports on change, or a stream that stalls, needs.",
           "properties": {
             "alpha": {
               "description": "the weight of the newest value, 0 to 1",
@@ -8226,6 +9044,14 @@ Run a draft's transforms over some messages.
             },
             "half_life": {
               "description": "the number of messages after which a value's weight has halved —\nthe spelling with an intuition behind it",
+              "format": "double",
+              "type": [
+                "number",
+                "null"
+              ]
+            },
+            "tau_seconds": {
+              "description": "the time constant in seconds: after this long, an old value's\nweight has fallen to about 37%. Reads the transform's `time`",
               "format": "double",
               "type": [
                 "number",
@@ -8322,7 +9148,7 @@ Run a draft's transforms over some messages.
       ]
     },
     "SmoothTransformConfig": {
-      "description": "Smooths a numeric field against the values before it in its series, writing\nthe result onto the message — over the field itself, or under `as`.",
+      "description": "Smooths a numeric field against the values before it in its series, writing\nthe result onto the message — over the field itself, or under `as`.\n\nEvery method but an `ewma` by `tau_seconds` is about *order*: the last few\nvalues, however far apart. So `time` is only accepted beside that one, and\nrefused elsewhere rather than ignored.",
       "properties": {
         "as": {
           "description": "the field the smoothed value is written under. Leave it out to replace\nthe field itself",
@@ -8350,6 +9176,28 @@ Run a draft's transforms over some messages.
         "on_missing": {
           "$ref": "#/$defs/MissingFieldPolicy",
           "description": "what to do about a message missing the field or a group field"
+        },
+        "reset_when": {
+          "description": "a message passing all of these clears its key's state first, so the\nseries starts over. Checked before `when`",
+          "items": {
+            "$ref": "#/$defs/Condition"
+          },
+          "type": "array"
+        },
+        "time": {
+          "description": "for an `ewma` by `tau_seconds`: the field carrying each message's time\n— RFC 3339 or milliseconds since the epoch. Leave it out for arrival\ntime",
+          "type": [
+            "string",
+            "null"
+          ],
+          "x-message-field": true
+        },
+        "when": {
+          "description": "only messages passing all of these are applied; the rest pass through\nuntouched. Leave it out for every message",
+          "items": {
+            "$ref": "#/$defs/Condition"
+          },
+          "type": "array"
         }
       },
       "required": [
@@ -8379,9 +9227,73 @@ Run a draft's transforms over some messages.
       "description": "How a string is compared to the one in the config.",
       "enum": [
         "equal_to",
+        "not_equal_to",
         "contains"
       ],
       "type": "string"
+    },
+    "ThrottleTransformConfig": {
+      "description": "Passes at most one message per key every `seconds` and drops the rest —\nthe honest spelling of \"don't write to the sink more often than this\".\n\nThe first message per key passes, and so does the first one at least\n`seconds` after the last that passed; everything in between is dropped\nwhole. The interval runs from the message that passed, not from a clock\ngrid, and nothing is held back to be sent later: a key that goes quiet\nmid-interval sends nothing more until its next message. Where the *last*\nvalue of an interval is what matters, or a quiet key should still report,\nthat is `resample`.\n\nUnlike `deadband` it never looks at a value, so the messages it passes are\nwhole messages, every field intact — which is what makes it the right\nthing in front of an output writing several fields per message.",
+      "properties": {
+        "group_by": {
+          "description": "the fields that identify a series, the reducer's way. Leave it out for\none series",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "on_missing": {
+          "$ref": "#/$defs/MissingFieldPolicy",
+          "description": "what to do about a message missing a group field"
+        },
+        "reset_when": {
+          "description": "a message passing all of these clears its key's state first, so the\nseries starts over. Checked before `when`",
+          "items": {
+            "$ref": "#/$defs/Condition"
+          },
+          "type": "array"
+        },
+        "seconds": {
+          "description": "the least time between two messages passed for one key, in seconds",
+          "format": "double",
+          "type": "number"
+        },
+        "time": {
+          "description": "the field carrying each message's time — RFC 3339 or milliseconds since\nthe epoch. Leave it out for arrival time",
+          "type": [
+            "string",
+            "null"
+          ],
+          "x-message-field": true
+        },
+        "when": {
+          "description": "only messages passing all of these are applied; the rest pass through\nuntouched. Leave it out for every message",
+          "items": {
+            "$ref": "#/$defs/Condition"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "seconds"
+      ],
+      "title": "throttle",
+      "type": "object"
+    },
+    "TimeFormat": {
+      "description": "How a [`Mapping::TimeBucket`] writes a time.",
+      "oneOf": [
+        {
+          "const": "rfc3339",
+          "description": "An RFC 3339 string in UTC, to the millisecond — the spelling every\ntime kayak writes uses.",
+          "type": "string"
+        },
+        {
+          "const": "millis",
+          "description": "Milliseconds since the epoch, as a number.",
+          "type": "string"
+        }
+      ]
     },
     "TransformConfig": {
       "oneOf": [
@@ -8507,6 +9419,32 @@ Run a draft's transforms over some messages.
           "properties": {
             "type": {
               "const": "deadband",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type"
+          ],
+          "type": "object"
+        },
+        {
+          "$ref": "#/$defs/ThrottleTransformConfig",
+          "properties": {
+            "type": {
+              "const": "throttle",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type"
+          ],
+          "type": "object"
+        },
+        {
+          "$ref": "#/$defs/PivotTransformConfig",
+          "properties": {
+            "type": {
+              "const": "pivot",
               "type": "string"
             }
           },
@@ -8854,7 +9792,17 @@ The same wire shape the run loop's `PipelineView` serializes to — this is the 
         },
         {
           "const": "divide",
-          "description": "left ÷ right. A literal zero on the right is refused when the pipeline\nis built; a *field* that turns out to be zero fails the batch.",
+          "description": "left ÷ right. A literal zero on the right is refused when the pipeline\nis built; what a *field* that turns out to be zero does is `on_zero`.",
+          "type": "string"
+        },
+        {
+          "const": "min",
+          "description": "the smaller of left and right — with a literal on one side, a ceiling",
+          "type": "string"
+        },
+        {
+          "const": "max",
+          "description": "the larger of left and right — with a literal on one side, a floor",
           "type": "string"
         }
       ]
@@ -9335,23 +10283,26 @@ The same wire shape the run loop's `PipelineView` serializes to — this is the 
       ]
     },
     "Condition": {
-      "description": "One test a message either passes or doesn't.\n\nThe same comparisons the `filter` transform makes, spelled as a tagged union\nso that a *list* of them can be configured and rendered as a form. Several\nconditions are read as \"all of these\" — there is no `or` and no nesting,\nbecause the moment either exists this is an expression language with a\nsyntax to design, and everything so far has been reachable without one.",
+      "description": "One test a message either passes or doesn't.\n\nWhat `filter` keeps, what `remember` remembers from, and what opens a\n`buffer`'s gate — one vocabulary, spelled as a tagged union so that a\n*list* of them can be configured and rendered as a form. Several\nconditions are read as \"all of these\" — there is no `or` and no nesting,\nbecause the moment either exists this is an expression language with a\nsyntax to design, and everything so far has been reachable without one.",
       "oneOf": [
         {
           "description": "Compares a field to a number. A message whose field is missing or isn't\na number does not match.",
           "properties": {
             "field": {
               "description": "the field to test — a dotted path, like anywhere else",
-              "type": "string"
+              "type": "string",
+              "x-message-field": true
             },
             "operator": {
-              "$ref": "#/$defs/NumericFilterOperatorKind"
+              "$ref": "#/$defs/NumericFilterOperatorKind",
+              "description": "how the field is compared"
             },
             "type": {
               "const": "numeric",
               "type": "string"
             },
             "value": {
+              "description": "the number it is compared to",
               "format": "double",
               "type": "number"
             }
@@ -9369,16 +10320,19 @@ The same wire shape the run loop's `PipelineView` serializes to — this is the 
           "properties": {
             "field": {
               "description": "the field to test — a dotted path, like anywhere else",
-              "type": "string"
+              "type": "string",
+              "x-message-field": true
             },
             "operator": {
-              "$ref": "#/$defs/StringFilterOperatorKind"
+              "$ref": "#/$defs/StringFilterOperatorKind",
+              "description": "how the field is compared"
             },
             "type": {
               "const": "string",
               "type": "string"
             },
             "value": {
+              "description": "the string it is compared to",
               "type": "string"
             }
           },
@@ -9387,6 +10341,60 @@ The same wire shape the run loop's `PipelineView` serializes to — this is the 
             "field",
             "operator",
             "value"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "The field is a string equal to one of `values`. A message whose field\nis missing or isn't a string does not match.",
+          "properties": {
+            "field": {
+              "description": "the field to test — a dotted path, like anywhere else",
+              "type": "string",
+              "x-message-field": true
+            },
+            "type": {
+              "const": "one_of",
+              "type": "string"
+            },
+            "values": {
+              "description": "the strings that match",
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            }
+          },
+          "required": [
+            "type",
+            "field",
+            "values"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "The field is a string equal to none of `values`. A message whose field\nis missing or isn't a string does not match this either — absence is\nnot a value, so it is in no list and outside none.",
+          "properties": {
+            "field": {
+              "description": "the field to test — a dotted path, like anywhere else",
+              "type": "string",
+              "x-message-field": true
+            },
+            "type": {
+              "const": "none_of",
+              "type": "string"
+            },
+            "values": {
+              "description": "the strings that do not match",
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            }
+          },
+          "required": [
+            "type",
+            "field",
+            "values"
           ],
           "type": "object"
         }
@@ -9500,6 +10508,13 @@ The same wire shape the run loop's `PipelineView` serializes to — this is the 
           "$ref": "#/$defs/MissingFieldPolicy",
           "description": "what to do about a message missing the field or a group field"
         },
+        "reset_when": {
+          "description": "a message passing all of these clears its key's state first, so the\nseries starts over. Checked before `when`",
+          "items": {
+            "$ref": "#/$defs/Condition"
+          },
+          "type": "array"
+        },
         "time": {
           "description": "the field carrying each message's time — RFC 3339 or milliseconds since\nthe epoch. Leave it out for arrival time",
           "type": [
@@ -9507,6 +10522,13 @@ The same wire shape the run loop's `PipelineView` serializes to — this is the 
             "null"
           ],
           "x-message-field": true
+        },
+        "when": {
+          "description": "only messages passing all of these are applied; the rest pass through\nuntouched. Leave it out for every message",
+          "items": {
+            "$ref": "#/$defs/Condition"
+          },
+          "type": "array"
         }
       },
       "required": [
@@ -9595,6 +10617,13 @@ The same wire shape the run loop's `PipelineView` serializes to — this is the 
           "$ref": "#/$defs/MissingFieldPolicy",
           "description": "what to do about a message missing a derived field or a group field"
         },
+        "reset_when": {
+          "description": "a message passing all of these clears its key's state first, so the\nseries starts over. Checked before `when`",
+          "items": {
+            "$ref": "#/$defs/Condition"
+          },
+          "type": "array"
+        },
         "time": {
           "description": "the field carrying each message's time — RFC 3339 or milliseconds since\nthe epoch. Leave it out for arrival time",
           "type": [
@@ -9602,6 +10631,13 @@ The same wire shape the run loop's `PipelineView` serializes to — this is the 
             "null"
           ],
           "x-message-field": true
+        },
+        "when": {
+          "description": "only messages passing all of these are applied; the rest pass through\nuntouched. Leave it out for every message",
+          "items": {
+            "$ref": "#/$defs/Condition"
+          },
+          "type": "array"
         }
       },
       "required": [
@@ -9609,6 +10645,21 @@ The same wire shape the run loop's `PipelineView` serializes to — this is the 
       ],
       "title": "derive",
       "type": "object"
+    },
+    "DetectLearn": {
+      "description": "What a `detect` that keeps learning its baseline learns from.",
+      "oneOf": [
+        {
+          "const": "all",
+          "description": "Every reading, anomalies included — so a lasting change becomes the\nnew normal as fast as the baseline follows anything.",
+          "type": "string"
+        },
+        {
+          "const": "normal_only",
+          "description": "Only the readings that were not flagged, so an anomaly cannot pull the\nbaseline it is measured against. Pair it with `readapt_after_seconds`,\nor a genuine change of level is flagged for ever.",
+          "type": "string"
+        }
+      ]
     },
     "DetectMethod": {
       "description": "How an anomaly is decided.\n\nThe window methods compare a value against the values *before* it, never\nincluding it, so a spike does not pull the baseline it is measured against.\nThe chart methods freeze their baseline at the end of the warm-up, which is\nwhat a control chart is: a fixed idea of normal that the process is held to.",
@@ -9763,6 +10814,47 @@ The same wire shape the run loop's `PipelineView` serializes to — this is the 
             "size"
           ],
           "type": "object"
+        },
+        {
+          "description": "Further than `threshold` deviations from a baseline that keeps\nlearning: an exponentially weighted mean and spread, each with a time\nconstant of its own. The window methods' answer for a series that\ndrifts slowly and arrives irregularly — no window to hold, and a\nreading's weight follows how long it lasted. Reads the transform's\n`time`.",
+          "properties": {
+            "mean_tau_seconds": {
+              "description": "the time constant of the mean, in seconds: how quickly normal\nfollows the series",
+              "format": "double",
+              "type": "number"
+            },
+            "min_spread": {
+              "description": "the smallest deviation believed, in the field's own units — a\nsignal that has been very quiet otherwise flags its first wobble.\n`0` when left out",
+              "format": "double",
+              "type": [
+                "number",
+                "null"
+              ]
+            },
+            "spread_tau_seconds": {
+              "description": "the time constant of the spread, in seconds — usually longer than\nthe mean's, so a burst of noise does not widen the band at once",
+              "format": "double",
+              "type": "number"
+            },
+            "threshold": {
+              "description": "how many deviations count. `3` when left out",
+              "format": "double",
+              "type": [
+                "number",
+                "null"
+              ]
+            },
+            "type": {
+              "const": "ewma",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "mean_tau_seconds",
+            "spread_tau_seconds"
+          ],
+          "type": "object"
         }
       ]
     },
@@ -9782,7 +10874,7 @@ The same wire shape the run loop's `PipelineView` serializes to — this is the 
       ]
     },
     "DetectTransformConfig": {
-      "description": "Flags anomalies in a numeric field against its own series — one component\nwith a `method`, the way `filter` is one component with a kind.\n\nWrites a boolean under `as` (`anomaly` when left out), and beside it\n`<as>_score` — how far outside normal the value was, in the method's own\nunits — so a downstream `filter` can be stricter than the threshold. Nothing\nis flagged during the warm-up of `min_samples` messages per key, because\nuntil then there is no idea of normal to be outside of.",
+      "description": "Flags anomalies in a numeric field against its own series — one component\nwith a `method`, the way `smooth` is.\n\nWrites a boolean under `as` (`anomaly` when left out), and beside it\n`<as>_score` — how far outside normal the value was, in the method's own\nunits — so a downstream `filter` can be stricter than the threshold. Nothing\nis flagged during the warm-up of `min_samples` messages per key, because\nuntil then there is no idea of normal to be outside of.",
       "properties": {
         "as": {
           "description": "the field the flag is written under; the score goes under `<as>_score`.\n`anomaly` when left out",
@@ -9802,6 +10894,10 @@ The same wire shape the run loop's `PipelineView` serializes to — this is the 
             "type": "string"
           },
           "type": "array"
+        },
+        "learn": {
+          "$ref": "#/$defs/DetectLearn",
+          "description": "for `zscore`, `mad` and `ewma`, which keep learning: whether flagged\nreadings are learned from too. `all` when left out"
         },
         "method": {
           "$ref": "#/$defs/DetectMethod",
@@ -9823,6 +10919,40 @@ The same wire shape the run loop's `PipelineView` serializes to — this is the 
         "on_missing": {
           "$ref": "#/$defs/MissingFieldPolicy",
           "description": "what to do about a message missing the field or a group field"
+        },
+        "readapt_after_seconds": {
+          "description": "with `learn: normal_only`: once readings have been flagged for this\nmany seconds in a row, learn from them anyway, so a lasting change\nbecomes the new normal",
+          "format": "double",
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "reset_when": {
+          "description": "a message passing all of these clears its key's state first, so the\nseries starts over. Checked before `when`",
+          "items": {
+            "$ref": "#/$defs/Condition"
+          },
+          "type": "array"
+        },
+        "time": {
+          "description": "the field carrying each message's time — RFC 3339 or milliseconds since\nthe epoch — for the `ewma` method and `readapt_after_seconds`. Leave it\nout for arrival time",
+          "type": [
+            "string",
+            "null"
+          ],
+          "x-message-field": true
+        },
+        "when": {
+          "description": "only messages passing all of these are applied; the rest pass through\nuntouched. Leave it out for every message",
+          "items": {
+            "$ref": "#/$defs/Condition"
+          },
+          "type": "array"
+        },
+        "with_baseline": {
+          "description": "also write the baseline the reading was judged against: what normal\nwas under `<as>_expected`, and how far from it counts under\n`<as>_band`, both in the field's units. `null` where a method has none",
+          "type": "boolean"
         }
       },
       "required": [
@@ -10156,66 +11286,22 @@ The same wire shape the run loop's `PipelineView` serializes to — this is the 
       "type": "object"
     },
     "FilterTransformConfig": {
-      "description": "Drops messages that don't match a condition, and drops the whole batch if\nnone of them do. Pick either the `Numeric` or the `String` form — the fields\ndiffer because the comparisons do.",
-      "oneOf": [
-        {
-          "properties": {
-            "Numeric": {
-              "properties": {
-                "field": {
-                  "description": "the field to filter on",
-                  "type": "string",
-                  "x-message-field": true
-                },
-                "operator": {
-                  "$ref": "#/$defs/NumericFilterOperatorKind"
-                },
-                "value": {
-                  "format": "double",
-                  "type": "number"
-                }
-              },
-              "required": [
-                "field",
-                "operator",
-                "value"
-              ],
-              "type": "object"
-            }
+      "description": "Keeps the messages that pass every one of `conditions` and drops the rest\n— or, with `invert`, drops the ones that pass and keeps the rest. A batch\nwith nothing left in it is dropped whole.\n\nA message missing a field a condition tests, or carrying it as the wrong\ntype, does not pass that condition. So `invert` keeps such a message: it\ndrops only what the conditions positively match.",
+      "properties": {
+        "conditions": {
+          "description": "what a message has to pass — all of them, and at least one",
+          "items": {
+            "$ref": "#/$defs/Condition"
           },
-          "required": [
-            "Numeric"
-          ],
-          "type": "object"
+          "type": "array"
         },
-        {
-          "properties": {
-            "String": {
-              "properties": {
-                "field": {
-                  "type": "string",
-                  "x-message-field": true
-                },
-                "operator": {
-                  "$ref": "#/$defs/StringFilterOperatorKind"
-                },
-                "value": {
-                  "type": "string"
-                }
-              },
-              "required": [
-                "field",
-                "operator",
-                "value"
-              ],
-              "type": "object"
-            }
-          },
-          "required": [
-            "String"
-          ],
-          "type": "object"
+        "invert": {
+          "description": "drop the messages that pass instead of keeping them",
+          "type": "boolean"
         }
+      },
+      "required": [
+        "conditions"
       ],
       "title": "filter",
       "type": "object"
@@ -11226,6 +12312,10 @@ The same wire shape the run loop's `PipelineView` serializes to — this is the 
               "$ref": "#/$defs/Operand",
               "description": "the left-hand operand"
             },
+            "on_zero": {
+              "$ref": "#/$defs/OnZero",
+              "description": "for `divide`: what a right-hand field holding zero produces. Fails\nthe batch when left out"
+            },
             "operator": {
               "$ref": "#/$defs/ArithmeticOperator",
               "description": "what to do with them"
@@ -11244,6 +12334,63 @@ The same wire shape the run loop's `PipelineView` serializes to — this is the 
             "left",
             "operator",
             "right",
+            "as"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "The start of the calendar period a time falls in — the hour, the day,\nthe shift — written as a field of its own.\n\nWhat it is for is `group_by`: a stateful transform grouped by the\nbucket keeps a series per period, so \"per shift\" and \"since midnight\"\nneed no window of their own, and the bucket store's idle timeout\nforgets the old periods. Periods are counted in the time zone's wall\nclock, so a shift that starts at 06:00 starts at 06:00 summer and\nwinter alike, and the night a clock changes holds a 7- or 9-hour shift.\nBuckets line up with local midnight on 1 January 1970, moved on by\n`offset_seconds`: `every_seconds: 28800, offset_seconds: 21600` is\n06:00, 14:00 and 22:00. A week counts from a Thursday, so starting one\non a Monday is an offset of four days.",
+          "properties": {
+            "as": {
+              "description": "the field to write the bucket's start to",
+              "type": "string"
+            },
+            "every_seconds": {
+              "description": "how long a bucket is, in seconds",
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "format": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/TimeFormat"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "how the bucket's start is written. `rfc3339` when left out"
+            },
+            "from": {
+              "description": "the field holding the time — an RFC 3339 string or milliseconds\nsince the epoch",
+              "type": "string"
+            },
+            "offset_seconds": {
+              "description": "how far past the line-up the buckets start, in seconds — less than\n`every_seconds`",
+              "format": "uint64",
+              "minimum": 0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "timezone": {
+              "description": "the IANA time zone whose clock the periods are counted on, e.g.\n`Europe/Stockholm`. UTC when left out",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "type": {
+              "const": "time_bucket",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "from",
+            "every_seconds",
             "as"
           ],
           "type": "object"
@@ -11458,9 +12605,60 @@ The same wire shape the run loop's `PipelineView` serializes to — this is the 
       "enum": [
         "greater_than",
         "less_than",
-        "equal_to"
+        "equal_to",
+        "not_equal_to"
       ],
       "type": "string"
+    },
+    "OnZero": {
+      "description": "What a `divide` does when the field it divides by holds zero.\n\nA ratio over an empty period — parts per minute before the first minute —\nis the usual way that happens, and which answer is right depends on what\nreads it: a chart wants nothing there, a sum downstream wants a number.",
+      "oneOf": [
+        {
+          "description": "Fail the batch, naming the division. A zero nobody expected is a\nstream that isn't what the config claims.",
+          "properties": {
+            "type": {
+              "const": "error",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "Write `null` as the answer.",
+          "properties": {
+            "type": {
+              "const": "null",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "Write this number as the answer.",
+          "properties": {
+            "type": {
+              "const": "value",
+              "type": "string"
+            },
+            "value": {
+              "description": "the answer to write instead",
+              "format": "double",
+              "type": "number"
+            }
+          },
+          "required": [
+            "type",
+            "value"
+          ],
+          "type": "object"
+        }
+      ]
     },
     "OpcuaBrowseConfig": {
       "description": "Everything under a node in the server's address space, found by browsing it\nwhen the pipeline starts.\n\nThe convenient half of naming nodes, and the one with a cost worth knowing:\nwhat this pipeline reads is then decided by the server's address space *at\nthe moment the pipeline starts*, so a tag added to the machine tomorrow is\npicked up by a restart and a tag removed silently stops arriving. An\nexplicit `nodes` list is the one that says in the config file exactly what\nis being read. The two combine — browse a folder and name the handful of\ntags elsewhere that belong with it.",
@@ -11820,6 +13018,67 @@ The same wire shape the run loop's `PipelineView` serializes to — this is the 
         "bucket"
       ],
       "title": "pipeline state",
+      "type": "object"
+    },
+    "PivotTransformConfig": {
+      "description": "Turns a stream of one-reading-per-message into rows: remembers the latest\nvalue of each of `names` per key, and writes all of them onto every\nmessage.\n\nThe usual shape of industrial and IoT data is one message per reading —\n`{\"sensor\": \"state\", \"value\": \"RUNNING\"}`, then `{\"sensor\": \"fault\",\n\"value\": \"NONE\"}` — and most logic downstream wants the machine as one\nrow: `{\"state\": \"RUNNING\", \"fault\": \"NONE\", ...}`. A message whose `name`\nfield holds one of `names` updates that one first, so it always carries its\nown reading; then every value remembered for its key is written onto it,\nat the top level or under `into`. A name not seen yet for a key is left\nout rather than written as `null`. One message in, one message out.\n\n`names` is required, and is what bounds the state: a stream naming a new\nthing in every message would otherwise grow one key's row without end. A\nmessage naming something else contributes nothing, and still gets the row.",
+      "properties": {
+        "group_by": {
+          "description": "the fields that identify a row, the reducer's way. Leave it out for one\nrow",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "into": {
+          "description": "an object field to write them under. Leave it out to write them at the\ntop level",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "name": {
+          "description": "the field whose value says which of `names` a message is a reading of",
+          "type": "string",
+          "x-message-field": true
+        },
+        "names": {
+          "description": "the names to remember and write, each as a field of its own. At least\none",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "on_missing": {
+          "$ref": "#/$defs/MissingFieldPolicy",
+          "description": "what to do about a message missing a group field, or naming one of\n`names` without carrying a `value`"
+        },
+        "reset_when": {
+          "description": "a message passing all of these clears its key's state first, so the\nseries starts over. Checked before `when`",
+          "items": {
+            "$ref": "#/$defs/Condition"
+          },
+          "type": "array"
+        },
+        "value": {
+          "description": "the field holding the reading — any JSON, a string state as much as a\nnumber",
+          "type": "string",
+          "x-message-field": true
+        },
+        "when": {
+          "description": "only messages passing all of these are applied; the rest pass through\nuntouched. Leave it out for every message",
+          "items": {
+            "$ref": "#/$defs/Condition"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "name",
+        "value",
+        "names"
+      ],
+      "title": "pivot",
       "type": "object"
     },
     "PollMode": {
@@ -12297,6 +13556,13 @@ The same wire shape the run loop's `PipelineView` serializes to — this is the 
           "$ref": "#/$defs/MissingFieldPolicy",
           "description": "what to do about a message missing the field or a group field"
         },
+        "reset_when": {
+          "description": "a message passing all of these clears its key's state first, so the\nseries starts over. Checked before `when`",
+          "items": {
+            "$ref": "#/$defs/Condition"
+          },
+          "type": "array"
+        },
         "time": {
           "description": "the field carrying each message's time — RFC 3339 or milliseconds since\nthe epoch. Leave it out for arrival time, in which case empty intervals\nare noticed by the clock rather than by the next reading",
           "type": [
@@ -12304,6 +13570,13 @@ The same wire shape the run loop's `PipelineView` serializes to — this is the 
             "null"
           ],
           "x-message-field": true
+        },
+        "when": {
+          "description": "only messages passing all of these are applied; the rest pass through\nuntouched. Leave it out for every message",
+          "items": {
+            "$ref": "#/$defs/Condition"
+          },
+          "type": "array"
         }
       },
       "required": [
@@ -12335,6 +13608,13 @@ The same wire shape the run loop's `PipelineView` serializes to — this is the 
           "$ref": "#/$defs/MissingFieldPolicy",
           "description": "what to do about a message missing an aggregated field or a group field"
         },
+        "reset_when": {
+          "description": "a message passing all of these clears its key's state first, so the\nseries starts over. Checked before `when`",
+          "items": {
+            "$ref": "#/$defs/Condition"
+          },
+          "type": "array"
+        },
         "seconds": {
           "description": "also drop from the window whatever is older than this many seconds,\noff the `time` field",
           "format": "double",
@@ -12356,6 +13636,13 @@ The same wire shape the run loop's `PipelineView` serializes to — this is the 
             "null"
           ],
           "x-message-field": true
+        },
+        "when": {
+          "description": "only messages passing all of these are applied; the rest pass through\nuntouched. Leave it out for every message",
+          "items": {
+            "$ref": "#/$defs/Condition"
+          },
+          "type": "array"
         }
       },
       "required": [
@@ -12542,7 +13829,7 @@ The same wire shape the run loop's `PipelineView` serializes to — this is the 
       "description": "How a value is smoothed against the ones before it.",
       "oneOf": [
         {
-          "description": "An exponentially weighted moving average — cheap, no window, follows\nthe data as closely as `alpha` says. Give `alpha` or `half_life`, not\nboth.",
+          "description": "An exponentially weighted moving average — cheap, no window, follows\nthe data as closely as it is told to. Give exactly one of `alpha`,\n`half_life` or `tau_seconds`.\n\nThe first two count *messages*, which is only right when they arrive\nat a steady rate. `tau_seconds` counts time: a value's weight is\n`1 − e^(−Δt/τ)` for the Δt since the previous one, so a reading after a\nlong gap counts for more than one a moment after the last — what a\nsensor that reports on change, or a stream that stalls, needs.",
           "properties": {
             "alpha": {
               "description": "the weight of the newest value, 0 to 1",
@@ -12554,6 +13841,14 @@ The same wire shape the run loop's `PipelineView` serializes to — this is the 
             },
             "half_life": {
               "description": "the number of messages after which a value's weight has halved —\nthe spelling with an intuition behind it",
+              "format": "double",
+              "type": [
+                "number",
+                "null"
+              ]
+            },
+            "tau_seconds": {
+              "description": "the time constant in seconds: after this long, an old value's\nweight has fallen to about 37%. Reads the transform's `time`",
               "format": "double",
               "type": [
                 "number",
@@ -12650,7 +13945,7 @@ The same wire shape the run loop's `PipelineView` serializes to — this is the 
       ]
     },
     "SmoothTransformConfig": {
-      "description": "Smooths a numeric field against the values before it in its series, writing\nthe result onto the message — over the field itself, or under `as`.",
+      "description": "Smooths a numeric field against the values before it in its series, writing\nthe result onto the message — over the field itself, or under `as`.\n\nEvery method but an `ewma` by `tau_seconds` is about *order*: the last few\nvalues, however far apart. So `time` is only accepted beside that one, and\nrefused elsewhere rather than ignored.",
       "properties": {
         "as": {
           "description": "the field the smoothed value is written under. Leave it out to replace\nthe field itself",
@@ -12678,6 +13973,28 @@ The same wire shape the run loop's `PipelineView` serializes to — this is the 
         "on_missing": {
           "$ref": "#/$defs/MissingFieldPolicy",
           "description": "what to do about a message missing the field or a group field"
+        },
+        "reset_when": {
+          "description": "a message passing all of these clears its key's state first, so the\nseries starts over. Checked before `when`",
+          "items": {
+            "$ref": "#/$defs/Condition"
+          },
+          "type": "array"
+        },
+        "time": {
+          "description": "for an `ewma` by `tau_seconds`: the field carrying each message's time\n— RFC 3339 or milliseconds since the epoch. Leave it out for arrival\ntime",
+          "type": [
+            "string",
+            "null"
+          ],
+          "x-message-field": true
+        },
+        "when": {
+          "description": "only messages passing all of these are applied; the rest pass through\nuntouched. Leave it out for every message",
+          "items": {
+            "$ref": "#/$defs/Condition"
+          },
+          "type": "array"
         }
       },
       "required": [
@@ -12727,6 +14044,7 @@ The same wire shape the run loop's `PipelineView` serializes to — this is the 
       "description": "How a string is compared to the one in the config.",
       "enum": [
         "equal_to",
+        "not_equal_to",
         "contains"
       ],
       "type": "string"
@@ -12753,6 +14071,54 @@ The same wire shape the run loop's `PipelineView` serializes to — this is the 
         "columns"
       ],
       "title": "index",
+      "type": "object"
+    },
+    "ThrottleTransformConfig": {
+      "description": "Passes at most one message per key every `seconds` and drops the rest —\nthe honest spelling of \"don't write to the sink more often than this\".\n\nThe first message per key passes, and so does the first one at least\n`seconds` after the last that passed; everything in between is dropped\nwhole. The interval runs from the message that passed, not from a clock\ngrid, and nothing is held back to be sent later: a key that goes quiet\nmid-interval sends nothing more until its next message. Where the *last*\nvalue of an interval is what matters, or a quiet key should still report,\nthat is `resample`.\n\nUnlike `deadband` it never looks at a value, so the messages it passes are\nwhole messages, every field intact — which is what makes it the right\nthing in front of an output writing several fields per message.",
+      "properties": {
+        "group_by": {
+          "description": "the fields that identify a series, the reducer's way. Leave it out for\none series",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "on_missing": {
+          "$ref": "#/$defs/MissingFieldPolicy",
+          "description": "what to do about a message missing a group field"
+        },
+        "reset_when": {
+          "description": "a message passing all of these clears its key's state first, so the\nseries starts over. Checked before `when`",
+          "items": {
+            "$ref": "#/$defs/Condition"
+          },
+          "type": "array"
+        },
+        "seconds": {
+          "description": "the least time between two messages passed for one key, in seconds",
+          "format": "double",
+          "type": "number"
+        },
+        "time": {
+          "description": "the field carrying each message's time — RFC 3339 or milliseconds since\nthe epoch. Leave it out for arrival time",
+          "type": [
+            "string",
+            "null"
+          ],
+          "x-message-field": true
+        },
+        "when": {
+          "description": "only messages passing all of these are applied; the rest pass through\nuntouched. Leave it out for every message",
+          "items": {
+            "$ref": "#/$defs/Condition"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "seconds"
+      ],
+      "title": "throttle",
       "type": "object"
     },
     "TidepoolOutputConfig": {
@@ -12803,6 +14169,21 @@ The same wire shape the run loop's `PipelineView` serializes to — this is the 
       ],
       "title": "tidepool",
       "type": "object"
+    },
+    "TimeFormat": {
+      "description": "How a [`Mapping::TimeBucket`] writes a time.",
+      "oneOf": [
+        {
+          "const": "rfc3339",
+          "description": "An RFC 3339 string in UTC, to the millisecond — the spelling every\ntime kayak writes uses.",
+          "type": "string"
+        },
+        {
+          "const": "millis",
+          "description": "Milliseconds since the epoch, as a number.",
+          "type": "string"
+        }
+      ]
     },
     "TransformConfig": {
       "oneOf": [
@@ -12928,6 +14309,32 @@ The same wire shape the run loop's `PipelineView` serializes to — this is the 
           "properties": {
             "type": {
               "const": "deadband",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type"
+          ],
+          "type": "object"
+        },
+        {
+          "$ref": "#/$defs/ThrottleTransformConfig",
+          "properties": {
+            "type": {
+              "const": "throttle",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type"
+          ],
+          "type": "object"
+        },
+        {
+          "$ref": "#/$defs/PivotTransformConfig",
+          "properties": {
+            "type": {
+              "const": "pivot",
               "type": "string"
             }
           },

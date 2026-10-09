@@ -8,6 +8,8 @@ state:
     idle_timeout_secs: 3600
   heartbeat_stats:
     max_keys: 8
+  line1_tags:
+    max_keys: 1
 pipelines:
 - id: heartbeat
   inputs:
@@ -77,7 +79,16 @@ pipelines:
       name: tank_level
     publish_interval_ms: 1000
     max_batch: 100
-  transforms: []
+  state:
+    bucket: line1_tags
+  transforms:
+  - type: pivot
+    name: name
+    value: value
+    names:
+    - line1_units
+    - line2_units
+    - tank_level
   outputs:
   - type: stdout
 - id: opcua_anomalies
@@ -185,7 +196,8 @@ pipelines:
     upstream: heartbeat
   transforms:
   - type: filter
-    Numeric:
+    conditions:
+    - type: numeric
       field: value
       operator: greater_than
       value: 8.0
@@ -400,7 +412,8 @@ pipelines:
     upstream: sensors
   transforms:
   - type: filter
-    Numeric:
+    conditions:
+    - type: numeric
       field: value
       operator: greater_than
       value: 90.0
@@ -642,7 +655,8 @@ pipelines:
     upstream: kafka_events
   transforms:
   - type: filter
-    Numeric:
+    conditions:
+    - type: numeric
       field: latency_ms
       operator: greater_than
       value: 400.0
@@ -709,6 +723,8 @@ pipelines:
       type: zscore
       size: 20
       threshold: 3.0
+  - type: throttle
+    seconds: 10.0
   outputs:
   - type: stdout
 - id: heartbeat_grid

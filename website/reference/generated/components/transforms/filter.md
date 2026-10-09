@@ -2,20 +2,41 @@
 
 ## `filter` {#transform-filter}
 
-Drops messages that don't match a condition, and drops the whole batch if none of them do. Pick either the `Numeric` or the `String` form — the fields differ because the comparisons do.
+Keeps the messages that pass every one of `conditions` and drops the rest — or, with `invert`, drops the ones that pass and keeps the rest. A batch with nothing left in it is dropped whole.
 
-**`{"type": "filter", "Numeric": { … }}`**
-
-| field | type | | description |
-| --- | --- | --- | --- |
-| `field` | `string` | <Badge type="warning" text="required" /> | the field to filter on |
-| `operator` | `greater_than` \| `less_than` \| `equal_to` | <Badge type="warning" text="required" /> | How a number is compared to the one in the config. |
-| `value` | `number` | <Badge type="warning" text="required" /> |  |
-
-**`{"type": "filter", "String": { … }}`**
+A message missing a field a condition tests, or carrying it as the wrong type, does not pass that condition. So `invert` keeps such a message: it drops only what the conditions positively match.
 
 | field | type | | description |
 | --- | --- | --- | --- |
-| `field` | `string` | <Badge type="warning" text="required" /> |  |
-| `operator` | `equal_to` \| `contains` | <Badge type="warning" text="required" /> | How a string is compared to the one in the config. |
-| `value` | `string` | <Badge type="warning" text="required" /> |  |
+| `conditions` | `list of numeric \| string \| one_of \| none_of` | <Badge type="warning" text="required" /> | what a message has to pass — all of them, and at least one |
+| `invert` | `boolean` | <Badge type="info" text="optional" /> | drop the messages that pass instead of keeping them |
+
+**`conditions` — each entry — `type: "numeric"`**
+
+| field | type | | description |
+| --- | --- | --- | --- |
+| `field` | `string` | <Badge type="warning" text="required" /> | the field to test — a dotted path, like anywhere else |
+| `operator` | `greater_than` \| `less_than` \| `equal_to` \| `not_equal_to` | <Badge type="warning" text="required" /> | how the field is compared |
+| `value` | `number` | <Badge type="warning" text="required" /> | the number it is compared to |
+
+**`conditions` — each entry — `type: "string"`**
+
+| field | type | | description |
+| --- | --- | --- | --- |
+| `field` | `string` | <Badge type="warning" text="required" /> | the field to test — a dotted path, like anywhere else |
+| `operator` | `equal_to` \| `not_equal_to` \| `contains` | <Badge type="warning" text="required" /> | how the field is compared |
+| `value` | `string` | <Badge type="warning" text="required" /> | the string it is compared to |
+
+**`conditions` — each entry — `type: "one_of"`**
+
+| field | type | | description |
+| --- | --- | --- | --- |
+| `field` | `string` | <Badge type="warning" text="required" /> | the field to test — a dotted path, like anywhere else |
+| `values` | `list of string` | <Badge type="warning" text="required" /> | the strings that match |
+
+**`conditions` — each entry — `type: "none_of"`**
+
+| field | type | | description |
+| --- | --- | --- | --- |
+| `field` | `string` | <Badge type="warning" text="required" /> | the field to test — a dotted path, like anywhere else |
+| `values` | `list of string` | <Badge type="warning" text="required" /> | the strings that do not match |

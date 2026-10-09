@@ -3,9 +3,9 @@
 //!
 //! The declarations are in [`kayak_core::streaming`], and that module's docs
 //! carry the argument for the shape. This is the shape made concrete once, so
-//! that `deadband`, `derive`, `rolling`, `smooth`, `detect` and `resample` each
-//! reduce to "what happens to a number, given the state" and none of them can
-//! forget the bucket, the bound or the missing-field rule.
+//! that `deadband`, `throttle`, `derive`, `rolling`, `smooth`, `detect` and
+//! `resample` each reduce to "what happens to a number, given the state" and
+//! none of them can forget the bucket, the bound or the missing-field rule.
 //!
 //! Three things are decided here and nowhere else:
 //!
@@ -23,13 +23,19 @@
 //! - **Reading the field is one call with one answer**: a number, "skip this
 //!   message", or an error. Absent and null follow `on_missing`; present and
 //!   not a number is always an error.
+//! - **The gate is applied in [`Series::key`]**, so no transform implements
+//!   `when` or `reset_when` itself: a message `when` doesn't match comes back
+//!   as "no key" — which every one of them already passes through untouched —
+//!   and a `reset_when` match clears the key's state before the key is
+//!   handed out.
 
 use anyhow::{Context, Result, bail};
-use kayak_core::config::MissingFieldPolicy;
+use kayak_core::config::{Condition, MissingFieldPolicy};
+use kayak_core::streaming::Gate;
 use serde_json::Value;
 use std::sync::Arc;
 
-use crate::{BuildCtx, buckets::Buckets, fields, time::MessageTime};
+use crate::{BuildCtx, buckets::Buckets, fields, time::MessageTime, transforms::state};
 
 /// What one message contributes to its series, or why it doesn't.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -50,6 +56,8 @@ pub struct Series {
     group_by: Vec<String>,
     time: MessageTime,
     on_missing: MissingFieldPolicy,
+    when: Vec<Condition>,
+    reset_when: Vec<Condition>,
 }
 
 impl Series {
@@ -65,6 +73,7 @@ impl Series {
         group_by: Vec<String>,
         time: Option<String>,
         on_missing: MissingFieldPolicy,
+        gate: Gate,
     ) -> Result<Self> {
         let Some(state) = ctx.state.clone() else {
             bail!(
@@ -92,6 +101,8 @@ impl Series {
             group_by,
             time: MessageTime::new(time),
             on_missing,
+            when: gate.when,
+            reset_when: gate.reset_when,
         })
     }
 
@@ -139,17 +150,32 @@ impl Series {
             .collect()
     }
 
-    /// The key, or what to do without one.
+    /// The key this message is applied under, or `None` when it is not to be
+    /// applied at all — no key under `on_missing: skip`, or not matched by
+    /// `when`. A `reset_when` match clears the key's state on the way.
+    ///
+    /// A message neither condition matches needs no key, so it is passed
+    /// through even under `on_missing: error`: the transform has nothing to say
+    /// about it, its key included.
     pub fn key(&self, message: &Value) -> Result<Option<String>> {
-        match self.key_of(message) {
-            Some(key) => Ok(Some(key)),
-            None if self.on_missing == MissingFieldPolicy::Skip => Ok(None),
+        let applies = state::matches(&self.when, message);
+        let resets = !self.reset_when.is_empty() && state::matches(&self.reset_when, message);
+        if !applies && !resets {
+            return Ok(None);
+        }
+        let key = match self.key_of(message) {
+            Some(key) => key,
+            None if self.on_missing == MissingFieldPolicy::Skip || !applies => return Ok(None),
             None => bail!(
                 "a message is missing a group_by field ({}) or it is not a string, number or \
                  boolean",
                 self.group_by.join(", ")
             ),
+        };
+        if resets {
+            self.update(&key, |state| *state = Value::Null)?;
         }
+        Ok(applies.then_some(key))
     }
 
     /// The field as a number, `Skip` under `on_missing: skip`, or an error.
@@ -271,6 +297,10 @@ mod tests {
     }
 
     fn series(group_by: &[&str], on_missing: MissingFieldPolicy) -> Result<Series> {
+        gated(group_by, on_missing, Gate::default())
+    }
+
+    fn gated(group_by: &[&str], on_missing: MissingFieldPolicy, gate: Gate) -> Result<Series> {
         let mut pipelines = std::collections::HashMap::new();
         let ctx = ctx_with_state(
             &mut pipelines,
@@ -286,6 +316,7 @@ mod tests {
             group_by.iter().map(ToString::to_string).collect(),
             None,
             on_missing,
+            gate,
         )
     }
 
@@ -293,7 +324,7 @@ mod tests {
     fn a_pipeline_without_state_cannot_build_one() {
         let mut pipelines = std::collections::HashMap::new();
         let ctx = ctx_with_state(&mut pipelines, None);
-        let err = Series::resolve(&ctx, "rolling", "x".into(), vec![], None, MissingFieldPolicy::Error)
+        let err = Series::resolve(&ctx, "rolling", "x".into(), vec![], None, MissingFieldPolicy::Error, Gate::default())
             .err()
             .map(|e| e.to_string())
             .unwrap_or_default();
@@ -306,7 +337,7 @@ mod tests {
                 key: None,
             }),
         );
-        let err = Series::resolve(&ctx, "rolling", "x".into(), vec![], None, MissingFieldPolicy::Error)
+        let err = Series::resolve(&ctx, "rolling", "x".into(), vec![], None, MissingFieldPolicy::Error, Gate::default())
             .err()
             .map(|e| e.to_string())
             .unwrap_or_default();
@@ -366,5 +397,80 @@ mod tests {
         assert_eq!(Window::seconds(points), vec![5.0]);
         assert_eq!(Window::values(points), vec![&json!(3.0)]);
         assert_eq!(Window::points(&Value::Null), &[] as &[Value]);
+    }
+
+    fn is(field: &str, value: &str) -> Condition {
+        Condition::String {
+            field: field.into(),
+            operator: kayak_core::config::StringFilterOperatorKind::EqualTo,
+            value: value.into(),
+        }
+    }
+
+    /// What is stored for a key, without touching it.
+    fn stored(series: &Series, key: &str) -> Result<Value> {
+        series.update(key, |state| state.clone())
+    }
+
+    /// A message `when` does not match has no key, even under `on_missing:
+    /// error` and even without the group field — the transform has nothing to
+    /// say about it — and its key's state is left alone.
+    #[test]
+    fn a_message_when_does_not_match_is_not_applied_and_needs_no_key() -> Result<()> {
+        let series = gated(
+            &["machine"],
+            MissingFieldPolicy::Error,
+            Gate {
+                when: vec![is("sensor", "vibration")],
+                reset_when: vec![],
+            },
+        )?;
+        series.update("m1", |state| *state = json!({"kept": true}))?;
+
+        assert_eq!(series.key(&json!({"machine": "m1", "sensor": "state", "value": "RUNNING"}))?, None);
+        assert_eq!(series.key(&json!({"sensor": "state"}))?, None, "no key needed when not applied");
+        assert_eq!(stored(&series, "m1")?, json!({"kept": true}));
+
+        assert_eq!(series.key(&json!({"machine": "m1", "sensor": "vibration"}))?, Some("m1".into()));
+        assert!(series.key(&json!({"sensor": "vibration"})).is_err(), "applied, so the key is owed");
+        Ok(())
+    }
+
+    /// `reset_when` clears the key's state whatever `when` says; the message
+    /// is then applied only if `when` matches it too.
+    #[test]
+    fn reset_when_clears_the_state_and_when_still_decides_the_message() -> Result<()> {
+        let series = gated(
+            &["machine"],
+            MissingFieldPolicy::Error,
+            Gate {
+                when: vec![is("sensor", "vibration")],
+                reset_when: vec![is("state", "OFF")],
+            },
+        )?;
+        series.update("m1", |state| *state = json!({"avg": 3.0}))?;
+        series.update("m2", |state| *state = json!({"avg": 4.0}))?;
+
+        // a state message: resets m1, is not itself applied
+        assert_eq!(series.key(&json!({"machine": "m1", "sensor": "state", "state": "OFF"}))?, None);
+        assert_eq!(stored(&series, "m1")?, Value::Null);
+        assert_eq!(stored(&series, "m2")?, json!({"avg": 4.0}), "only its own key");
+
+        // a reading that also says OFF: reset, then applied from nothing
+        series.update("m2", |state| *state = json!({"avg": 4.0}))?;
+        assert_eq!(
+            series.key(&json!({"machine": "m2", "sensor": "vibration", "state": "OFF"}))?,
+            Some("m2".into())
+        );
+        assert_eq!(stored(&series, "m2")?, Value::Null);
+        Ok(())
+    }
+
+    /// No gate is every message, exactly as before the gate existed.
+    #[test]
+    fn without_a_gate_every_message_is_applied() -> Result<()> {
+        let series = series(&[], MissingFieldPolicy::Error)?;
+        assert_eq!(series.key(&json!({"anything": 1}))?, Some(String::new()));
+        Ok(())
     }
 }

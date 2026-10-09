@@ -1,8 +1,8 @@
 //! The streaming statistics transforms — the declarations.
 //!
-//! Six transforms that each keep a little state *per key* and do arithmetic
-//! over it as messages arrive: `deadband`, `derive`, `rolling`, `smooth`,
-//! `detect` and `resample`. They share one shape, and the shape is the point:
+//! Transforms that each keep a little state *per key* and do arithmetic over
+//! it as messages arrive: `deadband`, `throttle`, `derive`, `rolling`,
+//! `smooth`, `detect` and `resample`. They share one shape, and the shape is the point:
 //!
 //! - **The key is `group_by`**, the reducer's list, so a series is a series
 //!   per machine, or per machine and signal, the same way a reduction is.
@@ -28,7 +28,42 @@
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
-use crate::config::{Aggregation, MissingFieldPolicy};
+use crate::config::{Aggregation, Condition, MissingFieldPolicy};
+
+#[allow(clippy::trivially_copy_pass_by_ref)] // serde's `skip_serializing_if` hands a reference
+fn is_false(value: &bool) -> bool {
+    !*value
+}
+
+// ── the gate every one of them takes ───────────────────────────────────────
+
+/// Which messages a keyed transform takes notice of, and which start a series
+/// over. Flattened into every transform in this module, so `when` and
+/// `reset_when` sit beside `group_by` in the config.
+///
+/// `when` is what lets one of these sit in a stream carrying more than one
+/// kind of message: a state reading beside the numeric ones would otherwise be
+/// a present non-number, and an error. A message it does not match passes
+/// through untouched and leaves the state alone — or, for `resample`, which
+/// emits grid points rather than the messages it was given, is simply not part
+/// of the series.
+///
+/// `reset_when` is checked first, and whatever `when` says: a message matching
+/// it clears its key's state, so the series starts over from the next message
+/// that is applied — this one, if it also matches `when`. It is how a series
+/// is told the thing it measures has changed underneath it: a machine
+/// switched off, a part replaced.
+#[derive(Clone, Debug, Default, Deserialize, Serialize, JsonSchema, PartialEq)]
+pub struct Gate {
+    /// only messages passing all of these are applied; the rest pass through
+    /// untouched. Leave it out for every message
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub when: Vec<Condition>,
+    /// a message passing all of these clears its key's state first, so the
+    /// series starts over. Checked before `when`
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub reset_when: Vec<Condition>,
+}
 
 // ── deadband ────────────────────────────────────────────────────────────────
 
@@ -89,6 +124,9 @@ pub struct DeadbandTransformConfig {
     /// what to do about a message missing the field or a group field
     #[serde(default, skip_serializing_if = "MissingFieldPolicy::is_default")]
     pub on_missing: MissingFieldPolicy,
+    /// which messages are applied, and which start the series over
+    #[serde(flatten)]
+    pub gate: Gate,
 }
 
 impl DeadbandMode {
@@ -96,6 +134,92 @@ impl DeadbandMode {
     pub fn is_default(&self) -> bool {
         matches!(self, Self::Absolute)
     }
+}
+
+// ── throttle ────────────────────────────────────────────────────────────────
+
+/// Passes at most one message per key every `seconds` and drops the rest —
+/// the honest spelling of "don't write to the sink more often than this".
+///
+/// The first message per key passes, and so does the first one at least
+/// `seconds` after the last that passed; everything in between is dropped
+/// whole. The interval runs from the message that passed, not from a clock
+/// grid, and nothing is held back to be sent later: a key that goes quiet
+/// mid-interval sends nothing more until its next message. Where the *last*
+/// value of an interval is what matters, or a quiet key should still report,
+/// that is `resample`.
+///
+/// Unlike `deadband` it never looks at a value, so the messages it passes are
+/// whole messages, every field intact — which is what makes it the right
+/// thing in front of an output writing several fields per message.
+#[derive(Clone, Debug, Deserialize, Serialize, JsonSchema, PartialEq)]
+#[schemars(title = "throttle")]
+pub struct ThrottleTransformConfig {
+    /// the least time between two messages passed for one key, in seconds
+    pub seconds: f64,
+    /// the fields that identify a series, the reducer's way. Leave it out for
+    /// one series
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub group_by: Vec<String>,
+    /// the field carrying each message's time — RFC 3339 or milliseconds since
+    /// the epoch. Leave it out for arrival time
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(extend("x-message-field" = true))]
+    pub time: Option<String>,
+    /// what to do about a message missing a group field
+    #[serde(default, skip_serializing_if = "MissingFieldPolicy::is_default")]
+    pub on_missing: MissingFieldPolicy,
+    /// which messages are applied, and which start the series over
+    #[serde(flatten)]
+    pub gate: Gate,
+}
+
+// ── pivot ───────────────────────────────────────────────────────────────────
+
+/// Turns a stream of one-reading-per-message into rows: remembers the latest
+/// value of each of `names` per key, and writes all of them onto every
+/// message.
+///
+/// The usual shape of industrial and IoT data is one message per reading —
+/// `{"sensor": "state", "value": "RUNNING"}`, then `{"sensor": "fault",
+/// "value": "NONE"}` — and most logic downstream wants the machine as one
+/// row: `{"state": "RUNNING", "fault": "NONE", ...}`. A message whose `name`
+/// field holds one of `names` updates that one first, so it always carries its
+/// own reading; then every value remembered for its key is written onto it,
+/// at the top level or under `into`. A name not seen yet for a key is left
+/// out rather than written as `null`. One message in, one message out.
+///
+/// `names` is required, and is what bounds the state: a stream naming a new
+/// thing in every message would otherwise grow one key's row without end. A
+/// message naming something else contributes nothing, and still gets the row.
+#[derive(Clone, Debug, Deserialize, Serialize, JsonSchema, PartialEq)]
+#[schemars(title = "pivot")]
+pub struct PivotTransformConfig {
+    /// the field whose value says which of `names` a message is a reading of
+    #[schemars(extend("x-message-field" = true))]
+    pub name: String,
+    /// the field holding the reading — any JSON, a string state as much as a
+    /// number
+    #[schemars(extend("x-message-field" = true))]
+    pub value: String,
+    /// the names to remember and write, each as a field of its own. At least
+    /// one
+    pub names: Vec<String>,
+    /// an object field to write them under. Leave it out to write them at the
+    /// top level
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub into: Option<String>,
+    /// the fields that identify a row, the reducer's way. Leave it out for one
+    /// row
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub group_by: Vec<String>,
+    /// what to do about a message missing a group field, or naming one of
+    /// `names` without carrying a `value`
+    #[serde(default, skip_serializing_if = "MissingFieldPolicy::is_default")]
+    pub on_missing: MissingFieldPolicy,
+    /// which messages are applied, and which start the row over
+    #[serde(flatten)]
+    pub gate: Gate,
 }
 
 // ── derive ──────────────────────────────────────────────────────────────────
@@ -161,6 +285,9 @@ pub struct DeriveTransformConfig {
     /// what to do about a message missing a derived field or a group field
     #[serde(default, skip_serializing_if = "MissingFieldPolicy::is_default")]
     pub on_missing: MissingFieldPolicy,
+    /// which messages are applied, and which start the series over
+    #[serde(flatten)]
+    pub gate: Gate,
 }
 
 // ── rolling ─────────────────────────────────────────────────────────────────
@@ -201,6 +328,9 @@ pub struct RollingTransformConfig {
     /// what to do about a message missing an aggregated field or a group field
     #[serde(default, skip_serializing_if = "MissingFieldPolicy::is_default")]
     pub on_missing: MissingFieldPolicy,
+    /// which messages are applied, and which start the series over
+    #[serde(flatten)]
+    pub gate: Gate,
 }
 
 // ── smooth ──────────────────────────────────────────────────────────────────
@@ -210,8 +340,14 @@ pub struct RollingTransformConfig {
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum SmoothMethod {
     /// An exponentially weighted moving average — cheap, no window, follows
-    /// the data as closely as `alpha` says. Give `alpha` or `half_life`, not
-    /// both.
+    /// the data as closely as it is told to. Give exactly one of `alpha`,
+    /// `half_life` or `tau_seconds`.
+    ///
+    /// The first two count *messages*, which is only right when they arrive
+    /// at a steady rate. `tau_seconds` counts time: a value's weight is
+    /// `1 − e^(−Δt/τ)` for the Δt since the previous one, so a reading after a
+    /// long gap counts for more than one a moment after the last — what a
+    /// sensor that reports on change, or a stream that stalls, needs.
     Ewma {
         /// the weight of the newest value, 0 to 1
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -220,6 +356,10 @@ pub enum SmoothMethod {
         /// the spelling with an intuition behind it
         #[serde(default, skip_serializing_if = "Option::is_none")]
         half_life: Option<f64>,
+        /// the time constant in seconds: after this long, an old value's
+        /// weight has fallen to about 37%. Reads the transform's `time`
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        tau_seconds: Option<f64>,
     },
     /// The median of the last `size` values, this one included. Removes
     /// single-sample spikes outright, which a mean only spreads out.
@@ -255,6 +395,10 @@ pub enum SmoothMethod {
 
 /// Smooths a numeric field against the values before it in its series, writing
 /// the result onto the message — over the field itself, or under `as`.
+///
+/// Every method but an `ewma` by `tau_seconds` is about *order*: the last few
+/// values, however far apart. So `time` is only accepted beside that one, and
+/// refused elsewhere rather than ignored.
 #[derive(Clone, Debug, Deserialize, Serialize, JsonSchema, PartialEq)]
 #[schemars(title = "smooth")]
 pub struct SmoothTransformConfig {
@@ -271,9 +415,18 @@ pub struct SmoothTransformConfig {
     /// one series
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub group_by: Vec<String>,
+    /// for an `ewma` by `tau_seconds`: the field carrying each message's time
+    /// — RFC 3339 or milliseconds since the epoch. Leave it out for arrival
+    /// time
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(extend("x-message-field" = true))]
+    pub time: Option<String>,
     /// what to do about a message missing the field or a group field
     #[serde(default, skip_serializing_if = "MissingFieldPolicy::is_default")]
     pub on_missing: MissingFieldPolicy,
+    /// which messages are applied, and which start the series over
+    #[serde(flatten)]
+    pub gate: Gate,
 }
 
 // ── detect ──────────────────────────────────────────────────────────────────
@@ -341,6 +494,49 @@ pub enum DetectMethod {
         /// how many identical values in a row count
         size: usize,
     },
+    /// Further than `threshold` deviations from a baseline that keeps
+    /// learning: an exponentially weighted mean and spread, each with a time
+    /// constant of its own. The window methods' answer for a series that
+    /// drifts slowly and arrives irregularly — no window to hold, and a
+    /// reading's weight follows how long it lasted. Reads the transform's
+    /// `time`.
+    Ewma {
+        /// the time constant of the mean, in seconds: how quickly normal
+        /// follows the series
+        mean_tau_seconds: f64,
+        /// the time constant of the spread, in seconds — usually longer than
+        /// the mean's, so a burst of noise does not widen the band at once
+        spread_tau_seconds: f64,
+        /// how many deviations count. `3` when left out
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        threshold: Option<f64>,
+        /// the smallest deviation believed, in the field's own units — a
+        /// signal that has been very quiet otherwise flags its first wobble.
+        /// `0` when left out
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        min_spread: Option<f64>,
+    },
+}
+
+/// What a `detect` that keeps learning its baseline learns from.
+#[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, JsonSchema, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum DetectLearn {
+    /// Every reading, anomalies included — so a lasting change becomes the
+    /// new normal as fast as the baseline follows anything.
+    #[default]
+    All,
+    /// Only the readings that were not flagged, so an anomaly cannot pull the
+    /// baseline it is measured against. Pair it with `readapt_after_seconds`,
+    /// or a genuine change of level is flagged for ever.
+    NormalOnly,
+}
+
+impl DetectLearn {
+    #[must_use]
+    pub fn is_default(&self) -> bool {
+        matches!(self, Self::All)
+    }
 }
 
 /// Whether every message comes out annotated, or only the anomalies.
@@ -362,7 +558,7 @@ impl DetectMode {
 }
 
 /// Flags anomalies in a numeric field against its own series — one component
-/// with a `method`, the way `filter` is one component with a kind.
+/// with a `method`, the way `smooth` is.
 ///
 /// Writes a boolean under `as` (`anomaly` when left out), and beside it
 /// `<as>_score` — how far outside normal the value was, in the method's own
@@ -388,6 +584,26 @@ pub struct DetectTransformConfig {
     /// `anomaly` when left out
     #[serde(default, rename = "as", skip_serializing_if = "Option::is_none")]
     pub output: Option<String>,
+    /// also write the baseline the reading was judged against: what normal
+    /// was under `<as>_expected`, and how far from it counts under
+    /// `<as>_band`, both in the field's units. `null` where a method has none
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub with_baseline: bool,
+    /// for `zscore`, `mad` and `ewma`, which keep learning: whether flagged
+    /// readings are learned from too. `all` when left out
+    #[serde(default, skip_serializing_if = "DetectLearn::is_default")]
+    pub learn: DetectLearn,
+    /// with `learn: normal_only`: once readings have been flagged for this
+    /// many seconds in a row, learn from them anyway, so a lasting change
+    /// becomes the new normal
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub readapt_after_seconds: Option<f64>,
+    /// the field carrying each message's time — RFC 3339 or milliseconds since
+    /// the epoch — for the `ewma` method and `readapt_after_seconds`. Leave it
+    /// out for arrival time
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(extend("x-message-field" = true))]
+    pub time: Option<String>,
     /// the fields that identify a series, the reducer's way. Leave it out for
     /// one series
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -395,6 +611,9 @@ pub struct DetectTransformConfig {
     /// what to do about a message missing the field or a group field
     #[serde(default, skip_serializing_if = "MissingFieldPolicy::is_default")]
     pub on_missing: MissingFieldPolicy,
+    /// which messages are applied, and which start the series over
+    #[serde(flatten)]
+    pub gate: Gate,
 }
 
 // ── resample ────────────────────────────────────────────────────────────────
@@ -462,6 +681,9 @@ pub struct ResampleTransformConfig {
     /// what to do about a message missing the field or a group field
     #[serde(default, skip_serializing_if = "MissingFieldPolicy::is_default")]
     pub on_missing: MissingFieldPolicy,
+    /// which messages are applied, and which start the series over
+    #[serde(flatten)]
+    pub gate: Gate,
 }
 
 // ── features ────────────────────────────────────────────────────────────────

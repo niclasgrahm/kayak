@@ -53,6 +53,7 @@ impl BuildTransform for DeriveTransformConfig {
             self.group_by,
             self.time,
             self.on_missing,
+            self.gate,
         )?;
         Ok(Box::new(DeriveTransform {
             series,
@@ -150,6 +151,7 @@ mod tests {
 
     fn config(derive: Vec<Derivation>) -> DeriveTransformConfig {
         DeriveTransformConfig {
+            gate: kayak_core::streaming::Gate::default(),
             derive,
             group_by: vec!["k".into()],
             time: Some("t".into()),

@@ -36,21 +36,32 @@ impl BuildTransform for SmoothTransformConfig {
             bail!("a smooth transform needs a 'field'");
         }
         let method = match &self.method {
-            SmoothMethod::Ewma { alpha, half_life } => {
-                let alpha = match (alpha, half_life) {
-                    (Some(_), Some(_)) => bail!("an ewma takes 'alpha' or 'half_life', not both"),
-                    (None, None) => bail!("an ewma needs an 'alpha' or a 'half_life'"),
-                    (Some(alpha), None) => {
-                        if !(0.0..=1.0).contains(alpha) {
-                            bail!("an ewma's 'alpha' is a weight from 0 to 1, not {alpha}");
-                        }
-                        *alpha
+            SmoothMethod::Ewma {
+                alpha,
+                half_life,
+                tau_seconds,
+            } => match (alpha, half_life, tau_seconds) {
+                (Some(alpha), None, None) => {
+                    if !(0.0..=1.0).contains(alpha) {
+                        bail!("an ewma's 'alpha' is a weight from 0 to 1, not {alpha}");
                     }
-                    (None, Some(half_life)) => stats::alpha_for_half_life(*half_life)
+                    Method::Ewma { alpha: *alpha }
+                }
+                (None, Some(half_life), None) => Method::Ewma {
+                    alpha: stats::alpha_for_half_life(*half_life)
                         .ok_or_else(|| anyhow::anyhow!("an ewma's 'half_life' has to be more than zero"))?,
-                };
-                Method::Ewma { alpha }
-            }
+                },
+                (None, None, Some(tau)) => {
+                    if !(tau.is_finite() && *tau > 0.0) {
+                        bail!("an ewma's 'tau_seconds' has to be more than zero, not {tau}");
+                    }
+                    Method::EwmaByTime { tau_millis: tau * 1000.0 }
+                }
+                (None, None, None) => {
+                    bail!("an ewma needs one of 'alpha', 'half_life' or 'tau_seconds'")
+                }
+                _ => bail!("an ewma takes one of 'alpha', 'half_life' or 'tau_seconds', not several"),
+            },
             SmoothMethod::Median { size } => {
                 if *size == 0 {
                     bail!("a median window needs a 'size' of at least one");
@@ -78,14 +89,23 @@ impl BuildTransform for SmoothTransformConfig {
                 Method::SavitzkyGolay { size: *size, order }
             }
         };
+        // a time on a method that never reads one would be a promise the
+        // transform doesn't keep
+        if self.time.is_some() && !matches!(method, Method::EwmaByTime { .. }) {
+            bail!(
+                "smooth's 'time' is only read by an ewma with 'tau_seconds' — every other method \
+                 is about the order of the values, not when they came"
+            );
+        }
         let output = self.output.unwrap_or_else(|| self.field.clone());
         let series = Series::resolve(
             ctx,
             "smooth",
             format!("smooth:{output}"),
             self.group_by,
-            None,
+            self.time,
             self.on_missing,
+            self.gate,
         )?;
         Ok(Box::new(SmoothTransform {
             series,
@@ -100,6 +120,7 @@ impl BuildTransform for SmoothTransformConfig {
 #[derive(Clone, Copy, Debug)]
 enum Method {
     Ewma { alpha: f64 },
+    EwmaByTime { tau_millis: f64 },
     Median { size: usize },
     Hampel { size: usize, threshold: f64 },
     SavitzkyGolay { size: usize, order: usize },
@@ -115,6 +136,24 @@ impl Method {
                     Some(prev) => alpha * value + (1.0 - alpha) * prev,
                 };
                 *state = json!({"prev": next});
+                next
+            }
+            Method::EwmaByTime { tau_millis } => {
+                let prev = state.get("prev").and_then(Value::as_f64);
+                let at = state.get("at").and_then(Value::as_i64);
+                let next = match (prev, at) {
+                    (Some(prev), Some(at)) => {
+                        // a reading older than the last one moves nothing: it
+                        // lasted no time at all as far as this series is
+                        // concerned, and a negative Δt would extrapolate
+                        #[allow(clippy::cast_precision_loss, reason = "a gap in millis")]
+                        let elapsed = (now - at).max(0) as f64;
+                        let weight = 1.0 - (-elapsed / tau_millis).exp();
+                        prev + weight * (value - prev)
+                    }
+                    _ => value,
+                };
+                *state = json!({"prev": next, "at": now.max(at.unwrap_or(now))});
                 next
             }
             Method::Median { size } => {
@@ -182,11 +221,13 @@ mod tests {
 
     fn config(method: SmoothMethod) -> SmoothTransformConfig {
         SmoothTransformConfig {
+            gate: kayak_core::streaming::Gate::default(),
             field: "v".into(),
             method,
             output: Some("s".into()),
             group_by: vec![],
             on_missing: MissingFieldPolicy::Error,
+            time: None,
         }
     }
 
@@ -208,6 +249,7 @@ mod tests {
             config(SmoothMethod::Ewma {
                 alpha: Some(0.5),
                 half_life: None,
+                tau_seconds: None,
             }),
             &[1.0, 3.0, 3.0],
         )
@@ -217,6 +259,7 @@ mod tests {
             config(SmoothMethod::Ewma {
                 alpha: None,
                 half_life: Some(1.0),
+                tau_seconds: None,
             }),
             &[1.0, 3.0, 3.0],
         )
@@ -280,14 +323,27 @@ mod tests {
             SmoothMethod::Ewma {
                 alpha: Some(0.5),
                 half_life: Some(2.0),
+                tau_seconds: None,
             },
             SmoothMethod::Ewma {
                 alpha: None,
                 half_life: None,
+                tau_seconds: None,
             },
             SmoothMethod::Ewma {
                 alpha: Some(1.5),
                 half_life: None,
+                tau_seconds: None,
+            },
+            SmoothMethod::Ewma {
+                alpha: Some(0.5),
+                half_life: None,
+                tau_seconds: Some(10.0),
+            },
+            SmoothMethod::Ewma {
+                alpha: None,
+                half_life: None,
+                tau_seconds: Some(0.0),
             },
             SmoothMethod::Median { size: 0 },
             SmoothMethod::Hampel {
@@ -301,5 +357,116 @@ mod tests {
         ] {
             assert!(config(method.clone()).build(&mut ctx).is_err(), "{method:?} should be refused");
         }
+    }
+
+    fn by_time(tau_seconds: f64) -> SmoothTransformConfig {
+        let mut config = config(SmoothMethod::Ewma {
+            alpha: None,
+            half_life: None,
+            tau_seconds: Some(tau_seconds),
+        });
+        config.time = Some("t".into());
+        config
+    }
+
+    /// Readings at `(seconds, value)`, smoothed.
+    async fn smoothed_at(config: SmoothTransformConfig, readings: &[(i64, f64)]) -> Result<Vec<f64>> {
+        let mut pipelines = std::collections::HashMap::new();
+        let mut ctx = ctx_with_bucket(&mut pipelines, None);
+        let mut transform = config.build(&mut ctx)?;
+        let messages = readings.iter().map(|(t, v)| json!({"t": t * 1000, "v": v})).collect();
+        let out = transform.apply(batch(messages)).await?;
+        Ok(out
+            .iter()
+            .flat_map(|b| b.iter().filter_map(|m| m["s"].as_f64()))
+            .collect())
+    }
+
+    /// By time, a value's weight is set by how long it lasted, not by how many
+    /// came before it: one τ after the last reading moves the average 1 − 1/e
+    /// of the way, and a burst a millisecond apart barely moves it at all.
+    #[tokio::test]
+    async fn ewma_by_time_weighs_a_value_by_the_gap_before_it() -> Result<()> {
+        let out = smoothed_at(by_time(10.0), &[(0, 0.0), (10, 1.0)]).await?;
+        assert_eq!(out[0], 0.0, "the first value is the average");
+        assert!((out[1] - (1.0 - (-1.0f64).exp())).abs() < 1e-12, "{}", out[1]);
+
+        // the same step, arriving as ten readings a second apart, ends up in
+        // the same place — the count of readings is not what decides it
+        let mut burst = vec![(0, 0.0)];
+        burst.extend((1..=10).map(|t| (t, 1.0)));
+        let out = smoothed_at(by_time(10.0), &burst).await?;
+        assert!((out[10] - (1.0 - (-1.0f64).exp())).abs() < 1e-12, "{}", out[10]);
+
+        // a long gap all but replaces the average
+        let out = smoothed_at(by_time(10.0), &[(0, 0.0), (1000, 1.0)]).await?;
+        assert!(out[1] > 0.999_999, "{}", out[1]);
+        Ok(())
+    }
+
+    /// A reading older than the last one moves nothing: a negative gap would
+    /// extrapolate, and the clock the series keeps does not go backwards.
+    #[tokio::test]
+    async fn ewma_by_time_does_not_move_on_a_late_reading() -> Result<()> {
+        let out = smoothed_at(by_time(10.0), &[(0, 0.0), (10, 1.0), (5, 100.0), (20, 1.0)]).await?;
+        assert_eq!(out[2], out[1], "a late reading changed the average");
+        // and the next reading's gap is measured from 10, not from 5
+        let expected = out[1] + (1.0 - (-1.0f64).exp()) * (1.0 - out[1]);
+        assert!((out[3] - expected).abs() < 1e-12, "{} vs {expected}", out[3]);
+        Ok(())
+    }
+
+    /// `time` is only read by an ewma by `tau_seconds`; anywhere else it is
+    /// refused rather than silently ignored.
+    #[test]
+    fn time_is_refused_on_a_method_that_would_not_read_it() {
+        let mut pipelines = std::collections::HashMap::new();
+        let mut ctx = ctx_with_bucket(&mut pipelines, None);
+        let mut median = config(SmoothMethod::Median { size: 3 });
+        median.time = Some("t".into());
+        let err = median.build(&mut ctx).err().map(|e| e.to_string()).unwrap_or_default();
+        assert!(err.contains("tau_seconds"), "{err}");
+        assert!(by_time(5.0).build(&mut ctx).is_ok());
+    }
+
+    /// The case the gate exists for: a stream carrying a machine's state
+    /// beside its readings. `when` keeps the state messages — strings, which
+    /// would otherwise be an error — away from the average and passes them
+    /// through untouched; `reset_when` starts the average over when the
+    /// machine stops.
+    #[tokio::test]
+    async fn a_gated_smooth_ignores_the_state_messages_and_restarts_on_off() -> Result<()> {
+        use kayak_core::config::{Condition, StringFilterOperatorKind};
+        let is = |field: &str, value: &str| Condition::String {
+            field: field.into(),
+            operator: StringFilterOperatorKind::EqualTo,
+            value: value.into(),
+        };
+        let mut config = config(SmoothMethod::Ewma {
+            alpha: Some(0.5),
+            half_life: None,
+            tau_seconds: None,
+        });
+        config.gate = kayak_core::streaming::Gate {
+            when: vec![is("sensor", "vibration")],
+            reset_when: vec![is("sensor", "state"), is("v", "OFF")],
+        };
+        let mut pipelines = std::collections::HashMap::new();
+        let mut ctx = ctx_with_bucket(&mut pipelines, None);
+        let mut transform = config.build(&mut ctx)?;
+        let messages = vec![
+            json!({"sensor": "vibration", "v": 2.0}),
+            json!({"sensor": "state", "v": "RUNNING"}),
+            json!({"sensor": "vibration", "v": 4.0}),
+            json!({"sensor": "state", "v": "OFF"}),
+            json!({"sensor": "vibration", "v": 10.0}),
+        ];
+        let out = transform.apply(batch(messages)).await?;
+        let out: Vec<Value> = out[0].iter().map(|m| (**m).clone()).collect();
+        assert_eq!(out[1], json!({"sensor": "state", "v": "RUNNING"}), "passed through untouched");
+        assert_eq!(out[2]["s"], json!(3.0), "the state message did not touch the average");
+        assert_eq!(out[3], json!({"sensor": "state", "v": "OFF"}));
+        assert_eq!(out[4]["s"], json!(10.0), "after OFF the average starts over");
+        Ok(())
     }
 }

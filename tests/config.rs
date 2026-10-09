@@ -153,7 +153,88 @@ fn transform_samples() -> Vec<(&'static str, Value)> {
     let mut samples = vec![("buffer", json!({"type": "buffer", "size": 10}))];
     samples.extend(chain_transform_samples());
     samples.extend(streaming_transform_samples());
+    samples.extend(composing_transform_samples());
     samples
+}
+
+/// The transforms and options added so that a chain of stock transforms can
+/// say what a script used to — see "composing instead of scripting" in the
+/// roadmap.
+fn composing_transform_samples() -> Vec<(&'static str, Value)> {
+    vec![
+        (
+            "detect",
+            json!({
+                "type": "detect",
+                "field": "value",
+                "method": {"type": "ewma", "mean_tau_seconds": 120.0, "spread_tau_seconds": 600.0,
+                           "threshold": 4.0, "min_spread": 1.0},
+                "min_samples": 120,
+                "learn": "normal_only",
+                "readapt_after_seconds": 300.0,
+                "with_baseline": true,
+                "time": "ts",
+                "group_by": ["sensor"]
+            }),
+        ),
+        (
+            "pivot",
+            json!({
+                "type": "pivot",
+                "name": "sensor",
+                "value": "value",
+                "names": ["state", "fault", "good_parts"],
+                "into": "machine",
+                "group_by": ["device"],
+                "on_missing": "skip",
+                "when": [{"type": "none_of", "field": "sensor", "values": ["heartbeat"]}]
+            }),
+        ),
+        (
+            "map",
+            json!({
+                "type": "map",
+                "mappings": [
+                    {"type": "arithmetic", "as": "_ratio", "operator": "divide",
+                     "left": {"type": "field", "field": "good"},
+                     "right": {"type": "field", "field": "parts"},
+                     "on_zero": {"type": "value", "value": 1.0}},
+                    {"type": "arithmetic", "as": "ratio", "operator": "min",
+                     "left": {"type": "field", "field": "_ratio"},
+                     "right": {"type": "value", "value": 1.0}},
+                    {"type": "time_bucket", "from": "ts", "every_seconds": 28800,
+                     "offset_seconds": 21600, "timezone": "Europe/Stockholm",
+                     "format": "millis", "as": "shift_start"},
+                    {"type": "drop", "from": ["_ratio"]}
+                ]
+            }),
+        ),
+        (
+            "throttle",
+            json!({
+                "type": "throttle",
+                "seconds": 5.0,
+                "group_by": ["_meta.machine_id"],
+                "time": "ts",
+                "on_missing": "skip"
+            }),
+        ),
+        (
+            "smooth",
+            json!({
+                "type": "smooth",
+                "field": "vibration",
+                "method": {"type": "ewma", "tau_seconds": 180.0},
+                "as": "vibration_smoothed",
+                "time": "ts",
+                "when": [
+                    {"type": "string", "field": "sensor", "operator": "equal_to",
+                     "value": "pump_vibration"}
+                ],
+                "reset_when": [{"type": "one_of", "field": "state", "values": ["OFF"]}]
+            }),
+        ),
+    ]
 }
 
 /// The streaming statistics family — one sample per transform, each keyed
@@ -289,7 +370,11 @@ fn chain_transform_samples() -> Vec<(&'static str, Value)> {
             "filter",
             json!({
                 "type": "filter",
-                "Numeric": {"field": "value", "operator": "greater_than", "value": 10.0}
+                "conditions": [
+                    {"type": "numeric", "field": "value", "operator": "greater_than", "value": 10.0},
+                    {"type": "none_of", "field": "state", "values": ["OFF", "UNKNOWN"]}
+                ],
+                "invert": true
             }),
         ),
         (
@@ -673,6 +758,67 @@ fn every_component_sample_round_trips_unchanged() -> anyhow::Result<()> {
 /// A connection round-trips the same way a component does, and the file it
 /// lives in is a map of name to connection — that map *is* the wire format,
 /// both on disk and out of `GET /api/connections`.
+/// `filter` was one comparison hung off its kind (`{"Numeric": {...}}`)
+/// before it took a list of conditions. A config written then has to keep
+/// loading — as the one condition it always meant — and is saved in the
+/// current spelling from then on.
+#[test]
+fn a_filter_in_the_old_single_comparison_spelling_still_parses() -> anyhow::Result<()> {
+    let config = |filter: Value| {
+        json!({
+            "id": "x",
+            "inputs": [{"type": "dummy", "duration": 1}],
+            "transforms": [filter],
+            "outputs": [{"type": "stdout"}]
+        })
+    };
+    for (old, condition) in [
+        (
+            json!({"type": "filter", "Numeric": {"field": "value", "operator": "greater_than", "value": 8.0}}),
+            json!({"type": "numeric", "field": "value", "operator": "greater_than", "value": 8.0}),
+        ),
+        (
+            json!({"type": "filter", "String": {"field": "level", "operator": "contains", "value": "warn"}}),
+            json!({"type": "string", "field": "level", "operator": "contains", "value": "warn"}),
+        ),
+    ] {
+        let parsed: Config = serde_json::from_value(config(old))?;
+        assert_eq!(
+            serde_json::to_value(&parsed)?,
+            config(json!({"type": "filter", "conditions": [condition]}))
+        );
+    }
+
+    // and from YAML, which is how the sample config spelled it
+    let yaml = "id: x\ninputs: [{type: dummy, duration: 1}]\noutputs: [{type: stdout}]\n\
+                transforms:\n- type: filter\n  Numeric: {field: value, operator: less_than, value: 3}\n";
+    let parsed: Config = serde_norway::from_str(yaml)?;
+    assert_eq!(
+        serde_json::to_value(&parsed.transforms)?,
+        json!([{"type": "filter", "conditions": [
+            {"type": "numeric", "field": "value", "operator": "less_than", "value": 3.0}
+        ]}])
+    );
+    Ok(())
+}
+
+/// A filter with neither spelling is an error that names what is missing,
+/// rather than an untagged-enum shrug.
+#[test]
+fn a_filter_with_no_conditions_field_says_so() {
+    let config = json!({
+        "id": "x",
+        "inputs": [{"type": "dummy", "duration": 1}],
+        "transforms": [{"type": "filter", "invert": true}],
+        "outputs": [{"type": "stdout"}]
+    });
+    let error = serde_json::from_value::<Config>(config)
+        .err()
+        .map(|e| e.to_string())
+        .unwrap_or_default();
+    assert!(error.contains("conditions"), "{error}");
+}
+
 #[test]
 fn every_connection_sample_round_trips_unchanged() -> anyhow::Result<()> {
     for (tag, connection) in connection_samples() {

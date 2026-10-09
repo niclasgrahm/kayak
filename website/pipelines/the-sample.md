@@ -32,8 +32,9 @@ root pipeline with no source, waiting to be posted to (see [posting into a
 pipeline](/io/posting-into-a-pipeline)).
 
 Three of them are the OPC UA sample and want `docker compose up opcua`, which is
-Microsoft's PLC simulator: `opcua_line1` names three of its nodes and gives them
-plant-ish names, `opcua_anomalies` browses a folder instead of naming anything
+Microsoft's PLC simulator: `opcua_line1` names three of its nodes, gives them
+plant-ish names and `pivot`s them, so every reading also carries the latest of
+all three as a row; `opcua_anomalies` browses a folder instead of naming anything
 and puts a deadband on it, and `opcua_line1_10s_avg` reduces the first per tag
 over ten seconds — which is a plain `group_by` on `name`, because an opcua
 reading carries its tag in the message rather than behind the envelope (see

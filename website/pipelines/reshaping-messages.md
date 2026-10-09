@@ -17,7 +17,7 @@ never makes two. That's what keeps it out of the territory `filter`, `splitter`
 and `reduce` already own, and it's why `on_missing` has no "drop the message"
 arm: that is a `filter`, one link along the chain.
 
-The seven mappings:
+The eight mappings:
 
 | | |
 |---|---|
@@ -27,6 +27,7 @@ The seven mappings:
 | `cast` | convert a value to another JSON shape |
 | `concat` | join fields and literal text into one string |
 | `arithmetic` | one operation on two numbers, each a field or a literal |
+| `time_bucket` | the start of the hour, day or shift a time falls in |
 | `drop` | take fields off |
 
 **`mappings` is an ordered list and the order is the semantics.** Each mapping
@@ -50,9 +51,62 @@ a syntax to design, and the honest answer at that point is an embedded scripting
 language rather than an expression tree spelled in YAML. Two steps read fine and
 four don't, and that unpleasantness is information about which tool you want.
 
+`arithmetic`'s operators are `add`, `subtract`, `multiply`, `divide`, `min` and
+`max`. The last two are what a clamp is made of — `min` against a literal is a
+ceiling and `max` a floor, so keeping a percentage in 0–100 is two mappings:
+
+```yaml
+  - { type: arithmetic, as: _capped, operator: min,
+      left: { type: field, field: health }, right: { type: value, value: 100 } }
+  - { type: arithmetic, as: health_pct, operator: max,
+      left: { type: field, field: _capped }, right: { type: value, value: 0 } }
+```
+
+A divisor that is a literal zero is refused when the pipeline is built. A
+divisor *field* that turns out to hold zero fails the batch, unless the
+mapping's `on_zero` says what it means instead: `{ type: null }` writes `null`
+— right for a chart, which should show nothing there — and
+`{ type: value, value: 1 }` writes a number, right for a ratio over an empty
+period that a sum downstream has to be able to add up.
+
 It's a list rather than an object keyed by target name for the same reason: a
 JSON object's key order is not something a config file should have to rely on,
 and here order decides the answer.
+
+## time buckets
+
+`time_bucket` writes the start of the calendar period a time falls in. Its
+reason to exist is `group_by`: a stateful transform grouped by the bucket
+keeps one series per period, so "per shift", "per hour" and "since midnight"
+need no window of their own — and the [state bucket](/pipelines/state)'s idle
+timeout forgets the periods that are over.
+
+```yaml
+- type: map
+  mappings:
+  - type: time_bucket
+    from: ts                       # RFC 3339 or epoch milliseconds
+    every_seconds: 28800           # eight hours
+    offset_seconds: 21600          # starting at 06:00
+    timezone: Europe/Stockholm     # on this clock
+    as: shift
+- type: derive
+  derive: [{ function: counter, field: good_parts, as: good }]
+  group_by: [machine, shift]       # the count starts over every shift
+```
+
+Periods are counted on the time zone's **wall clock**, which is the point of
+naming one: the morning shift starts at 06:00 in July and in December, two
+different UTC hours, and the night the clocks go back holds a nine-hour night
+shift. Without `timezone` the clock is UTC. Buckets line up with local
+midnight on 1 January 1970 and `offset_seconds` moves them on — which makes
+days start at midnight, and weeks on a Thursday (an offset of four days
+starts them on a Monday). A start that falls in the hour skipped in spring is
+the first instant after the gap; one in the hour that happens twice in autumn
+is the first of the two.
+
+`format: millis` writes the start as epoch milliseconds instead of an RFC 3339
+string, for an output that wants a number.
 
 ## keep
 

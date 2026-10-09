@@ -998,6 +998,7 @@ pub enum NumericFilterOperatorKind {
     GreaterThan,
     LessThan,
     EqualTo,
+    NotEqualTo,
 }
 
 /// How a string is compared to the one in the config.
@@ -1005,33 +1006,103 @@ pub enum NumericFilterOperatorKind {
 #[serde(rename_all = "snake_case")]
 pub enum StringFilterOperatorKind {
     EqualTo,
+    NotEqualTo,
     Contains,
 }
 
-#[derive(Clone, Debug, Deserialize, Serialize, JsonSchema)]
+/// The spelling `filter` had before it took a list of [`Condition`]s: one
+/// comparison, externally tagged by its kind (`{"Numeric": {...}}`). Still
+/// read, so a config written then keeps loading; never written, since a
+/// filter is saved as its `conditions`.
+#[derive(Clone, Debug, Deserialize)]
 pub enum FilterKind {
     Numeric {
-        /// the field to filter on
-        #[schemars(extend("x-message-field" = true))]
         field: String,
         operator: NumericFilterOperatorKind,
         value: f64,
     },
     String {
-        #[schemars(extend("x-message-field" = true))]
         field: String,
         operator: StringFilterOperatorKind,
         value: String,
     },
 }
-/// Drops messages that don't match a condition, and drops the whole batch if
-/// none of them do. Pick either the `Numeric` or the `String` form — the fields
-/// differ because the comparisons do.
-#[derive(Clone, Debug, Deserialize, Serialize, JsonSchema)]
+
+impl From<FilterKind> for Condition {
+    fn from(kind: FilterKind) -> Self {
+        match kind {
+            FilterKind::Numeric {
+                field,
+                operator,
+                value,
+            } => Condition::Numeric {
+                field,
+                operator,
+                value,
+            },
+            FilterKind::String {
+                field,
+                operator,
+                value,
+            } => Condition::String {
+                field,
+                operator,
+                value,
+            },
+        }
+    }
+}
+
+/// Keeps the messages that pass every one of `conditions` and drops the rest
+/// — or, with `invert`, drops the ones that pass and keeps the rest. A batch
+/// with nothing left in it is dropped whole.
+///
+/// A message missing a field a condition tests, or carrying it as the wrong
+/// type, does not pass that condition. So `invert` keeps such a message: it
+/// drops only what the conditions positively match.
+#[derive(Clone, Debug, Serialize, JsonSchema, PartialEq)]
 #[schemars(title = "filter")]
 pub struct FilterTransformConfig {
-    #[serde(flatten)]
-    pub filter: FilterKind,
+    /// what a message has to pass — all of them, and at least one
+    pub conditions: Vec<Condition>,
+    /// drop the messages that pass instead of keeping them
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub invert: bool,
+}
+
+#[allow(clippy::trivially_copy_pass_by_ref)] // serde's `skip_serializing_if` hands a reference
+fn is_false(value: &bool) -> bool {
+    !*value
+}
+
+impl<'de> Deserialize<'de> for FilterTransformConfig {
+    /// The current spelling, or the single-comparison one it replaced — told
+    /// apart by the `Numeric`/`String` key the old one hangs its fields off.
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        #[derive(Deserialize)]
+        struct Current {
+            conditions: Vec<Condition>,
+            #[serde(default)]
+            invert: bool,
+        }
+
+        let value = serde_json::Value::deserialize(deserializer)?;
+        let legacy = value
+            .as_object()
+            .is_some_and(|object| object.contains_key("Numeric") || object.contains_key("String"));
+        if legacy {
+            let kind = FilterKind::deserialize(value).map_err(serde::de::Error::custom)?;
+            return Ok(Self {
+                conditions: vec![kind.into()],
+                invert: false,
+            });
+        }
+        let current = Current::deserialize(value).map_err(serde::de::Error::custom)?;
+        Ok(Self {
+            conditions: current.conditions,
+            invert: current.invert,
+        })
+    }
 }
 
 /// Sends the batch to an http endpoint and carries on with what comes back —
@@ -1245,8 +1316,9 @@ pub struct ReduceTransformConfig {
 
 /// One test a message either passes or doesn't.
 ///
-/// The same comparisons the `filter` transform makes, spelled as a tagged union
-/// so that a *list* of them can be configured and rendered as a form. Several
+/// What `filter` keeps, what `remember` remembers from, and what opens a
+/// `buffer`'s gate — one vocabulary, spelled as a tagged union so that a
+/// *list* of them can be configured and rendered as a form. Several
 /// conditions are read as "all of these" — there is no `or` and no nesting,
 /// because the moment either exists this is an expression language with a
 /// syntax to design, and everything so far has been reachable without one.
@@ -1257,16 +1329,41 @@ pub enum Condition {
     /// a number does not match.
     Numeric {
         /// the field to test — a dotted path, like anywhere else
+        #[schemars(extend("x-message-field" = true))]
         field: String,
+        /// how the field is compared
         operator: NumericFilterOperatorKind,
+        /// the number it is compared to
         value: f64,
     },
     /// Compares a field to a string, the same way.
     String {
         /// the field to test — a dotted path, like anywhere else
+        #[schemars(extend("x-message-field" = true))]
         field: String,
+        /// how the field is compared
         operator: StringFilterOperatorKind,
+        /// the string it is compared to
         value: String,
+    },
+    /// The field is a string equal to one of `values`. A message whose field
+    /// is missing or isn't a string does not match.
+    OneOf {
+        /// the field to test — a dotted path, like anywhere else
+        #[schemars(extend("x-message-field" = true))]
+        field: String,
+        /// the strings that match
+        values: Vec<String>,
+    },
+    /// The field is a string equal to none of `values`. A message whose field
+    /// is missing or isn't a string does not match this either — absence is
+    /// not a value, so it is in no list and outside none.
+    NoneOf {
+        /// the field to test — a dotted path, like anywhere else
+        #[schemars(extend("x-message-field" = true))]
+        field: String,
+        /// the strings that do not match
+        values: Vec<String>,
     },
 }
 
@@ -1656,6 +1753,8 @@ pub enum TransformKind {
     Map(MapTransformConfig),
     Script(ScriptTransformConfig),
     Deadband(crate::streaming::DeadbandTransformConfig),
+    Throttle(crate::streaming::ThrottleTransformConfig),
+    Pivot(crate::streaming::PivotTransformConfig),
     Derive(crate::streaming::DeriveTransformConfig),
     Rolling(crate::streaming::RollingTransformConfig),
     Smooth(crate::streaming::SmoothTransformConfig),

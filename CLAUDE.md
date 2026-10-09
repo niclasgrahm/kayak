@@ -390,12 +390,16 @@ stream doesn't carry — that's a config mistake, not an event, and a line per
 message buries the log.
 
 `Condition` is also what the `buffer` transform's `until` gate is spelled with
-— see "the buffer transform" below. It is a new internally-tagged enum rather
-than reusing `FilterKind`
-(which is externally tagged): a `Vec<FilterKind>` would reflect as
-`FieldType::Json` and fail `no_component_field_needs_raw_json`. Several
-conditions mean *all of them*; there is no `or` and no nesting, because that is
-the point where this becomes an expression language.
+— see "the buffer transform" below — and, since 2026-10-09, what `filter` is:
+a `conditions` list plus `invert`, evaluated by the same
+`transforms::state::matches`. `filter` used to be one externally tagged
+comparison (`{"Numeric": {...}}`); `FilterKind` survives only as that legacy
+spelling, still *read* (a hand-written `Deserialize` on
+`FilterTransformConfig` tells the two apart by the `Numeric`/`String` key) and
+never written. Several conditions mean *all of them*; there is no `or` and no
+nesting, because that is the point where this becomes an expression language
+— `invert` plus `none_of` covers the negations without one. A missing field
+matches no condition, `none_of` included: absence is not a value.
 
 **The config file now has two spellings** (`kayak_core::state::ConfigFile`): a
 bare array of pipelines, or a document with `state` and `pipelines`. Both are
@@ -734,6 +738,13 @@ Five properties are load-bearing:
   stream that isn't what the config claims, and folding the two together hides
   it forever.
 
+`time_bucket` is the one mapping that knows about calendars, and it floors on
+the zone's **wall clock** (to a naive local time, floor, back to an instant via
+`chrono-tz`) — that is what keeps a 06:00 shift at 06:00 across a clock
+change, at the cost of a 7- or 9-hour bucket on those nights. Its job is to
+be a `group_by` field: a per-period series is "group the stateful transform by
+the bucket", never a new window concept.
+
 There is deliberately **no** build-time check that a mapping reads a field a
 later mapping writes — the message may already carry it, so the check has false
 positives and a false refusal is worse than the warning.
@@ -796,8 +807,8 @@ directions, and `just docs` regenerates the table on the scripting page.
 
 ### Streaming statistics (tier one)
 
-Six transforms — `deadband`, `derive`, `rolling`, `smooth`, `detect`,
-`resample` — declared together in `kayak-core/src/streaming.rs` and built on
+Seven transforms — `deadband`, `throttle`, `derive`, `rolling`, `smooth`,
+`detect`, `resample` — declared together in `kayak-core/src/streaming.rs` and built on
 one shared shape in `src/transforms/keyed.rs`. The shape is the decision:
 
 - **The key is `group_by`** (the reducer's list, rendered — a bare value for
@@ -812,16 +823,35 @@ one shared shape in `src/transforms/keyed.rs`. The shape is the decision:
   because `recall` + `remember` would clone a thousand-point window out and
   back per message. `rolling1`/`rolling1000` in the bench are what keep that
   cost visible.
+- **`when` and `reset_when` (`streaming::Gate`, flattened into all seven)
+  are enforced in `Series::key` and nowhere else.** A message `when` doesn't
+  match comes back as "no key" — the path every transform already had for an
+  unkeyed message under `skip` — so no transform implements the gate, and a
+  new keyed transform gets it by calling `key`. `reset_when` is checked first
+  and clears the key's state (`Value::Null`, the same as a fresh key). A
+  message matching neither needs no key, even under `on_missing: error`.
 - **Absent follows `on_missing` (error by default, like the reducer); present
   and wrong is always an error.** `Series::number` is the one place that rule
   is spelled. A skipped message passes through as the *same `Arc`*, untouched.
 - **Time is `MessageTime`** — arrival when no `time` field is named. Only the
   transforms that measure something *per second* or *by age* carry the field
-  (`deadband`, `derive`, `rolling`, `resample`); `smooth` and `detect` are
-  about order, and a `time` on them would be a promise they don't keep.
+  (`deadband`, `derive`, `rolling`, `resample`, and `smooth` for its `ewma`
+  by `tau_seconds` alone — `smooth` refuses a `time` beside any other method,
+  since those are about order and a `time` there would be a promise they
+  don't keep). `detect` is about order and has none.
 
 Per transform, the thing to know before changing it:
 
+- `pivot` is declared in `streaming.rs` and keyed through `Series` like the
+  rest, though it does no arithmetic: the latest value of each of `names` per
+  key, written onto every message. `names` is required because it is the
+  bound on one key's row — the bucket bounds keys, not what each one holds.
+  A message's own reading is taken *before* the row is written, and a name
+  not yet seen is left out rather than `null`.
+- `throttle` keeps one number per key, when the last message *passed*, and
+  runs the interval from there rather than from a grid — so it holds nothing,
+  needs no tick and loses nothing on shutdown. It never reads a value, which
+  is the difference from `deadband` that matters: what it passes is whole.
 - `deadband` anchors on the last value that *passed*, forced passes included
   (that is what a historian's exception filter does), but its flatline clock
   runs from the last *change*, so a `max_seconds` confirmation of a stuck
@@ -841,7 +871,14 @@ Per transform, the thing to know before changing it:
   *before* the reading, so a spike can't pull its own baseline; the chart
   methods (`cusum` without a target, `ewma_chart`, `western_electric`)
   **freeze** the warm-up's mean and deviation. Nothing is flagged during
-  `min_samples`; a baseline with no spread flags any departure.
+  `min_samples`; a baseline with no spread flags any departure. The methods
+  that keep learning (`zscore`, `mad`, `ewma`) take `learn`, and
+  `Learning::learns` is the one rule for all three: warm-up learns
+  everything, `normal_only` keeps a flagged reading out, and
+  `readapt_after_seconds` lets a run of flagged readings back in once it has
+  lasted that long — learning from the run, not jumping the level, so no
+  method needs its own readapt. `with_baseline` reads `Verdict::expected`/
+  `band`, which every arm fills where it has something in the field's units.
 - `resample` is the tick's second user and **only under arrival time**: a
   `time` field means the readings' own clock is driving, and the wall clock
   says nothing about whether an interval is over, so a quiet key's interval
@@ -850,7 +887,7 @@ Per transform, the thing to know before changing it:
   (nothing to interpolate towards); `forward_fill` is the only method that
   emits an empty interval.
 
-The sample's `heartbeat_trend` and `heartbeat_grid` run all six off the
+The sample's `heartbeat_trend` and `heartbeat_grid` run all seven off the
 heartbeat; `config.yaml` has to carry them too or `tests/config.rs` fails.
 
 ### The model round trip (`features`, and the http transform)
@@ -1681,7 +1718,7 @@ identifier would suggest the fix is to define it.
 
 ### The component reference (`/docs`)
 
-Generated, never hand-written. `kayak-core/src/docs.rs` reflects over `schema_for!(InputKind)` etc. and produces `ComponentDoc`s — kind, family, description, fields (name, type, required) and, for enum-shaped configs like `filter`, variants. **The doc comments on the config structs are the docs**, and a component with no doc comment fails a unit test. Two consumers: the Leptos `/docs` page renders it, `GET /api/docs` serves it as JSON.
+Generated, never hand-written. `kayak-core/src/docs.rs` reflects over `schema_for!(InputKind)` etc. and produces `ComponentDoc`s — kind, family, description, fields (name, type, required) and, for an enum-shaped config, variants (no component is one today — `filter` was; the shape is pinned against a stand-in in the tests). **The doc comments on the config structs are the docs**, and a component with no doc comment fails a unit test. Two consumers: the Leptos `/docs` page renders it, `GET /api/docs` serves it as JSON.
 
 Nothing in there knows the name of any component — keep it that way. Notes for anyone touching it: walk `oneOf` (which pairs a `type` tag with a config struct), never `$defs` (which also holds shared field types like `Secret`); field order is `required` order then alphabetical; `Option<T>` arrives as `anyOf: [T, null]` when the inner type is a `$ref` and as `"type": ["integer", "null"]` when it isn't — `scalar_type_of` handles the second spelling.
 

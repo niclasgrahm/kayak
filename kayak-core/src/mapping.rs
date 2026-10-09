@@ -219,6 +219,44 @@ pub enum Mapping {
         /// the field to write the answer to
         #[serde(rename = "as")]
         output: String,
+        /// for `divide`: what a right-hand field holding zero produces. Fails
+        /// the batch when left out
+        #[serde(default, skip_serializing_if = "OnZero::is_default")]
+        on_zero: OnZero,
+    },
+    /// The start of the calendar period a time falls in — the hour, the day,
+    /// the shift — written as a field of its own.
+    ///
+    /// What it is for is `group_by`: a stateful transform grouped by the
+    /// bucket keeps a series per period, so "per shift" and "since midnight"
+    /// need no window of their own, and the bucket store's idle timeout
+    /// forgets the old periods. Periods are counted in the time zone's wall
+    /// clock, so a shift that starts at 06:00 starts at 06:00 summer and
+    /// winter alike, and the night a clock changes holds a 7- or 9-hour shift.
+    /// Buckets line up with local midnight on 1 January 1970, moved on by
+    /// `offset_seconds`: `every_seconds: 28800, offset_seconds: 21600` is
+    /// 06:00, 14:00 and 22:00. A week counts from a Thursday, so starting one
+    /// on a Monday is an offset of four days.
+    TimeBucket {
+        /// the field holding the time — an RFC 3339 string or milliseconds
+        /// since the epoch
+        from: String,
+        /// how long a bucket is, in seconds
+        every_seconds: u64,
+        /// how far past the line-up the buckets start, in seconds — less than
+        /// `every_seconds`
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        offset_seconds: Option<u64>,
+        /// the IANA time zone whose clock the periods are counted on, e.g.
+        /// `Europe/Stockholm`. UTC when left out
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        timezone: Option<String>,
+        /// how the bucket's start is written. `rfc3339` when left out
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        format: Option<TimeFormat>,
+        /// the field to write the bucket's start to
+        #[serde(rename = "as")]
+        output: String,
     },
     /// Takes fields off the message.
     ///
@@ -247,7 +285,8 @@ impl Mapping {
             Self::Constant { output, .. }
             | Self::Coalesce { output, .. }
             | Self::Concat { output, .. }
-            | Self::Arithmetic { output, .. } => Some(output),
+            | Self::Arithmetic { output, .. }
+            | Self::TimeBucket { output, .. } => Some(output),
             Self::Drop { .. } => None,
         }
     }
@@ -263,6 +302,7 @@ impl Mapping {
             Self::Cast { .. } => "cast",
             Self::Concat { .. } => "concat",
             Self::Arithmetic { .. } => "arithmetic",
+            Self::TimeBucket { .. } => "time_bucket",
             Self::Drop { .. } => "drop",
         }
     }
@@ -322,6 +362,17 @@ impl Literal {
     }
 }
 
+/// How a [`Mapping::TimeBucket`] writes a time.
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, JsonSchema, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum TimeFormat {
+    /// An RFC 3339 string in UTC, to the millisecond — the spelling every
+    /// time kayak writes uses.
+    Rfc3339,
+    /// Milliseconds since the epoch, as a number.
+    Millis,
+}
+
 /// One side of an [`Mapping::Arithmetic`]: a field to read, or a fixed number.
 #[derive(Clone, Debug, Deserialize, Serialize, JsonSchema, PartialEq)]
 #[serde(tag = "type", rename_all = "snake_case")]
@@ -349,8 +400,40 @@ pub enum ArithmeticOperator {
     /// left × right
     Multiply,
     /// left ÷ right. A literal zero on the right is refused when the pipeline
-    /// is built; a *field* that turns out to be zero fails the batch.
+    /// is built; what a *field* that turns out to be zero does is `on_zero`.
     Divide,
+    /// the smaller of left and right — with a literal on one side, a ceiling
+    Min,
+    /// the larger of left and right — with a literal on one side, a floor
+    Max,
+}
+
+/// What a `divide` does when the field it divides by holds zero.
+///
+/// A ratio over an empty period — parts per minute before the first minute —
+/// is the usual way that happens, and which answer is right depends on what
+/// reads it: a chart wants nothing there, a sum downstream wants a number.
+#[derive(Clone, Debug, Default, Deserialize, Serialize, JsonSchema, PartialEq)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum OnZero {
+    /// Fail the batch, naming the division. A zero nobody expected is a
+    /// stream that isn't what the config claims.
+    #[default]
+    Error,
+    /// Write `null` as the answer.
+    Null,
+    /// Write this number as the answer.
+    Value {
+        /// the answer to write instead
+        value: f64,
+    },
+}
+
+impl OnZero {
+    #[must_use]
+    pub fn is_default(&self) -> bool {
+        matches!(self, Self::Error)
+    }
 }
 
 impl ArithmeticOperator {
@@ -362,6 +445,8 @@ impl ArithmeticOperator {
             Self::Subtract => "-",
             Self::Multiply => "*",
             Self::Divide => "/",
+            Self::Min => "min",
+            Self::Max => "max",
         }
     }
 }

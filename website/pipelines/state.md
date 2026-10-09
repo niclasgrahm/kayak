@@ -93,6 +93,41 @@ the config rebuilds every pipeline, and an edit to an unrelated pipeline
 shouldn't cost an hour of accumulated state. A bucket whose *declaration*
 changed is a different bucket and starts empty.
 
+## readings into rows: pivot
+
+`remember` and `recall` carry a named fact from one kind of message to
+another. `pivot` is the common case of that done in one step: a stream of one
+reading per message — the shape almost every industrial and IoT source has —
+turned into rows. It remembers the latest value of each of `names` per key and
+writes all of them onto every message:
+
+```yaml
+state:
+  machines: { max_keys: 500, idle_timeout_secs: 3600 }
+pipelines:
+  - id: machine_rows
+    state: { bucket: machines }
+    inputs: [{ type: indu, connection: indu, sensors: [press-3/state, press-3/fault] }]
+    transforms:
+      - type: pivot
+        name: sensor            # which reading this is
+        value: value            # and what it says
+        names: [state, fault]
+        group_by: [device]
+```
+
+`{"device": "press-3", "sensor": "fault", "value": "NONE"}` comes out carrying
+`"state": "RUNNING", "fault": "NONE"` beside its own fields, once both have
+been seen. A message updates its own name before the row is written, so it
+always carries its own reading; a name not seen yet for its key is left out,
+not written as `null`. `into: machine` writes the row under an object instead
+of at the top level.
+
+`names` is required because it is the bound — a key's row can hold those and
+nothing else — and a message naming something not on the list contributes
+nothing and still gets the row. Like the streaming transforms, `pivot` takes
+`when` and `reset_when`.
+
 ## gating a buffer on a bucket
 
 The third thing a bucket can do is hold a pipeline back. The `buffer`
