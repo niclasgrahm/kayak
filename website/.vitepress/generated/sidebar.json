@@ -123,6 +123,10 @@
     {
       "link": "/reference/inputs#input-clickhouse",
       "text": "clickhouse"
+    },
+    {
+      "link": "/reference/inputs#input-http-poll",
+      "text": "http_poll"
     }
   ],
   "outputs": [

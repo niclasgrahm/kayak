@@ -33,7 +33,10 @@ use tokio::time::Instant;
 
 use crate::backoff::Backoff;
 use crate::events::publish;
-use crate::inputs::{Delivery, InputSource, MessageBatch, batch_cap, envelope::Envelope};
+use crate::inputs::{
+    Delivery, InputSource, MessageBatch, batch_cap,
+    envelope::{Envelope, Meta},
+};
 use crate::outputs::columns::{Identifier, Table};
 use crate::state::{PipelineId, UiEvent};
 
@@ -177,6 +180,37 @@ impl Plan {
             Source::Query(_) => "the configured query".to_string(),
         }
     }
+
+    /// What the poller needs of this plan; the rest is the reader's.
+    #[must_use]
+    pub fn schedule(&self) -> Schedule {
+        Schedule {
+            interval: self.interval,
+            start_from: self.cursor.as_ref().map(|c| c.start_from),
+            page_size: self.page_size,
+            max_batch: self.max_batch,
+            source: self.describe_source(),
+        }
+    }
+}
+
+/// What the poller itself needs, whatever it is reading: when to read, whether
+/// there is a watermark to follow, and how much to ask for and hand on.
+///
+/// A [`Plan`] gives one for a database. The `http_poll` input builds its own,
+/// always a snapshot: the poller has never needed to know that what it reads
+/// speaks SQL, only that a [`Reader`] answers it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Schedule {
+    pub interval: Duration,
+    /// Where an incremental read starts; `None` is a snapshot. Only the start
+    /// is the poller's business — which field the watermark follows is the
+    /// reader's.
+    pub start_from: Option<StartFrom>,
+    pub page_size: usize,
+    pub max_batch: usize,
+    /// How the source is named in a log line.
+    pub source: String,
 }
 
 /// One row as a reader returns it: the message, and the row's cursor value
@@ -238,9 +272,12 @@ pub fn cut_at_last_value(mut page: Vec<Fetched>, limit: usize) -> (Vec<Fetched>,
 
 /// The `InputSource` — see the module docs.
 pub struct Poller {
-    plan: Plan,
+    schedule: Schedule,
     reader: Box<dyn Reader>,
-    connection_name: String,
+    /// What every message carries about where it was read from, beside
+    /// `polled_at`: the connection a database was read through, the url an
+    /// api was. Attached only when the envelope is on.
+    origin: Meta,
     envelope: Envelope,
     pipeline_id: PipelineId,
     events: broadcast::Sender<UiEvent>,
@@ -265,17 +302,17 @@ pub struct Poller {
 impl Poller {
     #[must_use]
     pub fn new(
-        plan: Plan,
+        schedule: Schedule,
         reader: Box<dyn Reader>,
-        connection_name: String,
+        origin: Meta,
         envelope: Envelope,
         pipeline_id: PipelineId,
         events: broadcast::Sender<UiEvent>,
     ) -> Self {
         Self {
-            plan,
+            schedule,
             reader,
-            connection_name,
+            origin,
             envelope,
             pipeline_id,
             events,
@@ -300,17 +337,16 @@ impl Poller {
         if self.pending.is_empty() {
             return None;
         }
-        let count = self.pending.len().min(self.plan.max_batch);
+        let count = self.pending.len().min(self.schedule.max_batch);
         let batch: MessageBatch = self.pending.drain(..count).map(Arc::new).collect();
         Some(Arc::new(batch))
     }
 
     fn enqueue(&mut self, row: Value) {
         let own = if self.envelope.is_enabled() {
-            vec![
-                ("connection", Value::String(self.connection_name.clone())),
-                ("polled_at", Value::String(self.polled_at.clone())),
-            ]
+            let mut own = self.origin.clone();
+            own.push(("polled_at", Value::String(self.polled_at.clone())));
+            own
         } else {
             Vec::new()
         };
@@ -331,26 +367,23 @@ impl Poller {
             // the start of a read, as against the next page of one
             self.polled_at = chrono::Utc::now().to_rfc3339();
         }
-        let Some(cursor) = self.plan.cursor.clone() else {
+        let Some(start_from) = self.schedule.start_from else {
             let rows = self.reader.snapshot().await?;
             let count = rows.len();
             for row in rows {
                 self.enqueue(row);
             }
-            tracing::debug!(
-                "snapshot of {} returned {count} rows",
-                self.plan.describe_source()
-            );
-            self.next_due = Some(Instant::now() + self.plan.interval);
+            tracing::debug!("snapshot of {} returned {count} rows", self.schedule.source);
+            self.next_due = Some(Instant::now() + self.schedule.interval);
             return Ok(());
         };
 
         if !self.started {
-            if cursor.start_from == StartFrom::Newest {
+            if start_from == StartFrom::Newest {
                 self.watermark = self.reader.newest().await?;
                 tracing::info!(
                     "incremental read of {} starts after {}",
-                    self.plan.describe_source(),
+                    self.schedule.source,
                     self.watermark
                         .as_deref()
                         .map_or_else(|| "an empty relation".to_string(), |w| format!("'{w}'"))
@@ -361,18 +394,18 @@ impl Poller {
 
         let page = self
             .reader
-            .page(self.watermark.as_deref(), self.plan.page_size)
+            .page(self.watermark.as_deref(), self.schedule.page_size)
             .await?;
         let fetched = page.len();
-        let (rows, uncuttable) = cut_at_last_value(page, self.plan.page_size);
+        let (rows, uncuttable) = cut_at_last_value(page, self.schedule.page_size);
         if uncuttable && !self.warned_ties {
             self.warned_ties = true;
             tracing::warn!(
                 "a whole page of {} rows from {} shares the cursor value '{}'; rows with that \
                  value beyond the page may be missed — raise `page_size` or follow a field \
                  with fewer ties",
-                self.plan.page_size,
-                self.plan.describe_source(),
+                self.schedule.page_size,
+                self.schedule.source,
                 rows.last().and_then(|r| r.cursor.as_deref()).unwrap_or("")
             );
         }
@@ -382,8 +415,8 @@ impl Poller {
             }
             self.enqueue(row.row);
         }
-        if fetched < self.plan.page_size {
-            self.next_due = Some(Instant::now() + self.plan.interval);
+        if fetched < self.schedule.page_size {
+            self.next_due = Some(Instant::now() + self.schedule.interval);
         }
         Ok(())
     }
@@ -506,12 +539,12 @@ mod tests {
         }
     }
 
-    fn poller(plan: Plan, reader: Scripted) -> Poller {
+    fn poller(plan: &Plan, reader: Scripted) -> Poller {
         let (events, _rx) = broadcast::channel(4);
         Poller::new(
-            plan,
+            plan.schedule(),
             Box::new(reader),
-            "db".to_string(),
+            vec![("connection", json!("db"))],
             Envelope::none(),
             "p".to_string(),
             events,
@@ -640,7 +673,7 @@ mod tests {
             Ok(vec![fetched(3), fetched(4)]),
             Ok(vec![fetched(5)]),
         ]);
-        let mut poller = poller(Plan::build(&config(incremental()), "schema")?, reader.clone());
+        let mut poller = poller(&Plan::build(&config(incremental()), "schema")?, reader.clone());
 
         // the full page is cut before its last value...
         assert_eq!(ids(&poller.next().await?), [1]);
@@ -691,7 +724,7 @@ mod tests {
             lag_secs: None,
         });
         config.interval_secs = 1;
-        let mut poller = poller(Plan::build(&config, "schema")?, reader.clone());
+        let mut poller = poller(&Plan::build(&config, "schema")?, reader.clone());
 
         assert_eq!(ids(&poller.next().await?), [42]);
         assert_eq!(ids(&poller.next().await?), [43]);
@@ -720,7 +753,7 @@ mod tests {
             lag_secs: None,
         });
         config.interval_secs = 1;
-        let mut poller = poller(Plan::build(&config, "schema")?, reader.clone());
+        let mut poller = poller(&Plan::build(&config, "schema")?, reader.clone());
         assert_eq!(ids(&poller.next().await?), [1]);
         assert_eq!(
             *reader.asked.lock().map_err(|_| anyhow::anyhow!("poisoned"))?,
@@ -742,7 +775,7 @@ mod tests {
             ]);
         let mut config = config(PollMode::Snapshot);
         config.max_batch = Some(10);
-        let mut poller = poller(Plan::build(&config, "schema")?, reader);
+        let mut poller = poller(&Plan::build(&config, "schema")?, reader);
 
         assert_eq!(ids(&poller.next().await?), [1, 2]);
         // the interval, then everything again, including what was there before
@@ -767,7 +800,7 @@ mod tests {
             .push_back(Ok(vec![fetched(1), fetched(2)]));
         let mut config = config(incremental());
         config.max_batch = Some(5);
-        let mut poller = poller(Plan::build(&config, "schema")?, reader);
+        let mut poller = poller(&Plan::build(&config, "schema")?, reader);
         // two rows, one batch — not a wait for three more
         assert_eq!(ids(&poller.next().await?), [1, 2]);
         Ok(())
@@ -785,7 +818,7 @@ mod tests {
         ]);
         let mut config = config(incremental());
         config.interval_secs = 1;
-        let mut poller = poller(Plan::build(&config, "schema")?, reader.clone());
+        let mut poller = poller(&Plan::build(&config, "schema")?, reader.clone());
         assert_eq!(ids(&poller.next().await?), [1]);
         // the failure, the backoff, then the retry
         assert_eq!(ids(&poller.next().await?), [2]);
@@ -810,9 +843,9 @@ mod tests {
             vec![("input", json!("postgres"))],
         );
         let mut poller = Poller::new(
-            Plan::build(&config(incremental()), "schema")?,
+            Plan::build(&config(incremental()), "schema")?.schedule(),
             Box::new(reader),
-            "warehouse".to_string(),
+            vec![("connection", json!("warehouse"))],
             envelope,
             "p".to_string(),
             events,

@@ -121,6 +121,28 @@ pipelines:
   transforms: []
   outputs:
   - type: stdout
+- id: components_from_api
+  inputs:
+  - type: http_poll
+    url: http://127.0.0.1:6767/api/docs
+    interval_secs: 300
+    max_batch: 100
+    envelope:
+      type: merge
+  transforms:
+  - type: map
+    keep: mapped
+    on_missing: omit
+    mappings:
+    - type: copy
+      from: kind
+    - type: copy
+      from: family
+    - type: copy
+      from: _meta.polled_at
+      as: polled_at
+  outputs:
+  - type: stdout
 - id: sensors
   inputs:
   - type: nats

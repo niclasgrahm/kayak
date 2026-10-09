@@ -12,6 +12,7 @@ pub mod clickhouse;
 pub mod dummy;
 pub mod envelope;
 pub mod http;
+pub mod http_poll;
 pub mod indu;
 pub mod kafka;
 pub mod mqtt;

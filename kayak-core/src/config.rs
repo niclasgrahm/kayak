@@ -1415,6 +1415,50 @@ pub struct ClickhouseInputConfig {
     pub poll: SqlPollConfig,
 }
 
+/// Fetches a url on a timer and hands on what it returns — the `snapshot`
+/// mode of the database inputs, for an api.
+///
+/// Every read is a `GET`, and every read hands on the whole answer: an array
+/// is one message per element, anything else is one message. `items` points
+/// into a reply that wraps its records (`{"data": {"machines": [...]}}`). This
+/// is the reference-data case — a list of machines, recipes or thresholds that
+/// changes rarely and that a downstream system needs all of — so there is no
+/// watermark, no paging and no notion of what changed since the last read: a
+/// sink that upserts by key makes the repetition harmless.
+///
+/// A read that fails (unreachable, a status other than 2xx, a body that is not
+/// JSON, an `items` that points at nothing) is reported once and retried on the
+/// usual backoff, and the interval starts again from the next read that works.
+#[derive(Clone, Debug, Deserialize, Serialize, JsonSchema)]
+#[schemars(title = "http_poll")]
+pub struct HttpPollConfig {
+    /// the url to fetch, e.g. `https://erp.example.com/api/machines`
+    pub url: String,
+    /// how long to wait between reads, in seconds, counted from the end of one
+    /// read to the start of the next. The first read happens as soon as the
+    /// pipeline starts.
+    pub interval_secs: u64,
+    /// where the records are in the reply, as a JSON pointer: `/data/machines`
+    /// reads the array at `data.machines`. Absent reads the reply itself. What
+    /// it points at is split like a whole reply would be — an array into its
+    /// elements, anything else as one message.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub items: Option<String>,
+    /// what this input presents to the api. Absent — the default — sends no
+    /// credential, which is what an open endpoint wants.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub auth: Option<HttpAuthConfig>,
+    /// how long one request may take before it is given up on, in seconds.
+    /// Defaults to 30.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub timeout_seconds: Option<u64>,
+    /// most messages to put in one batch. Defaults to 1, as on every input.
+    /// Messages already read are grouped up to this many; the input never
+    /// waits for a batch to fill.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_batch: Option<usize>,
+}
+
 #[derive(Clone, Debug, Deserialize, Serialize, JsonSchema)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum InputKind {
@@ -1429,6 +1473,7 @@ pub enum InputKind {
     Indu(InduInputConfig),
     Postgres(PostgresInputConfig),
     Clickhouse(ClickhouseInputConfig),
+    HttpPoll(HttpPollConfig),
 }
 /// How an input's messages are gathered into batches before the transforms see
 /// them.
@@ -1696,7 +1741,8 @@ impl Config {
                 | InputKind::Opcua(_)
                 | InputKind::Indu(_)
                 | InputKind::Postgres(_)
-                | InputKind::Clickhouse(_) => None,
+                | InputKind::Clickhouse(_)
+                | InputKind::HttpPoll(_) => None,
             })
             .collect()
     }
@@ -1722,7 +1768,10 @@ impl Config {
             InputKind::Indu(c) => Some(&c.connection),
             InputKind::Postgres(c) => Some(&c.connection),
             InputKind::Clickhouse(c) => Some(&c.connection),
-            InputKind::Dummy(_) | InputKind::Http(_) | InputKind::Pipeline(_) => None,
+            InputKind::Dummy(_)
+            | InputKind::Http(_)
+            | InputKind::HttpPoll(_)
+            | InputKind::Pipeline(_) => None,
         });
         let outputs = self.outputs.iter().filter_map(|output| match &output.kind {
             OutputKind::Kafka(c) => Some(&c.connection),
