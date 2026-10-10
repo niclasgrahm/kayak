@@ -1,18 +1,18 @@
 # connections
 
-A connection is a system, declared once under a name in a file beside the config
-and referred to by the components that use it. The split is **what the system is
-(brokers, urls, credentials) against what this pipeline wants from it (topic,
-group, subject, table)** — there is no inline form: a component names a
-connection or it does not build.
+A connection is a system that you declare one time, under a name, in a file
+beside the config. Components refer to it by that name. The connection holds
+what the system is: brokers, urls, credentials. The component holds what the
+pipeline wants from the system: a topic, a group, a subject, a table. There is
+no inline form. A component names a connection, or it does not build.
 
-One kind serves both directions, so a `kafka` connection feeds a kafka input and
-a kafka output. The kind is checked as well as the name, and deleting one a
-running pipeline names is refused rather than breaking it later.
+One kind serves both directions. For example, a `kafka` connection serves a
+kafka input and a kafka output. kayak checks the kind as well as the name.
+kayak refuses to delete a connection that a pipeline uses.
 
-Credentials are typed as secrets and hold the *unresolved* `${NAME}` template,
-never the value — see [secrets](/io/secrets). How the file is found, what
-happens when you edit one under a running pipeline, and why `file` is a
-connection at all are covered in [connections](/io/connections).
+Credentials are secrets. A connection holds the `${NAME}` template, never the
+value. See [secrets](/io/secrets). [Connections](/io/connections) tells how
+kayak finds the file, what an edit does to a pipeline that runs, and why `file`
+is a connection.
 
 <!--@include: ./generated/components/connections.md-->

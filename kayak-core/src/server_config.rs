@@ -73,18 +73,16 @@ use serde::{Deserialize, Serialize};
 use crate::config::Secret;
 use crate::history::{DEFAULT_RETENTION_SECS, MAX_RETENTION_SECS};
 
-/// Everything the server is told about itself, as opposed to about its
-/// pipelines.
-///
-/// One field so far. New sections go beside `auth` and want the same property
-/// it has: a default that is what the server does today, so that adding a
-/// section doesn't change an existing deployment.
+/// The settings of the server process, in the file that `--server-config`
+/// names. The file is optional. Without it, the server uses the defaults.
 #[derive(Clone, Debug, Default, Deserialize, Serialize, JsonSchema, PartialEq, Eq)]
 #[serde(default, deny_unknown_fields)]
 pub struct ServerConfig {
-    /// Who is allowed to reach the server. Absent means nobody is asked.
+    /// How the server authenticates requests. The default is `none`: the
+    /// server does not authenticate requests.
     pub auth: AuthConfig,
-    /// How much of what the pipelines did is kept for the UI to show later.
+    /// How long the server keeps the counters and failure records of each
+    /// pipeline.
     pub history: HistoryConfig,
 }
 
@@ -131,72 +129,70 @@ impl ServerConfig {
     }
 }
 
-/// How the server decides who is asking.
-///
-/// Internally tagged, so `type` selects the variant the way it does throughout
-/// the component config. One scheme so far; an `oidc` variant is the shape the
-/// next one takes, and the reason this is an enum rather than a struct of
-/// optional fields.
+/// How the server identifies the caller of a request. The `type` field
+/// selects the scheme.
 #[derive(Clone, Debug, Default, Deserialize, Serialize, JsonSchema, PartialEq, Eq)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum AuthConfig {
-    /// Anyone who can reach the server can do anything to it. The default, and
-    /// what every deployment before this feature was.
+    /// No authentication. All callers that can reach the server can do all
+    /// operations. This is the default.
     #[default]
     None,
-    /// A fixed set of accounts declared in this file. Requests carry either
-    /// HTTP Basic credentials or a session cookie issued by
-    /// `POST /api/auth/login`; both resolve to one of these users.
+    /// A fixed set of accounts in this file. A request sends HTTP Basic
+    /// credentials, or a session cookie from `POST /api/auth/login`.
     Basic {
-        /// The accounts, by username. A `BTreeMap` so the file round-trips in
-        /// name order, the same reason `Connections` is one.
+        /// The accounts, as an object from username to account. Give one
+        /// account or more.
         users: BTreeMap<String, UserConfig>,
     },
-    /// Tokens minted by an external identity provider — Cognito, Keycloak,
-    /// anything that publishes a JWKS — validated against its published keys.
-    /// This is the embedding scheme: a host application puts a token it
-    /// already holds on the iframe URL, and kayak exchanges it for its own
-    /// session cookie. See [`JwtConfig`] for the fields.
+    /// Tokens from an external identity provider that publishes a JWKS, for
+    /// example Cognito or Keycloak. kayak checks each token against the keys
+    /// of the provider.
+    ///
+    /// Use this scheme to embed kayak in a host application. The host puts its
+    /// token on the iframe URL. kayak changes the token into its own session
+    /// cookie.
     Jwt(JwtConfig),
 }
 
-/// The `jwt` scheme's settings.
+/// The settings of the `jwt` scheme.
 ///
-/// Everything here describes the *issuer's* side of the contract: where its
-/// keys are published, what its tokens claim, and how those claims map onto
-/// kayak's two roles. Nothing is kayak-issued — the server holds no signing
-/// key and mints no tokens, it only checks what arrives and hands out its
-/// ordinary session cookie in exchange.
+/// These fields describe the issuer: the location of its keys, the claims in
+/// its tokens, and how the claims give the kayak roles. kayak has no signing
+/// key and makes no tokens. It checks each token, and gives a session cookie
+/// for a valid token.
 #[derive(Clone, Debug, Deserialize, Serialize, JsonSchema, PartialEq, Eq)]
 pub struct JwtConfig {
-    /// Where the issuer publishes its signing keys — for Cognito,
-    /// `https://cognito-idp.<region>.amazonaws.com/<pool>/.well-known/jwks.json`.
-    /// Fetched once at startup (a server that can't reach it refuses to start,
-    /// the same way a `${NAME}` that isn't set does) and re-fetched when a
-    /// token names a key id the cache doesn't hold, which is how rotation is
-    /// followed.
+    /// The url where the issuer publishes its signing keys. For Cognito, this
+    /// is `https://cognito-idp.<region>.amazonaws.com/<pool>/.well-known/jwks.json`.
+    /// The url must start with `http://` or `https://`.
+    ///
+    /// kayak gets the keys when it starts. If it cannot get them, the server
+    /// does not start. kayak gets the keys again when a token has a key id
+    /// that it does not know. Thus, kayak follows a key rotation.
     pub jwks_url: String,
-    /// The exact `iss` claim a token must carry. A token from any other
-    /// issuer is refused however validly it is signed.
+    /// The `iss` claim that a token must have. kayak refuses a token from a
+    /// different issuer, also when its signature is valid.
     pub issuer: String,
-    /// The `aud` claim a token must carry, when set. Left out, the audience
-    /// is not checked — which is what a Cognito *access* token needs, since
-    /// those carry `client_id` rather than `aud`; an ID token wants this set
-    /// to the app client id.
+    /// The `aud` claim that a token must have. Leave it out to not check the
+    /// audience. A Cognito access token has no `aud` claim, so leave it out
+    /// for access tokens. For a Cognito ID token, set it to the app client
+    /// id.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub audience: Option<String>,
-    /// The claim the username is read from. `sub` by default; Cognito's
-    /// human-readable one is `cognito:username`.
+    /// The claim that holds the username. The default is `sub`. For a
+    /// username that people can read in Cognito, use `cognito:username`.
     #[serde(default = "default_username_claim")]
     pub username_claim: String,
-    /// How claims decide what the caller may do. Left out, every valid token
-    /// is a reader and only `service_accounts` can be admins — the safe
-    /// reading of a section someone didn't write.
+    /// How the claims give the role of the caller. Leave it out to give the
+    /// `read` role to every valid token. Then only `service_accounts` can have
+    /// the `admin` role.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub roles: Option<RoleMapping>,
-    /// Accounts checked as HTTP Basic beside the tokens, for callers that
-    /// cannot do an identity-provider login — a provisioning script, CI.
-    /// Same shape as the `basic` scheme's `users`, resolved the same way.
+    /// Accounts that use HTTP Basic credentials, in addition to the tokens.
+    /// Use them for callers that cannot log in to the identity provider, for
+    /// example a script or CI. They have the same shape as `users` in the
+    /// `basic` scheme.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub service_accounts: BTreeMap<String, UserConfig>,
 }
@@ -224,19 +220,20 @@ impl JwtConfig {
     }
 }
 
-/// The claim → role rule: one claim, and the values of it that mean admin.
+/// The rule that gives a role from a claim: one claim, and the values that
+/// give the `admin` role.
 ///
-/// Deliberately not an expression language — Grafana answers this with
-/// JMESPath, and kayak consistently refuses that trade (`Condition` has no
-/// `or`, `map` doesn't compute). A claim that is a string matches by equality,
-/// one that is an array (Cognito's `cognito:groups`) matches if any element
-/// is listed. Every valid token that doesn't match is a reader.
+/// A claim that is a string matches when it is equal to a value in `admin`. A
+/// claim that is an array, for example `cognito:groups`, matches when one of
+/// its elements is in `admin`. A valid token that does not match gets the
+/// `read` role.
 #[derive(Clone, Debug, Deserialize, Serialize, JsonSchema, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct RoleMapping {
-    /// The claim the role is read from, `cognito:groups` for Cognito.
+    /// The claim to read the role from. For Cognito, use `cognito:groups`.
     pub claim: String,
-    /// The values of it that make the caller an admin.
+    /// The values of the claim that give the `admin` role. Give one value or
+    /// more.
     pub admin: Vec<String>,
 }
 
@@ -257,35 +254,28 @@ fn usernames_are_spellable(
     Ok(())
 }
 
-/// One account.
+/// One account. The username must not be empty.
 #[derive(Clone, Debug, Deserialize, Serialize, JsonSchema, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct UserConfig {
-    /// The password, as a `${NAME}` reference to whatever the server's secret
-    /// store holds. A literal works and is what a throwaway deployment will
-    /// write, but it puts a real credential in a file that gets committed —
-    /// which is the thing every other password field in kayak avoids.
+    /// The password, as a `${NAME}` reference to the secret store of the
+    /// server. A literal password also works. Do not use a literal password in
+    /// a file that you commit.
     pub password: Secret,
-    /// What this account may do. Omitted means [`Role::Read`], because the
-    /// field someone forgets to write should be the harmless one.
+    /// The role of the account. The default is `read`.
     #[serde(default)]
     pub role: Role,
 }
 
-/// What an account is allowed to do.
-///
-/// Two, and deliberately only two: the split that matters first is "can change
-/// what the server is running" against "can watch it". Anything finer — per
-/// pipeline, per connection — needs a model of *which* resources, which is a
-/// much larger feature than a second role.
+/// The operations that an account can do. A role applies to all pipelines and
+/// all connections.
 #[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, JsonSchema, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum Role {
-    /// May do anything: create and delete pipelines and connections, save and
-    /// revert the config file, rearrange the canvas.
+    /// All operations. For example, create and delete pipelines and
+    /// connections, save and revert the config file, and change the layout.
     Admin,
-    /// May see everything and change nothing. The default for an account whose
-    /// `role` is left out.
+    /// Read all data and change nothing. This is the default.
     #[default]
     Read,
 }
@@ -545,35 +535,22 @@ mod tests {
     }
 }
 
-/// How much of what the pipelines did the server keeps for the UI to show
-/// later — the knob on [`crate::history`].
+/// How long the server keeps the history of each pipeline: the counts of
+/// messages and errors, and the failure records. The endpoint
+/// `GET /api/pipelines/{pipeline_id}/history` returns it.
 ///
-/// **One duration, and the buffer sizes are derived from it.** Retention is
-/// what an operator actually has an opinion about; "how many buckets" is an
-/// implementation detail they would have to multiply out to reason about, and
-/// exposing it would let the two rings be configured into disagreement. The
-/// fine ring is not configurable at all — it is sized by what a card can
-/// display, which is not a deployment's business.
-///
-/// This is the one section whose default is *not* what the server did before it
-/// existed, and the deviation is deliberate. Off by default would mean the
-/// feature is missing for everyone who doesn't know to look for it, which is
-/// precisely the person it is for — someone finding out at 08:00 that something
-/// broke at 02:14. What makes that affordable is the bound: a pipeline costs
-/// one `HistoryBucket` per minute of retention plus half an hour of fine ones,
-/// which is about 58 kB a day, flat in throughput.
+/// The history is in memory. It is on by default. With the default retention,
+/// it uses about 58 kB for each pipeline. The throughput has no effect on this
+/// size.
 #[derive(Clone, Debug, Deserialize, Serialize, JsonSchema, PartialEq, Eq)]
 #[serde(default, deny_unknown_fields)]
 pub struct HistoryConfig {
-    /// How far back the coarse ring reaches, in seconds. A day by default,
-    /// capped at [`MAX_RETENTION_SECS`].
+    /// The time to keep the history, in seconds. The default is 86400 (one
+    /// day). The maximum is 604800 (seven days). A larger value is an error
+    /// when the server starts.
     ///
-    /// **Zero turns history off** — the rings are never allocated and the
-    /// counters are never sampled. That is the off switch rather than an
-    /// `enabled` flag beside a duration, for the reason [`AuthConfig`] is an
-    /// enum rather than a bool beside a map: `enabled: false` above
-    /// `retention_secs: 86400` is a contradiction someone would write and then
-    /// misread, and here there is nowhere to write it.
+    /// **Set it to 0 to turn the history off.** The server then keeps no
+    /// history.
     pub retention_secs: u64,
 }
 

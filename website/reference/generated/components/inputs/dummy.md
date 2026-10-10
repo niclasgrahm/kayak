@@ -2,56 +2,56 @@
 
 ## `dummy` {#input-dummy}
 
-Emits one generated message on a fixed interval — a heartbeat for testing a pipeline without a real source attached.
+Sends one generated message at a fixed interval. Use it to test a pipeline without a real source.
 
-Every message carries a `value` and the `current_time` it was emitted at. What the `value` holds is the `payload` field's business: a number sampled from a sine wave, so a chart of it has a shape, or a random sentence, so a text transform has something to chew on.
+Each message contains a `value` and the `current_time` at which the input sent it. The `payload` field sets the type of `value`. It can be a number from a sine wave or a random sentence.
 
 | field | type | | description |
 | --- | --- | --- | --- |
-| `duration` | `integer` | <Badge type="warning" text="required" /> | seconds between messages |
-| `amplitude` | `number` | <Badge type="info" text="optional" /> | peak of the sine wave — it swings between `-amplitude` and `+amplitude`. Numeric payloads only; defaults to 1. |
-| `payload` | `number` \| `text` | <Badge type="info" text="optional" /> | what each message's `value` holds: a `number` sampled from a sine wave, or a random sentence as `text`. Defaults to `number`. |
-| `period` | `number` | <Badge type="info" text="optional" /> | seconds for one full turn of the sine wave. Numeric payloads only; defaults to 60. Sampling is by wall clock rather than by message count, so the wave keeps its period whatever `duration` is. |
-| `ack` | `on_receipt` \| `on_delivery` | <Badge type="info" text="optional" /> | when this input tells its broker a message is done with. Available on every input kind in the schema, but only honoured by ones with a broker-side notion of "received" vs "delivered" of their own (`kafka`, for now) — an input with nothing to acknowledge refuses to build rather than silently treating this as `on_receipt`. Defaults to `on_receipt`, which is what every input has always done. See "acknowledgement modes" in the guide. |
-| `buffer` | `static \| tumbling \| batch` | <Badge type="info" text="optional" /> | batch messages from this input before the transforms see them — by count (`static`), by time (`tumbling`) or by whichever comes first (`batch`). Never emits an empty batch. Available on every input kind. Not to be confused with the `buffer` transform. |
-| `envelope` | `merge \| wrap` | <Badge type="info" text="optional" /> | attach metadata about where each message came from — the subject, topic, partition and so on listed under "metadata" below. Available on every input kind. Omit it and messages are passed on exactly as they arrive. |
+| `duration` | `integer` | <Badge type="warning" text="required" /> | The time between two messages, in s. |
+| `amplitude` | `number` | <Badge type="info" text="optional" /> | The peak of the sine wave. The value goes from `-amplitude` to `+amplitude`. Applies only to the `number` payload. The default is 1. |
+| `payload` | `number` \| `text` | <Badge type="info" text="optional" /> | The type of `value` in each message. `number` is a number from a sine wave. `text` is a random sentence. The default is `number`. |
+| `period` | `number` | <Badge type="info" text="optional" /> | The time for one full cycle of the sine wave, in s. Applies only to the `number` payload. The default is 60. The input samples the wave by the clock, so the period does not change with `duration`. |
+| `ack` | `on_receipt` \| `on_delivery` | <Badge type="info" text="optional" /> | When the input acknowledges a message to its broker. The default is `on_receipt`. Only the `kafka` and `mqtt` inputs support `on_delivery`. The `mqtt` input requires a `qos` of `at_least_once` or higher for it. On all other inputs, `on_delivery` fails to build. |
+| `buffer` | `static \| tumbling \| batch` | <Badge type="info" text="optional" /> | Collect messages from this input into batches before the transforms. Use a count (`static`), a time (`tumbling`) or the first of the two (`batch`). The buffer never sends an empty batch. Available on all input types. This is not the `buffer` transform. |
+| `envelope` | `merge \| wrap` | <Badge type="info" text="optional" /> | Add metadata about the source of each message, for example the subject, the topic or the partition. The "metadata" section lists the fields. Available on all input types. If you do not set it, the input sends each message without changes. |
 
 **`buffer` — `type: "static"`**
 
 | field | type | | description |
 | --- | --- | --- | --- |
-| `size` | `integer` | <Badge type="warning" text="required" /> | how many messages to gather before the batch is handed on |
+| `size` | `integer` | <Badge type="warning" text="required" /> | The number of messages in a batch. |
 
 **`buffer` — `type: "tumbling"`**
 
 | field | type | | description |
 | --- | --- | --- | --- |
-| `window_seconds` | `integer` | <Badge type="warning" text="required" /> | how long to gather messages for, measured from the first one |
+| `window_seconds` | `integer` | <Badge type="warning" text="required" /> | The time to collect messages, in s, from the first message. |
 
 **`buffer` — `type: "batch"`**
 
 | field | type | | description |
 | --- | --- | --- | --- |
-| `size` | `integer` | <Badge type="warning" text="required" /> | how many messages end the batch immediately |
-| `window_seconds` | `integer` | <Badge type="warning" text="required" /> | how long to wait for them, measured from the first message in the batch |
+| `size` | `integer` | <Badge type="warning" text="required" /> | The number of messages that closes the batch immediately. |
+| `window_seconds` | `integer` | <Badge type="warning" text="required" /> | The maximum time to wait, in s, from the first message in the batch. |
 
 **`envelope` — `type: "merge"`**
 
 | field | type | | description |
 | --- | --- | --- | --- |
-| `meta` | `string` | <Badge type="info" text="optional" /> | the field the metadata object is written to. Defaults to `_meta`. |
+| `meta` | `string` | <Badge type="info" text="optional" /> | The field for the metadata object. The default is `_meta`. |
 
 **`envelope` — `type: "wrap"`**
 
 | field | type | | description |
 | --- | --- | --- | --- |
-| `meta` | `string` | <Badge type="info" text="optional" /> | the field the metadata object is written to. Defaults to `_meta`. |
-| `payload` | `string` | <Badge type="info" text="optional" /> | the field the original payload is written to. Defaults to `value`. |
+| `meta` | `string` | <Badge type="info" text="optional" /> | The field for the metadata object. The default is `_meta`. |
+| `payload` | `string` | <Badge type="info" text="optional" /> | The field for the original payload. The default is `value`. |
 
 **metadata** — what this input attaches to a message when its `envelope` is set.
 
 | field | holds |
 | --- | --- |
-| `pipeline` | id of the pipeline that read the message |
-| `input` | kind of input it was read by, e.g. `nats` |
-| `received_at` | when kayak read it, RFC 3339. This is an arrival time and not an event time: it says when the message reached this pipeline, not when whatever it describes happened. |
+| `pipeline` | The id of the pipeline that read the message. |
+| `input` | The type of the input that read the message, for example `nats`. |
+| `received_at` | The time when kayak read the message, as RFC 3339. This is the arrival time at this pipeline. It is not the time of the event in the message. |

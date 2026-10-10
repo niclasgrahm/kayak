@@ -2,12 +2,10 @@
 
 ## `file` {#connection-file}
 
-A directory on the server's filesystem that file outputs write under.
+A directory on the filesystem of the server. A `file` output writes under it, to a `path` relative to this directory.
 
-The odd one out among the kinds: there is no host, no credentials, nothing to authenticate against. It earns its place as a connection anyway because it holds the same thing the others do — *what the system is*, as against what one pipeline wants from it. A file output names a `path` relative to this root exactly as a kafka output names a topic on those brokers, and the object-store connection that replaces it later swaps the root for a bucket without any component changing.
-
-The root is **not** a boundary on its own. It arrives from `POST /api/connections` like any other connection, so a browser could name `/` here; what actually confines writes is the server's `--data-dir`, which this root has to resolve under. See `Root::resolve` in the root crate.
+The directory must be inside the `--data-dir` of the server. kayak checks this when it builds the output. A server started without `--data-dir` has no file output.
 
 | field | type | | description |
 | --- | --- | --- | --- |
-| `root` | `string` | <Badge type="warning" text="required" /> | directory that file outputs write under, e.g. `./out/events`. Created if it does not exist, and it must resolve inside the server's `--data-dir` — a server started without that flag has file output turned off. |
+| `root` | `string` | <Badge type="warning" text="required" /> | The directory that file outputs write under, for example `./out/events`. It must be inside the `--data-dir` of the server. If the directory does not exist, kayak makes it. |

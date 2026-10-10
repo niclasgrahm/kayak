@@ -2,50 +2,50 @@
 
 ## `remember` {#transform-remember}
 
-Writes values from matching messages into the pipeline's state bucket, keyed by whatever the pipeline's `state.key` names.
+Writes values from the messages that match into the state bucket of the pipeline. The key is the field that `state.key` of the pipeline names.
 
-The message itself is **passed on unchanged** — this is a tap on the stream, not a filter. A transform called `remember` that quietly swallowed what it remembered would be a surprise, and the message is usually still wanted.
+The transform sends each message on without changes. It does not filter.
 
-Needs a `state` on the pipeline; it fails to build without one.
+The pipeline must have a `state`, or the transform fails to build.
 
 | field | type | | description |
 | --- | --- | --- | --- |
-| `remember` | `list of object` | <Badge type="warning" text="required" /> | what to take from a matching message. At least one, each with a distinct `as`. |
-| `when` | `list of numeric \| string \| one_of \| none_of` | <Badge type="info" text="optional" /> | which messages to remember from — all of these have to match. Leave it out to remember from every message, which is right for a stream carrying one kind of thing and wrong for one carrying several. |
+| `remember` | `list of object` | <Badge type="warning" text="required" /> | The values to take from a message that matches. At least one entry is required. Each entry must have a different `as`. |
+| `when` | `list of numeric \| string \| one_of \| none_of` | <Badge type="info" text="optional" /> | The conditions that a message must match to be remembered. All of them must match. If you do not set it, the transform remembers values from each message. Set it when the stream contains more than one type of message. |
 
 **`remember` — each entry**
 
 | field | type | | description |
 | --- | --- | --- | --- |
-| `field` | `string` | <Badge type="warning" text="required" /> | the field to take the value from |
-| `as` | `string` | <Badge type="warning" text="required" /> | the name to remember it under, which is the name `recall` asks for it by. Two entries may not share one. |
+| `field` | `string` | <Badge type="warning" text="required" /> | The field to take the value from. |
+| `as` | `string` | <Badge type="warning" text="required" /> | The name for the value in the bucket. `recall` reads the value by this name. Each entry must have a different name. |
 
 **`when` — each entry — `type: "numeric"`**
 
 | field | type | | description |
 | --- | --- | --- | --- |
-| `field` | `string` | <Badge type="warning" text="required" /> | the field to test — a dotted path, like anywhere else |
-| `operator` | `greater_than` \| `less_than` \| `equal_to` \| `not_equal_to` | <Badge type="warning" text="required" /> | how the field is compared |
-| `value` | `number` | <Badge type="warning" text="required" /> | the number it is compared to |
+| `field` | `string` | <Badge type="warning" text="required" /> | The field to test, as a dotted path. |
+| `operator` | `greater_than` \| `less_than` \| `equal_to` \| `not_equal_to` | <Badge type="warning" text="required" /> | How to compare the field. |
+| `value` | `number` | <Badge type="warning" text="required" /> | The number to compare to. |
 
 **`when` — each entry — `type: "string"`**
 
 | field | type | | description |
 | --- | --- | --- | --- |
-| `field` | `string` | <Badge type="warning" text="required" /> | the field to test — a dotted path, like anywhere else |
-| `operator` | `equal_to` \| `not_equal_to` \| `contains` | <Badge type="warning" text="required" /> | how the field is compared |
-| `value` | `string` | <Badge type="warning" text="required" /> | the string it is compared to |
+| `field` | `string` | <Badge type="warning" text="required" /> | The field to test, as a dotted path. |
+| `operator` | `equal_to` \| `not_equal_to` \| `contains` | <Badge type="warning" text="required" /> | How to compare the field. |
+| `value` | `string` | <Badge type="warning" text="required" /> | The string to compare to. |
 
 **`when` — each entry — `type: "one_of"`**
 
 | field | type | | description |
 | --- | --- | --- | --- |
-| `field` | `string` | <Badge type="warning" text="required" /> | the field to test — a dotted path, like anywhere else |
-| `values` | `list of string` | <Badge type="warning" text="required" /> | the strings that match |
+| `field` | `string` | <Badge type="warning" text="required" /> | The field to test, as a dotted path. |
+| `values` | `list of string` | <Badge type="warning" text="required" /> | The strings that match. |
 
 **`when` — each entry — `type: "none_of"`**
 
 | field | type | | description |
 | --- | --- | --- | --- |
-| `field` | `string` | <Badge type="warning" text="required" /> | the field to test — a dotted path, like anywhere else |
-| `values` | `list of string` | <Badge type="warning" text="required" /> | the strings that do not match |
+| `field` | `string` | <Badge type="warning" text="required" /> | The field to test, as a dotted path. |
+| `values` | `list of string` | <Badge type="warning" text="required" /> | The strings that do not match. |

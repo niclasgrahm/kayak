@@ -32,51 +32,49 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-/// Rewrites the shape of every message: renames, promotions, constants, casts
-/// and projections, applied in order.
+/// Changes the shape of every message. A mapping can rename, move, cast or
+/// remove a field, or write a constant. The transform applies the mappings in
+/// order.
 ///
-/// Each entry in `mappings` reads fields from the message and writes one field
-/// back, and **later entries see what earlier ones wrote** — so an intermediate
-/// value is just a mapping whose target a later mapping reads (and, under
-/// `keep: all`, a `drop` takes away again).
+/// Each entry in `mappings` reads fields from the message and writes one
+/// field. A mapping can read the fields that earlier mappings wrote. Use this
+/// for intermediate values. With `keep: all`, a `drop` can remove them again.
 ///
-/// Reads are dotted paths, like everywhere else. Writes are too: an `as` of
-/// `sensor.id` puts the value inside a `sensor` object, creating it if it isn't
-/// there.
+/// Reads and writes use dotted paths. For example, an `as` of `sensor.id`
+/// writes the value inside a `sensor` object. If the object does not exist,
+/// the transform makes it.
 ///
-/// The message is passed through unchanged, with the mappings laid over it,
-/// unless `keep` says otherwise. One message always comes out — this never
-/// drops one, and never makes two. Reach for `filter` or `splitter` for those.
+/// By default, the message passes through with the mappings applied to it.
+/// `keep` can change this. One message goes in and one message comes out. To
+/// drop a message, use `filter`. To make many messages, use `splitter`.
 #[derive(Clone, Debug, Deserialize, Serialize, JsonSchema, PartialEq)]
 #[schemars(title = "map")]
 pub struct MapTransformConfig {
-    /// what to write, in the order it is written. At least one, and no two may
-    /// write the same field.
+    /// The fields to write, in order. Give one mapping or more. Two mappings
+    /// must not write the same field.
     pub mappings: Vec<Mapping>,
-    /// whether fields nothing mapped survive
+    /// Which fields of the input message the output keeps. The default is
+    /// `all`.
     #[serde(default, skip_serializing_if = "KeepPolicy::is_default")]
     pub keep: KeepPolicy,
-    /// what to do about a message missing a field a mapping reads. A `default`
-    /// on the mapping itself is answered first, and is the better way to say
-    /// that one particular field is expected to be absent.
+    /// What to do with a message that does not have a field that a mapping
+    /// reads. The default is `error`. A `default` on the mapping applies
+    /// first. Use a `default` when you expect one field to be absent.
     #[serde(default, skip_serializing_if = "MapMissingPolicy::is_default")]
     pub on_missing: MapMissingPolicy,
 }
 
-/// Whether a `map` passes through the fields it wasn't told about.
+/// Which fields of the input message a `map` keeps.
 #[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, JsonSchema, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum KeepPolicy {
-    /// The message is passed through and the mappings are laid over it. The
-    /// default, because it is the one that doesn't quietly discard data: a map
-    /// that renamed one field would otherwise throw the rest of the message
-    /// away.
+    /// Keep all fields, and apply the mappings to them. This is the default.
     #[default]
     All,
-    /// Only the fields the mappings wrote come out — a projection. This is what
-    /// prepares a message for an output with a shape of its own (a `postgres`
-    /// table, an `s3` part), and it is also what sweeps up the intermediate
-    /// fields a chained arithmetic leaves behind.
+    /// Keep only the fields that the mappings wrote. Use it to prepare a
+    /// message for an output with a fixed shape, for example a `postgres`
+    /// table. It also removes intermediate fields. You cannot use `drop` with
+    /// `mapped`.
     Mapped,
 }
 
@@ -89,24 +87,18 @@ impl KeepPolicy {
     }
 }
 
-/// What `map` does about a message that doesn't carry a field a mapping reads.
+/// What `map` does with a message that does not have a field that a mapping
+/// reads.
 ///
-/// It has its own set rather than sharing the reducer's `MissingFieldPolicy` or
-/// `recall`'s `RecallMissingPolicy` for one specific reason: `skip` already
-/// means two different things in those two ("leave this message out of this
-/// aggregation" and "drop the message"), and a third reading of the same word
-/// would make the config file unreadable. So the arm that leaves the target
-/// field unwritten is called `omit`, and there is deliberately no arm that
-/// drops the message — that is what `filter` is for.
+/// No value drops the message. To drop a message, use `filter`.
 #[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, JsonSchema, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum MapMissingPolicy {
-    /// Fail the pipeline. The default, on the reducer's argument: a mapping
-    /// that silently produced nothing is wrong in a way nothing downstream can
-    /// see. Say `omit`, or give that one mapping a `default`, to mean it.
+    /// Fail the batch. This is the default. To accept a missing field, use
+    /// `omit`, or give the mapping a `default`.
     #[default]
     Error,
-    /// Leave the target field unwritten, as though the mapping weren't there.
+    /// Do not write the target field.
     Omit,
     /// Write the target field as `null`.
     Null,
@@ -120,152 +112,136 @@ impl MapMissingPolicy {
     }
 }
 
-/// One field written onto the message, and where its value comes from.
-///
-/// A tagged union rather than one struct with a great many optional fields, for
-/// the reason `Condition` gives: a list of these has to render as a form, and a
-/// pile of boxes of which four are relevant offers no way to say which four.
-/// Here the tag is picked first and the rest of the row follows from it.
+/// One field that the transform writes onto the message, and the source of
+/// its value. The `type` field selects the mapping.
 #[derive(Clone, Debug, Deserialize, Serialize, JsonSchema, PartialEq)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum Mapping {
-    /// Takes a value from one field and writes it to another — a rename, or a
-    /// promotion of something out of a nested object (`_meta.subject` →
-    /// `subject`).
+    /// Reads a value from one field and writes it to another field. Use it to
+    /// rename a field, or to move a field out of a nested object, for example
+    /// from `_meta.subject` to `subject`.
     Copy {
-        /// the field to read — a dotted path, like anywhere else
+        /// The field to read, as a dotted path.
         from: String,
-        /// the field to write. Left out, it is `from`'s last segment, which is
-        /// the reading that makes promoting a nested value the short spelling.
+        /// The field to write. The default is the last segment of `from`.
         #[serde(rename = "as", default, skip_serializing_if = "Option::is_none")]
         output: Option<String>,
-        /// what to write when `from` isn't there, instead of applying
-        /// `on_missing`
+        /// The value to write when the message does not have `from`. With it,
+        /// `on_missing` does not apply.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         default: Option<Literal>,
     },
-    /// Writes a fixed value — the environment, the site, the name of the feed.
+    /// Writes a fixed value, for example the name of the site.
     Constant {
-        /// the value to write
+        /// The value to write.
         value: Literal,
-        /// the field to write it to
+        /// The field to write the value to.
         #[serde(rename = "as")]
         output: String,
     },
-    /// Writes the first of several fields that the message actually carries.
-    ///
-    /// This is what merging two sources that spell one thing differently comes
-    /// to, and it needs no expression language to say.
+    /// Writes the value of the first field in a list that the message has.
+    /// Use it when two sources use different names for the same field.
     Coalesce {
-        /// the fields to try, in order. At least two — with one, this is a
-        /// `copy`.
+        /// The fields to try, in order. Give two fields or more.
         from: Vec<String>,
-        /// the field to write the first value found to
+        /// The field to write the first value to.
         #[serde(rename = "as")]
         output: String,
-        /// what to write when none of them is there
+        /// The value to write when the message has none of the fields.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         default: Option<Literal>,
     },
-    /// Converts a value from one JSON shape to another — the string `"12.5"` to
-    /// the number `12.5`, an epoch second to a timestamp, a string of embedded
-    /// JSON to the thing it describes.
+    /// Converts a value from one JSON type to another. For example, it
+    /// converts the string `"12.5"` to the number `12.5`, or epoch seconds to
+    /// a timestamp. It can also parse a string that contains JSON.
     ///
-    /// This is the one place in kayak where coercion is legal, and that is the
-    /// division of labour: a `postgres` column mapping *checks* a value and
-    /// never converts it, so a stream that needs converting says so once, here,
-    /// rather than at each of three outputs.
+    /// This is the only place in kayak that converts a value. The column
+    /// mapping of the database outputs checks a value and does not convert it.
     Cast {
-        /// the field to read
+        /// The field to read.
         from: String,
-        /// what to convert it to
+        /// The type to convert the value to.
         to: CastType,
-        /// the field to write. Left out, it is `from`'s last segment — so
-        /// casting a field in place is `{"from": "value", "to": "float"}`.
+        /// The field to write. The default is the last segment of `from`. For
+        /// example, `{"from": "value", "to": "float"}` converts `value` in place.
         #[serde(rename = "as", default, skip_serializing_if = "Option::is_none")]
         output: Option<String>,
-        /// what to write when `from` isn't there. A value that *is* there and
-        /// won't convert is an error either way — that is a stream that isn't
-        /// what the config says it is, not a missing field.
+        /// The value to write when the message does not have `from`. A value
+        /// that is present and does not convert is always an error.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         default: Option<Literal>,
     },
-    /// Joins fields and literal text into one string.
-    ///
-    /// Mostly earns its place because `group_by` takes a list of fields and has
-    /// no composite key: building `site/machine` as a field is the only way to
-    /// group on the pair.
+    /// Joins fields and literal text into one string. For example, use it to
+    /// write a `site/machine` key for `group_by`.
     Concat {
-        /// the pieces, in order. At least one.
+        /// The parts, in order. Give one part or more.
         parts: Vec<ConcatPart>,
-        /// the field to write the joined string to
+        /// The field to write the string to.
         #[serde(rename = "as")]
         output: String,
     },
-    /// One arithmetic operation on two numbers, each of them a field or a
+    /// One arithmetic operation on two numbers. Each number is a field or a
     /// literal.
     ///
-    /// One operation, deliberately: `(f - 32) / 1.8` is two of these through an
-    /// intermediate field, and the fact that three or four steps read badly is
-    /// information rather than a defect — it is where this stops being
-    /// configuration.
+    /// For a calculation with more steps, use more mappings with intermediate
+    /// fields. For example, `(f - 32) / 1.8` is two mappings. For a long
+    /// calculation, use the `script` transform.
     Arithmetic {
-        /// the left-hand operand
+        /// The left operand.
         left: Operand,
-        /// what to do with them
+        /// The operation to do.
         operator: ArithmeticOperator,
-        /// the right-hand operand
+        /// The right operand.
         right: Operand,
-        /// the field to write the answer to
+        /// The field to write the result to.
         #[serde(rename = "as")]
         output: String,
-        /// for `divide`: what a right-hand field holding zero produces. Fails
-        /// the batch when left out
+        /// For `divide`: what to do when the right field holds zero. The
+        /// default is `error`, which fails the batch.
         #[serde(default, skip_serializing_if = "OnZero::is_default")]
         on_zero: OnZero,
     },
-    /// The start of the calendar period a time falls in — the hour, the day,
-    /// the shift — written as a field of its own.
+    /// Writes the start of the calendar period that a time is in, for example
+    /// the hour, the day or the shift.
     ///
-    /// What it is for is `group_by`: a stateful transform grouped by the
-    /// bucket keeps a series per period, so "per shift" and "since midnight"
-    /// need no window of their own, and the bucket store's idle timeout
-    /// forgets the old periods. Periods are counted in the time zone's wall
-    /// clock, so a shift that starts at 06:00 starts at 06:00 summer and
-    /// winter alike, and the night a clock changes holds a 7- or 9-hour shift.
-    /// Buckets line up with local midnight on 1 January 1970, moved on by
-    /// `offset_seconds`: `every_seconds: 28800, offset_seconds: 21600` is
-    /// 06:00, 14:00 and 22:00. A week counts from a Thursday, so starting one
-    /// on a Monday is an offset of four days.
+    /// Use the field in `group_by`. A stateful transform that groups by it
+    /// keeps one series for each period. The idle timeout of the state bucket
+    /// removes the old periods.
+    ///
+    /// The periods use the local clock of `timezone`. Thus, a shift that
+    /// starts at 06:00 starts at 06:00 in summer and in winter. On the night
+    /// that the clock changes, the shift is 7 or 9 hours.
+    ///
+    /// The periods start at local midnight on 1 January 1970, plus
+    /// `offset_seconds`. For example, `every_seconds: 28800` with
+    /// `offset_seconds: 21600` gives 06:00, 14:00 and 22:00. A week starts on a
+    /// Thursday. For a week that starts on a Monday, add an offset of four days.
     TimeBucket {
-        /// the field holding the time — an RFC 3339 string or milliseconds
-        /// since the epoch
+        /// The field that holds the time, as an RFC 3339 string or as
+        /// milliseconds since the epoch.
         from: String,
-        /// how long a bucket is, in seconds
+        /// The length of a period, in seconds.
         every_seconds: u64,
-        /// how far past the line-up the buckets start, in seconds — less than
-        /// `every_seconds`
+        /// The offset of the start of the periods, in seconds. It must be
+        /// less than `every_seconds`.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         offset_seconds: Option<u64>,
-        /// the IANA time zone whose clock the periods are counted on, e.g.
-        /// `Europe/Stockholm`. UTC when left out
+        /// The IANA time zone of the periods, for example `Europe/Stockholm`.
+        /// The default is UTC.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         timezone: Option<String>,
-        /// how the bucket's start is written. `rfc3339` when left out
+        /// The format of the start time. The default is `rfc3339`.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         format: Option<TimeFormat>,
-        /// the field to write the bucket's start to
+        /// The field to write the start time to.
         #[serde(rename = "as")]
         output: String,
     },
-    /// Takes fields off the message.
-    ///
-    /// The counterpart of the in-band envelope: metadata that a `group_by`
-    /// needed is rarely metadata an output wants, and this is what takes it
-    /// back off before the message leaves. Removing a field that isn't there is
-    /// not an error — `on_missing` doesn't apply.
+    /// Removes fields from the message. Use it to remove metadata fields
+    /// before the output. A field that is not there is not an error.
+    /// `on_missing` does not apply.
     Drop {
-        /// the fields to remove. At least one.
+        /// The fields to remove. Give one field or more.
         from: Vec<String>,
     },
 }
@@ -318,33 +294,27 @@ fn leaf(field: &str) -> &str {
     field.rsplit('.').next().unwrap_or(field)
 }
 
-/// A literal value written by a `constant`, or standing in for a field that
-/// isn't there.
-///
-/// Spelled as a tagged union rather than as a bare JSON value because an
-/// untyped `Value` field reflects as a box to hand-write JSON into, and one of
-/// those in a form is a field the user has to already know the answer for.
-/// Tagging it means the form asks which kind of value and then offers the right
-/// control.
+/// A literal value. A `constant` writes it, and a `default` writes it in place
+/// of a missing field. The `type` field selects the type of the value.
 #[derive(Clone, Debug, Deserialize, Serialize, JsonSchema, PartialEq)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum Literal {
     /// A string.
     Text {
-        /// the text
+        /// The text.
         value: String,
     },
     /// A number.
     Number {
-        /// the number
+        /// The number.
         value: f64,
     },
     /// True or false.
     Boolean {
-        /// the flag
+        /// The boolean value.
         value: bool,
     },
-    /// JSON null — an explicit "nothing", as against leaving the field out.
+    /// JSON `null`. The field is present with the value `null`.
     Null,
 }
 
@@ -366,8 +336,8 @@ impl Literal {
 #[derive(Clone, Copy, Debug, Deserialize, Serialize, JsonSchema, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum TimeFormat {
-    /// An RFC 3339 string in UTC, to the millisecond — the spelling every
-    /// time kayak writes uses.
+    /// An RFC 3339 string in UTC, with milliseconds. kayak writes all times in
+    /// this format.
     Rfc3339,
     /// Milliseconds since the epoch, as a number.
     Millis,
@@ -377,14 +347,14 @@ pub enum TimeFormat {
 #[derive(Clone, Debug, Deserialize, Serialize, JsonSchema, PartialEq)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum Operand {
-    /// A number read out of the message.
+    /// A number from the message.
     Field {
-        /// the field to read — it has to hold a number
+        /// The field to read. It must hold a number.
         field: String,
     },
-    /// A number written here in the config.
+    /// A number in the config.
     Value {
-        /// the number
+        /// The number.
         value: f64,
     },
 }
@@ -393,38 +363,36 @@ pub enum Operand {
 #[derive(Clone, Copy, Debug, Deserialize, Serialize, JsonSchema, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum ArithmeticOperator {
-    /// left + right
+    /// Left + right.
     Add,
-    /// left − right
+    /// Left − right.
     Subtract,
-    /// left × right
+    /// Left × right.
     Multiply,
-    /// left ÷ right. A literal zero on the right is refused when the pipeline
-    /// is built; what a *field* that turns out to be zero does is `on_zero`.
+    /// Left ÷ right. A literal zero on the right is an error when the pipeline
+    /// builds. For a field that holds zero, `on_zero` applies.
     Divide,
-    /// the smaller of left and right — with a literal on one side, a ceiling
+    /// The smaller of left and right. With a literal on one side, this is an
+    /// upper limit.
     Min,
-    /// the larger of left and right — with a literal on one side, a floor
+    /// The larger of left and right. With a literal on one side, this is a
+    /// lower limit.
     Max,
 }
 
-/// What a `divide` does when the field it divides by holds zero.
-///
-/// A ratio over an empty period — parts per minute before the first minute —
-/// is the usual way that happens, and which answer is right depends on what
-/// reads it: a chart wants nothing there, a sum downstream wants a number.
+/// What a `divide` does when the right field holds zero. For example, this
+/// occurs with a ratio over an empty period.
 #[derive(Clone, Debug, Default, Deserialize, Serialize, JsonSchema, PartialEq)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum OnZero {
-    /// Fail the batch, naming the division. A zero nobody expected is a
-    /// stream that isn't what the config claims.
+    /// Fail the batch. The error names the division. This is the default.
     #[default]
     Error,
-    /// Write `null` as the answer.
+    /// Write `null` as the result.
     Null,
-    /// Write this number as the answer.
+    /// Write a number as the result.
     Value {
-        /// the answer to write instead
+        /// The number to write.
         value: f64,
     },
 }
@@ -455,59 +423,50 @@ impl ArithmeticOperator {
 #[derive(Clone, Debug, Deserialize, Serialize, JsonSchema, PartialEq)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ConcatPart {
-    /// A value read out of the message. A string is taken as it is; a number or
-    /// a boolean is written the way JSON writes it. An object or an array is an
-    /// error — there is no one right way to flatten one into a key.
+    /// A value from the message. A string is used as it is. A number or a
+    /// boolean is written as JSON writes it. An object or an array is an error.
     Field {
-        /// the field to read
+        /// The field to read.
         field: String,
     },
-    /// Literal text — the separator, a prefix, a suffix.
+    /// Literal text, for example a separator, a prefix or a suffix.
     Value {
-        /// the text
+        /// The text.
         value: String,
     },
 }
 
-/// What a [`Mapping::Cast`] converts a value to.
+/// The type that a `cast` converts a value to.
 ///
-/// A closed set of *logical* shapes, and a deliberately smaller one than the
-/// column mapping's `ColumnType` even though the two overlap. `integer` and
-/// `bigint` are one thing here, because JSON has one integer; `decimal` is
-/// absent, because a `serde_json` number cannot hold one distinctly from a
-/// float and a cast that claimed to would be a lie. `json` means something else
-/// again — in a column it is "store whatever this is", here it is "this string
-/// contains JSON, parse it", which is the common case of a payload that arrived
-/// double-encoded.
+/// These types are not the column types of the database outputs. There is no
+/// `bigint` and no `decimal`. Here, `json` parses a string that contains JSON.
 #[derive(Clone, Copy, Debug, Deserialize, Serialize, JsonSchema, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum CastType {
-    /// A string. A number or a boolean is written the way JSON writes it; an
-    /// object or an array is an error.
+    /// A string. A number or a boolean is written as JSON writes it. An object
+    /// or an array is an error.
     Text,
-    /// A whole number. A string is parsed; a number with a fractional part is
-    /// an error rather than a rounding, since which way to round is not
-    /// something a config file said.
+    /// A whole number. A string is parsed. A number with a fractional part is
+    /// an error. The cast does not round.
     Integer,
     /// A number. A string is parsed.
     Float,
-    /// True or false. The strings `true`/`false` (in any case) and the numbers
-    /// 1/0 are accepted; nothing else is.
+    /// True or false. The cast accepts the strings `true` and `false` in
+    /// uppercase or lowercase, and the numbers 1 and 0. Other values are an
+    /// error.
     Boolean,
-    /// A timestamp, written out as RFC 3339. A string is parsed and
-    /// re-rendered, so a mixture of offsets arrives downstream in one spelling;
-    /// a number is read as **seconds** since the epoch, fractions included —
-    /// the same reading the column mapping makes.
+    /// A timestamp, written as RFC 3339. A string is parsed and written again
+    /// in one format. A number is read as **seconds** since the epoch, with
+    /// fractions. The column mapping reads a number in the same way.
     Timestamp,
-    /// A calendar date, written out as `2026-08-10`. A string may be a plain
-    /// date or a full timestamp, of which the date is taken.
+    /// A calendar date, written as `2026-08-10`. A string can be a date or a
+    /// full timestamp. From a timestamp, the cast uses the date.
     Date,
-    /// A UUID, lower-cased. Only a string in the canonical hyphenated form is
-    /// accepted — this validates, it does not invent.
+    /// A UUID, in lowercase. The cast accepts only a string in the canonical
+    /// form with hyphens.
     Uuid,
-    /// The JSON a string contains, parsed. This is the one cast whose input
-    /// must be a string: it is for a payload that arrived encoded inside
-    /// another one.
+    /// Parses the JSON that a string contains. The input must be a string. Use
+    /// it for a payload that is encoded inside another payload.
     Json,
 }
 

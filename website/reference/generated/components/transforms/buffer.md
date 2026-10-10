@@ -2,55 +2,55 @@
 
 ## `buffer` {#transform-buffer}
 
-Holds messages back and hands them on when a *trigger* says to.
+Keeps messages and sends them on when a trigger fires.
 
-There are three triggers and they compose: a message count, a length of time, and a condition on a state bucket. Any of them is enough on its own — whichever comes first ends the wait, the same rule the input-level `batch` buffer follows. A buffer with no trigger at all fails to build.
+There are three triggers: a message count, a time, and a condition on a state bucket. You can use them together. The first trigger that fires releases the messages. A buffer with no trigger fails to build.
 
-`size` is the one that has always been here and it behaves exactly as it did: messages are handed on in batches of exactly that many, as they fill. The other two release **everything currently held** as a single batch, however much that is — which is the useful reading of "the run is finished, send what you have".
+`size` sends batches of exactly that number of messages. `seconds` and `until` send all messages that the buffer keeps, as one batch.
 
-Distinct from the `buffer` option on an input: that one batches what an input produces, before any transform has seen it. This one sits in the chain, so it batches what the transforms in front of it produced — after a `filter` has thinned the stream, or a `recall` has enriched it.
+The `buffer` setting on an input is a different thing. It makes batches before the transforms. The `buffer` transform makes batches at its position in the chain, for example after a `filter` or a `recall`.
 
 | field | type | | description |
 | --- | --- | --- | --- |
-| `max_messages` | `integer` | <Badge type="info" text="optional" /> | never hold more than this many messages: reaching it releases them all, whatever the triggers say, and says so in the log once. Required unless `size` is set, because `size` is its own bound — a buffer waiting on a condition that never comes true is otherwise a memory leak that grows at the rate of the stream. |
-| `seconds` | `integer` | <Badge type="info" text="optional" /> | release everything held this many seconds after the *first* held message. The window opens when a message is held rather than when the last batch went out, so this is a bound on how long a message waits and not a cadence — an idle buffer holds nothing and no clock is running. |
-| `size` | `integer` | <Badge type="info" text="optional" /> | hand messages on in batches of exactly this many, as they fill. On its own this is a buffer that only ever counts, and is what this transform has always done. |
-| `until` | `object` | <Badge type="info" text="optional" /> | release everything held when a state bucket says so. This is the trigger a *different* pipeline can pull: buckets are global, so one pipeline can mark a run complete and this one hands on what it gathered while the run was going. |
+| `max_messages` | `integer` | <Badge type="info" text="optional" /> | The maximum number of messages to keep. At this number, the buffer sends all kept messages and writes one warning to the log. Required if `size` is not set. Without a limit, a condition that is never true makes the buffer use more and more memory. |
+| `seconds` | `integer` | <Badge type="info" text="optional" /> | Send all kept messages this number of seconds after the first kept message. The time starts when the buffer keeps a message. An empty buffer sends nothing. |
+| `size` | `integer` | <Badge type="info" text="optional" /> | Send batches of exactly this number of messages, when each batch is full. |
+| `until` | `object` | <Badge type="info" text="optional" /> | Send all kept messages when a condition on a state bucket is true. Buckets are global, so a different pipeline can write the value that opens the gate. |
 
 **`until`**
 
 | field | type | | description |
 | --- | --- | --- | --- |
-| `conditions` | `list of numeric \| string \| one_of \| none_of` | <Badge type="warning" text="required" /> | what has to be true of that key for the buffer to be released. All of them, and at least one — a gate with no conditions would be a buffer that releases on every write to the bucket. |
-| `bucket` | `string` | <Badge type="info" text="optional" /> | which bucket to watch. Defaults to the one this pipeline's `state` names; a pipeline with no `state` of its own has to name it here. |
-| `key` | `string` | <Badge type="info" text="optional" /> | which key in that bucket to read. A literal key, not a field path — this is one gate for the whole buffer, so there is no message to take a key from. Leave it out for the bucket-wide value, which is what `remember` writes when its pipeline's `state` has no `key`. |
+| `conditions` | `list of numeric \| string \| one_of \| none_of` | <Badge type="warning" text="required" /> | The conditions that must all be true to release the buffer. At least one condition is required. |
+| `bucket` | `string` | <Badge type="info" text="optional" /> | The bucket to watch. The default is the bucket in the `state` of this pipeline. A pipeline with no `state` must set it. |
+| `key` | `string` | <Badge type="info" text="optional" /> | The key in the bucket to read. This is a literal key, not a field path. If you do not set it, the gate reads the value for the full bucket. `remember` writes that value when the `state` of its pipeline has no `key`. |
 
 **`until`.`conditions` — each entry — `type: "numeric"`**
 
 | field | type | | description |
 | --- | --- | --- | --- |
-| `field` | `string` | <Badge type="warning" text="required" /> | the field to test — a dotted path, like anywhere else |
-| `operator` | `greater_than` \| `less_than` \| `equal_to` \| `not_equal_to` | <Badge type="warning" text="required" /> | how the field is compared |
-| `value` | `number` | <Badge type="warning" text="required" /> | the number it is compared to |
+| `field` | `string` | <Badge type="warning" text="required" /> | The field to test, as a dotted path. |
+| `operator` | `greater_than` \| `less_than` \| `equal_to` \| `not_equal_to` | <Badge type="warning" text="required" /> | How to compare the field. |
+| `value` | `number` | <Badge type="warning" text="required" /> | The number to compare to. |
 
 **`until`.`conditions` — each entry — `type: "string"`**
 
 | field | type | | description |
 | --- | --- | --- | --- |
-| `field` | `string` | <Badge type="warning" text="required" /> | the field to test — a dotted path, like anywhere else |
-| `operator` | `equal_to` \| `not_equal_to` \| `contains` | <Badge type="warning" text="required" /> | how the field is compared |
-| `value` | `string` | <Badge type="warning" text="required" /> | the string it is compared to |
+| `field` | `string` | <Badge type="warning" text="required" /> | The field to test, as a dotted path. |
+| `operator` | `equal_to` \| `not_equal_to` \| `contains` | <Badge type="warning" text="required" /> | How to compare the field. |
+| `value` | `string` | <Badge type="warning" text="required" /> | The string to compare to. |
 
 **`until`.`conditions` — each entry — `type: "one_of"`**
 
 | field | type | | description |
 | --- | --- | --- | --- |
-| `field` | `string` | <Badge type="warning" text="required" /> | the field to test — a dotted path, like anywhere else |
-| `values` | `list of string` | <Badge type="warning" text="required" /> | the strings that match |
+| `field` | `string` | <Badge type="warning" text="required" /> | The field to test, as a dotted path. |
+| `values` | `list of string` | <Badge type="warning" text="required" /> | The strings that match. |
 
 **`until`.`conditions` — each entry — `type: "none_of"`**
 
 | field | type | | description |
 | --- | --- | --- | --- |
-| `field` | `string` | <Badge type="warning" text="required" /> | the field to test — a dotted path, like anywhere else |
-| `values` | `list of string` | <Badge type="warning" text="required" /> | the strings that do not match |
+| `field` | `string` | <Badge type="warning" text="required" /> | The field to test, as a dotted path. |
+| `values` | `list of string` | <Badge type="warning" text="required" /> | The strings that do not match. |

@@ -2,38 +2,38 @@
 
 | | |
 |---|---|
-| `msg` | the message this run was handed *(`message` scope)* |
-| `batch` | every message of the batch, as an array *(`batch` scope)* |
-| `emit(value)` | hand a value on to the rest of the pipeline |
-| `field(message, path)` | read a dotted field path, as every other transform reads one |
-| `recall(key)` | read what was remembered under a key |
-| `remember(key, values)` | write values into the pipeline's state bucket |
-| `now()` | the current time, RFC 3339 |
+| `msg` | the message of this run *(`message` scope)* |
+| `batch` | all messages of the batch, as an array *(`batch` scope)* |
+| `emit(value)` | send a value to the rest of the pipeline |
+| `field(message, path)` | read a dotted field path, as the other transforms do |
+| `recall(key)` | read the values stored under a key |
+| `remember(key, values)` | write values into the state bucket of the pipeline |
+| `now()` | the current time, as RFC 3339 |
 | `now_millis()` | the current time, in milliseconds since the epoch |
-| `parse_time(value)` | a time read as milliseconds since the epoch |
-| `format_time(millis)` | milliseconds since the epoch as an RFC 3339 string |
-| `pluck(batch, path)` | one field across an array of messages, as an array |
+| `parse_time(value)` | a time, as milliseconds since the epoch |
+| `format_time(millis)` | milliseconds since the epoch, as an RFC 3339 string |
+| `pluck(batch, path)` | one field from an array of messages, as an array |
 | `sum(array)` | the total of an array of numbers |
-| `mean(array)` | the arithmetic mean, or `()` of nothing |
-| `median(array)` | the middle value, or the mean of the two middle ones |
-| `min(array)` | the smallest of an array of numbers |
-| `max(array)` | the largest of an array of numbers |
+| `mean(array)` | the arithmetic mean, or `()` for an empty array |
+| `median(array)` | the middle value, or the mean of the two middle values |
+| `min(array)` | the smallest number in an array |
+| `max(array)` | the largest number in an array |
 | `std(array)` | the population standard deviation |
 | `variance(array)` | the population variance |
-| `quantile(array, q)` | the value a fraction q of the way through the sorted numbers |
+| `quantile(array, q)` | the value at fraction q of the sorted numbers |
 | `mad(array)` | the median absolute deviation from the median |
-| `zscore(array)` | each value as standard deviations from the mean, as an array |
-| `skew(array)` | which way the tail points: positive to the right |
-| `kurtosis(array)` | how heavy the tails are: 0 is normal, positive is heavier |
+| `zscore(array)` | each value in standard deviations from the mean, as an array |
+| `skew(array)` | the direction of the longer tail: positive is to the right |
+| `kurtosis(array)` | the weight of the tails: 0 is normal, positive is heavier |
 | `rms(array)` | the root mean square |
-| `diff(array)` | each value less the one before it |
-| `cumsum(array)` | the running total, as an array the same length |
+| `diff(array)` | each value minus the value before it |
+| `cumsum(array)` | the running total, as an array of the same length |
 | `ewma(array, alpha)` | an exponentially weighted moving average, as an array |
 | `linfit(array)` | the least-squares line: `#{slope, intercept, r2}` |
-| `autocorr(array, lag)` | how much each value resembles the one lag steps before it, −1 to 1 |
+| `autocorr(array, lag)` | the correlation of each value with the value lag steps before it, −1 to 1 |
 | `peaks(array)` | the positions of the local maxima |
-| `histogram(array, bins)` | counts in equal-width buckets: `#{edges, counts}` |
-| `clamp(x, low, high)` | x held within low to high |
+| `histogram(array, bins)` | counts in buckets of equal width: `#{edges, counts}` |
+| `clamp(x, low, high)` | x limited to the range low to high |
 | `interp(xs, ys, x)` | y at x, by straight lines between known points |
-| `dtw(a, b)` | the dynamic-time-warping distance between two series |
-| `warn(text)` | put a line in the server's log without failing the batch |
+| `dtw(a, b)` | the dynamic time warping distance between two series |
+| `warn(text)` | write a line to the server log, and do not fail the batch |

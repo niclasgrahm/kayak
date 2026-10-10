@@ -1,25 +1,23 @@
 # transforms
 
-Transforms run in the order they are listed, each taking a batch and returning
-zero or more batches — which is how `splitter` and `reduce` change a stream's
-cardinality. Everything is untyped JSON, and a transform addresses fields by
-[field path](/pipelines/message-metadata#field-paths), so `_meta.subject` is
-reachable wherever `value` is.
+Transforms run in the sequence of the list. Each transform takes one batch and
+returns zero or more batches. Thus `splitter` and `reducer` can change the
+number of messages in a stream. All messages are untyped JSON. A transform
+addresses a field by its [field path](/pipelines/message-metadata#field-paths),
+so `_meta.subject` works in every place where `value` works.
 
-Two of these are a pair rather than two components: `remember` and `recall`
-share a [state bucket](/pipelines/state), and they are separate because **chain
-order is the semantics** — `remember` is a tap that passes its batch on
-unchanged, and `recall` writes what was remembered onto the messages that come
-after.
+`remember` and `recall` share a [state bucket](/pipelines/state). They are two
+transforms because their position in the chain sets what they do. `remember`
+passes its batch on unchanged. `recall` writes the remembered values onto the
+messages that come after it.
 
-Six of them — `deadband`, `derive`, `rolling`, `smooth`, `detect` and
-`resample` — are the [streaming statistics](/pipelines/streaming-statistics)
-family: each keeps a little state per `group_by` key in the pipeline's state
-bucket, and each refuses to build in a pipeline that declares no `state`.
+Eight transforms keep state per `group_by` key in the state bucket of the
+pipeline: `deadband`, `throttle`, `pivot`, `derive`, `rolling`, `smooth`,
+`detect` and `resample`. They do not build in a pipeline without a `state`. See
+[streaming statistics](/pipelines/streaming-statistics).
 
-Anything contradictory is refused when the pipeline is built rather than
-producing a strange message once per batch forever: a reducer with no
-aggregations, an `as` that would overwrite a group field, a `map` writing a
-path that runs through a scalar.
+kayak refuses a contradictory transform when it builds the pipeline. Examples
+are a reducer with no aggregations, an `as` that overwrites a group field, and
+a `map` that writes a path through a scalar.
 
 <!--@include: ./generated/components/transforms.md-->

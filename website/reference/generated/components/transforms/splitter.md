@@ -2,10 +2,10 @@
 
 ## `splitter` {#transform-splitter}
 
-Cuts one batch into several smaller ones — the opposite of `buffer`.
+Divides one batch into smaller batches.
 
-Note the current limitation: messages left over after the last whole chunk are dropped, so 4 messages with `out_size: 3` emit one batch, not two.
+The last batch contains the messages that remain and can be smaller. For example, 4 messages with `out_size: 3` give a batch of 3 and a batch of 1.
 
 | field | type | | description |
 | --- | --- | --- | --- |
-| `out_size` | `integer` | <Badge type="warning" text="required" /> | how many messages go in each emitted batch |
+| `out_size` | `integer` | <Badge type="warning" text="required" /> | The number of messages in each sent batch. |

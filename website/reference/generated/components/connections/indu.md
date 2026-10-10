@@ -2,12 +2,12 @@
 
 ## `indu` {#connection-indu}
 
-An Indu Cloud deployment: where its API and ingest endpoints are, and the API key this kayak speaks to it with.
+An Indu Cloud deployment: the API and ingest endpoints, and the API key.
 
-One connection serves both directions: the `indu` output writes streams through `/ingest/v1/streams`, and the `indu` input reads sensors and streams through `/api/v1`. The key is minted on the Indu side (its `/keys` page, or `indud apps register --kind kayak`), bound to a role there, and arrives here as a `${NAME}` reference like every other credential.
+The `indu` output and the `indu` input use the same connection. The output writes streams through `/ingest/v1/streams`. The input reads sensors and streams through `/api/v1`. Make the key in Indu, on the `/keys` page or with `indud apps register --kind kayak`. Give the key a role in Indu.
 
 | field | type | | description |
 | --- | --- | --- | --- |
-| `url` | `string` | <Badge type="warning" text="required" /> | the deployment's origin, e.g. `https://app.acme.indu.cloud`. The ingest endpoint is reached under it as `/ingest/v1/…`; a deployment that serves ingest on a separate host names it in `ingest_url`. |
-| `api_key` | `string` | <Badge type="warning" text="required" /> | the API key, `indu.ak.…`, as a `${NAME}` reference — see "secrets". |
-| `ingest_url` | `string` | <Badge type="info" text="optional" /> | where `/ingest/v1/…` lives when it is not under `url` — the single-server install serves ingest on its own host, e.g. `https://ingest.acme.indu.cloud`. |
+| `url` | `string` | <Badge type="warning" text="required" /> | The origin of the deployment, for example `https://app.acme.indu.cloud`. The ingest endpoint is `/ingest/v1/…` under this url, unless you set `ingest_url`. |
+| `api_key` | `string` | <Badge type="warning" text="required" /> | The API key (`indu.ak.…`), as a `${NAME}` secret reference. |
+| `ingest_url` | `string` | <Badge type="info" text="optional" /> | The origin of `/ingest/v1/…` when it is not under `url`, for example `https://ingest.acme.indu.cloud`. A single-server installation serves ingest on its own host. |

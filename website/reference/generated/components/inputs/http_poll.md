@@ -2,75 +2,77 @@
 
 ## `http_poll` {#input-http-poll}
 
-Fetches a url on a timer and hands on what it returns — the `snapshot` mode of the database inputs, for an api.
+Gets a url at an interval and sends the full reply each time.
 
-Every read is a `GET`, and every read hands on the whole answer: an array is one message per element, anything else is one message. `items` points into a reply that wraps its records (`{"data": {"machines": [...]}}`). This is the reference-data case — a list of machines, recipes or thresholds that changes rarely and that a downstream system needs all of — so there is no watermark, no paging and no notion of what changed since the last read: a sink that upserts by key makes the repetition harmless.
+Each read is a `GET`. A reply that is an array gives one message for each element. Any other reply gives one message. Use `items` for a reply that has the records inside it, for example `{"data": {"machines": [...]}}`.
 
-A read that fails (unreachable, a status other than 2xx, a body that is not JSON, an `items` that points at nothing) is reported once and retried on the usual backoff, and the interval starts again from the next read that works.
+Use this input for reference data, for example a list of machines or recipes that changes rarely. The input has no watermark and no pages. Each read sends all records again. Send them to an output that writes the latest value for each key.
+
+A read fails when the url cannot be reached, when the status is not 2xx, when the body is not JSON, or when `items` finds nothing. The input reports the failure one time and tries again with backoff. The interval starts again after the next successful read.
 
 | field | type | | description |
 | --- | --- | --- | --- |
-| `url` | `string` | <Badge type="warning" text="required" /> | the url to fetch, e.g. `https://erp.example.com/api/machines` |
-| `interval_secs` | `integer` | <Badge type="warning" text="required" /> | how long to wait between reads, in seconds, counted from the end of one read to the start of the next. The first read happens as soon as the pipeline starts. |
-| `auth` | `bearer \| header` | <Badge type="info" text="optional" /> | what this input presents to the api. Absent — the default — sends no credential, which is what an open endpoint wants. |
-| `items` | `string` | <Badge type="info" text="optional" /> | where the records are in the reply, as a JSON pointer: `/data/machines` reads the array at `data.machines`. Absent reads the reply itself. What it points at is split like a whole reply would be — an array into its elements, anything else as one message. |
-| `max_batch` | `integer` | <Badge type="info" text="optional" /> | most messages to put in one batch. Defaults to 1, as on every input. Messages already read are grouped up to this many; the input never waits for a batch to fill. |
-| `timeout_seconds` | `integer` | <Badge type="info" text="optional" /> | how long one request may take before it is given up on, in seconds. Defaults to 30. |
-| `ack` | `on_receipt` \| `on_delivery` | <Badge type="info" text="optional" /> | when this input tells its broker a message is done with. Available on every input kind in the schema, but only honoured by ones with a broker-side notion of "received" vs "delivered" of their own (`kafka`, for now) — an input with nothing to acknowledge refuses to build rather than silently treating this as `on_receipt`. Defaults to `on_receipt`, which is what every input has always done. See "acknowledgement modes" in the guide. |
-| `buffer` | `static \| tumbling \| batch` | <Badge type="info" text="optional" /> | batch messages from this input before the transforms see them — by count (`static`), by time (`tumbling`) or by whichever comes first (`batch`). Never emits an empty batch. Available on every input kind. Not to be confused with the `buffer` transform. |
-| `envelope` | `merge \| wrap` | <Badge type="info" text="optional" /> | attach metadata about where each message came from — the subject, topic, partition and so on listed under "metadata" below. Available on every input kind. Omit it and messages are passed on exactly as they arrive. |
+| `url` | `string` | <Badge type="warning" text="required" /> | The url to get, for example `https://erp.example.com/api/machines`. |
+| `interval_secs` | `integer` | <Badge type="warning" text="required" /> | The time between two reads, in s. The time starts at the end of one read. The first read occurs when the pipeline starts. |
+| `auth` | `bearer \| header` | <Badge type="info" text="optional" /> | The credential that the input sends. If you do not set it, the input sends no credential. |
+| `items` | `string` | <Badge type="info" text="optional" /> | The position of the records in the reply, as a JSON pointer. For example, `/data/machines` reads the array at `data.machines`. If you do not set it, the input uses the full reply. An array gives one message for each element. Any other value gives one message. |
+| `max_batch` | `integer` | <Badge type="info" text="optional" /> | The maximum number of messages in one batch. The default is 1. The input puts only messages that are already read into a batch. It does not wait for a batch to fill. |
+| `timeout_seconds` | `integer` | <Badge type="info" text="optional" /> | The maximum time for one request, in s. The default is 30. |
+| `ack` | `on_receipt` \| `on_delivery` | <Badge type="info" text="optional" /> | When the input acknowledges a message to its broker. The default is `on_receipt`. Only the `kafka` and `mqtt` inputs support `on_delivery`. The `mqtt` input requires a `qos` of `at_least_once` or higher for it. On all other inputs, `on_delivery` fails to build. |
+| `buffer` | `static \| tumbling \| batch` | <Badge type="info" text="optional" /> | Collect messages from this input into batches before the transforms. Use a count (`static`), a time (`tumbling`) or the first of the two (`batch`). The buffer never sends an empty batch. Available on all input types. This is not the `buffer` transform. |
+| `envelope` | `merge \| wrap` | <Badge type="info" text="optional" /> | Add metadata about the source of each message, for example the subject, the topic or the partition. The "metadata" section lists the fields. Available on all input types. If you do not set it, the input sends each message without changes. |
 
 **`auth` — `type: "bearer"`**
 
 | field | type | | description |
 | --- | --- | --- | --- |
-| `token` | `string` | <Badge type="warning" text="required" /> | the token. A `${NAME}` reference, so the config file holds the name and the secret store holds the value. |
+| `token` | `string` | <Badge type="warning" text="required" /> | The token. Use a `${NAME}` reference, so that the config file keeps only the name and the secret store keeps the value. |
 
 **`auth` — `type: "header"`**
 
 | field | type | | description |
 | --- | --- | --- | --- |
-| `name` | `string` | <Badge type="warning" text="required" /> | the header's name, matched case-insensitively on the way in. On an `http` input it may not be one of the headers an `envelope` passes through, since that would write the credential into the messages. |
-| `value` | `string` | <Badge type="warning" text="required" /> | the exact value that header must have. A `${NAME}` reference, as above. |
+| `name` | `string` | <Badge type="warning" text="required" /> | The name of the header. The `http` input compares the name without case. On an `http` input, the name must not be a header that an `envelope` copies into the messages. |
+| `value` | `string` | <Badge type="warning" text="required" /> | The exact value of the header. Use a `${NAME}` reference. |
 
 **`buffer` — `type: "static"`**
 
 | field | type | | description |
 | --- | --- | --- | --- |
-| `size` | `integer` | <Badge type="warning" text="required" /> | how many messages to gather before the batch is handed on |
+| `size` | `integer` | <Badge type="warning" text="required" /> | The number of messages in a batch. |
 
 **`buffer` — `type: "tumbling"`**
 
 | field | type | | description |
 | --- | --- | --- | --- |
-| `window_seconds` | `integer` | <Badge type="warning" text="required" /> | how long to gather messages for, measured from the first one |
+| `window_seconds` | `integer` | <Badge type="warning" text="required" /> | The time to collect messages, in s, from the first message. |
 
 **`buffer` — `type: "batch"`**
 
 | field | type | | description |
 | --- | --- | --- | --- |
-| `size` | `integer` | <Badge type="warning" text="required" /> | how many messages end the batch immediately |
-| `window_seconds` | `integer` | <Badge type="warning" text="required" /> | how long to wait for them, measured from the first message in the batch |
+| `size` | `integer` | <Badge type="warning" text="required" /> | The number of messages that closes the batch immediately. |
+| `window_seconds` | `integer` | <Badge type="warning" text="required" /> | The maximum time to wait, in s, from the first message in the batch. |
 
 **`envelope` — `type: "merge"`**
 
 | field | type | | description |
 | --- | --- | --- | --- |
-| `meta` | `string` | <Badge type="info" text="optional" /> | the field the metadata object is written to. Defaults to `_meta`. |
+| `meta` | `string` | <Badge type="info" text="optional" /> | The field for the metadata object. The default is `_meta`. |
 
 **`envelope` — `type: "wrap"`**
 
 | field | type | | description |
 | --- | --- | --- | --- |
-| `meta` | `string` | <Badge type="info" text="optional" /> | the field the metadata object is written to. Defaults to `_meta`. |
-| `payload` | `string` | <Badge type="info" text="optional" /> | the field the original payload is written to. Defaults to `value`. |
+| `meta` | `string` | <Badge type="info" text="optional" /> | The field for the metadata object. The default is `_meta`. |
+| `payload` | `string` | <Badge type="info" text="optional" /> | The field for the original payload. The default is `value`. |
 
 **metadata** — what this input attaches to a message when its `envelope` is set.
 
 | field | holds |
 | --- | --- |
-| `pipeline` | id of the pipeline that read the message |
-| `input` | kind of input it was read by, e.g. `nats` |
-| `received_at` | when kayak read it, RFC 3339. This is an arrival time and not an event time: it says when the message reached this pipeline, not when whatever it describes happened. |
-| `url` | the url the message was read from, without any username or password it carried |
-| `polled_at` | when the read that returned this message started, RFC 3339. Every message of one read carries the same value, which is what tells one snapshot's messages apart from the next's. |
+| `pipeline` | The id of the pipeline that read the message. |
+| `input` | The type of the input that read the message, for example `nats`. |
+| `received_at` | The time when kayak read the message, as RFC 3339. This is the arrival time at this pipeline. It is not the time of the event in the message. |
+| `url` | The url that the input read the message from, with no username and no password. |
+| `polled_at` | The start time of the read that returned the message, as RFC 3339. All messages of one read have the same value. Use it to tell one snapshot from the next. |

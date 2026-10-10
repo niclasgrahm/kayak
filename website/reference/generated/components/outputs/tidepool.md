@@ -2,30 +2,30 @@
 
 ## `tidepool` {#output-tidepool}
 
-Writes every batch into a Tidepool table, one request per batch.
+Writes each batch into a Tidepool table, one request for each batch.
 
-The table has to exist: Tidepool's project declares it, with its column types, and this output checks against that on start — every mapped column has to be one of the table's, of a type it can write, and every column the table requires has to be written. A mismatch fails the start rather than the first batch.
+The table must exist in the Tidepool project. On start, the output checks the columns against the table. Each mapped column must be in the table and have a type that the mapping can write. Each required column of the table must be written. If the check fails, the start fails.
 
-`columns` is spelled as the database outputs spell it. Leave it out to send each message as a row as it is, for messages already shaped like the table: Tidepool checks every value and refuses a batch with any problem in it, so nothing is coerced on either side.
+`columns` has the same format as on the database outputs. If you do not set it, the output sends each message as a row without changes. Tidepool checks each value and refuses a batch that has a problem.
 
-A batch Tidepool refuses fails with its problems quoted by row and column. A busy server (`503`) or one that can't be reached is retried for up to `retry_seconds` under the same idempotency key, so a retry never writes a batch twice.
+A refused batch fails. The error gives the problems by row and column. The output tries again when the server is busy (`503`), when the server cannot be reached and on other `5xx` errors. It tries again for up to `retry_seconds`. Each try uses the same idempotency key, so Tidepool does not write a batch two times.
 
 | field | type | | description |
 | --- | --- | --- | --- |
-| `connection` | `tidepool` connection | <Badge type="warning" text="required" /> | name of the tidepool connection to write through — see "connections" in the readme. |
-| `table` | `string` | <Badge type="warning" text="required" /> | the table to write into, as Tidepool's project names it |
-| `columns` | `list of column` | <Badge type="info" text="optional" /> | which message field goes in which column. Leave it out to send each message as a row as it is. |
-| `on_extra_fields` | `ignore` \| `error` | <Badge type="info" text="optional" /> | what to do about a message carrying fields no column reads |
-| `retry_seconds` | `integer` | <Badge type="info" text="optional" /> | how long one batch keeps being retried while the server is busy or unreachable, in seconds. Defaults to 30. |
-| `timeout_seconds` | `integer` | <Badge type="info" text="optional" /> | how long one request may take, in seconds. Defaults to 30. |
+| `connection` | `tidepool` connection | <Badge type="warning" text="required" /> | The name of the tidepool connection to write through. Declare the connection in the connections file. |
+| `table` | `string` | <Badge type="warning" text="required" /> | The table to write into, with the name from the Tidepool project. |
+| `columns` | `list of column` | <Badge type="info" text="optional" /> | The column for each message field. If you do not set it, the output sends each message as a row without changes. |
+| `on_extra_fields` | `ignore` \| `error` | <Badge type="info" text="optional" /> | What to do with a message that has fields that no column reads. |
+| `retry_seconds` | `integer` | <Badge type="info" text="optional" /> | The maximum time to try one batch again while the server is busy or cannot be reached, in s. The default is 30. |
+| `timeout_seconds` | `integer` | <Badge type="info" text="optional" /> | The maximum time for one request, in s. The default is 30. |
 
 **`columns` — each entry**
 
 | field | type | | description |
 | --- | --- | --- | --- |
-| `name` | `string` | <Badge type="warning" text="required" /> | the column's name in the table. Letters, digits and underscores only, since it cannot be sent as a query parameter. |
-| `type` | `text` \| `integer` \| `bigint` \| `float` \| `decimal` \| `boolean` \| `timestamp` \| `date` \| `uuid` \| `json` | <Badge type="warning" text="required" /> | what the column holds. Values are checked against it rather than coerced into it. |
-| `field` | `string` | <Badge type="info" text="optional" /> | the field to read, as a dotted path. Defaults to the column's name. |
-| `message` | `boolean` | <Badge type="info" text="optional" /> | store the whole message in this column instead of one of its fields. Only for a `json` column, and not together with `field`. |
-| `nullable` | `boolean` | <Badge type="info" text="optional" /> | whether the column accepts `NULL`. Defaults to true; `false` makes the created column `NOT NULL` and makes a missing field an error. |
-| `on_missing` | `null` \| `error` \| `skip_row` | <Badge type="info" text="optional" /> | what to do about a message that doesn't carry the field. Defaults to `null`, or to `error` for a column that is not nullable. |
+| `name` | `string` | <Badge type="warning" text="required" /> | The name of the column in the table. Use only letters, digits and underscores. |
+| `type` | `text` \| `integer` \| `bigint` \| `float` \| `decimal` \| `boolean` \| `timestamp` \| `date` \| `uuid` \| `json` | <Badge type="warning" text="required" /> | The type of the column. The output checks each value against it. |
+| `field` | `string` | <Badge type="info" text="optional" /> | The field to read, as a dotted path. The default is the name of the column. |
+| `message` | `boolean` | <Badge type="info" text="optional" /> | Write the full message to this column. Use it only with a `json` column. Do not use it with `field`. |
+| `nullable` | `boolean` | <Badge type="info" text="optional" /> | Whether the column accepts `NULL`. The default is true. With `false`, the output makes the column `NOT NULL`, and a missing field is an error. |
+| `on_missing` | `null` \| `error` \| `skip_row` | <Badge type="info" text="optional" /> | What to do with a message that does not have the field. The default is `null`, or `error` for a column that is not nullable. |

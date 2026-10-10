@@ -76,91 +76,87 @@ use serde::{Deserialize, Serialize};
 /// catch-up is not a query per handful of rows.
 pub const DEFAULT_PAGE_SIZE: usize = 1000;
 
-/// What to read, how often, and whether to remember where the last read got
-/// to. Shared verbatim by every SQL input — see the module docs.
+/// What to read, how often to read it, and whether to continue from the last
+/// read. All SQL inputs use these fields.
 #[derive(Clone, Debug, Deserialize, Serialize, JsonSchema)]
 pub struct SqlPollConfig {
-    /// the table or view to read, as `name` or `schema.name`. Exactly one of
-    /// `table` and `query` is required.
+    /// The table or view to read, as `name` or `schema.name`. Give exactly one
+    /// of `table` and `query`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub table: Option<String>,
-    /// a `SELECT` to read instead of a table. It is the *source*, not the whole
-    /// statement: the input wraps it as a subquery and adds the cursor
-    /// condition, the ordering and the page limit itself, so an incremental
-    /// query needs no placeholder and no `ORDER BY` of its own. One statement,
-    /// no trailing semicolon; anything the server can put in a subquery
-    /// (including a `WITH`) is fine.
+    /// A `SELECT` to read in place of a table. The input puts the query in a
+    /// subquery. It adds the cursor condition, the `ORDER BY` and the page
+    /// limit outside the subquery. Thus, the query needs no placeholder and no
+    /// `ORDER BY`.
+    ///
+    /// Write one statement with no semicolon at the end. You can use all SQL
+    /// that the server accepts in a subquery, for example `WITH`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub query: Option<String>,
-    /// the columns to read, in the order they are listed. Empty reads every
-    /// column the table or query has. An incremental input's `field` has to be
-    /// among them.
+    /// The columns to read, in order. Leave it empty to read all columns. For
+    /// an incremental input, the list must include `field`.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub columns: Vec<String>,
-    /// how long to wait between reads, in seconds, counted from the end of one
-    /// read to the start of the next — a read that takes longer than this
-    /// never overlaps itself. The first read happens as soon as the pipeline
-    /// starts.
+    /// The time between two reads, in seconds. The time starts at the end of a
+    /// read. Thus, two reads never overlap. The first read occurs when the
+    /// pipeline starts.
     pub interval_secs: u64,
-    /// whether every read returns the whole relation (`snapshot`) or only the
-    /// rows past where the last read got to (`incremental`).
+    /// Whether each read returns all rows (`snapshot`) or only the rows after
+    /// the last read (`incremental`).
     pub mode: PollMode,
-    /// most rows one query returns, and so the most an incremental read holds
-    /// at once. A read that fills a page asks for the next one straight away
-    /// until a page comes back short; only then does the interval start.
-    /// Defaults to 1000. Ignored by `snapshot`, which reads the relation
-    /// whole.
+    /// The maximum number of rows that one query returns. The default is
+    /// 1000. When a page is full, the input reads the next page immediately.
+    /// The interval starts after a page that is not full. A `snapshot` ignores
+    /// this field and reads all rows in one query.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub page_size: Option<usize>,
-    /// most rows to put in one batch. Defaults to 1 — one message per batch,
-    /// which is what every input does unless asked otherwise. Rows already
-    /// read are grouped up to this many; the input never waits for a batch to
-    /// fill.
+    /// The maximum number of rows in one batch. The default is 1. The input
+    /// puts rows that it already read into a batch. It does not wait for more
+    /// rows to fill a batch.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_batch: Option<usize>,
 }
 
-/// Whether a read returns everything or only what is new.
+/// Whether a read returns all rows or only the new rows.
 #[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize, JsonSchema)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum PollMode {
-    /// Every row, every read, in one query. For reference data — a table the
-    /// pipeline remembers rather than a stream it follows — and for relations
-    /// that fit in memory, since there is no page limit on a snapshot.
+    /// Each read returns all rows, in one query. Use it for reference data,
+    /// for example a table of recipes for a `remember` transform. A snapshot
+    /// has no page limit. Use it only for a table that fits in memory.
     Snapshot,
-    /// Only rows whose `field` is past the highest value already handed on,
-    /// read in pages ordered by that field. The field has to be one that
-    /// grows — an id, an `updated_at` — and it should be indexed, or every
-    /// read is a scan of the whole table.
+    /// Each read returns only the rows with a `field` value above the highest
+    /// value that the input already sent. The input reads pages in the order
+    /// of the field. The value of the field must increase, for example an id
+    /// or an `updated_at`. Put an index on the field. Without an index, each
+    /// read scans the full table.
     Incremental {
-        /// the column the input follows: the watermark is the highest value
-        /// of it handed on so far, and each read asks for rows above that.
-        /// Rows where it is `null` are never read.
+        /// The column that the input follows. The watermark is the highest
+        /// value that the input sent. Each read asks for the rows above the
+        /// watermark. The input does not read rows where the column is `null`.
         field: String,
-        /// where the first read starts: `newest` reads only rows added after
-        /// the pipeline started, `oldest` reads the whole relation first and
-        /// then follows it. Defaults to `newest` — replaying a whole table
-        /// into a pipeline is the surprising outcome and the one to ask for.
+        /// Where the first read starts. With `newest`, the input reads only
+        /// the rows added after the pipeline started. With `oldest`, it reads
+        /// all rows first and then follows the table. The default is `newest`.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         start_from: Option<StartFrom>,
-        /// how far behind the current moment to stay, in seconds, for a
-        /// timestamp cursor: rows above the watermark but within this many
-        /// seconds of `now()` are left for a later read, giving a transaction
-        /// that commits late time to land. Meaningless on a numeric cursor and
-        /// refused by the server on one.
+        /// For a timestamp column: the time to stay behind the current time,
+        /// in seconds. A later read gets the rows that are less than this time
+        /// before `now()`. This gives late transactions time to commit. Do not
+        /// use it with a numeric column. The server refuses the query.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         lag_secs: Option<u64>,
     },
 }
 
-/// Where an incremental input's first read starts.
+/// Where the first read of an incremental input starts.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Deserialize, Serialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum StartFrom {
-    /// From the beginning: the first read returns every row, page by page.
+    /// From the start. The first read returns all rows, one page at a time.
     Oldest,
-    /// From now: the first read finds the highest value of the field and
-    /// returns only rows above it. The default.
+    /// From now. The first read finds the highest value of the field and
+    /// returns only the rows above it. This is the default.
     #[default]
     Newest,
 }

@@ -2,16 +2,12 @@
 
 ## `clickhouse` {#connection-clickhouse}
 
-A ClickHouse server, as one user connects to it over its HTTP interface.
-
-The same split [`PostgresConnection`] makes: the server, the database and the user are the connection's; the *table* belongs to the output that writes it.
-
-The HTTP interface rather than the native protocol because it is what every ClickHouse deployment exposes — including ClickHouse Cloud, where 8443 is the only port there is — and because it takes an insert as a body in a named format, which is exactly the shape a batch of messages already has.
+A ClickHouse server and the user that kayak connects as. kayak uses the HTTP interface of the server. The output or the input sets the table.
 
 | field | type | | description |
 | --- | --- | --- | --- |
-| `url` | `string` | <Badge type="warning" text="required" /> | url of the HTTP interface, e.g. `http://localhost:8123` for the server in `docker-compose.yaml`, or `https://<host>:8443` for ClickHouse Cloud. |
-| `database` | `string` | <Badge type="warning" text="required" /> | the database to write into. It has to exist already — an output creates tables, never databases. |
-| `user` | `string` | <Badge type="warning" text="required" /> | the user to connect as |
-| `password` | `string` | <Badge type="warning" text="required" /> | that user's password. May reference secrets as `${NAME}` — see "secrets" in the readme, and prefer a reference to a literal here. |
-| `allow_http` | `boolean` | <Badge type="info" text="optional" /> | allow a plaintext `http://` url. Defaults to false: the credentials above go with every insert, so sending them in the clear is a decision worth writing down. The local server in `docker-compose.yaml` is the case that legitimately wants it. |
+| `url` | `string` | <Badge type="warning" text="required" /> | The url of the HTTP interface, for example `http://localhost:8123` for the server in `docker-compose.yaml`, or `https://<host>:8443` for ClickHouse Cloud. |
+| `database` | `string` | <Badge type="warning" text="required" /> | The database to use. The database must exist. The output makes tables. It does not make databases. |
+| `user` | `string` | <Badge type="warning" text="required" /> | The user to connect as. |
+| `password` | `string` | <Badge type="warning" text="required" /> | The password of the user. Use a `${NAME}` secret reference for this value. |
+| `allow_http` | `boolean` | <Badge type="info" text="optional" /> | Permit an `http://` url with no TLS. The default is false. The credentials go with every request, as plain text. Use it only for a local server, for example the server in `docker-compose.yaml`. |

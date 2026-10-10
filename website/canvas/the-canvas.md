@@ -1,249 +1,149 @@
 # the canvas
 
-Cards are laid out automatically as a top-to-bottom hierarchy — a `pipeline`
-input makes its pipeline a child of the one it names as upstream — until you
-drag one somewhere else, at which point that card stays put and everything else
-carries on being placed for you. See [arranging the canvas](/canvas/arranging-the-canvas).
+kayak has an optional web UI on the same port as the API. Use it to look at the
+running graph and at the messages in each pipeline. You do not need the UI to
+run kayak. Each action in the UI is also an HTTP endpoint and a change to the
+config. See the [http api reference](/reference/api).
 
-It is a DAG rather than a tree: a pipeline with several `pipeline` inputs has
-several parents, and sits one row below the deepest of them so that every edge
-still points downwards.
+The main page is the canvas. It shows each pipeline as a card. A line connects
+a pipeline to each pipeline that it feeds through a `pipeline` input.
 
-Edges are **orthogonal and grid-aligned**: they leave a card's face, run along a
-grid line to a channel between the two cards, and turn in. Vertical wins
-whenever there is room for it, because the graph is a flow and down the page is
-what the flow means — a child one row below its parent is joined bottom to top
-whether it sits underneath or right across the canvas. The side faces are for
-cards that are *level* with each other, which is exactly when a sideways line is
-the one that reads right; a card dragged above its parent leaves by the top, and
-the line reads as running backwards because it does. Edges sharing a face fan
-out along it rather than piling onto one point, in the order of the cards they
-lead to.
+## layout
 
-**Channels are separated automatically.** The middle segment of every route
-wants the same place — half way between the two rows — so a fan-out would be
-drawn as one thick line with a few stubs coming out of it. Instead each edge
-takes the nearest grid line to half way that no other channel is already lying
-along, working outwards a cell at a time, so an edge only moves as far as it has
-to and a graph with room to spare looks exactly as it would have. Edges the user
-has placed by hand are laid down first and the automatic ones route around them.
+kayak puts the cards in rows from top to bottom. A pipeline is one row below
+its upstream. A pipeline with several upstreams is one row below the deepest
+upstream, so that each line points down.
 
-**Three parts of a route are draggable in edit mode**, and each is the answer to
-something automatic routing can't get right on its own. Double-click any of them
-to put that part back to automatic.
+When you move a card, that card stays where you put it. kayak continues to
+place the other cards. See [arranging the canvas](/canvas/arranging-the-canvas).
 
-*The channel* — the middle segment, the part between the two cards and the only
-one not pinned to a port. The automatic separation keeps the lines apart but has
-no opinion about which one should pass above which; dragging is how you say.
-Stored as an *offset* from the half-way line rather than a coordinate, so it
-survives either card being moved, and clamped to the gap between the cards,
-since past either end the route would double back. A stored offset of zero is a
-real answer — "on the half-way line, whatever else is there" — which is why
-handing a channel back to the automatic separation is done by double-clicking
-it, not by dragging it back to the middle. A route with no middle to move — a
-straight line between two aligned cards, an L-shape between perpendicular faces
-— has no handle, because one that did nothing would be worse than none.
+The lines are horizontal and vertical, on the grid. Lines that share a face of a
+card spread out along that face. Lines between the same two rows go on
+different grid lines, so that a fan-out does not look like one thick line.
 
-*The two ends.* Which *face* an edge uses stays automatic — that answer is
-nearly always right and it has to keep up as cards move — but where along that
-face it attaches is yours. The fan-out spreads ends evenly, which is a good
-default and a poor answer when two of the lines need to cross to get where they
-are going. Stored as a distance from the start of the face (its left end across
-the top and bottom, its top end up the sides) rather than a fraction of it,
-because that is what the drag meant: "a card's width in from the corner" should
-stay put when the card is made taller.
+A line flashes when a batch goes across it. The signal is the `input` event of
+the downstream pipeline. Thus a pipeline with an input `buffer` flashes once
+for each closed window. A pipeline with several upstreams flashes all its
+incoming lines. With `prefers-reduced-motion`, the lines do not move.
 
-Each stored end carries the face it was measured on. When the router changes its
-mind — a card moves, and an edge that left by the bottom now leaves by the side
-— the old number means nothing on the new face, so it is ignored and that end
-goes back to automatic. Self-healing, and no cleanup pass over the file.
+## the sidebar
 
-A pinned end still takes up its slot in the fan-out, even though its position is
-then thrown away. That is what keeps nudging one line from shifting its
-siblings out from under you; it costs an unused gap in the fan, which is a much
-smaller surprise.
+The sidebar has three tabs:
 
-One known rough edge, visible rather than wrong: a channel can run straight
-through a card that happens to sit between the two ends. That used to need an
-obstacle-aware router to fix; now it needs a drag.
+- **pipelines**: the list of pipelines. Click a name to move the view to that
+  card.
+- **connections**: the connections of the server.
+- **state**: the state buckets and their contents. This tab only shows the
+  buckets. The UI refreshes it once a second while it is open.
 
-An edge lights up when a batch crosses it and fades back over ~700ms, so a busy
-graph glows rather than strobes (and doesn't animate at all under
-`prefers-reduced-motion`). The signal is the *downstream's* `input` UI event,
-which means a pipeline whose input is buffered blinks once per closed window
-rather than once per message — its upstream is feeding it continuously, but
-nothing observable happens until the buffer closes. A pipeline with several
-upstreams lights *all* its incoming edges: the event says a batch arrived, not
-which input carried it.
+The pipelines tab has two views. Select `flat` or `tree` in its header:
 
-| gesture | does |
+- `flat` shows each pipeline one time, sorted by id.
+- `tree` shows each pipeline under its upstreams. A pipeline with several
+  upstreams is shown in full under the deepest upstream. Under the other
+  upstreams, it is a dimmed row with no children and no delete button.
+
+The search box filters the list. In tree mode, a match keeps its ancestors in
+the list.
+
+## a card
+
+A card has three sections: **config**, **stats** and **logs**. Click a heading
+to open or close its section. Config and stats are open at the start. Logs is
+closed. A closed section gets no data from the feed, so it costs nothing.
+
+The UI keeps the open sections, and the maximized card, in the browser tab
+only. They do not go into the layout file. A reload resets them.
+
+The button in the title bar maximizes the card to fill the canvas. Click it
+again to restore the card.
+
+### config
+
+The config section shows the inputs, the transforms and the outputs on three
+tabs. When a tab has more than one component, each component is one line at the
+start. Click a heading to open its settings. The transforms tab has a row of
+chips, one for each step. Click a chip to open that step.
+
+A maximized card shows the three stages side by side.
+
+Select `yaml` or `json` on the heading to see the config as text. The text
+comes from `GET /api/pipelines/{id}/config`. It is the config that the pipeline
+runs, in the format of a saved file. The `{ }` button beside a component opens
+the text at that component.
+
+For a `script` transform, the config section shows the script. It is the
+script that the pipeline was built with. It is not the file on disk now. The
+section shows when the file on disk changed after the build.
+
+### stats
+
+The stats section has a bar chart of the throughput. Each pair of bars is one
+time unit: messages in and messages out. The newest bar is at the right.
+
+| unit | window (30 bars) |
 | --- | --- |
-| wheel / trackpad scroll | zoom about the cursor, 20%–250% (shown in the navbar) — except over a card's pane that has somewhere to scroll, or anywhere on a maximized card |
-| drag empty canvas | pan |
-| click a name in the sidebar | glide the camera to centre that pipeline |
-| `flat` / `tree` in the sidebar header | switch between the pipelines in id order and the same set nested under the upstreams that feed them |
-| type in the sidebar's search box | narrow the list; in tree mode a match keeps the chain above it |
-| click a card's `config` / `stats` / `logs` heading | fold that part away, or bring it back — a shut part stops being fed |
-| click a component's heading in the config | open or fold its settings; folded, it is one line saying what they are |
-| a step's chip above the transforms | open that step and scroll to it |
-| `fields` / `yaml` / `json` on the config heading | show the config as rows, or as the text a config file would hold, with a copy button |
-| `{ }` beside a component's heading | open the text at that component |
-| `▸` at the left of a log row (on hover) | open that row's payload, pretty-printed — the log pauses so it can be read |
-| `5s` / `1m` / `5m` on a card's chart | change the bar width, and so how far back the chart reaches |
-| `edit` in the navbar | switch out of read-only, revealing the controls below |
-| `+` in the sidebar header | open the "add pipeline" modal |
-| `×` on a sidebar row | delete that pipeline (click twice — the first click arms it) |
-| shift-click a card or a sidebar row (edit mode) | add that pipeline to the selection, or take it out again |
-| `⋯` on a sidebar row (edit mode) | `select children` — add that pipeline and everything downstream of it to the selection |
-| click empty canvas | clear the selection |
-| drag a card's title bar (edit mode) | move it — and every other selected card with it; they snap to the grid |
-| drag a card's bottom-right corner (edit mode) | resize it; also snapped |
-| double-click a card's title bar (edit mode) | put it back under the automatic layout |
-| drag the middle of a line (edit mode) | move that line's channel closer to one card or the other |
-| drag the end of a line (edit mode) | slide where it connects along the card's face |
-| double-click either (edit mode) | put that part of the line back to automatic |
+| `5s` | 2.5 min |
+| `1m` | 30 min |
+| `5m` | 2.5 h |
 
-**Selecting more than one card** is an edit-mode thing, and it exists because a
-graph of any size is arranged in handfuls rather than card by card. Shift-click
-builds the set — on the cards or on the sidebar rows, whichever is closer to
-hand — and dragging any card in it moves all of them together, keeping their
-positions relative to each other. A row's `⋯` menu offers `select children`,
-which adds that pipeline and its whole subtree; it *adds* rather than replacing,
-so two branches of a fan-out take two clicks. A plain click on a card that isn't
-selected selects just that one, and a plain click on one that already is leaves
-the set alone — which is what lets a group be grabbed by any of its members. The
-way out is a click on empty canvas.
+A change of the unit starts the chart again. The chart starts with the
+[history](/operating/history) of the server, so it is full when it opens.
 
-**Text is only selectable where it is there to be read.** A card's settings and
-its log rows can be swept over and copied — a broker url or a failing message is
-exactly the kind of thing that wants pasting somewhere else — and so can the
-documentation pages, the connection and bucket cards, and anything typed into.
-Everything else on the canvas is a control: dragging a card, a line or the view
-itself sweeps the pointer across labels, and shift-click is the browser's
-"extend the selection to here" as well as the one that adds a card to the
-selection. Both used to leave a blue smear across the ui that was never what
-anyone meant.
+- **Out** is the sum over all outputs. A pipeline with two outputs shows two
+  times as many messages out as in.
+- The bars include the messages that the sampled feed did not send. Thus the
+  bars show the real rate of the pipeline.
+- Failures are on a separate strip with its own scale.
 
-The sidebar's pipeline list has the same two views of the graph the canvas has,
-behind the `flat` / `tree` button in its header. Flat is every pipeline once, in
-id order — sorted in the browser, because `GET /api/pipelines` walks a hash map
-and its order changes between reloads. Tree nests each pipeline under the
-upstreams that feed it, which the graph being a DAG makes slightly more than an
-indent: a pipeline with several upstreams is listed under each of them, in full
-under the *deepest* one — the parent the canvas draws its card below, so the two
-agree about where it lives — and as a dimmed pointer under the rest. Those
-pointers don't repeat their children and carry no delete: one pipeline, one
-`×`.
+Below the chart, the card lists each distinct failure from the history, with
+its time and its count. When there are no failures, the list is not shown.
 
-The search box above the list filters it. In flat mode that is just the matching
-rows; in tree mode the ancestors of a match are kept as well, because a match
-indented under nothing has lost the one thing the tree was for. Descendants are
-not — searching for a root would otherwise show the whole graph. Both modes and
-the filter are `frontend/src/sidebar.rs`, unit-tested away from the browser like
-`graph.rs`.
+### logs
 
-A card is **three collapsible parts**: config, stats and logs, each with a
-heading that toggles it. Config and stats start open and the log starts shut —
-it is the expensive one and the one you go looking for. Which parts are open is
-a property of the browser tab, like maximizing a card and unlike arranging one:
-it isn't written to the layout file and doesn't survive a reload, because it is
-a way of looking at a card rather than a change to the graph.
+The logs section shows the live feed of the pipeline. Each row is one batch at
+one stage. A failure is a red row: `<stage> error: <cause>`. It is the same
+text as in the server log.
 
-**A shut section is not fed.** The body is unmounted rather than hidden, so a
-shut log is not a two-hundred row list with `display: none` on it, and the feed
-stops writing to it — which is the point, since a canvas of nine cards is nine
-of everything. What each part does about it differs by what it would otherwise
-get wrong. A shut log still takes the counters and none of the rows, so opening
-one onto a busy pipeline reads what that pipeline is doing rather than climbing
-from zero over ten seconds. A shut chart takes nothing at all and is emptied on
-the way down: a bar is a fact about a moment, a gap in a bar chart reads as an
-idle pipeline, and there is no honest way to draw the moments nobody was
-watching. So the chart always says "since you opened this".
+The feed is a sample. The server reports at most about 10 passes per second
+for each pipeline. A gap in the log shows passes that the UI did not get.
 
-The **stats** part is a rolling bar chart of the pipeline's throughput: one pair
-of bars per time unit, messages in against messages out, newest on the right and
-sliding left as time passes. The unit is `5s`, `1m` or `5m` and the window is
-thirty of them — two and a half minutes, half an hour, two and a half hours.
-Changing it starts the chart again, because minutes can't be cut back out of
-seconds. The one number on it is the tallest bar in the window, which is also
-the scale the bars are drawn against; there is no axis, since a grid behind
-thirty bar pairs on a 360px card is noise.
+The bar above the log has these controls:
 
-Two things it counts deliberately. **Out is summed over every output** — each
-output gets every batch, so a pipeline with two of them shows twice as much
-leaving as arriving, and one of them dying is visible as the gap it is. And a
-bar counts what the *feed skipped* as well as what it carried: `/events` is
-sampled under load and every batch says how many passes were dropped to reach
-it, so counting only what arrives would draw the sampling rate rather than the
-pipeline. The counting is the browser's, though — it is fed by the same event
-stream the log is, so nothing is recorded while the tab is closed and none of it
-survives a reload. `frontend/src/stats.rs` is the bucketing and the bar
-geometry, pure and unit tested like `log.rs`; the chart itself is two `<path>`
-elements in a fixed viewBox, which is what makes it cheap enough to redraw on
-every card once a second.
+- `in`, `out` and `err` filter the rows.
+- `flat` shows one event per row. `grouped` shows one pass per row.
+- **pause** stops new rows. The counters continue.
+- **copy** copies the rows as tab-separated text: time, stage, text.
+- **clear** removes the rows.
 
-The **config** part is a tabbed property list — inputs / transforms / outputs.
-A tab with more than one component starts with each folded to a line of its
-values, so a long chain fits the pane; the transforms tab adds a row of chips,
-the chain at a glance, each opening its step. On a maximized card the tabs give
-way to every stage side by side, in the order a batch goes through them. The
-switch on the heading turns the whole part into the pipeline's config as text,
-YAML or JSON, fetched from `GET /api/pipelines/{id}/config` — the config it is
-*running*, rendered by the code a save uses, so it is spelled exactly as the
-saved file would spell it.
+The arrow at the left of a row opens the batch. It shows each message that the
+feed carried, formatted, with a copy button. To open a row also pauses the log.
+The feed carries a limited number of messages per batch, and cuts long
+messages. The box says so when it does not show the complete batch.
 
-The **logs** part is the live message log. The log carries failures as well
-as messages: a `UiEvent` is either a `batch` or an `error`, and an error is
-logged in red as
-`<stage> error: <cause>` on the card of the pipeline it happened in. That covers
-the three places the run loop tolerates a failure — a transform that threw, an
-output that couldn't emit, an input that died — and it's the same text the
-server log shows, so a card no longer just goes quiet for reasons only visible
-in the terminal. `frontend/src/log.rs` turns an event into log lines and is unit
-tested; `frontend/src/inspector.rs` builds those rows
-from `serde_json::Value` rather than by matching on the config enums, so a new
-component kind or a new field shows up without touching the frontend; the row
-names are the wire names.
+## gestures
 
-The bar above the log acts on the log and nothing else. The `in` / `out` / `err`
-chips filter it, `flat` / `grouped` swaps between an event per row and a batch's
-whole journey per row, and three buttons do what they say: **pause** stops
-keeping new events so a moving log can be read, **copy** puts the rows on the
-clipboard as tab-separated `time · stage · text`, and **clear** empties it.
+| gesture | what it does |
+| --- | --- |
+| wheel or trackpad scroll | zoom at the pointer, from 20% to 250% |
+| drag the empty canvas | move the view |
+| click a name in the sidebar | move the view to that card |
+| click a section heading | open or close that section |
+| `5s` / `1m` / `5m` on the chart | change the time unit |
+| `▸` at the left of a log row | open the batch and pause the log |
+| `edit` in the navbar | show the edit controls |
 
-A row is one **batch**, summarised to a single line — and the arrow that appears
-at its left edge on hover opens that batch out: every message the feed carried,
-laid out and coloured, with a copy button of its own on the box and another on
-each message. A row that is being read must not scroll away, so **opening one
-pauses the log**; collapsing it leaves the log paused, since the pause button is
-where a stopped log is resumed. What the box can show is bounded by what the
-feed carries (`kayak_core::MESSAGES_PER_BATCH`, and each message cut to
-`MAX_MESSAGE_BYTES`), and it says so at the bottom when the batch was wider than
-that. A message the cut left as invalid JSON — or an error's text, which gets
-the same treatment, since a row truncates it and there is nowhere else to read
-it — is shown as it stands rather than not at all.
+Over a pane that can scroll, such as the log, the wheel scrolls the pane. On a
+maximized card, the wheel always scrolls.
 
-`frontend/src/pretty.rs` is the pure half, unit tested like `log.rs`. It
-**re-indents the text rather than parsing it into a `Value` and printing that
-back**, which is worth knowing before touching it: `serde_json::Map` is a
-`BTreeMap` here, so a round trip would silently sort every payload's keys, and
-re-serializing a number loses the digits the source wrote. The laying out
-happens when a box opens and never on the path of an ordinary log update — the
-same rule the rest of the feed follows.
+The edit controls are on [editing the graph](/canvas/editing-the-graph) and
+[arranging the canvas](/canvas/arranging-the-canvas).
 
-Two details there are deliberate. Pausing stops the *log*, not the pipeline, so
-the throughput readout and the error badge go on counting while it is paused —
-its tooltip says how many events went past — and resuming jumps back to the
-newest line rather than leaving the reader stranded mid-history. And a wheel
-over a log that has somewhere to scroll scrolls it instead of zooming the
-canvas; over one with nothing to scroll it falls through and zooms, since a
-pane that doesn't scroll shouldn't swallow the gesture. That rule is the
-canvas', not the log's (`graph::wheel_zooms`): any pane marked `wheel-scrolls`
-— the log, the config pane, the config's text — gets it, and a maximized card
-keeps every wheel, since there is nothing behind it to zoom.
+## for contributors
 
-All the geometry — layout, edge paths, zoom anchoring, the camera glide — lives
-in `frontend/src/graph.rs` as pure functions with unit tests, and the same goes
-for the inspector rows. Keep it that way: the Leptos components should only feed
-those functions and render the result, since anything inside a component can't
-be tested without a browser.
+The pure logic of the UI is in modules with unit tests:
+`frontend/src/graph.rs` (layout, line routes, zoom), `frontend/src/sidebar.rs`,
+`frontend/src/log.rs`, `frontend/src/stats.rs`, `frontend/src/pretty.rs` and
+`frontend/src/inspector.rs`. The Leptos components only call these functions
+and render the result. Keep new logic in these modules. Code in a component
+cannot be tested without a browser.

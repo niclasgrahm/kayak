@@ -2,10 +2,10 @@
 
 ## `redis` {#connection-redis}
 
-A redis server, or a cluster front-end that speaks the same protocol.
+A redis server, or a server that uses the same protocol.
 
-Used through its pub/sub commands (`SUBSCRIBE`/`PUBLISH`), the same shape [`NatsConnection`] is — one url, which may already carry a password — rather than the key-value store: there is no queue to consume from here, so a redis input has exactly the delivery guarantees a nats one does (see `RedisConfig`'s doc comment).
+kayak uses the pub/sub commands `SUBSCRIBE` and `PUBLISH`. It does not use the key-value store. Thus, a redis input has the same delivery guarantees as a nats input.
 
 | field | type | | description |
 | --- | --- | --- | --- |
-| `url` | `string` | <Badge type="warning" text="required" /> | connection url, e.g. `redis://localhost:6379` or `redis://:${REDIS_PASSWORD}@localhost:6379/0`. May reference secrets as `${NAME}` — see "secrets" in the readme. |
+| `url` | `string` | <Badge type="warning" text="required" /> | The url of the server, for example `redis://localhost:6379` or `redis://:${REDIS_PASSWORD}@localhost:6379/0`. You can use `${NAME}` secret references. |

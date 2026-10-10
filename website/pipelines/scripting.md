@@ -1,7 +1,7 @@
 # scripting
 
-`script` runs a [rhai](https://rhai.rs) script over each message, or over the
-whole batch, and emits whatever the script asks for.
+The `script` transform runs a [rhai](https://rhai.rs) script on each message, or
+on the whole batch. It sends the values that the script gives to `emit`.
 
 ```yaml
 - type: script
@@ -12,20 +12,20 @@ whole batch, and emits whatever the script asks for.
       msg
 ```
 
-It reaches the message as `msg` and emits with `emit(value)` — **zero times to
-drop it, once to replace it, many times to split it**. That covers what
-`filter`, `map` and `splitter` do, which is exactly why it should not be reached
-for first: a script that only copies fields is a `map` written the hard way, and
-a config that says what it does is worth more than one that can do anything.
+The script gets the message as `msg`. It sends values with `emit(value)`:
+
+- Call `emit` zero times to drop the message.
+- Call `emit` one time to replace the message.
+- Call `emit` many times to split the message.
+
+Use a script only when the other transforms are not sufficient. A config that
+uses `filter`, `map` and `splitter` is easier to read and to review than a
+script that does the same work.
 
 ## what a script reaches that nothing else does
 
-Three things, and they are the reason this exists rather than a longer list of
-transforms:
-
-**Arrays inside a message.** `splitter` turns one message into many and `reduce`
-folds a batch, but nothing walks a list *within* a message. There is no
-declarative spelling of "total the line items" whose body isn't arbitrary code.
+**Arrays inside a message.** `splitter` makes many messages from one, and
+`reduce` combines a batch. No transform goes through a list inside one message.
 
 ```rhai
 let total = 0;
@@ -36,20 +36,17 @@ msg.total = total;
 msg
 ```
 
-**Conditionals.** `map` has none by design and `filter` can only drop the whole
-message, so a severity ladder or a fallback deeper than `coalesce` has nowhere
-else to live.
+**Conditions.** `map` has no conditions. `filter` can only drop the whole
+message. Use a script for a severity ladder, or for a fallback that `coalesce`
+cannot express.
 
-**String work.** Parsing a log line, a `k=v` pair or a URL query is a long tail
-that a `regex_extract` and a `split` would answer about half of.
+**String work.** Use a script to parse a log line, a `k=v` pair or a URL query.
 
 ## scripts and state together
 
-This is the combination that unlocks a class of problem rather than a case.
-[State buckets](/pipelines/state) give a pipeline memory; `remember` and
-`recall` give it a way to write and read. What they have no spelling for is the
-*comparison* — and that is where deduplication, change detection, sessionisation
-and thresholds with hysteresis all live.
+A script can use a [state bucket](/pipelines/state). With a bucket, a script
+can compare a message with an earlier one. Use this for deduplication, change
+detection, sessions and thresholds with hysteresis.
 
 ```rhai
 let previous = recall(msg.id);
@@ -63,32 +60,29 @@ if previous == () {
 msg
 ```
 
-`recall` answers `()` for a key nothing has been written under yet, which is
-distinguishable from an entry holding nothing — `if recall(k) == ()` is the
-warm-up check. The bucket is the one the pipeline declares in its `state` block;
-a script cannot name another, for the reason `remember` and `recall` cannot.
-
-The bucket's bounds still apply, and they are enforced by the store rather than
-by the script, so a script cannot write past `max_keys` however many keys it
-invents.
+- `recall` gives `()` for a key that has no value yet. Use `if recall(k) == ()`
+  to find the warm-up.
+- The script uses the bucket in the `state` block of its pipeline. A script
+  cannot name a different bucket.
+- The limits of the bucket apply. A script cannot write more than `max_keys`
+  keys.
 
 ::: warning
-The rule about [sharing a bucket between pipelines](/pipelines/state) matters
-more here, not less. A script makes ordering-sensitive correlation easy to
-write, and two pipelines sharing a bucket are two run loops with no ordering
-between them.
+Do not [share a bucket between pipelines](/pipelines/state) for data where the
+order is important. Two pipelines that share a bucket have no order between
+them. A script makes this mistake easy.
 :::
 
 ## message scope and batch scope
 
-`scope: message` is the default and is what nearly everything wants. The
-operation budget is then spent per message, the batch structure is preserved,
-and a script that emits nothing for one message has dropped exactly that message.
+`scope: message` is the default. The operation budget applies to each message.
+The batch keeps its structure. A script that sends nothing for a message drops
+only that message.
 
-`scope: batch` hands the script the whole batch as `batch`, and every emitted
-value is a **whole batch** — so `emit([msg])`, not `emit(msg)`. It is for the
-things that are about the batch itself: deduplicating within it, repartitioning
-it, or computing something across it that `reduce` has no function for.
+`scope: batch` gives the script the whole batch as `batch`. Each value that the
+script sends is a **whole batch**. Thus write `emit([msg])`, not `emit(msg)`.
+Use batch scope to deduplicate a batch, to divide it, or to calculate a value
+across it.
 
 ```rhai
 let small = [];
@@ -100,68 +94,58 @@ emit(small);
 emit(large);
 ```
 
-Batch scope is only interesting when something upstream has made the batches
-worth looking at — put a [`buffer`](/reference/inputs) on the input, or the
-script will see one message at a time.
+Put a [`buffer`](/pipelines/pipelines#buffering-an-input) on the input when you
+use batch scope. Without a buffer, many inputs send one message per batch.
 
-Computing something across a batch is where the array functions come in:
-`pluck(batch, "value")` is that field across the batch as an array, and
-`mean`, `std`, `linfit` and the rest are answers over it — see
-[time and numbers](/pipelines/time-and-numbers) for the list and the three
-rules they follow.
+To calculate across a batch, use the array functions. `pluck(batch, "value")`
+gives that field across the batch as an array. `mean`, `std`, `linfit` and the
+other functions calculate a result from it. See
+[time and numbers](/pipelines/time-and-numbers) for the list and the rules.
 
 ## what a script is given
 
 <!--@include: ../reference/generated/script-builtins.md-->
 
-`throw "reason"` is rhai's own, and fails the batch with `reason` on the card.
+`throw "reason"` is part of rhai. It fails the batch with the text `reason`.
 
-This table is generated from the same declaration the editor's reference panel
-and its completion list are built from, and a test pins that declaration against
-what the engine actually registers — so a function that exists is on this page,
-in the popup and in the panel, or it is in none of them.
+kayak generates this table from the functions that the engine registers. Thus
+the table is always complete.
 
-`msg.a.b` is ordinary rhai indexing and is what most scripts will use.
-`field(msg, "a.b")` is for the paths that cannot spell — the ones whose segments
-are chosen at runtime, and the literal dotted keys an
-[envelope](/pipelines/message-metadata) writes. It is **not** called `get`: rhai
-object maps already have a `get` method, and `get(msg, "a.b")` is method-call
-sugar for `msg.get("a.b")`, which finds an exact key and never walks a path.
+- `msg.a.b` is ordinary rhai indexing. Most scripts use it.
+- `field(msg, "a.b")` reads a [field path](/pipelines/message-metadata#field-paths).
+  Use it for a path that the script makes at runtime, and for a literal key with
+  dots, for example a key that an envelope writes. The name is not `get`,
+  because `get` on a rhai map reads an exact key only.
 
-The last expression is **sugar for a single `emit`**, and only when the script
-emitted nothing itself — which is what makes the one-liner above a one-liner. A
-script that did both means the `emit`s.
+If the script does not call `emit`, kayak sends the value of the last
+expression. If the script calls `emit`, kayak ignores the last expression.
 
 ## inline or in a file
 
-`source` is either spelling:
+`source` has two types. `inline` holds the code in the config. `file` names a
+file:
 
 ```yaml
 - type: script
   source: { type: file, path: scripts/swings.rhai }
 ```
 
-A file is resolved against the **directory the config file is in** — the same
-place the connections and layout files live — and it may not climb out of it.
-That is also why a server started without `--config` refuses a file-sourced
-script: there is no directory to resolve against, and the working directory
-would be a boundary that moved depending on where the server was launched from.
-Inline scripts work either way, which is what the HTTP API and the UI carry.
+- The path is relative to the **directory of the config file**. The path cannot
+  go out of that directory.
+- A server without `--config` refuses a file source. It has no directory to read
+  from. An inline script works on every server.
+- kayak reads the file when it builds the pipeline. After you change the file,
+  do a `revert` (`POST /api/config/revert`) to load it again.
 
-Which to use is mostly about how you work. A file gets an editor's
-highlighting, a formatter and a place to keep test cases; inline keeps the
-pipeline in one piece and is the only form the UI can edit. **Prefer a YAML
-config for inline scripts** — it renders them as a literal block, where JSON has
-to escape every newline.
-
-The file is read when the pipeline is built, so editing it takes a revert to
-pick up.
+A file gets the highlighting and formatting of your editor. An inline script
+keeps the pipeline in one place. **Use a YAML config for inline scripts.** YAML
+shows the code as a block. JSON must escape every newline.
 
 ## sharing code between scripts
 
-A script may `import` other rhai files, and the boundary is the one a file
-source already has: the path is relative to the **config file's directory**, it
-may not climb out, and the `.rhai` extension is implied.
+A script can `import` other rhai files. The path is relative to the
+**directory of the config file**, and it cannot go out of that directory. Do not
+write the `.rhai` extension. kayak adds it.
 
 ```rhai
 import "scripts/shared/readings" as readings;
@@ -170,8 +154,7 @@ msg.direction = readings::direction(msg.delta);
 msg
 ```
 
-That makes a more involved project look like this, with the helpers written
-once instead of pasted into every script that classifies the same way:
+A project with shared code has this layout:
 
 ```
 config.yaml
@@ -179,33 +162,27 @@ scripts/swings.rhai
 scripts/shared/readings.rhai
 ```
 
-Three rules keep imports as reviewable as the rest of the config:
+Rules:
 
-- **Everything resolves when the pipeline is built.** A missing or broken
-  module is a pipeline that refuses to start, the same rule a script that does
-  not parse follows — and a running pipeline never touches the filesystem.
-  Editing a module, like editing a script file, takes a revert to pick up.
-- **A module's top level runs once, at build time.** What a script reaches
-  through an import is the module's functions and exported constants, not a
-  body re-run per message — so a module is for functions, and anything
-  per-message belongs in the importing script.
-- **The path is a literal.** An import whose path is assembled at runtime
-  resolves nothing, for the reason `eval` is refused: a script whose
-  dependencies cannot be read off the page is not one a reviewer can approve.
+- **kayak resolves all imports when it builds the pipeline.** If a module is
+  missing or does not compile, the pipeline does not start. A running pipeline
+  does not read files. After you change a module, do a `revert`.
+- **The top level of a module runs one time, at build time.** A script gets the
+  functions and the exported constants of a module. Put the code for each
+  message in the script that imports the module.
+- **The path must be a literal.** An import with a path that the script makes
+  at runtime does not resolve.
+- **A server without `--config` refuses imports**, also in an inline script.
+- **Only `.rhai` files resolve.** An import cannot open other files in the
+  directory, for example `secrets.json`.
 
-Imports follow the file source's other consequence too: a server started
-without `--config` has no directory to resolve against and refuses them, even
-in an inline script. And only `.rhai` files resolve at all — an import can
-never open anything else that lives beside the config, which matters because
-`secrets.json` usually does.
-
-The sample uses this: `scripts/shared/readings.rhai` in `example_config/` holds
-the classification both heartbeat scripts share.
+The sample uses an import. `scripts/shared/readings.rhai` in `example_config/`
+holds the classification that two heartbeat scripts use.
 
 ## trying one out
 
-`POST /api/scripts/dry-run` runs a script over messages you hand it, without
-creating a pipeline:
+`POST /api/scripts/dry-run` runs a script on messages that you send. It does not
+make a pipeline.
 
 ```bash
 curl -s localhost:6767/api/scripts/dry-run -H 'content-type: application/json' -d '{
@@ -218,96 +195,49 @@ curl -s localhost:6767/api/scripts/dry-run -H 'content-type: application/json' -
 { "outcome": "emitted", "batches": [[{"a": 1, "b": 2, "total": 3}]] }
 ```
 
-**A script with a bug in it is a 200, not a 400.** The request was well formed
-and the server answered it completely; where the bug is *is* the answer:
+**A script with a bug gives status 200.** The response tells where the bug is:
 
 ```json
 { "outcome": "failed", "stage": "compile", "message": "...", "line": 2, "column": 9 }
 ```
 
-A 400 means the request itself was wrong — malformed JSON, or a `file` source
-naming something unreadable.
+Status 400 means that the request itself is wrong. Examples are bad JSON, or a
+`file` source that kayak cannot read.
 
-State is never live here. The run gets a private bucket, seeded from `state` in
-the body and thrown away afterwards, and what it holds at the end comes back in
-the response — so a stateful script can be exercised without touching what the
-server is running.
+The dry run does not use a live bucket. It gets a private bucket with the
+values from `state` in the request body. The response contains the contents of
+that bucket at the end. kayak then discards the bucket.
 
 ## writing one in the ui
 
-The same endpoint is what the script editor in the add-pipeline form runs on,
-and it is what makes writing a script there viable at all: every other control
-in that form either builds or says which box is wrong, while this one holds
-code, and the only way to find out what code does is to run it.
-
-**The check and the run are one request, on a debounce after you stop typing.**
-A script that does not compile marks its line in the gutter and says why in the
-strip underneath; one that does compile is run over the messages beside it and
-the result appears as you type. Both come from the server rather than from a
-copy of rhai in the browser — a script that passes in the editor and fails in
-the pipeline is the worst thing this could do, so there is exactly one
-interpreter.
-
-**The messages it runs over are your own.** [Fetching a
-sample](/canvas/editing-the-graph#seeing-the-data-while-you-build) for the input
-seeds the box with the messages
-that reach *this* component — the sample put through the transforms in front of
-it — so what is on screen is this script's effect on the data that will actually
-arrive. Editing that box by hand stops the sample writing to it, so a pasted-in
-awkward message stays where you put it. The summary over the two panes is where
-the surprise usually is: `4 in → 2 out · 2 dropped` is a filter working.
-
-**What you can call is on the page.** `reference` opens the list above, with the
-same descriptions; typing a name offers it as a completion, and so does `msg.`,
-which offers the fields the sample carried. Hovering a name kayak provides
-describes it. A name belonging to the other scope — `batch` in a per-message
-script — is described but never offered, because completing it would write a
-call that fails at runtime.
-
-**Switching scope is in the toolbar**, beside the code, as well as in the
-`scope` row under the editor — they are the same field and either follows the
-other. It is worth having twice because it decides whether `msg` or `batch` is
-a name at all, and because the full-screen editor covers the form. A box still
-holding the starter follows the switch; anything you have typed is left exactly
-as it is, and the editor reports what the other scope makes of it.
-
-**`expand` gives it the screen.** The form is a column of narrow controls and a
-script is the one field that is not a line; the full-screen editor is the same
-box with the reference beside it and the messages under it. Escape closes it,
-and what you typed is in both.
+The script editor in the web UI uses the same dry-run endpoint. It compiles and
+runs the script a short time after the last keystroke. It runs the script on
+messages from a [sample](/canvas/editing-the-graph#seeing-the-data-while-you-build)
+of the input.
 
 ## the sandbox
 
-A script runs **synchronously inside the run loop's task**. That one fact is
-what shapes everything here: a script that loops forever would wedge a worker
-thread, not merely break its own pipeline.
+A script runs inside the task of the run loop. A script that never stops blocks
+a worker thread. These limits prevent that:
 
-- **Every script runs under an operation budget.** `max_operations` on the
-  transform, with a generous default; exceeding it fails the batch. Raise it for
-  a script that legitimately walks a large array.
-- **Sizes are bounded separately**, because the budget counts operations and one
-  operation can allocate — a doubling string reaches a gigabyte in thirty of
-  them.
-- **There is no filesystem, no network and no `eval`.** rhai's default module
-  resolver reads `import`ed files off disk with no boundary; here
-  [imports](#sharing-code-between-scripts) resolve when the pipeline is built,
-  under the config directory's boundary, and a running script resolves nothing.
-  A script that needs a service is the [`http`
-  transform](/reference/transforms), which can await; this cannot.
-- **Nothing survives between runs.** Each run gets a fresh scope, so a top-level
-  variable is not a way to accumulate. That is deliberate: it would be state
-  outside every bound the buckets enforce and invisible in the state tab. All
-  persistence goes through a bucket.
+- **Operation budget.** `max_operations` on the transform is 100000 by default.
+  A script that goes above it fails the batch. Increase it for a script that
+  goes through a large array.
+- **Size limits.** A string can be 256 KiB. An array can have 100000 elements.
+  A map can have 10000 entries. The operation budget does not limit memory, so
+  these limits are separate.
+- **No filesystem, no network and no `eval`.** Imports resolve at build time.
+  [Imports](#sharing-code-between-scripts) and a running script cannot read
+  files. To call a service, use the [`http` transform](/reference/transforms).
+- **No state between runs.** Each run gets a new scope. A top-level variable
+  does not keep its value. Keep state in a bucket.
 
 ## what is checked when
 
-The script is **compiled when the pipeline is built**, so a syntax error is a
-pipeline that refuses to start rather than one that fails every batch forever —
-the same rule the reducer's build-time checks follow. What cannot be known until
-a message arrives — a field that isn't there, a type that won't convert, a
-`throw` — fails that batch and shows up on the card.
+kayak **compiles the script when it builds the pipeline**. A syntax error stops
+the pipeline from starting. Other errors occur only when a message arrives. An
+absent field, a type that does not convert or a `throw` fails that batch.
 
-The one thing not checked at build time is whether a script calls `remember` or
-`recall` without the pipeline declaring a `state` block. Knowing that means
-walking the compiled script, which rhai only exposes behind a feature flag, so
-it is a runtime error instead — one that says exactly what to add.
+kayak does not check at build time if a script calls `remember` or `recall`
+without a `state` block on the pipeline. This is an error at runtime. The error
+message tells you what to add.

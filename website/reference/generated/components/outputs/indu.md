@@ -2,21 +2,21 @@
 
 ## `indu` {#output-indu}
 
-Writes messages into Indu Cloud as **streams** — series that are not sensors — through `POST /ingest/v1/streams`.
+Writes messages into Indu Cloud as streams through `POST /ingest/v1/streams`. A stream is a series that is not a sensor.
 
-Every message yields one reading per entry in `series`; a reducer emitting `{machine, oee, availability}` with two series entries writes two streams per machine. An unknown stream is created on the Indu side on first sight, when the connection's key may create streams. Anything but a full acceptance fails the batch with Indu's own row errors quoted, so a stream the key may not write to shows up on the card rather than being written off as delivered.
+Each message gives one reading for each entry in `series`. For example, a reducer that sends `{machine, oee, availability}` with two series entries writes two streams for each machine. Indu creates an unknown stream when the key of the connection has permission to create streams. If Indu does not accept all rows, the batch fails. The error contains the row errors from Indu.
 
 | field | type | | description |
 | --- | --- | --- | --- |
-| `connection` | `indu` connection | <Badge type="warning" text="required" /> | name of the indu connection to write through — see "connections". |
-| `series` | `list of object` | <Badge type="warning" text="required" /> | the streams to write, one reading each per message. At least one. |
-| `at` | `string` | <Badge type="info" text="optional" /> | the field holding the reading's time — an RFC 3339 string or epoch milliseconds. Absent, the time the batch is sent is used. An `envelope` puts an input's receive time at `_meta.received_at`. |
-| `timeout_seconds` | `integer` | <Badge type="info" text="optional" /> | how long one request may take before it is given up on, in seconds. Defaults to 30. |
+| `connection` | `indu` connection | <Badge type="warning" text="required" /> | The name of the indu connection to write through. Declare the connection in the connections file. |
+| `series` | `list of object` | <Badge type="warning" text="required" /> | The streams to write, one reading for each message. At least one entry is required. |
+| `at` | `string` | <Badge type="info" text="optional" /> | The field that contains the time of the reading, as an RFC 3339 string or as ms since the epoch. If you do not set it, the output uses the time at which it sends the batch. An `envelope` puts the receive time of an input at `_meta.received_at`. |
+| `timeout_seconds` | `integer` | <Badge type="info" text="optional" /> | The maximum time for one request, in s. The default is 30. |
 
 **`series` — each entry**
 
 | field | type | | description |
 | --- | --- | --- | --- |
-| `stream` | `string` | <Badge type="warning" text="required" /> | the stream's name on the Indu side, e.g. `press-3/oee`. May contain `{field}` placeholders filled from the message — `{machine}/oee` — so one output serves every machine a pipeline reduces over. A message missing a placeholder's field is skipped for this series. |
-| `value` | `string` | <Badge type="warning" text="required" /> | the field holding the value, as a path (`oee`, `stats.mean`). Must be a number; a message where it is missing or not a number is skipped for this series rather than failing the batch. |
-| `unit` | `string` | <Badge type="info" text="optional" /> | the unit Indu records when it creates the stream, e.g. `%`. Ignored once the stream exists. |
+| `stream` | `string` | <Badge type="warning" text="required" /> | The name of the stream in Indu, for example `press-3/oee`. The name can contain `{field}` placeholders that the output fills from the message, for example `{machine}/oee`. Thus one output can write a stream for each machine. The output skips this series for a message that does not have the field of a placeholder. |
+| `value` | `string` | <Badge type="warning" text="required" /> | The field that contains the value, as a path (`oee`, `stats.mean`). The value must be a number. The output skips this series for a message where the value is missing or is not a number. The batch does not fail. |
+| `unit` | `string` | <Badge type="info" text="optional" /> | The unit that Indu records when it creates the stream, for example `%`. Indu ignores it when the stream exists. |

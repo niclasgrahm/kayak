@@ -2,36 +2,36 @@
 
 ## `postgres` {#output-postgres}
 
-Inserts every message in the batch into a postgres table, one row per message.
+Inserts each message in the batch into a postgres table, one row for each message.
 
-With `columns`, each entry names a column, its type and the field to read — `{"name": "temperature", "type": "float", "field": "reading.temp_c"}`, and `field` defaults to the column's name. Without them the table gets a single `jsonb` column holding the whole message, which is what this output has always done.
+With `columns`, each entry names a column, its type and the field to read, for example `{"name": "temperature", "type": "float", "field": "reading.temp_c"}`. The default `field` is the name of the column. Without `columns`, the table has an `id`, a `received_at` timestamp and a `payload` column of type `jsonb` that contains the full message.
 
-The table is created if it isn't there, from the columns above; set `create_table` to false for a table someone else owns. Creation never *alters* an existing table — a table whose shape has moved on fails the insert with the server's own error rather than being migrated from a config file.
+The output creates the table if it does not exist. Set `create_table` to false for a table that another system owns. The output does not change an existing table. If the table does not agree with the columns, the insert fails with the error from postgres.
 
 | field | type | | description |
 | --- | --- | --- | --- |
-| `connection` | `postgres` connection | <Badge type="warning" text="required" /> | name of the postgres connection to insert through — see "connections" in the readme. The host, database and role live there; the table below is this output's own. |
-| `table` | `string` | <Badge type="warning" text="required" /> | the table to insert into, created if it does not exist. Optionally schema-qualified (`analytics.readings`); letters, digits and underscores only, since it cannot be sent as a query parameter. |
-| `columns` | `list of column` | <Badge type="info" text="optional" /> | which message field goes in which column. Leave it out to store each message whole, as JSON, in a `payload` column. |
-| `create_table` | `boolean` | <Badge type="info" text="optional" /> | create the table on connect if it does not exist. Defaults to true. |
-| `indexes` | `list of index` | <Badge type="info" text="optional" /> | indexes to create with the table. Each names mapped columns, in order. |
-| `on_extra_fields` | `ignore` \| `error` | <Badge type="info" text="optional" /> | what to do about a message carrying fields no column reads |
-| `primary_key` | `list of string` | <Badge type="info" text="optional" /> | the columns forming the created table's primary key. With none, the table gets an `id` of its own and a `received_at` timestamp; naming one here says the data carries its own identity and drops both. |
+| `connection` | `postgres` connection | <Badge type="warning" text="required" /> | The name of the postgres connection to insert through. Declare the connection in the connections file. The connection gives the host, the database and the role. |
+| `table` | `string` | <Badge type="warning" text="required" /> | The table to insert into. The output creates it if it does not exist. You can add a schema (`analytics.readings`). Use only letters, digits and underscores. |
+| `columns` | `list of column` | <Badge type="info" text="optional" /> | The column for each message field. If you do not set it, the output keeps each full message as JSON in a `payload` column. |
+| `create_table` | `boolean` | <Badge type="info" text="optional" /> | Create the table on connect if it does not exist. The default is true. |
+| `indexes` | `list of index` | <Badge type="info" text="optional" /> | The indexes to create with the table. Each index names mapped columns, in sequence. |
+| `on_extra_fields` | `ignore` \| `error` | <Badge type="info" text="optional" /> | What to do with a message that has fields that no column reads. |
+| `primary_key` | `list of string` | <Badge type="info" text="optional" /> | The columns of the primary key of the created table. If you do not set it, the table gets an `id` and a `received_at` timestamp. If you set it, the table does not get these two columns. |
 
 **`columns` — each entry**
 
 | field | type | | description |
 | --- | --- | --- | --- |
-| `name` | `string` | <Badge type="warning" text="required" /> | the column's name in the table. Letters, digits and underscores only, since it cannot be sent as a query parameter. |
-| `type` | `text` \| `integer` \| `bigint` \| `float` \| `decimal` \| `boolean` \| `timestamp` \| `date` \| `uuid` \| `json` | <Badge type="warning" text="required" /> | what the column holds. Values are checked against it rather than coerced into it. |
-| `field` | `string` | <Badge type="info" text="optional" /> | the field to read, as a dotted path. Defaults to the column's name. |
-| `message` | `boolean` | <Badge type="info" text="optional" /> | store the whole message in this column instead of one of its fields. Only for a `json` column, and not together with `field`. |
-| `nullable` | `boolean` | <Badge type="info" text="optional" /> | whether the column accepts `NULL`. Defaults to true; `false` makes the created column `NOT NULL` and makes a missing field an error. |
-| `on_missing` | `null` \| `error` \| `skip_row` | <Badge type="info" text="optional" /> | what to do about a message that doesn't carry the field. Defaults to `null`, or to `error` for a column that is not nullable. |
+| `name` | `string` | <Badge type="warning" text="required" /> | The name of the column in the table. Use only letters, digits and underscores. |
+| `type` | `text` \| `integer` \| `bigint` \| `float` \| `decimal` \| `boolean` \| `timestamp` \| `date` \| `uuid` \| `json` | <Badge type="warning" text="required" /> | The type of the column. The output checks each value against it. |
+| `field` | `string` | <Badge type="info" text="optional" /> | The field to read, as a dotted path. The default is the name of the column. |
+| `message` | `boolean` | <Badge type="info" text="optional" /> | Write the full message to this column. Use it only with a `json` column. Do not use it with `field`. |
+| `nullable` | `boolean` | <Badge type="info" text="optional" /> | Whether the column accepts `NULL`. The default is true. With `false`, the output makes the column `NOT NULL`, and a missing field is an error. |
+| `on_missing` | `null` \| `error` \| `skip_row` | <Badge type="info" text="optional" /> | What to do with a message that does not have the field. The default is `null`, or `error` for a column that is not nullable. |
 
 **`indexes` — each entry**
 
 | field | type | | description |
 | --- | --- | --- | --- |
-| `columns` | `list of string` | <Badge type="warning" text="required" /> | the columns to index, in order. Each must be one of the mapped columns. |
-| `unique` | `boolean` | <Badge type="info" text="optional" /> | whether the index is unique. Defaults to false. |
+| `columns` | `list of string` | <Badge type="warning" text="required" /> | The columns to index, in order. Each column must be a mapped column. |
+| `unique` | `boolean` | <Badge type="info" text="optional" /> | Whether the index is unique. The default is false. |

@@ -20,7 +20,7 @@ export default defineConfig({
   // domain of its own serving it from a root, and not before.
   base: '/kayak/',
   title: 'kayak',
-  description: 'graph-based stream processing — configurable input → transforms → output pipelines, running on a live canvas',
+  description: 'kayak is a stream processor in one Rust binary. You write pipelines in a config file, keep it in version control and run the container image.',
   lang: 'en',
   cleanUrls: true,
   // this directory's own readme is for whoever edits the site, not a page of it
@@ -41,7 +41,7 @@ export default defineConfig({
     ['meta', { property: 'og:title', content: 'kayak' }],
     ['meta', {
       property: 'og:description',
-      content: 'graph-based stream processing you can watch running',
+      content: 'A stream processor in one Rust binary. Pipelines in a config file, deployed as a container image.',
     }],
   ],
   markdown: {
@@ -58,7 +58,7 @@ export default defineConfig({
     siteTitle: 'kayak',
     outline: [2, 3],
     nav: [
-      { text: 'guide', link: '/getting-started', activeMatch: '/(getting-started|canvas|pipelines|io|operating)/' },
+      { text: 'guide', link: '/getting-started', activeMatch: '/(getting-started|pipelines|io|operating|canvas)/' },
       { text: 'reference', link: '/reference/', activeMatch: '/reference/' },
       { text: 'contributing', link: '/contributing/testing', activeMatch: '/contributing/' },
     ],
@@ -68,15 +68,7 @@ export default defineConfig({
         items: [
           { text: 'what kayak is', link: '/' },
           { text: 'getting started', link: '/getting-started' },
-          { text: 'the config file', link: '/canvas/editing-the-graph#the-config-file' },
-        ],
-      },
-      {
-        text: 'the canvas',
-        items: [
-          { text: 'the canvas', link: '/canvas/the-canvas' },
-          { text: 'editing the graph', link: '/canvas/editing-the-graph' },
-          { text: 'arranging the canvas', link: '/canvas/arranging-the-canvas' },
+          { text: 'the config file', link: '/pipelines/the-config-file' },
         ],
       },
       {
@@ -116,6 +108,14 @@ export default defineConfig({
           { text: 'authentication', link: '/operating/authentication' },
           { text: 'history', link: '/operating/history' },
           { text: 'deployment', link: '/operating/deployment' },
+        ],
+      },
+      {
+        text: 'web ui',
+        items: [
+          { text: 'the canvas', link: '/canvas/the-canvas' },
+          { text: 'editing the graph', link: '/canvas/editing-the-graph' },
+          { text: 'arranging the canvas', link: '/canvas/arranging-the-canvas' },
         ],
       },
       {

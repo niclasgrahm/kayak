@@ -2,12 +2,10 @@
 
 ## `tidepool` {#connection-tidepool}
 
-A Tidepool server: where it listens, and the ingest token it wants.
-
-The same split every connection makes: the server and its credential are the connection's, the *table* belongs to the output that writes it. Tables are declared in Tidepool's own project, never created from here.
+A Tidepool server and its ingest token. The `tidepool` output sets the table. You declare the tables in the Tidepool project. kayak does not make them.
 
 | field | type | | description |
 | --- | --- | --- | --- |
-| `url` | `string` | <Badge type="warning" text="required" /> | the server's url, e.g. `http://localhost:7070`. |
-| `allow_http` | `boolean` | <Badge type="info" text="optional" /> | allow a plaintext `http://` url while a `token` is set. Defaults to false, for the clickhouse connection's reason: the token goes with every batch. Without a token there is nothing to send in the clear. |
-| `token` | `string` | <Badge type="info" text="optional" /> | the ingest token (the server's `TIDEPOOL_INGEST_TOKEN`, or its admin token) as a `${NAME}` reference — see "secrets". Leave it out for a server whose ingest is open. |
+| `url` | `string` | <Badge type="warning" text="required" /> | The url of the server, for example `http://localhost:7070`. |
+| `allow_http` | `boolean` | <Badge type="info" text="optional" /> | Permit an `http://` url with no TLS when `token` is set. The default is false. The token goes with every batch, as plain text. Without a token, an `http://` url is always permitted. |
+| `token` | `string` | <Badge type="info" text="optional" /> | The ingest token, as a `${NAME}` secret reference. Use the `TIDEPOOL_INGEST_TOKEN` of the server, or its admin token. Leave it out for a server with open ingest. |

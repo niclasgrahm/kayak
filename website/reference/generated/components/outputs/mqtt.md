@@ -2,13 +2,13 @@
 
 ## `mqtt` {#output-mqtt}
 
-Publishes every message in the batch to an mqtt topic, one message per publish.
+Publishes each message in the batch to an mqtt topic, one message for each publish.
 
-A stable client id is derived from the pipeline's id and this topic, the same as the mqtt input — not configurable, for the same reason.
+kayak makes the client id from the pipeline id and the topic. You cannot set the client id.
 
 | field | type | | description |
 | --- | --- | --- | --- |
-| `connection` | `mqtt` connection | <Badge type="warning" text="required" /> | name of the mqtt connection to publish on — see "connections" in the readme. |
-| `topic` | `string` | <Badge type="warning" text="required" /> | the topic to publish to |
-| `qos` | `at_most_once` \| `at_least_once` \| `exactly_once` | <Badge type="info" text="optional" /> | the quality of service to publish with. Defaults to `at_most_once`. |
-| `retain` | `boolean` | <Badge type="info" text="optional" /> | ask the broker to keep this as the topic's *retained* message, handed to every future subscriber immediately on subscribe. Defaults to false. |
+| `connection` | `mqtt` connection | <Badge type="warning" text="required" /> | The name of the mqtt connection to publish on. Declare the connection in the connections file. |
+| `topic` | `string` | <Badge type="warning" text="required" /> | The topic to publish to. |
+| `qos` | `at_most_once` \| `at_least_once` \| `exactly_once` | <Badge type="info" text="optional" /> | The quality of service for each publish. The default is `at_most_once`. |
+| `retain` | `boolean` | <Badge type="info" text="optional" /> | Tell the broker to keep the message as the retained message of the topic. The broker sends it to each new subscriber. The default is false. |

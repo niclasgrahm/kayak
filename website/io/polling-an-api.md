@@ -1,9 +1,8 @@
 # polling an api
 
-The `http` input is reached: something posts to the pipeline. The `http_poll`
-input reaches out: a `GET` on a timer, and the whole reply handed on every
-time. It is the [database inputs](/io/database-inputs)' `snapshot` mode for a
-system that only has an api.
+The `http_poll` input sends a `GET` request on a timer. It sends the whole reply
+into the pipeline on each read. It is the `snapshot` mode of the
+[database inputs](/io/database-inputs), for a system that has only an API.
 
 ```jsonc
 // config.json — the machine list from an ERP, every hour
@@ -15,56 +14,71 @@ system that only has an api.
   "max_batch": 500 }
 ```
 
+The input has no connection. The `url` and the `auth` are on the component.
+
 ## what a reply becomes
 
-An array is one message per element; anything else is one message. `items`
-is a JSON pointer into a reply that wraps its records — `/data/machines`
-reads the array at `data.machines` — and what it points at is split the same
-way. A pointer at nothing is a failed read rather than an empty snapshot: an
-api that changed its shape should show up on the card, not as a pipeline that
-quietly stopped sending.
+- A JSON array becomes one message for each element.
+- Any other JSON value becomes one message.
+- **`items`** is a JSON pointer into a reply that wraps its records. For
+  example, `/data/machines` reads the array at `data.machines`. The input
+  splits the value at the pointer with the same rules.
+- If the pointer finds nothing, the read fails. Thus a change in the shape of
+  the API shows as an error, and the pipeline does not stop without a sign.
 
-`max_batch` is the knob it is on every input. It defaults to one message per
-batch, so a reply of 500 machines is 500 passes through the run loop unless it
-is raised, and raising it is the cheapest fix there is.
+### performance
 
-## why snapshots only
+Set `max_batch`. The default is 1. With the default, a reply of 500 machines
+makes 500 passes through the run loop. The input does not wait for a batch to
+fill.
 
-This is for **reference data**: a list of machines, recipes, sites or
-thresholds that changes rarely and that something downstream needs all of. It
-reads the whole thing every time and hands all of it on, with no notion of
-what changed since the last read. That is cheap when the list is small, and
-harmless when the sink keeps the latest value per key, such as a Tidepool
-table with a primary key or a `remember` transform keyed by id. Sending the
-same rows again changes nothing, and a periodic read repairs anything that
-went missing.
+## snapshots only {#why-snapshots-only}
 
-There is deliberately no incremental mode. An api has no common way to ask
-for "rows after this one" (a cursor parameter, a `Link` header, a page
-number, a `since`), and choosing one would mean choosing an api. A source that
-grows faster than it can be read whole every interval is a stream, and
-belongs on a broker or behind the [`http` input](/io/posting-into-a-pipeline).
+Use this input for **reference data**: a list of machines, recipes, sites or
+thresholds that changes rarely. The input reads the whole list each time and
+sends all of it. It does not know what changed since the last read.
 
-Deletes are not seen either: a machine missing from the list is just not sent.
-If that matters, have the api report it (`"active": false`) rather than leave
-it out.
+This works well when the list is small and the destination keeps the latest
+value for each key. Examples are a Tidepool table with a primary key, or a
+`remember` transform keyed by id. A row that arrives again changes nothing. A
+row that was lost arrives on the next read.
 
-## failures, the interval and the reply's size
+There is no incremental mode. APIs use many different methods to ask for new
+rows, for example a cursor parameter, a `Link` header, a page number or a
+`since` value. If the data grows too fast to read whole on each interval, send
+it through a broker or to the [`http` input](/io/posting-into-a-pipeline).
 
-`interval_secs` counts from the *end* of one read to the start of the next,
-and the first read happens as soon as the pipeline starts. A read that fails is
-reported once on the card and retried on the backoff every broker input
-reconnects on. That covers an unreachable host, a status other than 2xx (the
-api's own complaint is quoted), a body that is not JSON, and an `items` that
-points at nothing. Once a read succeeds, the interval starts again.
+The input does not see deletes. A machine that is not in the list is not sent.
+If deletes are important, make the API report them, for example with
+`"active": false`.
 
-A reply is held whole, so it is bounded: past 64 MiB the read fails rather than
-the process growing to fit. `timeout_seconds` (30 by default) bounds how long
-one request can take.
+## failures, the interval and the reply size {#failures-the-interval-and-the-reply-s-size}
 
-`auth` is the same block the `http` output presents: a `bearer` token or a
-header of your choosing, with the value as a `${NAME}` reference. With an
-`envelope`, each message carries the `url` it came from (minus any username
-or password) and a `polled_at` that every message of one read shares.
+- **`interval_secs`**: the wait after the end of one read and before the next
+  read. The first read occurs when the pipeline starts.
+- **`timeout_seconds`**: the longest time for one request. The default is 30.
+- **Reply size**: the input holds a reply in memory, so the limit is 64 MiB.
+  A larger reply fails the read.
+
+These problems fail a read:
+
+- a host that is not reachable;
+- a status that is not 2xx (the error quotes the reply of the API);
+- a body that is not JSON;
+- an `items` pointer that finds nothing.
+
+The input reports a failure one time and retries with backoff. After a read
+succeeds, the interval starts again.
+
+## credentials and metadata
+
+`auth` is the same block as on the [`http` output](/io/sending-over-http): a
+`bearer` token or a header that you name. Write the value as a `${NAME}`
+reference.
+
+With an `envelope`, each message carries:
+
+- the `url` that it came from, without a username or password;
+- a `polled_at` time, which is the same for all messages of one read.
 
 <!--@include: ../reference/generated/components/inputs/http_poll.md-->

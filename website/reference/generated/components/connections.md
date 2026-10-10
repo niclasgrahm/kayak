@@ -2,148 +2,136 @@
 
 ## `kafka` {#connection-kafka}
 
-A kafka cluster: the brokers, and eventually whatever it takes to authenticate against them.
+A kafka cluster.
 
 | field | type | | description |
 | --- | --- | --- | --- |
-| `brokers` | `string` | <Badge type="warning" text="required" /> | comma-separated broker list, e.g. `localhost:9092`. May reference secrets as `${NAME}` — see "secrets" in the readme. |
+| `brokers` | `string` | <Badge type="warning" text="required" /> | The brokers, as a list with commas, for example `localhost:9092`. You can use `${NAME}` secret references. |
 
 
 ## `nats` {#connection-nats}
 
-A nats server, or a cluster of them.
+A nats server, or a cluster of nats servers.
 
 | field | type | | description |
 | --- | --- | --- | --- |
-| `urls` | `string` | <Badge type="warning" text="required" /> | connection url, e.g. `nats://localhost:4222`. May reference secrets as `${NAME}` — see "secrets" in the readme. |
+| `urls` | `string` | <Badge type="warning" text="required" /> | The url of the server, for example `nats://localhost:4222`. You can use `${NAME}` secret references. |
 
 
 ## `postgres` {#connection-postgres}
 
-A postgres database, as one role connects to it.
-
-The database and the role are part of the connection; the *table* is not — that is what a particular output writes into, so it stays on the output.
+A postgres database and the role that kayak connects as. The output or the input sets the table.
 
 | field | type | | description |
 | --- | --- | --- | --- |
-| `host` | `string` | <Badge type="warning" text="required" /> | server hostname, e.g. `localhost` |
-| `database` | `string` | <Badge type="warning" text="required" /> | the database to connect to |
-| `user` | `string` | <Badge type="warning" text="required" /> | the role to connect as |
-| `password` | `string` | <Badge type="warning" text="required" /> | that role's password. May reference secrets as `${NAME}` — see "secrets" in the readme, and prefer a reference to a literal here. |
-| `port` | `integer` | <Badge type="info" text="optional" /> | server port. Defaults to 5432. |
+| `host` | `string` | <Badge type="warning" text="required" /> | The hostname of the server, for example `localhost`. |
+| `database` | `string` | <Badge type="warning" text="required" /> | The database to connect to. |
+| `user` | `string` | <Badge type="warning" text="required" /> | The role to connect as. |
+| `password` | `string` | <Badge type="warning" text="required" /> | The password of the role. Use a `${NAME}` secret reference for this value. |
+| `port` | `integer` | <Badge type="info" text="optional" /> | The port of the server. The default is 5432. |
 
 
 ## `clickhouse` {#connection-clickhouse}
 
-A ClickHouse server, as one user connects to it over its HTTP interface.
-
-The same split [`PostgresConnection`] makes: the server, the database and the user are the connection's; the *table* belongs to the output that writes it.
-
-The HTTP interface rather than the native protocol because it is what every ClickHouse deployment exposes — including ClickHouse Cloud, where 8443 is the only port there is — and because it takes an insert as a body in a named format, which is exactly the shape a batch of messages already has.
+A ClickHouse server and the user that kayak connects as. kayak uses the HTTP interface of the server. The output or the input sets the table.
 
 | field | type | | description |
 | --- | --- | --- | --- |
-| `url` | `string` | <Badge type="warning" text="required" /> | url of the HTTP interface, e.g. `http://localhost:8123` for the server in `docker-compose.yaml`, or `https://<host>:8443` for ClickHouse Cloud. |
-| `database` | `string` | <Badge type="warning" text="required" /> | the database to write into. It has to exist already — an output creates tables, never databases. |
-| `user` | `string` | <Badge type="warning" text="required" /> | the user to connect as |
-| `password` | `string` | <Badge type="warning" text="required" /> | that user's password. May reference secrets as `${NAME}` — see "secrets" in the readme, and prefer a reference to a literal here. |
-| `allow_http` | `boolean` | <Badge type="info" text="optional" /> | allow a plaintext `http://` url. Defaults to false: the credentials above go with every insert, so sending them in the clear is a decision worth writing down. The local server in `docker-compose.yaml` is the case that legitimately wants it. |
+| `url` | `string` | <Badge type="warning" text="required" /> | The url of the HTTP interface, for example `http://localhost:8123` for the server in `docker-compose.yaml`, or `https://<host>:8443` for ClickHouse Cloud. |
+| `database` | `string` | <Badge type="warning" text="required" /> | The database to use. The database must exist. The output makes tables. It does not make databases. |
+| `user` | `string` | <Badge type="warning" text="required" /> | The user to connect as. |
+| `password` | `string` | <Badge type="warning" text="required" /> | The password of the user. Use a `${NAME}` secret reference for this value. |
+| `allow_http` | `boolean` | <Badge type="info" text="optional" /> | Permit an `http://` url with no TLS. The default is false. The credentials go with every request, as plain text. Use it only for a local server, for example the server in `docker-compose.yaml`. |
 
 
 ## `file` {#connection-file}
 
-A directory on the server's filesystem that file outputs write under.
+A directory on the filesystem of the server. A `file` output writes under it, to a `path` relative to this directory.
 
-The odd one out among the kinds: there is no host, no credentials, nothing to authenticate against. It earns its place as a connection anyway because it holds the same thing the others do — *what the system is*, as against what one pipeline wants from it. A file output names a `path` relative to this root exactly as a kafka output names a topic on those brokers, and the object-store connection that replaces it later swaps the root for a bucket without any component changing.
-
-The root is **not** a boundary on its own. It arrives from `POST /api/connections` like any other connection, so a browser could name `/` here; what actually confines writes is the server's `--data-dir`, which this root has to resolve under. See `Root::resolve` in the root crate.
+The directory must be inside the `--data-dir` of the server. kayak checks this when it builds the output. A server started without `--data-dir` has no file output.
 
 | field | type | | description |
 | --- | --- | --- | --- |
-| `root` | `string` | <Badge type="warning" text="required" /> | directory that file outputs write under, e.g. `./out/events`. Created if it does not exist, and it must resolve inside the server's `--data-dir` — a server started without that flag has file output turned off. |
+| `root` | `string` | <Badge type="warning" text="required" /> | The directory that file outputs write under, for example `./out/events`. It must be inside the `--data-dir` of the server. If the directory does not exist, kayak makes it. |
 
 
 ## `s3` {#connection-s3}
 
-A bucket on an S3-compatible object store, and the credentials that reach it.
+A bucket on an S3-compatible object store, and its credentials. An `s3` output writes under a prefix in the bucket.
 
-The `bucket` is where [`FileConnection`]'s `root` is: the thing the *system* gives you, against which an output names a prefix of its own. What is not here is any equivalent of `--data-dir`. There cannot be one — the server has no view of a remote namespace to confine writes within, so the boundary is the credentials, and giving a deployment a key that can only write one bucket is the thing that does what the sandbox does locally.
+There is no limit like `--data-dir` for a bucket. The credentials set what kayak can write. Give kayak a key that can write only to this bucket.
 
-`endpoint` is what makes this work against rustfs, minio or any other S3-compatible server; left out, it is real AWS S3 in `region`.
+Set `endpoint` for rustfs, minio or another S3-compatible server. Without `endpoint`, kayak uses AWS S3 in `region`.
 
 | field | type | | description |
 | --- | --- | --- | --- |
-| `bucket` | `string` | <Badge type="warning" text="required" /> | the bucket to write into. It has to exist already — an output creates objects, never buckets. |
-| `access_key_id` | `string` | <Badge type="warning" text="required" /> | access key id. May reference secrets as `${NAME}` — see "secrets" in the readme, and prefer a reference to a literal here. |
-| `secret_access_key` | `string` | <Badge type="warning" text="required" /> | secret access key. May reference secrets as `${NAME}` — see "secrets" in the readme, and prefer a reference to a literal here. |
-| `allow_http` | `boolean` | <Badge type="info" text="optional" /> | allow a plaintext `http://` endpoint. Defaults to false: credentials over http is a mistake worth having to write down, and the local rustfs is the case that legitimately wants it. |
-| `endpoint` | `string` | <Badge type="info" text="optional" /> | url of an S3-compatible server, e.g. `http://localhost:9000` for the rustfs in `docker-compose.yaml`. Leave it out for real AWS S3, which is then addressed through `region`. |
-| `region` | `string` | <Badge type="info" text="optional" /> | the bucket's region. Defaults to `us-east-1`, which is also what an S3-compatible server that does not care about regions will accept. |
+| `bucket` | `string` | <Badge type="warning" text="required" /> | The bucket to write to. The bucket must exist. The output makes objects. It does not make buckets. |
+| `access_key_id` | `string` | <Badge type="warning" text="required" /> | The access key id. Use a `${NAME}` secret reference for this value. |
+| `secret_access_key` | `string` | <Badge type="warning" text="required" /> | The secret access key. Use a `${NAME}` secret reference for this value. |
+| `allow_http` | `boolean` | <Badge type="info" text="optional" /> | Permit an `http://` endpoint with no TLS. The default is false. The credentials then go over the network as plain text. Use it only for a local server, for example the rustfs in `docker-compose.yaml`. |
+| `endpoint` | `string` | <Badge type="info" text="optional" /> | The url of an S3-compatible server, for example `http://localhost:9000` for the rustfs in `docker-compose.yaml`. Leave it out to use AWS S3 in `region`. |
+| `region` | `string` | <Badge type="info" text="optional" /> | The region of the bucket. The default is `us-east-1`. S3-compatible servers with no regions accept this value. |
 
 
 ## `mqtt` {#connection-mqtt}
 
 An mqtt broker.
 
-Plaintext TCP only for now — there is no TLS field here yet, and that is a deliberate gap (see `docs/roadmap.md`) rather than an oversight: a CA certificate needs somewhere to live (a `Secret`? a file path resolved against `--data-dir`?) and that question deserves its own pass rather than a field bolted on to get this connection working.
+The connection uses plain TCP. TLS is not available.
 
 | field | type | | description |
 | --- | --- | --- | --- |
-| `host` | `string` | <Badge type="warning" text="required" /> | broker hostname, e.g. `localhost` |
-| `password` | `string` | <Badge type="info" text="optional" /> | that username's password. May reference secrets as `${NAME}` — see "secrets" in the readme, and prefer a reference to a literal here. |
-| `port` | `integer` | <Badge type="info" text="optional" /> | broker port. Defaults to 1883, mqtt's conventional plaintext port. |
-| `username` | `string` | <Badge type="info" text="optional" /> | username to connect with, if the broker requires one. Must be set together with `password` or not at all. |
+| `host` | `string` | <Badge type="warning" text="required" /> | The hostname of the broker, for example `localhost`. |
+| `password` | `string` | <Badge type="info" text="optional" /> | The password of the user. Use a `${NAME}` secret reference for this value. |
+| `port` | `integer` | <Badge type="info" text="optional" /> | The port of the broker. The default is 1883. |
+| `username` | `string` | <Badge type="info" text="optional" /> | The username, if the broker requires one. Set `username` and `password` together, or set neither. |
 
 
 ## `redis` {#connection-redis}
 
-A redis server, or a cluster front-end that speaks the same protocol.
+A redis server, or a server that uses the same protocol.
 
-Used through its pub/sub commands (`SUBSCRIBE`/`PUBLISH`), the same shape [`NatsConnection`] is — one url, which may already carry a password — rather than the key-value store: there is no queue to consume from here, so a redis input has exactly the delivery guarantees a nats one does (see `RedisConfig`'s doc comment).
+kayak uses the pub/sub commands `SUBSCRIBE` and `PUBLISH`. It does not use the key-value store. Thus, a redis input has the same delivery guarantees as a nats input.
 
 | field | type | | description |
 | --- | --- | --- | --- |
-| `url` | `string` | <Badge type="warning" text="required" /> | connection url, e.g. `redis://localhost:6379` or `redis://:${REDIS_PASSWORD}@localhost:6379/0`. May reference secrets as `${NAME}` — see "secrets" in the readme. |
+| `url` | `string` | <Badge type="warning" text="required" /> | The url of the server, for example `redis://localhost:6379` or `redis://:${REDIS_PASSWORD}@localhost:6379/0`. You can use `${NAME}` secret references. |
 
 
 ## `opcua` {#connection-opcua}
 
-An OPC UA server, as one client session connects to it.
+An OPC UA server. The connection holds the endpoint. The `opcua` input selects the nodes to read.
 
-The endpoint is the whole of "what the system is" here — an OPC UA server exposes one address space at one url, and *which nodes* a pipeline reads out of it is the component's business, exactly as a topic is on a kafka connection.
+**The session is not signed and not encrypted.** kayak connects with the security policy `None`, as an anonymous user or with a username and password. The credentials go over the network as plain text. Use this connection only on a network that you trust.
 
-**Plaintext and anonymous or username/password only.** There is no security policy field and no certificate: an OPC UA session can be signed and encrypted, and that is worth having, but it needs a client certificate, somewhere for it to live and a server trust list — the same question [`MqttConnection`]'s missing TLS raises, one size larger. It gets its own pass (see `docs/roadmap.md`) rather than a field bolted on here, and until then this refuses to pretend: the session is `SecurityPolicy::None`, so credentials cross the wire in the clear and belong on a network you trust.
-
-One consequence is visible in the log and is not a fault: the OPC UA client prints two errors about a missing *application instance certificate* when a session is opened. kayak has none by design, and an unencrypted session needs none — a pipeline that logs those and then reports readings is working.
+When a session opens, the OPC UA client writes two errors about a missing application instance certificate to the log. This is not a fault. A session with no encryption needs no certificate.
 
 | field | type | | description |
 | --- | --- | --- | --- |
-| `endpoint` | `string` | <Badge type="warning" text="required" /> | endpoint url, e.g. `opc.tcp://localhost:50000`. May reference secrets as `${NAME}` — see "secrets" in the readme. This is connected to *directly*: kayak does not ask the server for its endpoint list first. Discovery is the usual way, and it is the usual way to fail — a server behind docker, NAT or a load balancer advertises the hostname it knows itself by, which is regularly not one the client can resolve. What is written here is what is dialled. |
-| `password` | `string` | <Badge type="info" text="optional" /> | that username's password. May reference secrets as `${NAME}` — see "secrets" in the readme, and prefer a reference to a literal here. |
-| `username` | `string` | <Badge type="info" text="optional" /> | username to sign in with, if the server requires one. Must be set together with `password` or not at all; without either, the session is anonymous. |
+| `endpoint` | `string` | <Badge type="warning" text="required" /> | The url of the endpoint, for example `opc.tcp://localhost:50000`. You can use `${NAME}` secret references. kayak connects directly to this url. It does not ask the server for its list of endpoints first. Thus, a server behind docker, NAT or a load balancer works when this url is correct. |
+| `password` | `string` | <Badge type="info" text="optional" /> | The password of the user. Use a `${NAME}` secret reference for this value. |
+| `username` | `string` | <Badge type="info" text="optional" /> | The username, if the server requires one. Set `username` and `password` together, or set neither. Without them, the session is anonymous. |
 
 
 ## `indu` {#connection-indu}
 
-An Indu Cloud deployment: where its API and ingest endpoints are, and the API key this kayak speaks to it with.
+An Indu Cloud deployment: the API and ingest endpoints, and the API key.
 
-One connection serves both directions: the `indu` output writes streams through `/ingest/v1/streams`, and the `indu` input reads sensors and streams through `/api/v1`. The key is minted on the Indu side (its `/keys` page, or `indud apps register --kind kayak`), bound to a role there, and arrives here as a `${NAME}` reference like every other credential.
+The `indu` output and the `indu` input use the same connection. The output writes streams through `/ingest/v1/streams`. The input reads sensors and streams through `/api/v1`. Make the key in Indu, on the `/keys` page or with `indud apps register --kind kayak`. Give the key a role in Indu.
 
 | field | type | | description |
 | --- | --- | --- | --- |
-| `url` | `string` | <Badge type="warning" text="required" /> | the deployment's origin, e.g. `https://app.acme.indu.cloud`. The ingest endpoint is reached under it as `/ingest/v1/…`; a deployment that serves ingest on a separate host names it in `ingest_url`. |
-| `api_key` | `string` | <Badge type="warning" text="required" /> | the API key, `indu.ak.…`, as a `${NAME}` reference — see "secrets". |
-| `ingest_url` | `string` | <Badge type="info" text="optional" /> | where `/ingest/v1/…` lives when it is not under `url` — the single-server install serves ingest on its own host, e.g. `https://ingest.acme.indu.cloud`. |
+| `url` | `string` | <Badge type="warning" text="required" /> | The origin of the deployment, for example `https://app.acme.indu.cloud`. The ingest endpoint is `/ingest/v1/…` under this url, unless you set `ingest_url`. |
+| `api_key` | `string` | <Badge type="warning" text="required" /> | The API key (`indu.ak.…`), as a `${NAME}` secret reference. |
+| `ingest_url` | `string` | <Badge type="info" text="optional" /> | The origin of `/ingest/v1/…` when it is not under `url`, for example `https://ingest.acme.indu.cloud`. A single-server installation serves ingest on its own host. |
 
 
 ## `tidepool` {#connection-tidepool}
 
-A Tidepool server: where it listens, and the ingest token it wants.
-
-The same split every connection makes: the server and its credential are the connection's, the *table* belongs to the output that writes it. Tables are declared in Tidepool's own project, never created from here.
+A Tidepool server and its ingest token. The `tidepool` output sets the table. You declare the tables in the Tidepool project. kayak does not make them.
 
 | field | type | | description |
 | --- | --- | --- | --- |
-| `url` | `string` | <Badge type="warning" text="required" /> | the server's url, e.g. `http://localhost:7070`. |
-| `allow_http` | `boolean` | <Badge type="info" text="optional" /> | allow a plaintext `http://` url while a `token` is set. Defaults to false, for the clickhouse connection's reason: the token goes with every batch. Without a token there is nothing to send in the clear. |
-| `token` | `string` | <Badge type="info" text="optional" /> | the ingest token (the server's `TIDEPOOL_INGEST_TOKEN`, or its admin token) as a `${NAME}` reference — see "secrets". Leave it out for a server whose ingest is open. |
+| `url` | `string` | <Badge type="warning" text="required" /> | The url of the server, for example `http://localhost:7070`. |
+| `allow_http` | `boolean` | <Badge type="info" text="optional" /> | Permit an `http://` url with no TLS when `token` is set. The default is false. The token goes with every batch, as plain text. Without a token, an `http://` url is always permitted. |
+| `token` | `string` | <Badge type="info" text="optional" /> | The ingest token, as a `${NAME}` secret reference. Use the `TIDEPOOL_INGEST_TOKEN` of the server, or its admin token. Leave it out for a server with open ingest. |

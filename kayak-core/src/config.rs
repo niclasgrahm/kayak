@@ -8,25 +8,20 @@ use crate::state::PipelineState;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
-/// A config value that may *reference* secrets rather than contain them.
+/// A text value that can refer to secrets with `${NAME}` references.
 ///
-/// On the wire it is an ordinary JSON string, but `${NAME}` placeholders in it
-/// are replaced with real values when the pipeline is built, against whatever
-/// secret store the server was started with:
+/// The value is an ordinary JSON string. When kayak builds the pipeline, it
+/// replaces each `${NAME}` reference with the value from the secret store of
+/// the server:
 ///
 /// ```json
 /// { "type": "nats", "urls": "nats://app:${NATS_PASSWORD}@broker:4222" }
 /// ```
 ///
-/// The unresolved form is the only one this type ever holds. That is what makes
-/// it safe to commit, safe to hand back from `GET /api/pipelines` and safe to show
-/// in the UI — a resolved value exists only inside the built runtime component,
-/// never in a `Config`. Resolution deliberately lives in the root crate: this
-/// crate compiles to wasm for the frontend, which must not be able to hold a
-/// resolved secret at all.
+/// The config keeps only the reference, never the value. Thus you can commit
+/// the file, and `GET /api/pipelines` does not show the secret.
 ///
-/// A value with no `${...}` in it is passed through untouched, so fields that
-/// hold nothing sensitive need no special handling.
+/// kayak uses a value with no `${...}` reference as it is.
 #[derive(Clone, Debug, Deserialize, Serialize, JsonSchema, PartialEq, Eq)]
 #[serde(transparent)]
 pub struct Secret(String);
@@ -64,110 +59,103 @@ impl std::fmt::Display for Secret {
     }
 }
 
-/// Subscribes to a nats subject. Each message is parsed as JSON and emitted as
-/// a batch of one; a payload that isn't JSON is skipped with a warning rather
-/// than taking the pipeline down. The connection is opened on the first read.
+/// Subscribes to a nats subject and parses each message as JSON.
+///
+/// The input skips a payload that is not JSON and writes a warning to the log.
+/// The input opens the connection on the first read.
 #[derive(Clone, Debug, Deserialize, Serialize, JsonSchema)]
 #[schemars(title = "nats")]
 pub struct NatsConfig {
-    /// name of the nats connection to subscribe on — see "connections" in the
-    /// readme. The server it points at is declared once, in the connections
-    /// file, rather than repeated in every pipeline that uses it.
+    /// The name of the nats connection to subscribe on. Declare the connection
+    /// in the connections file.
     #[schemars(extend("x-connection" = "nats"))]
     pub connection: ConnectionId,
-    /// the subject to subscribe to
+    /// The subject to subscribe to.
     pub subject: String,
-    /// most messages to put in one batch. Defaults to 1 — one message per
-    /// batch, which is what this input has always done.
+    /// The maximum number of messages in one batch. The default is 1.
     ///
-    /// Raising it only ever coalesces messages that had *already arrived*: the
-    /// input still returns as soon as it has one, so a quiet subject is no
-    /// slower than it was.
+    /// The input puts only messages that are already received into a batch.
+    /// It does not wait for more messages, so a high value does not add
+    /// latency on a quiet subject.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_batch: Option<usize>,
 }
 
-/// Subscribes to a redis channel. Each message is parsed as JSON and emitted
-/// as a batch of one; a payload that isn't JSON is skipped with a warning
-/// rather than taking the pipeline down. The connection is opened on the
-/// first read.
+/// Subscribes to a redis channel and parses each message as JSON.
 ///
-/// Plain `SUBSCRIBE`, not `PSUBSCRIBE` — a channel name is exact, the same
-/// choice the nats input makes for a subject with no wildcard. Redis pub/sub
-/// has no broker-side redelivery of any kind: an unsubscribed client simply
-/// misses whatever was published while it was gone, and there is nothing an
-/// ack could hold open — the same limitation `NatsConfig` has, for the same
-/// reason.
+/// The input skips a payload that is not JSON and writes a warning to the log.
+/// The input opens the connection on the first read.
+///
+/// The input uses `SUBSCRIBE`, so the channel name must be exact. Patterns are
+/// not supported. Redis pub/sub does not send a message again. When the input
+/// is not connected, it does not receive the messages that are published.
 #[derive(Clone, Debug, Deserialize, Serialize, JsonSchema)]
 #[schemars(title = "redis")]
 pub struct RedisConfig {
-    /// name of the redis connection to subscribe on — see "connections" in
-    /// the readme. The server it points at is declared once, in the
-    /// connections file, rather than repeated in every pipeline that uses it.
+    /// The name of the redis connection to subscribe on. Declare the
+    /// connection in the connections file.
     #[schemars(extend("x-connection" = "redis"))]
     pub connection: ConnectionId,
-    /// the channel to subscribe to
+    /// The channel to subscribe to.
     pub channel: String,
-    /// most messages to put in one batch. Defaults to 1 — one message per
-    /// batch, which is what this input has always done.
+    /// The maximum number of messages in one batch. The default is 1.
     ///
-    /// Raising it only ever coalesces messages that had *already arrived*: the
-    /// input still returns as soon as it has one, so a quiet channel is no
-    /// slower than it was.
+    /// The input puts only messages that are already received into a batch.
+    /// It does not wait for more messages, so a high value does not add
+    /// latency on a quiet channel.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_batch: Option<usize>,
 }
 
-/// One node an `opcua` input subscribes to, and what the messages call it.
+/// One node that an `opcua` input subscribes to, and the name for it in the
+/// messages.
 #[derive(Clone, Debug, Deserialize, Serialize, JsonSchema)]
 #[schemars(title = "opcua node")]
 pub struct OpcuaNodeConfig {
-    /// the node's id, in OPC UA's own notation — `ns=2;s=Machine1.Temperature`
-    /// for a string identifier, `ns=2;i=1042` for a numeric one, `g=` for a
-    /// guid and `b=` for an opaque one. A node id with no `ns=` is in
-    /// namespace 0, the server's own.
+    /// The id of the node, in OPC UA notation. Use `ns=2;s=Machine1.Temperature`
+    /// for a string identifier and `ns=2;i=1042` for a numeric identifier. Use
+    /// `g=` for a GUID and `b=` for an opaque identifier. A node id with no
+    /// `ns=` is in namespace 0, the namespace of the server.
     pub node_id: String,
-    /// what the messages from this node call it. Defaults to the node id
-    /// itself, which is exact and unreadable; naming the tag here is what makes
-    /// the rest of the pipeline — a `group_by`, a column mapping — legible.
+    /// The name of the node in the messages. The default is the node id. Set
+    /// a readable name to use in a `group_by` or a column mapping.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
 }
 
-/// Everything under a node in the server's address space, found by browsing it
-/// when the pipeline starts.
+/// All variables under a node in the address space of the server. The input
+/// browses for them when the pipeline starts.
 ///
-/// The convenient half of naming nodes, and the one with a cost worth knowing:
-/// what this pipeline reads is then decided by the server's address space *at
-/// the moment the pipeline starts*, so a tag added to the machine tomorrow is
-/// picked up by a restart and a tag removed silently stops arriving. An
-/// explicit `nodes` list is the one that says in the config file exactly what
-/// is being read. The two combine — browse a folder and name the handful of
-/// tags elsewhere that belong with it.
+/// The input reads the address space only at the start. A tag that is added
+/// to the server later is read only after a restart. A tag that is removed
+/// stops without an error. Use a `nodes` list to name in the config file
+/// exactly which nodes the input reads. You can use `browse` and `nodes`
+/// together.
 #[derive(Clone, Debug, Deserialize, Serialize, JsonSchema)]
 #[schemars(title = "opcua browse")]
 pub struct OpcuaBrowseConfig {
-    /// id of the node to browse under, in the same notation as `node_id` —
-    /// typically a folder, e.g. `ns=2;s=Machine1`. Every *variable* found
-    /// beneath it is subscribed to; folders and objects are followed, not
-    /// subscribed.
+    /// The id of the node to browse under, in the same notation as `node_id`.
+    /// This is usually a folder, for example `ns=2;s=Machine1`. The input
+    /// subscribes to each variable under it. It follows folders and objects
+    /// but does not subscribe to them.
     pub root: String,
-    /// how many levels below the root to follow. Defaults to 3, and there is
-    /// deliberately no spelling for "all of them": a browse of a plant server's
-    /// whole address space is thousands of nodes, and the pipeline that asked
-    /// for it would find that out by subscribing to them.
+    /// The number of levels below the root to follow. The default is 3. The
+    /// value 0 is not permitted. There is no value for "all levels", because
+    /// the address space of a plant server can have thousands of nodes.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub depth: Option<usize>,
 }
 
-/// Subscribes to variables on an OPC UA server, one message per value change.
+/// Subscribes to variables on an OPC UA server and sends one message for each
+/// change of a value.
 ///
-/// The server pushes: this creates a subscription with a monitored item per
-/// node and is told when a value changes, rather than reading them round-robin
-/// on a timer. `publish_interval_ms` is how often the server may send, not how
-/// often it samples — a tag that doesn't move produces no messages at all.
+/// The input makes a subscription with one monitored item for each node. The
+/// server sends a value when it changes. The input does not poll. A tag that
+/// does not change sends no messages. `publish_interval_ms` sets how
+/// frequently the server can send. It does not set how frequently the server
+/// samples.
 ///
-/// Each message is one reading, and carries the tag as well as the value:
+/// Each message is one reading. It contains the tag and the value:
 ///
 /// ```json
 /// {
@@ -180,107 +168,94 @@ pub struct OpcuaBrowseConfig {
 /// }
 /// ```
 ///
-/// `status` is the reading's own quality and is **always present** — a sensor
-/// that has failed reports `Bad...` with a `null` value rather than going
-/// quiet, and a pipeline that acted on those as if they were readings would be
-/// acting on nothing. `source_timestamp` is when the *device* says the value
-/// was produced, which is the one to reduce or partition by; the envelope's
-/// `received_at` is when kayak read it, and on a slow link those are not the
-/// same instant.
+/// `status` is the quality of the reading and is always present. A failed
+/// sensor sends a `Bad...` status with a `null` value. Use a `filter` to remove
+/// these readings. `source_timestamp` is the time at which the device produced
+/// the value. Use it to reduce or partition. The `received_at` field of the
+/// envelope is the time at which kayak read the value.
 ///
-/// The nodes are named by `nodes`, or found by `browse`, or both — one of them
-/// is required, since an input with nothing to monitor would sit silent
-/// forever. A node named twice is subscribed to once.
+/// Set `nodes`, `browse` or both. One of them is required. The input subscribes
+/// to a node only one time, also when two settings name it.
 #[derive(Clone, Debug, Deserialize, Serialize, JsonSchema)]
 #[schemars(title = "opcua")]
 pub struct OpcuaConfig {
-    /// name of the opcua connection to subscribe on — see "connections" in the
-    /// readme. The server it points at is declared once, in the connections
-    /// file, rather than repeated in every pipeline that uses it.
+    /// The name of the opcua connection to subscribe on. Declare the
+    /// connection in the connections file.
     #[schemars(extend("x-connection" = "opcua"))]
     pub connection: ConnectionId,
-    /// the nodes to subscribe to, named one by one.
+    /// The nodes to subscribe to, one entry for each node.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub nodes: Vec<OpcuaNodeConfig>,
-    /// a node to browse, subscribing to every variable found under it.
+    /// A node to browse. The input subscribes to each variable under it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub browse: Option<OpcuaBrowseConfig>,
-    /// how often the server may send a batch of changes, in milliseconds.
-    /// Defaults to 1000. This bounds how long a change waits, not how often
-    /// anything is measured.
+    /// The interval at which the server can send a group of changes, in ms.
+    /// The default is 1000. This value sets the longest time that a change
+    /// waits.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub publish_interval_ms: Option<u64>,
-    /// how often the server should *look* at each node, in milliseconds.
-    /// Absent asks the server to sample at the publishing interval, which is
-    /// what it does by default; a smaller value here is what fills a queue with
-    /// intermediate readings between two publishes.
+    /// The interval at which the server samples each node, in ms. If you do not
+    /// set it, the server samples at the publish interval. Set a smaller value
+    /// to get more readings between two publishes.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sampling_interval_ms: Option<u64>,
-    /// how many samples the server may hold for a node between publishes.
-    /// Defaults to 1, which means a value that changes twice in one interval is
-    /// reported once — the latest. Raise it, together with
-    /// `sampling_interval_ms`, when every sample matters rather than the
-    /// current value.
+    /// The number of samples that the server keeps for one node between two
+    /// publishes. The default is 1. With 1, the server sends only the latest
+    /// value of a node that changes two times in one interval. Increase it,
+    /// together with `sampling_interval_ms`, when you need each sample.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub queue_size: Option<u32>,
-    /// how far a value must move before the server reports it, in the value's
-    /// own units. Absent reports every change, however small — which on an
-    /// analogue signal is every sample, since the last digit is always moving.
+    /// The smallest change of a value that the server reports, in the units of
+    /// the value. If you do not set it, the server reports each change.
     ///
-    /// This is applied by the *server*, so it saves the network and this
-    /// pipeline alike. It only applies to numeric nodes; a string or a boolean
-    /// is reported on every change whatever this says.
+    /// The server applies the deadband, so it decreases network traffic. It
+    /// applies only to numeric nodes. The server reports each change of a
+    /// string or a boolean.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub deadband: Option<f64>,
-    /// most messages to put in one batch. Defaults to 1 — one message per
-    /// batch, which is what every other input does unless asked otherwise.
+    /// The maximum number of messages in one batch. The default is 1.
     ///
-    /// Worth raising here more than elsewhere: one publish from the server
-    /// carries every node that changed in the interval, so a subscription to
-    /// two hundred tags at 1 Hz is two hundred batches a second through the run
-    /// loop unless they are allowed to travel together. Raising it only ever
-    /// coalesces changes that had *already arrived*.
+    /// One publish from the server contains each node that changed in the
+    /// interval. With 200 tags at 1 Hz and the default, the pipeline handles
+    /// 200 batches each second. A higher value decreases this cost. The input
+    /// puts only changes that are already received into a batch.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_batch: Option<usize>,
 }
 
-/// Consumes JSON messages from a kafka topic, each emitted as a batch of one.
+/// Consumes JSON messages from a kafka topic.
 ///
-/// A payload that isn't JSON is skipped with a warning rather than taking the
-/// pipeline down, same as the nats input. The consumer connects on the first
-/// read and joins a consumer group, so kafka remembers where this pipeline got
-/// to between restarts.
+/// The input skips a payload that is not JSON and writes a warning to the log.
+/// The consumer connects on the first read and joins a consumer group. Kafka
+/// keeps the read position of the group between restarts.
 #[derive(Clone, Debug, Deserialize, Serialize, JsonSchema)]
 #[schemars(title = "kafka")]
 pub struct KafkaConfig {
-    /// name of the kafka connection to consume from — see "connections" in the
-    /// readme. The brokers are declared once, in the connections file, rather
-    /// than repeated in every pipeline reading from the same cluster.
+    /// The name of the kafka connection to consume from. Declare the
+    /// connection in the connections file.
     #[schemars(extend("x-connection" = "kafka"))]
     pub connection: ConnectionId,
-    /// the topic to consume from
+    /// The topic to consume from.
     pub topic: String,
-    /// consumer group id. Kafka tracks the read position per group, so two
-    /// pipelines sharing a group split the topic between them, and two with
-    /// different groups each get every message.
+    /// The consumer group id. Kafka keeps one read position for each group.
+    /// Two pipelines in the same group divide the topic between them. Two
+    /// pipelines in different groups each get all messages.
     pub group: String,
-    /// where to start when the group has no committed position yet: `earliest`
-    /// replays the topic from the beginning, `latest` only sees new messages.
-    /// Defaults to `latest`.
+    /// The start position when the group has no committed position. `earliest`
+    /// reads the topic from the start. `latest` reads only new messages. The
+    /// default is `latest`.
     pub start_at: Option<KafkaStartAt>,
-    /// most messages to put in one batch. Defaults to 1 — one message per
-    /// batch, which is what this input has always done.
+    /// The maximum number of messages in one batch. The default is 1.
     ///
-    /// Raising it only ever coalesces records that had *already arrived*: the
-    /// input still returns as soon as it has one, so an idle topic is no slower
-    /// than it was. It is worth raising when a consumer is catching up on a
-    /// backlog, where one-message batches make the run loop, the transforms and
-    /// every downstream pipeline do their per-batch work a hundred times over.
+    /// The input puts only records that are already received into a batch. It
+    /// does not wait for more records, so a high value does not add latency on
+    /// a quiet topic. Increase it when the consumer reads a backlog. Each batch
+    /// has a fixed cost in the pipeline and in each downstream pipeline.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_batch: Option<usize>,
 }
 
-/// Where a new consumer group starts reading.
+/// The position at which a new consumer group starts to read.
 #[derive(Clone, Debug, Deserialize, Serialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum KafkaStartAt {
@@ -288,710 +263,667 @@ pub enum KafkaStartAt {
     Latest,
 }
 
-/// Emits one generated message on a fixed interval — a heartbeat for testing a
-/// pipeline without a real source attached.
+/// Sends one generated message at a fixed interval. Use it to test a pipeline
+/// without a real source.
 ///
-/// Every message carries a `value` and the `current_time` it was emitted at.
-/// What the `value` holds is the `payload` field's business: a number sampled
-/// from a sine wave, so a chart of it has a shape, or a random sentence, so a
-/// text transform has something to chew on.
+/// Each message contains a `value` and the `current_time` at which the input
+/// sent it. The `payload` field sets the type of `value`. It can be a number
+/// from a sine wave or a random sentence.
 #[derive(Clone, Debug, Deserialize, Serialize, JsonSchema)]
 #[schemars(title = "dummy")]
 pub struct DummyConfig {
-    /// seconds between messages
+    /// The time between two messages, in s.
     pub duration: u64,
-    /// what each message's `value` holds: a `number` sampled from a sine wave,
-    /// or a random sentence as `text`. Defaults to `number`.
+    /// The type of `value` in each message. `number` is a number from a sine
+    /// wave. `text` is a random sentence. The default is `number`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub payload: Option<DummyPayload>,
-    /// peak of the sine wave — it swings between `-amplitude` and `+amplitude`.
-    /// Numeric payloads only; defaults to 1.
+    /// The peak of the sine wave. The value goes from `-amplitude` to
+    /// `+amplitude`. Applies only to the `number` payload. The default is 1.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub amplitude: Option<f64>,
-    /// seconds for one full turn of the sine wave. Numeric payloads only;
-    /// defaults to 60. Sampling is by wall clock rather than by message count,
-    /// so the wave keeps its period whatever `duration` is.
+    /// The time for one full cycle of the sine wave, in s. Applies only to the
+    /// `number` payload. The default is 60. The input samples the wave by the
+    /// clock, so the period does not change with `duration`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub period: Option<f64>,
 }
 
-/// What a dummy input puts in each message's `value`.
+/// The type of `value` in each message from a `dummy` input.
 #[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, JsonSchema, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum DummyPayload {
-    /// a number sampled from a sine wave
+    /// A number from a sine wave.
     #[default]
     Number,
-    /// a random sentence
+    /// A random sentence.
     Text,
 }
 
-/// Accepts messages posted to this pipeline's own endpoint,
-/// `POST /api/pipelines/{id}/messages` — the pipeline is the receiving end of
-/// an http API rather than something that reaches out to a broker.
+/// Accepts messages that are posted to the endpoint of the pipeline,
+/// `POST /api/pipelines/{id}/messages`.
 ///
-/// The endpoint is derived from the pipeline's id and appears as soon as the
-/// pipeline is running; nothing is configured about it here. The body is one
-/// JSON message or an array of them, and an array arrives as one batch. A
-/// pipeline can only have one of these — two would share an endpoint, and which
-/// of them a request went to would be a coin toss — so a second one fails to
-/// build.
+/// kayak makes the endpoint from the pipeline id. The endpoint is available
+/// when the pipeline runs. The body is one JSON message or an array of
+/// messages. An array becomes one batch. A pipeline can have only one `http`
+/// input. A second `http` input fails to build.
 #[derive(Clone, Debug, Deserialize, Serialize, JsonSchema)]
 #[schemars(title = "http")]
 pub struct HttpInputConfig {
-    /// how many posted batches may queue up ahead of the pipeline before it
-    /// starts refusing them with a `503`. Defaults to 1024. The queue is what
-    /// lets a burst through; refusing past it is deliberate, since the
-    /// alternative is holding a request open until the pipeline catches up.
+    /// The maximum number of posted batches in the queue before the pipeline.
+    /// The default is 1024. When the queue is full, the endpoint refuses a
+    /// post with `503`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub capacity: Option<usize>,
-    /// what a post must present to be accepted. Absent — the default — means
-    /// the endpoint takes anything that reaches it, which is what every
-    /// pipeline with an `http` input has always done.
+    /// The credential that a post must have. If you do not set it, the
+    /// endpoint accepts all posts. A post without the correct credential gets
+    /// `401`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub auth: Option<HttpAuthConfig>,
 }
 
-/// A credential carried in a header — checked by the `http` input on a post to
-/// a pipeline's endpoint, and presented by the `http` output on a request it
-/// sends.
+/// A credential in a header. The `http` input checks it on each post. The
+/// `http` output, the `http` transform and the `http_poll` input send it on
+/// each request.
 ///
-/// One type for both directions because it is one fact: a fixed string in a
-/// named header. The two halves read it differently — the input compares what
-/// arrived against this, the output sets it — and only the input has the rule
-/// about `ALLOWED_HEADERS`, since only the input can write a header into the
-/// messages.
+/// This credential is for one pipeline only. It is not related to the user
+/// accounts of the server.
 ///
-/// This is the **data plane's** own credential and has nothing to do with the
-/// accounts in the settings file: those are people signing in to look at and
-/// edit the graph, this is one system pushing data into one pipeline. A machine
-/// posting readings should not need an account that can rewrite the config, and
-/// a person with such an account should not thereby be able to post readings.
-///
-/// The token is a fixed string the sender repeats on every request, which makes
-/// it **only as private as the transport**. kayak speaks plain HTTP; putting
-/// TLS in front of it is the deployment's job, and without that the token is
-/// readable by anything on the path. It is the same trade every log-ingest API
-/// makes, and worth making deliberately rather than by accident.
+/// The sender sends the same token on each request. Thus the token is only as
+/// secure as the connection. kayak serves plain HTTP. Put TLS in front of
+/// kayak, or other systems on the network path can read the token.
 #[derive(Clone, Debug, Deserialize, Serialize, JsonSchema)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum HttpAuthConfig {
     /// A token in the standard `Authorization` header, as
-    /// `Authorization: Bearer <token>`. The one to reach for unless the system
-    /// on the other end can't use that header.
+    /// `Authorization: Bearer TOKEN`. Use this variant if the other system can
+    /// use that header.
     Bearer {
-        /// the token. A `${NAME}` reference, so the config file holds the name
-        /// and the secret store holds the value.
+        /// The token. Use a `${NAME}` reference, so that the config file keeps
+        /// only the name and the secret store keeps the value.
         token: Secret,
     },
-    /// A fixed value in a header of your choosing — for webhook senders and
-    /// receivers that can't use `Authorization` but can carry a header of their
-    /// own, which is most of them.
+    /// A fixed value in a header that you name. Use this variant for a system
+    /// that cannot use the `Authorization` header.
     Header {
-        /// the header's name, matched case-insensitively on the way in. On an
-        /// `http` input it may not be one of the headers an `envelope` passes
-        /// through, since that would write the credential into the messages.
+        /// The name of the header. The `http` input compares the name without
+        /// case. On an `http` input, the name must not be a header that an
+        /// `envelope` copies into the messages.
         name: String,
-        /// the exact value that header must have. A `${NAME}` reference, as
-        /// above.
+        /// The exact value of the header. Use a `${NAME}` reference.
         value: Secret,
     },
 }
 
-/// Takes another pipeline's output as its input. This is what makes the
-/// pipelines a graph: several pipelines can read from the same upstream, and it
-/// fans out to all of them. The upstream must already exist when this pipeline
-/// is created, so declare it earlier in the config file.
+/// Reads the output of another pipeline. Use it to connect pipelines into a
+/// graph.
+///
+/// Many pipelines can read from the same upstream. Each of them gets all
+/// batches. The upstream must exist when kayak creates this pipeline, so
+/// declare the upstream first in the config file.
 #[derive(Clone, Debug, Deserialize, Serialize, JsonSchema)]
 #[schemars(title = "pipeline")]
 pub struct PipelineConfig {
-    /// id of the pipeline to read from
+    /// The id of the pipeline to read from.
     #[schemars(extend("x-pipeline-id" = true))]
     pub upstream: PipelineId,
 }
 
-/// The delivery guarantee to ask for on an mqtt subscribe or publish, spelled
-/// the way mqtt itself names them rather than as the bare numbers `0`/`1`/`2`.
+/// The mqtt quality of service for a subscribe or a publish.
 #[derive(Clone, Copy, Debug, Deserialize, Serialize, JsonSchema, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum MqttQos {
-    /// fire and forget — the broker never resends and there is no ack of any
-    /// kind. The default.
+    /// QoS 0. The broker does not send a message again and there is no
+    /// acknowledgement. The default.
     AtMostOnce,
-    /// the broker resends until acknowledged, so a message may arrive more
-    /// than once. Required for an input's `ack: on_delivery` to mean anything
-    /// — see "acknowledgement modes" in the guide.
+    /// QoS 1. The broker sends a message again until it gets an
+    /// acknowledgement, so a message can arrive more than one time. An input
+    /// with `ack: on_delivery` requires this level or higher.
     AtLeastOnce,
-    /// the broker's four-part handshake that guarantees exactly one delivery.
-    /// The most expensive of the three; reach for `at_least_once` unless a
-    /// duplicate would actually be wrong.
+    /// QoS 2. A four-part handshake makes sure of exactly one delivery. This
+    /// level has the highest cost. Use `at_least_once` if a duplicate message
+    /// is not a problem.
     ExactlyOnce,
 }
 
-/// Subscribes to an mqtt topic — or a topic *filter*, since mqtt's `+` and `#`
-/// wildcards are valid here. Each message is parsed as JSON and emitted as a
-/// batch of one; a payload that isn't JSON is skipped with a warning rather
-/// than taking the pipeline down, the same rule every other input follows.
+/// Subscribes to an mqtt topic and parses each message as JSON.
 ///
-/// The connection is opened on the first read, and a stable client id is
-/// derived from the pipeline's id and this topic — not configurable, since
-/// nothing about it is a choice this pipeline needs to make and getting it
-/// wrong (two inputs sharing one id) silently drops one of them.
+/// The topic can be a filter with the mqtt wildcards `+` and `#`. The input
+/// skips a payload that is not JSON and writes a warning to the log.
+///
+/// The input opens the connection on the first read. kayak makes the client id
+/// from the pipeline id and the topic. You cannot set the client id.
 #[derive(Clone, Debug, Deserialize, Serialize, JsonSchema)]
 #[schemars(title = "mqtt")]
 pub struct MqttConfig {
-    /// name of the mqtt connection to subscribe on — see "connections" in the
-    /// readme. The broker it points at is declared once, in the connections
-    /// file, rather than repeated in every pipeline that uses it.
+    /// The name of the mqtt connection to subscribe on. Declare the connection
+    /// in the connections file.
     #[schemars(extend("x-connection" = "mqtt"))]
     pub connection: ConnectionId,
-    /// the topic, or topic filter, to subscribe to
+    /// The topic or topic filter to subscribe to.
     pub topic: String,
-    /// the quality of service to subscribe with. Defaults to `at_most_once`.
-    /// `ack: on_delivery` needs at least `at_least_once` here — a QoS-0
-    /// subscription has nothing for it to acknowledge.
+    /// The quality of service for the subscription. The default is
+    /// `at_most_once`. `ack: on_delivery` requires `at_least_once` or
+    /// `exactly_once`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub qos: Option<MqttQos>,
-    /// most messages to put in one batch. Defaults to 1 — one message per
-    /// batch, which is what this input has always done.
+    /// The maximum number of messages in one batch. The default is 1.
     ///
-    /// Raising it only ever coalesces messages that had *already arrived*: the
-    /// input still returns as soon as it has one, so a quiet topic is no
-    /// slower than it was.
+    /// The input puts only messages that are already received into a batch.
+    /// It does not wait for more messages, so a high value does not add
+    /// latency on a quiet topic.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_batch: Option<usize>,
 }
 
-/// How the messages in a file are laid out.
+/// The layout of the messages in a file.
 ///
-/// Both are JSON — the difference is whether the file is one document or one
-/// document per line. `ndjson` is the one to want for anything that streams:
-/// the file is valid after every batch, so a run that is still going (or that
-/// died) is still readable, and every tool that eats logs eats it.
+/// Both formats are JSON. Use `ndjson` for a stream. An `ndjson` file is valid
+/// after each batch, so you can read it while the pipeline runs or after a
+/// crash.
 #[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, JsonSchema, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum FileFormat {
-    /// one JSON message per line, appended as it arrives
+    /// One JSON message on each line. The output adds each message when it
+    /// arrives.
     #[default]
     Ndjson,
-    /// the whole file is a single JSON array, closed when the file rotates
+    /// The file is one JSON array. The output closes the array when the file
+    /// rotates.
     JsonArray,
 }
 
-/// When a file is closed and the next one started.
+/// When the output closes a file and starts the next file.
 ///
-/// Both triggers are optional and are checked together — whichever comes first
-/// rotates. With neither, a pipeline writes one file for as long as it runs.
-///
-/// Shared with the object-store output rather than local-only: "how big does a
-/// part get" is the same question on a disk and in a bucket, and the answer
-/// belongs in one place.
+/// The two triggers are optional. The first trigger that is reached rotates
+/// the file. With no trigger, the output writes one file while the pipeline
+/// runs. The `file` and `s3` outputs use the same rotation settings.
 #[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, JsonSchema, PartialEq, Eq)]
 pub struct RotationConfig {
-    /// close the file once it holds this many messages
+    /// Close the file when it contains this number of messages. The output
+    /// does not divide a batch, so a file can contain more messages.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_rows: Option<usize>,
-    /// close the file this many seconds after it was opened. Measured from the
-    /// open, not from the last write, so files line up on a predictable cadence.
+    /// Close the file this number of seconds after the output opened it. The
+    /// time starts when the file opens, not at the last write.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub interval_secs: Option<u64>,
 }
 
 /// Writes each batch to files in a directory on the server.
 ///
-/// The directory comes from a `file` connection and the `path` below is
-/// relative to it; the server's `--data-dir` is what both are confined to, so a
-/// server started without that flag cannot write files at all. Names are
-/// generated rather than configured — `<open time>-<sequence>.<ext>`, which
-/// sorts chronologically and cannot collide across rotations.
+/// A `file` connection gives the root directory, and `path` is relative to it.
+/// The root must be inside the `--data-dir` of the server. Without that flag,
+/// a `file` output fails to build. The output names each file
+/// `<open time>-<sequence>.<ext>`, so the names sort by time and are unique.
 ///
-/// Meant for local development and testing. The object-store output is what
-/// this shape is being built towards for anything else.
+/// Use the `file` output for local development and tests.
 #[derive(Clone, Debug, Deserialize, Serialize, JsonSchema)]
 #[schemars(title = "file")]
 pub struct FileOutputConfig {
-    /// name of the file connection to write under — see "connections" in the
-    /// readme. The root directory lives there; the path below is this output's
-    /// own.
+    /// The name of the file connection to write under. Declare the connection
+    /// in the connections file. The connection gives the root directory.
     #[schemars(extend("x-connection" = "file"))]
     pub connection: ConnectionId,
-    /// directory to write into, relative to the connection's root, e.g.
-    /// `orders`. Must stay inside the root: an absolute path or one containing
-    /// `..` is refused rather than trimmed.
+    /// The directory to write into, relative to the root of the connection,
+    /// for example `orders`. The path must stay inside the root. kayak refuses
+    /// an absolute path and a path that contains `..`.
     pub path: String,
-    /// how the messages are laid out. Defaults to `ndjson`.
+    /// The layout of the messages. The default is `ndjson`.
     // omitted rather than written as `null` when absent, so a config saved back
     // out is the file someone hand-wrote — same rule as a postgres port
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub format: Option<FileFormat>,
-    /// when to close a file and start the next one. Without this, one file per
-    /// run.
+    /// When to close a file and start the next file. Without this setting, the
+    /// output writes one file while the pipeline runs.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub rotate: Option<RotationConfig>,
 }
 
 /// Writes each batch to objects under a prefix in an S3-compatible bucket.
 ///
-/// The same writer as the `file` output — the same part naming, the same
-/// formats, the same rotation policy — pointed at a bucket instead of a
-/// directory. What differs is that an object store has no append: a part is
-/// buffered in memory and uploaded whole when it rotates, so `rotate` is
-/// **required** here and is what decides both how often objects appear and how
-/// much a running pipeline holds.
+/// The `s3` output uses the same file names, formats and rotation as the
+/// `file` output. An object store cannot append to an object. Thus the output
+/// keeps the current object in memory and uploads it when it rotates.
+/// `rotate` is required. It sets how frequently objects appear and how much
+/// memory the pipeline uses.
 #[derive(Clone, Debug, Deserialize, Serialize, JsonSchema)]
 #[schemars(title = "s3")]
 pub struct S3OutputConfig {
-    /// name of the s3 connection to write through — see "connections" in the
-    /// readme. The bucket and credentials live there; the prefix below is this
-    /// output's own.
+    /// The name of the s3 connection to write through. Declare the connection
+    /// in the connections file. The connection gives the bucket and the
+    /// credentials.
     #[schemars(extend("x-connection" = "s3"))]
     pub connection: ConnectionId,
-    /// key prefix to write under, e.g. `orders` — objects land at
-    /// `<prefix>/<generated part name>`. Leave it empty to write at the root of
-    /// the bucket.
+    /// The key prefix to write under, for example `orders`. The output writes
+    /// each object to `<prefix>/<part name>`. Set an empty prefix to write at
+    /// the root of the bucket.
     pub prefix: String,
-    /// how the messages are laid out. Defaults to `ndjson`.
+    /// The layout of the messages. The default is `ndjson`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub format: Option<FileFormat>,
-    /// when to finish an object and start the next one. Required: an object
-    /// store cannot be appended to, so without a rotation trigger a pipeline
-    /// would hold its entire run in memory and upload it once, at the end.
+    /// When to close an object and start the next object. Required. A
+    /// `rotate` with no trigger fails to build.
     pub rotate: RotationConfig,
 }
 
-/// Publishes every message in the batch to a nats subject, one message per
+/// Publishes each message in the batch to a nats subject, one message for each
 /// publish.
 #[derive(Clone, Debug, Deserialize, Serialize, JsonSchema)]
 #[schemars(title = "nats")]
 pub struct NatsOutputConfig {
-    /// name of the nats connection to publish on — see "connections" in the
-    /// readme.
+    /// The name of the nats connection to publish on. Declare the connection
+    /// in the connections file.
     #[schemars(extend("x-connection" = "nats"))]
     pub connection: ConnectionId,
-    /// the subject to publish to
+    /// The subject to publish to.
     pub subject: String,
 }
 
-/// Publishes every message in the batch to a redis channel, one message per
-/// publish.
+/// Publishes each message in the batch to a redis channel, one message for
+/// each publish.
 #[derive(Clone, Debug, Deserialize, Serialize, JsonSchema)]
 #[schemars(title = "redis")]
 pub struct RedisOutputConfig {
-    /// name of the redis connection to publish on — see "connections" in the
-    /// readme.
+    /// The name of the redis connection to publish on. Declare the connection
+    /// in the connections file.
     #[schemars(extend("x-connection" = "redis"))]
     pub connection: ConnectionId,
-    /// the channel to publish to
+    /// The channel to publish to.
     pub channel: String,
 }
 
-/// Reads sensors and streams out of Indu Cloud, live, over
-/// `/api/v1/live/sse` — the platform's own subscription protocol, under the
-/// connection's API key.
+/// Reads live sensors and streams from Indu Cloud through `/api/v1/live/sse`,
+/// with the API key of the connection.
 ///
-/// Sensors and streams are named the way they are named on the platform
-/// (customer-supplied ids, never UUIDs) and resolved through `/api/v1` on
-/// the first read; a name the key cannot find or may not see is reported on
-/// the card and looked for again after a pause, since a stream that does not
-/// exist yet is the usual case for one another pipeline is about to write.
-/// Every reading arrives as its own message, named — `{"kind": "sensor",
-/// "name": "press-3/temperature", "value": 71.2, "at": …}` — with the
-/// platform's ids riding along for anything that needs them. A dropped
-/// connection reconnects with backoff; readings the connection could not keep
-/// up with are reported as an error rather than silently missed.
+/// Name sensors and streams with the ids that the platform uses. Do not use
+/// UUIDs. The input finds the names through `/api/v1` on the first read. If
+/// the key cannot find or see a name, the input reports an error. It then
+/// tries again after a pause.
+///
+/// Each reading is one message, for example
+/// `{"kind": "sensor", "name": "press-3/temperature", "value": 71.2, "at": …}`.
+/// The message also contains the ids of the platform. When the connection
+/// drops, the input connects again with backoff. If the input cannot read
+/// all readings, it reports an error.
 #[derive(Clone, Debug, Deserialize, Serialize, JsonSchema)]
 #[schemars(title = "indu")]
 pub struct InduInputConfig {
-    /// name of the indu connection to read through — see "connections".
+    /// The name of the indu connection to read through. Declare the connection
+    /// in the connections file.
     #[schemars(extend("x-connection" = "indu"))]
     pub connection: ConnectionId,
-    /// sensors to read, as `<device>/<sensor>` — the device's id followed by
-    /// the sensor's, both as the platform knows them: `press-3/temperature`.
-    /// The split is at the first `/`.
+    /// The sensors to read, as `<device>/<sensor>`, for example
+    /// `press-3/temperature`. Use the ids that the platform uses. kayak divides
+    /// the name at the first `/`.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub sensors: Vec<String>,
-    /// streams to read, by the name they were written under — `press-3/oee` —
-    /// or, for a stream the platform computes itself, its display name.
+    /// The streams to read, by the name they were written under, for example
+    /// `press-3/oee`. For a stream that the platform calculates, use its
+    /// display name.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub streams: Vec<String>,
-    /// whether to start with each series' latest value before live readings
-    /// arrive. Defaults to true, so a pipeline restarted at 03:00 has a value
-    /// for every machine at 03:00 rather than at the next reading.
+    /// Send the latest value of each series before the live readings. The
+    /// default is true. Thus a restarted pipeline has a value for each series
+    /// immediately.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub backfill: Option<bool>,
-    /// most readings to put in one batch. Defaults to 1. Raising it only ever
-    /// coalesces readings that had *already arrived* — a quiet sensor is no
-    /// slower than it was.
+    /// The maximum number of readings in one batch. The default is 1. The input
+    /// puts only readings that are already received into a batch. It does not
+    /// wait for more readings.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_batch: Option<usize>,
 }
 
-/// One series an `indu` output writes: which stream a message's value goes
-/// to, and which field carries the value.
+/// One series that an `indu` output writes: the stream that gets the value,
+/// and the field that contains the value.
 #[derive(Clone, Debug, Deserialize, Serialize, JsonSchema, PartialEq, Eq)]
 pub struct InduSeries {
-    /// the stream's name on the Indu side, e.g. `press-3/oee`. May contain
-    /// `{field}` placeholders filled from the message — `{machine}/oee` — so
-    /// one output serves every machine a pipeline reduces over. A message
-    /// missing a placeholder's field is skipped for this series.
+    /// The name of the stream in Indu, for example `press-3/oee`. The name can
+    /// contain `{field}` placeholders that the output fills from the message,
+    /// for example `{machine}/oee`. Thus one output can write a stream for each
+    /// machine. The output skips this series for a message that does not have
+    /// the field of a placeholder.
     pub stream: String,
-    /// the field holding the value, as a path (`oee`, `stats.mean`). Must be a
-    /// number; a message where it is missing or not a number is skipped for
-    /// this series rather than failing the batch.
+    /// The field that contains the value, as a path (`oee`, `stats.mean`). The
+    /// value must be a number. The output skips this series for a message
+    /// where the value is missing or is not a number. The batch does not fail.
     pub value: String,
-    /// the unit Indu records when it creates the stream, e.g. `%`. Ignored
-    /// once the stream exists.
+    /// The unit that Indu records when it creates the stream, for example `%`.
+    /// Indu ignores it when the stream exists.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub unit: Option<String>,
 }
 
-/// Writes messages into Indu Cloud as **streams** — series that are not
-/// sensors — through `POST /ingest/v1/streams`.
+/// Writes messages into Indu Cloud as streams through
+/// `POST /ingest/v1/streams`. A stream is a series that is not a sensor.
 ///
-/// Every message yields one reading per entry in `series`; a reducer emitting
-/// `{machine, oee, availability}` with two series entries writes two streams
-/// per machine. An unknown stream is created on the Indu side on first sight,
-/// when the connection's key may create streams. Anything but a full
-/// acceptance fails the batch with Indu's own row errors quoted, so a stream
-/// the key may not write to shows up on the card rather than being written
-/// off as delivered.
+/// Each message gives one reading for each entry in `series`. For example, a
+/// reducer that sends `{machine, oee, availability}` with two series entries
+/// writes two streams for each machine. Indu creates an unknown stream when
+/// the key of the connection has permission to create streams. If Indu does
+/// not accept all rows, the batch fails. The error contains the row errors
+/// from Indu.
 #[derive(Clone, Debug, Deserialize, Serialize, JsonSchema)]
 #[schemars(title = "indu")]
 pub struct InduOutputConfig {
-    /// name of the indu connection to write through — see "connections".
+    /// The name of the indu connection to write through. Declare the
+    /// connection in the connections file.
     #[schemars(extend("x-connection" = "indu"))]
     pub connection: ConnectionId,
-    /// the streams to write, one reading each per message. At least one.
+    /// The streams to write, one reading for each message. At least one entry
+    /// is required.
     pub series: Vec<InduSeries>,
-    /// the field holding the reading's time — an RFC 3339 string or epoch
-    /// milliseconds. Absent, the time the batch is sent is used. An `envelope`
-    /// puts an input's receive time at `_meta.received_at`.
+    /// The field that contains the time of the reading, as an RFC 3339 string
+    /// or as ms since the epoch. If you do not set it, the output uses the time
+    /// at which it sends the batch. An `envelope` puts the receive time of an
+    /// input at `_meta.received_at`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub at: Option<String>,
-    /// how long one request may take before it is given up on, in seconds.
-    /// Defaults to 30.
+    /// The maximum time for one request, in s. The default is 30.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub timeout_seconds: Option<u64>,
 }
 
-/// Sends the batch to an http endpoint — the pipeline pushes its results at a
-/// webhook or an ingest API rather than at a broker.
+/// Sends the batch to an http endpoint, for example a webhook or an ingest
+/// API.
 ///
-/// The counterpart of the `http` *input*, and the sending half of what the
-/// `http` transform does: the transform replaces the batch with the reply, this
-/// one is the end of the chain and the reply's body is discarded. What is not
-/// discarded is its **status** — anything but a 2xx fails the batch, which is
-/// what makes a webhook that is rejecting the data show up on the card rather
-/// than being written off as delivered.
+/// The output ignores the body of the reply. A status other than 2xx fails the
+/// batch. The error contains the reply of the endpoint. Use the `http`
+/// transform if the pipeline needs the reply.
 #[derive(Clone, Debug, Deserialize, Serialize, JsonSchema)]
 #[schemars(title = "http")]
 pub struct HttpOutputConfig {
-    /// endpoint to send to, e.g. `https://example.com/hooks/readings`
+    /// The endpoint to send to, for example
+    /// `https://example.com/hooks/readings`.
     pub url: String,
-    /// http method. Defaults to `POST`. `GET` and `DELETE` are refused at build
-    /// time — an output exists to send the messages somewhere, and a method
-    /// with no body has nowhere to put them.
+    /// The http method. The default is `POST`. `GET` and `DELETE` fail to
+    /// build, because a request with no body cannot send the messages.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub verb: Option<HttpVerb>,
-    /// what one request carries. Defaults to `batch`, which is one request per
-    /// batch.
+    /// The content of one request. The default is `batch`, one request for
+    /// each batch.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub body: Option<HttpBodyKind>,
-    /// what this output presents to be allowed to send. Absent — the default —
-    /// sends no credential at all, which is what an open webhook wants.
+    /// The credential that the output sends. If you do not set it, the output
+    /// sends no credential.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub auth: Option<HttpAuthConfig>,
-    /// how long one request may take before it is given up on, in seconds.
-    /// Defaults to 30. A batch whose request times out is a failed batch, so
-    /// this is also the longest a slow endpoint can hold the pipeline up.
+    /// The maximum time for one request, in s. The default is 30. A request
+    /// that times out fails the batch. Thus a slow endpoint stops the pipeline
+    /// for this time at most.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub timeout_seconds: Option<u64>,
 }
 
-/// What the body of one request from an `http` output holds.
+/// The body of one request from an `http` output or an `http` transform.
 ///
-/// A closed set of two, and the choice is the receiving API's rather than a
-/// tuning knob: an ingest endpoint that takes an array wants `batch`, a webhook
-/// that takes one event per call wants `message`. There is no third spelling
-/// (an envelope with a count, say) because that is the receiver's shape, and
-/// shaping the request is the http transform's outstanding work, not this
-/// component's.
+/// Select the value that the API at the endpoint expects. Use `batch` for an
+/// endpoint that takes an array. Use `message` for a webhook that takes one
+/// event for each call.
 #[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, JsonSchema, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum HttpBodyKind {
-    /// The whole batch as one JSON array, in one request. One round trip per
-    /// batch however many messages it holds, which is why it is the default.
+    /// The full batch as one JSON array, in one request. The default.
     #[default]
     Batch,
-    /// One request per message, each body the message itself. Requests go out
-    /// in order and the first failure fails the batch, so the messages after it
-    /// are not sent — the same all-or-nothing a broker publish loop has.
+    /// One request for each message. The body is the message. The requests go
+    /// in sequence. The first failure fails the batch, and kayak does not send
+    /// the messages after it.
     Message,
 }
 
-/// Publishes every message in the batch to an mqtt topic, one message per
+/// Publishes each message in the batch to an mqtt topic, one message for each
 /// publish.
 ///
-/// A stable client id is derived from the pipeline's id and this topic, the
-/// same as the mqtt input — not configurable, for the same reason.
+/// kayak makes the client id from the pipeline id and the topic. You cannot
+/// set the client id.
 #[derive(Clone, Debug, Deserialize, Serialize, JsonSchema)]
 #[schemars(title = "mqtt")]
 pub struct MqttOutputConfig {
-    /// name of the mqtt connection to publish on — see "connections" in the
-    /// readme.
+    /// The name of the mqtt connection to publish on. Declare the connection
+    /// in the connections file.
     #[schemars(extend("x-connection" = "mqtt"))]
     pub connection: ConnectionId,
-    /// the topic to publish to
+    /// The topic to publish to.
     pub topic: String,
-    /// the quality of service to publish with. Defaults to `at_most_once`.
+    /// The quality of service for each publish. The default is `at_most_once`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub qos: Option<MqttQos>,
-    /// ask the broker to keep this as the topic's *retained* message, handed
-    /// to every future subscriber immediately on subscribe. Defaults to false.
+    /// Tell the broker to keep the message as the retained message of the
+    /// topic. The broker sends it to each new subscriber. The default is false.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub retain: Option<bool>,
 }
 
-/// Inserts every message in the batch into a postgres table, one row per
+/// Inserts each message in the batch into a postgres table, one row for each
 /// message.
 ///
-/// With `columns`, each entry names a column, its type and the field to read —
-/// `{"name": "temperature", "type": "float", "field": "reading.temp_c"}`, and
-/// `field` defaults to the column's name. Without them the table gets a single
-/// `jsonb` column holding the whole message, which is what this output has
-/// always done.
+/// With `columns`, each entry names a column, its type and the field to read,
+/// for example `{"name": "temperature", "type": "float", "field": "reading.temp_c"}`.
+/// The default `field` is the name of the column. Without `columns`, the table
+/// has an `id`, a `received_at` timestamp and a `payload` column of type
+/// `jsonb` that contains the full message.
 ///
-/// The table is created if it isn't there, from the columns above; set
-/// `create_table` to false for a table someone else owns. Creation never
-/// *alters* an existing table — a table whose shape has moved on fails the
-/// insert with the server's own error rather than being migrated from a config
-/// file.
+/// The output creates the table if it does not exist. Set `create_table` to
+/// false for a table that another system owns. The output does not change an
+/// existing table. If the table does not agree with the columns, the insert
+/// fails with the error from postgres.
 #[derive(Clone, Debug, Deserialize, Serialize, JsonSchema)]
 #[schemars(title = "postgres")]
 pub struct PostgresOutputConfig {
-    /// name of the postgres connection to insert through — see "connections"
-    /// in the readme. The host, database and role live there; the table below
-    /// is this output's own.
+    /// The name of the postgres connection to insert through. Declare the
+    /// connection in the connections file. The connection gives the host, the
+    /// database and the role.
     #[schemars(extend("x-connection" = "postgres"))]
     pub connection: ConnectionId,
-    /// the table to insert into, created if it does not exist. Optionally
-    /// schema-qualified (`analytics.readings`); letters, digits and underscores
-    /// only, since it cannot be sent as a query parameter.
+    /// The table to insert into. The output creates it if it does not exist.
+    /// You can add a schema (`analytics.readings`). Use only letters, digits
+    /// and underscores.
     pub table: String,
-    /// which message field goes in which column. Leave it out to store each
-    /// message whole, as JSON, in a `payload` column.
+    /// The column for each message field. If you do not set it, the output
+    /// keeps each full message as JSON in a `payload` column.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub columns: Vec<ColumnMapping>,
-    /// create the table on connect if it does not exist. Defaults to true.
+    /// Create the table on connect if it does not exist. The default is true.
     // omitted rather than written as `null` when absent, so a config saved back
     // out is the file someone hand-wrote — same rule as the port
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub create_table: Option<bool>,
-    /// the columns forming the created table's primary key. With none, the
-    /// table gets an `id` of its own and a `received_at` timestamp; naming one
-    /// here says the data carries its own identity and drops both.
+    /// The columns of the primary key of the created table. If you do not set
+    /// it, the table gets an `id` and a `received_at` timestamp. If you set it,
+    /// the table does not get these two columns.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub primary_key: Vec<String>,
-    /// indexes to create with the table. Each names mapped columns, in order.
+    /// The indexes to create with the table. Each index names mapped columns,
+    /// in sequence.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub indexes: Vec<TableIndex>,
-    /// what to do about a message carrying fields no column reads
+    /// What to do with a message that has fields that no column reads.
     #[serde(default, skip_serializing_if = "ExtraFieldPolicy::is_default")]
     pub on_extra_fields: ExtraFieldPolicy,
 }
 
-/// Inserts every batch into a ClickHouse table, one insert per batch.
+/// Inserts each batch into a `ClickHouse` table, one insert for each batch.
 ///
-/// `columns` is spelled exactly as the postgres output's is — each entry names
-/// a column, its type and the field to read, and `field` defaults to the
-/// column's name. Without them the table gets a single column holding each
-/// message as JSON text.
+/// `columns` has the same format as on the `postgres` output. Each entry names
+/// a column, its type and the field to read. The default `field` is the name of
+/// the column. Without `columns`, the table has a `payload` column that
+/// contains each message as JSON text.
 ///
-/// Where it differs from postgres is what a created table is *sorted* by.
-/// ClickHouse has no auto-increment column and no unique constraint, so there
-/// is no surrogate `id` to fall back on: `order_by` names the MergeTree sorting
-/// key, and a table that names none is sorted by the `received_at` timestamp it
-/// gets for free. A sorting key does not deduplicate — naming one says how the
-/// table is laid out and indexed, not that its rows are unique.
+/// `ClickHouse` has no auto-increment column and no unique constraint.
+/// `order_by` names the sorting key of the `MergeTree` table. If you do not set
+/// it, the table gets a `received_at` timestamp and is sorted by it. A sorting
+/// key does not remove duplicate rows.
 ///
-/// The table is created if it isn't there; set `create_table` to false for a
-/// table someone else owns. Creation never *alters* an existing table.
+/// The output creates the table if it does not exist. Set `create_table` to
+/// false for a table that another system owns. The output does not change an
+/// existing table.
 #[derive(Clone, Debug, Deserialize, Serialize, JsonSchema)]
 #[schemars(title = "clickhouse")]
 pub struct ClickhouseOutputConfig {
-    /// name of the clickhouse connection to insert through — see "connections"
-    /// in the readme. The url, database and user live there; the table below is
-    /// this output's own.
+    /// The name of the clickhouse connection to insert through. Declare the
+    /// connection in the connections file. The connection gives the url, the
+    /// database and the user.
     #[schemars(extend("x-connection" = "clickhouse"))]
     pub connection: ConnectionId,
-    /// the table to insert into, created if it does not exist. Optionally
-    /// database-qualified (`analytics.readings`), which overrides the
-    /// connection's database; letters, digits and underscores only, since it
-    /// cannot be sent as a query parameter.
+    /// The table to insert into. The output creates it if it does not exist.
+    /// You can add a database (`analytics.readings`). This database replaces
+    /// the database of the connection. Use only letters, digits and
+    /// underscores.
     pub table: String,
-    /// which message field goes in which column. Leave it out to store each
-    /// message whole, as JSON text, in a `payload` column.
+    /// The column for each message field. If you do not set it, the output
+    /// keeps each full message as JSON text in a `payload` column.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub columns: Vec<ColumnMapping>,
-    /// create the table on start if it does not exist. Defaults to true.
+    /// Create the table on start if it does not exist. The default is true.
     // omitted rather than written as `null` when absent, so a config saved back
     // out is the file someone hand-wrote — same rule as the postgres port
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub create_table: Option<bool>,
-    /// the columns the created table is sorted by — MergeTree's sorting key, and
-    /// its index. With none, the table gets a `received_at` timestamp of its own
-    /// and is sorted by that. Named columns are made `NOT NULL`, since a
-    /// nullable key is not something ClickHouse sorts by.
+    /// The columns that sort the created table. This is the sorting key of the
+    /// `MergeTree` table and its index. If you do not set it, the table gets a
+    /// `received_at` timestamp and is sorted by it. The output makes these
+    /// columns `NOT NULL`, because `ClickHouse` cannot sort by a nullable key.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub order_by: Vec<String>,
-    /// what to do about a message carrying fields no column reads
+    /// What to do with a message that has fields that no column reads.
     #[serde(default, skip_serializing_if = "ExtraFieldPolicy::is_default")]
     pub on_extra_fields: ExtraFieldPolicy,
 }
 
-/// Writes every batch into a Tidepool table, one request per batch.
+/// Writes each batch into a Tidepool table, one request for each batch.
 ///
-/// The table has to exist: Tidepool's project declares it, with its column
-/// types, and this output checks against that on start — every mapped column
-/// has to be one of the table's, of a type it can write, and every column the
-/// table requires has to be written. A mismatch fails the start rather than
-/// the first batch.
+/// The table must exist in the Tidepool project. On start, the output checks
+/// the columns against the table. Each mapped column must be in the table and
+/// have a type that the mapping can write. Each required column of the table
+/// must be written. If the check fails, the start fails.
 ///
-/// `columns` is spelled as the database outputs spell it. Leave it out to send
-/// each message as a row as it is, for messages already shaped like the table:
-/// Tidepool checks every value and refuses a batch with any problem in it, so
-/// nothing is coerced on either side.
+/// `columns` has the same format as on the database outputs. If you do not set
+/// it, the output sends each message as a row without changes. Tidepool checks
+/// each value and refuses a batch that has a problem.
 ///
-/// A batch Tidepool refuses fails with its problems quoted by row and column.
-/// A busy server (`503`) or one that can't be reached is retried for up to
-/// `retry_seconds` under the same idempotency key, so a retry never writes a
-/// batch twice.
+/// A refused batch fails. The error gives the problems by row and column. The
+/// output tries again when the server is busy (`503`), when the server cannot
+/// be reached and on other `5xx` errors. It tries again for up to
+/// `retry_seconds`. Each try uses the same idempotency key, so Tidepool does
+/// not write a batch two times.
 #[derive(Clone, Debug, Deserialize, Serialize, JsonSchema)]
 #[schemars(title = "tidepool")]
 pub struct TidepoolOutputConfig {
-    /// name of the tidepool connection to write through — see "connections"
-    /// in the readme.
+    /// The name of the tidepool connection to write through. Declare the
+    /// connection in the connections file.
     #[schemars(extend("x-connection" = "tidepool"))]
     pub connection: ConnectionId,
-    /// the table to write into, as Tidepool's project names it
+    /// The table to write into, with the name from the Tidepool project.
     pub table: String,
-    /// which message field goes in which column. Leave it out to send each
-    /// message as a row as it is.
+    /// The column for each message field. If you do not set it, the output
+    /// sends each message as a row without changes.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub columns: Vec<ColumnMapping>,
-    /// what to do about a message carrying fields no column reads
+    /// What to do with a message that has fields that no column reads.
     #[serde(default, skip_serializing_if = "ExtraFieldPolicy::is_default")]
     pub on_extra_fields: ExtraFieldPolicy,
-    /// how long one batch keeps being retried while the server is busy or
-    /// unreachable, in seconds. Defaults to 30.
+    /// The maximum time to try one batch again while the server is busy or
+    /// cannot be reached, in s. The default is 30.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub retry_seconds: Option<u64>,
-    /// how long one request may take, in seconds. Defaults to 30.
+    /// The maximum time for one request, in s. The default is 30.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub timeout_seconds: Option<u64>,
 }
 
-/// Publishes every message in the batch to a kafka topic, one message per
-/// record. Records are sent without a key, so they round-robin across the
-/// topic's partitions.
+/// Publishes each message in the batch to a kafka topic, one record for each
+/// message.
+///
+/// The records have no key, so kafka distributes them across the partitions
+/// of the topic.
 #[derive(Clone, Debug, Deserialize, Serialize, JsonSchema)]
 #[schemars(title = "kafka")]
 pub struct KafkaOutputConfig {
-    /// name of the kafka connection to publish to — see "connections" in the
-    /// readme.
+    /// The name of the kafka connection to publish to. Declare the connection
+    /// in the connections file.
     #[schemars(extend("x-connection" = "kafka"))]
     pub connection: ConnectionId,
-    /// the topic to publish to
+    /// The topic to publish to.
     pub topic: String,
 }
 
-/// Prints each batch to the server's stdout. Useful while building a pipeline
-/// up; takes no settings.
+/// Prints each batch to the standard output of the server. Use it to test a
+/// pipeline. It has no settings.
 #[derive(Clone, Debug, Deserialize, Serialize, JsonSchema)]
 #[schemars(title = "stdout")]
 pub struct StdoutOutputConfig {}
 
-/// Holds messages back and hands them on when a *trigger* says to.
+/// Keeps messages and sends them on when a trigger fires.
 ///
-/// There are three triggers and they compose: a message count, a length of
-/// time, and a condition on a state bucket. Any of them is enough on its own —
-/// whichever comes first ends the wait, the same rule the input-level `batch`
-/// buffer follows. A buffer with no trigger at all fails to build.
+/// There are three triggers: a message count, a time, and a condition on a
+/// state bucket. You can use them together. The first trigger that fires
+/// releases the messages. A buffer with no trigger fails to build.
 ///
-/// `size` is the one that has always been here and it behaves exactly as it
-/// did: messages are handed on in batches of exactly that many, as they fill.
-/// The other two release **everything currently held** as a single batch,
-/// however much that is — which is the useful reading of "the run is finished,
-/// send what you have".
+/// `size` sends batches of exactly that number of messages. `seconds` and
+/// `until` send all messages that the buffer keeps, as one batch.
 ///
-/// Distinct from the `buffer` option on an input: that one batches what an
-/// input produces, before any transform has seen it. This one sits in the
-/// chain, so it batches what the transforms in front of it produced — after a
-/// `filter` has thinned the stream, or a `recall` has enriched it.
+/// The `buffer` setting on an input is a different thing. It makes batches
+/// before the transforms. The `buffer` transform makes batches at its
+/// position in the chain, for example after a `filter` or a `recall`.
 #[derive(Clone, Debug, Deserialize, Serialize, JsonSchema, PartialEq)]
 #[schemars(title = "buffer")]
 pub struct BufferTransformConfig {
-    /// hand messages on in batches of exactly this many, as they fill. On its
-    /// own this is a buffer that only ever counts, and is what this transform
-    /// has always done.
+    /// Send batches of exactly this number of messages, when each batch is
+    /// full.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub size: Option<usize>,
 
-    /// release everything held this many seconds after the *first* held
-    /// message. The window opens when a message is held rather than when the
-    /// last batch went out, so this is a bound on how long a message waits and
-    /// not a cadence — an idle buffer holds nothing and no clock is running.
+    /// Send all kept messages this number of seconds after the first kept
+    /// message. The time starts when the buffer keeps a message. An empty
+    /// buffer sends nothing.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub seconds: Option<usize>,
 
-    /// release everything held when a state bucket says so. This is the
-    /// trigger a *different* pipeline can pull: buckets are global, so one
-    /// pipeline can mark a run complete and this one hands on what it gathered
-    /// while the run was going.
+    /// Send all kept messages when a condition on a state bucket is true.
+    /// Buckets are global, so a different pipeline can write the value that
+    /// opens the gate.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub until: Option<BufferGateConfig>,
 
-    /// never hold more than this many messages: reaching it releases them all,
-    /// whatever the triggers say, and says so in the log once. Required unless
-    /// `size` is set, because `size` is its own bound — a buffer waiting on a
-    /// condition that never comes true is otherwise a memory leak that grows
-    /// at the rate of the stream.
+    /// The maximum number of messages to keep. At this number, the buffer sends
+    /// all kept messages and writes one warning to the log. Required if `size`
+    /// is not set. Without a limit, a condition that is never true makes the
+    /// buffer use more and more memory.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_messages: Option<usize>,
 }
 
-/// A condition on a state bucket, as a release trigger for the `buffer`
-/// transform.
+/// A condition on a state bucket that releases a `buffer` transform.
 ///
-/// The conditions are tested against the bucket entry rendered as an object —
-/// the names `remember` wrote under are its fields — so `field` is a dotted
-/// path exactly as it is everywhere else, and several conditions mean *all of
-/// them*, exactly as they do on `remember`'s `when`.
+/// The buffer tests the conditions against the bucket entry as an object. The
+/// names that `remember` wrote are its fields. `field` is a dotted path, as in
+/// all other transforms. All conditions must be true.
 ///
-/// Note what this is not: it is a gate on the whole buffer, not a test applied
-/// to each held message. When it opens, everything held is handed on.
+/// The gate applies to the full buffer. It does not test each kept message.
+/// When the gate opens, the buffer sends all kept messages.
 #[derive(Clone, Debug, Deserialize, Serialize, JsonSchema, PartialEq)]
 #[schemars(title = "buffer gate")]
 pub struct BufferGateConfig {
-    /// which bucket to watch. Defaults to the one this pipeline's `state`
-    /// names; a pipeline with no `state` of its own has to name it here.
+    /// The bucket to watch. The default is the bucket in the `state` of this
+    /// pipeline. A pipeline with no `state` must set it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub bucket: Option<String>,
 
-    /// which key in that bucket to read. A literal key, not a field path —
-    /// this is one gate for the whole buffer, so there is no message to take a
-    /// key from. Leave it out for the bucket-wide value, which is what
-    /// `remember` writes when its pipeline's `state` has no `key`.
+    /// The key in the bucket to read. This is a literal key, not a field path.
+    /// If you do not set it, the gate reads the value for the full bucket.
+    /// `remember` writes that value when the `state` of its pipeline has no
+    /// `key`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub key: Option<String>,
 
-    /// what has to be true of that key for the buffer to be released. All of
-    /// them, and at least one — a gate with no conditions would be a buffer
-    /// that releases on every write to the bucket.
+    /// The conditions that must all be true to release the buffer. At least
+    /// one condition is required.
     pub conditions: Vec<Condition>,
 }
 
-/// How a number is compared to the one in the config.
+/// How a `numeric` condition compares a number to the value in the config.
 #[derive(Clone, Copy, Debug, Deserialize, Serialize, JsonSchema, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum NumericFilterOperatorKind {
@@ -1001,7 +933,7 @@ pub enum NumericFilterOperatorKind {
     NotEqualTo,
 }
 
-/// How a string is compared to the one in the config.
+/// How a `string` condition compares a string to the value in the config.
 #[derive(Clone, Copy, Debug, Deserialize, Serialize, JsonSchema, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum StringFilterOperatorKind {
@@ -1053,19 +985,22 @@ impl From<FilterKind> for Condition {
     }
 }
 
-/// Keeps the messages that pass every one of `conditions` and drops the rest
-/// — or, with `invert`, drops the ones that pass and keeps the rest. A batch
-/// with nothing left in it is dropped whole.
+/// Keeps the messages that match all `conditions` and drops the other
+/// messages. With `invert`, it drops the messages that match and keeps the
+/// other messages.
 ///
-/// A message missing a field a condition tests, or carrying it as the wrong
-/// type, does not pass that condition. So `invert` keeps such a message: it
-/// drops only what the conditions positively match.
+/// The transform drops a batch that has no messages left. A message that does
+/// not have the field of a condition does not match that condition. A message
+/// with a field of the wrong type also does not match. Thus `invert` keeps
+/// these messages.
 #[derive(Clone, Debug, Serialize, JsonSchema, PartialEq)]
 #[schemars(title = "filter")]
 pub struct FilterTransformConfig {
-    /// what a message has to pass — all of them, and at least one
+    /// The conditions that a message must match. At least one condition is
+    /// required.
     pub conditions: Vec<Condition>,
-    /// drop the messages that pass instead of keeping them
+    /// Drop the messages that match, and keep the other messages. The default
+    /// is false.
     #[serde(default, skip_serializing_if = "is_false")]
     pub invert: bool,
 }
@@ -1105,57 +1040,55 @@ impl<'de> Deserialize<'de> for FilterTransformConfig {
     }
 }
 
-/// Sends the batch to an http endpoint and carries on with what comes back —
-/// so the service on the other end is the transform. The round trip to a
-/// model: a `buffer` and a `features` in front of it make the request the
-/// seven numbers with the identifiers, and `response: merge` writes the
-/// answer onto that message so the identifiers survive the trip.
+/// Sends the batch to an http endpoint and continues with the reply. Use it
+/// to call a model or another service.
 ///
-/// `body` says whether one request carries the whole batch as a JSON array
-/// or each message goes on its own; `wrap` puts that under a key
-/// (`{"instances": …}`) for an API that wants one. `response` says what the
-/// reply is: `replace` makes it the new batch — the JSON array it holds under
-/// `batch`, the message (or array of messages) it holds under `message` —
-/// and `merge` writes it onto the message under `as` instead. `unwrap` reads
-/// the reply out from under a key first. Anything but a 2xx fails the batch
-/// with the endpoint's own words quoted; a network failure or a 5xx is
-/// retried `retries` times with backoff before it does.
+/// `body` sets the content of one request: the full batch as a JSON array, or
+/// one message. `wrap` puts the body under a key, for example
+/// `{"instances": …}`. `response` sets what the transform does with the reply.
+/// `replace` makes the reply the new batch. `merge` writes the reply onto the
+/// message under `as`. `unwrap` reads the reply from under a key first.
+///
+/// A status other than 2xx fails the batch. The error contains the reply of the
+/// endpoint. A network failure, a 5xx or a 429 is tried again `retries` times
+/// with backoff.
+///
+/// For a model, put a `buffer` and a `features` transform before this
+/// transform. Use `response: merge` to keep the identifiers of the message.
 #[derive(Clone, Debug, Deserialize, Serialize, JsonSchema)]
 #[schemars(title = "http")]
 pub struct HttpTransformConfig {
-    /// endpoint to send to
+    /// The endpoint to send to.
     pub url: String,
-    /// http method. `GET` and `DELETE` are refused — a request with no body
-    /// would send none of the messages
+    /// The http method. `GET` and `DELETE` fail to build, because a request
+    /// with no body cannot send the messages.
     pub verb: HttpVerb,
-    /// what one request carries. Defaults to `batch`
+    /// The content of one request. The default is `batch`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub body: Option<HttpBodyKind>,
-    /// a key to put the body under, for an API that wants `{"key": …}`
+    /// A key to put the body under, for an API that expects `{"key": …}`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub wrap: Option<String>,
-    /// what to do with the reply. Defaults to `replace`
+    /// What to do with the reply. The default is `replace`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub response: Option<HttpResponseKind>,
-    /// a key to read the reply out from under, for an API that answers
-    /// `{"predictions": …}`
+    /// A key to read the reply from, for an API that replies with
+    /// `{"predictions": …}`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub unwrap: Option<String>,
-    /// for `response: merge`: the field the reply is written under
+    /// The field to write the reply under. Applies to `response: merge`.
     #[serde(default, rename = "as", skip_serializing_if = "Option::is_none")]
     pub output: Option<String>,
-    /// what this transform presents to be allowed to send. Absent sends no
-    /// credential
+    /// The credential that the transform sends. If you do not set it, the
+    /// transform sends no credential.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub auth: Option<HttpAuthConfig>,
-    /// how long one request may take before it is given up on, in seconds.
-    /// Defaults to 30
+    /// The maximum time for one request, in s. The default is 30.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub timeout_seconds: Option<u64>,
-    /// how many times a request that failed to reach the endpoint, or was
-    /// answered 5xx or 429, is tried again before the batch fails. Defaults to
-    /// 0. Each retry waits a little longer than the last, and the pipeline
-    /// waits with it
+    /// The number of times to send a request again before the batch fails.
+    /// Applies to a network failure, a 5xx and a 429. The default is 0. Each
+    /// try waits longer than the previous try, and the pipeline waits too.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub retries: Option<u32>,
 }
@@ -1164,23 +1097,19 @@ pub struct HttpTransformConfig {
 #[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, JsonSchema, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum HttpResponseKind {
-    /// The reply is the new batch: a JSON array of messages under `body:
-    /// batch`, a message or an array of them under `body: message`. The
-    /// service decides what carries on.
+    /// The reply becomes the new batch. With `body: batch`, the reply must be a
+    /// JSON array of messages. With `body: message`, the reply is a message or
+    /// an array of messages. The default.
     #[default]
     Replace,
-    /// The reply is written onto the message that caused it, under `as`. Under
-    /// `body: batch` an array reply of the batch's length is written
-    /// element-wise, and any other reply onto every message. Nothing the
-    /// pipeline sent is lost.
+    /// The transform writes the reply onto the message that caused it, under
+    /// `as`. With `body: batch`, an array reply with one entry for each message
+    /// goes to the messages in sequence. Any other reply goes onto each
+    /// message. The messages keep all their fields.
     Merge,
 }
 
-/// The http method an http transform sends with.
-///
-/// A closed set rather than a `String` because it is one: a request is made
-/// with one of these or it is not made at all, and typing the name of a method
-/// into a box is a way of finding that out one round trip later than necessary.
+/// The http method of a request.
 #[derive(Clone, Copy, Debug, Deserialize, Serialize, JsonSchema, PartialEq, Eq)]
 #[serde(rename_all = "UPPERCASE")]
 pub enum HttpVerb {
@@ -1202,7 +1131,7 @@ impl std::fmt::Display for HttpVerb {
         })
     }
 }
-/// How the values of one field are combined into a single answer.
+/// How a reducer combines the values of one field into one result.
 #[derive(Clone, Copy, Debug, Deserialize, Serialize, JsonSchema, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum ReduceFnKind {
@@ -1210,45 +1139,44 @@ pub enum ReduceFnKind {
     Sum,
     /// The arithmetic mean. Numbers only.
     Avg,
-    /// The smallest value. Numbers compare as numbers and strings
-    /// alphabetically, which is what makes `min` over an ISO timestamp the
-    /// earliest one.
+    /// The smallest value. Numbers compare as numbers. Strings compare in
+    /// alphabetical sequence, so `min` of ISO timestamps is the earliest time.
     Min,
-    /// The largest value, comparing as `min` does.
+    /// The largest value. Values compare as for `min`.
     Max,
-    /// How many messages there were. The one function that needs no `field` —
-    /// given one, it counts the messages that carry it instead.
+    /// The number of messages. This function does not need a `field`. With a
+    /// `field`, it counts the messages that have the field.
     Count,
-    /// How many *different* values there were, compared by their JSON form.
+    /// The number of different values. The function compares the values as
+    /// JSON.
     CountDistinct,
-    /// The value from the first message of the group, whatever type it is.
+    /// The value from the first message of the group, of any type.
     First,
     /// The value from the last message of the group.
     Last,
-    /// Every value, as an array, in the order they arrived.
+    /// All values as an array, in the sequence of arrival.
     Collect,
-    /// The middle value, or the mean of the middle two. Numbers only.
+    /// The middle value, or the mean of the two middle values. Numbers only.
     Median,
     /// The population standard deviation. Numbers only.
     Stddev,
-    /// How fast the field is changing, per second, by a least-squares line
-    /// against each message's time. Numbers only, and it needs the reducer's
-    /// `time` setting — a slope with no time is a slope per nothing.
+    /// The rate of change of the field per second, from a least-squares line
+    /// against the time of each message. Numbers only. The reducer must have a
+    /// `time` setting, or it fails to build.
     Slope,
 }
 
-/// What to do about a message that doesn't carry a field being aggregated or
-/// grouped by. A field present but `null` counts as missing — it is the same
-/// fact said two ways.
+/// What to do with a message that does not have a field that is aggregated or
+/// grouped by. A field with the value `null` is missing.
 #[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, JsonSchema, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum MissingFieldPolicy {
-    /// Fail the pipeline. The default, because a sum over "whichever messages
-    /// happened to have the field" is wrong in a way nothing downstream can see.
+    /// Fail the batch. The default. A sum of only some of the messages gives a
+    /// wrong result that is not visible downstream.
     #[default]
     Error,
-    /// Leave that message out of that one aggregation. An aggregation left with
-    /// no values at all reports `null` (or `0`, for the counts).
+    /// Do not use that message in that aggregation. An aggregation with no
+    /// values gives `null`, or `0` for the counts.
     Skip,
 }
 
@@ -1261,182 +1189,176 @@ impl MissingFieldPolicy {
     }
 }
 
-/// One thing to compute over a group, and what to call it in the result.
+/// One value to calculate for a group, and the field name for the result.
 #[derive(Clone, Debug, Deserialize, Serialize, JsonSchema, PartialEq)]
 #[schemars(title = "aggregation")]
 pub struct Aggregation {
-    /// how to combine the values
+    /// How to combine the values.
     pub function: ReduceFnKind,
-    /// the field the emitted message carries this answer under. Two
-    /// aggregations may not share one, and none may collide with a `group_by`
-    /// field.
+    /// The field that contains the result in the sent message. Each
+    /// aggregation must have a different `as`. It must not be the same as a
+    /// `group_by` field.
     #[serde(rename = "as")]
     pub output: String,
-    /// the field to aggregate. Required by every function except `count`, which
-    /// counts messages when it is left out.
+    /// The field to aggregate. Required for all functions except `count`.
+    /// Without a `field`, `count` counts the messages.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[schemars(extend("x-message-field" = true))]
     pub field: Option<String>,
 }
 
-/// Reduces a batch to one message per group, carrying whatever was asked for
-/// about it. Pair it with a buffer, or it will only ever see one message at a
-/// time.
+/// Reduces a batch to one message for each group. Put a buffer before it, or
+/// it gets only one message at a time.
 ///
-/// With no `group_by` the whole batch is one group and one message comes out;
-/// with one, a message comes out per distinct combination of those fields, in
-/// the order the groups were first seen. The emitted message carries the
-/// grouping fields under their own names alongside the aggregations.
+/// Without `group_by`, the full batch is one group and the reducer sends one
+/// message. With `group_by`, it sends one message for each different
+/// combination of those fields. The messages are in the sequence in which the
+/// groups first occur. Each message contains the `group_by` fields and the
+/// results of the aggregations.
 ///
-/// Each aggregation is a `function`, the `field` to apply it to and the `as`
-/// name the answer is written under — `{"function": "avg", "field": "value",
-/// "as": "mean"}`. `count` is the one function that needs no `field`: without
-/// one it counts the messages in the group, with one it counts the messages
-/// that carried it.
+/// Each aggregation has a `function`, the `field` to use and the name `as` for
+/// the result, for example
+/// `{"function": "avg", "field": "value", "as": "mean"}`.
 #[derive(Clone, Debug, Deserialize, Serialize, JsonSchema)]
 #[schemars(title = "reducer")]
 pub struct ReduceTransformConfig {
-    /// what to compute. At least one, and each needs a distinct `as`.
+    /// The values to calculate. At least one aggregation is required. Each one
+    /// must have a different `as`.
     pub aggregations: Vec<Aggregation>,
-    /// the fields whose combination defines a group. Omit it to reduce the
-    /// whole batch at once.
+    /// The fields whose combination defines a group. If you do not set it, the
+    /// full batch is one group.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub group_by: Vec<String>,
-    /// what to do about a message missing one of the fields above
+    /// What to do with a message that does not have one of the fields. The
+    /// default is `error`.
     #[serde(default, skip_serializing_if = "MissingFieldPolicy::is_default")]
     pub on_missing: MissingFieldPolicy,
-    /// the field carrying each message's time — an RFC 3339 string or
-    /// milliseconds since the epoch. Needed by `slope`; a message missing it
-    /// fails the batch. Leave it out and each message's time is when it
-    /// arrived.
+    /// The field that contains the time of each message, as an RFC 3339 string
+    /// or as ms since the epoch. `slope` requires it. A message without this
+    /// field fails the batch. If you do not set it, the time of each message is
+    /// its arrival time.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[schemars(extend("x-message-field" = true))]
     pub time: Option<String>,
 }
 
-/// One test a message either passes or doesn't.
+/// One test on a message.
 ///
-/// What `filter` keeps, what `remember` remembers from, and what opens a
-/// `buffer`'s gate — one vocabulary, spelled as a tagged union so that a
-/// *list* of them can be configured and rendered as a form. Several
-/// conditions are read as "all of these" — there is no `or` and no nesting,
-/// because the moment either exists this is an expression language with a
-/// syntax to design, and everything so far has been reachable without one.
+/// `filter`, `remember` and the gate of a `buffer` use conditions. A list of
+/// conditions means that all of them must match. There is no `or` and no
+/// nesting. Use `invert` on a `filter`, or `none_of`, for a negative test.
 #[derive(Clone, Debug, Deserialize, Serialize, JsonSchema, PartialEq)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum Condition {
-    /// Compares a field to a number. A message whose field is missing or isn't
+    /// Compares a field to a number. A message whose field is missing or is not
     /// a number does not match.
     Numeric {
-        /// the field to test — a dotted path, like anywhere else
+        /// The field to test, as a dotted path.
         #[schemars(extend("x-message-field" = true))]
         field: String,
-        /// how the field is compared
+        /// How to compare the field.
         operator: NumericFilterOperatorKind,
-        /// the number it is compared to
+        /// The number to compare to.
         value: f64,
     },
-    /// Compares a field to a string, the same way.
+    /// Compares a field to a string. A message whose field is missing or is not
+    /// a string does not match.
     String {
-        /// the field to test — a dotted path, like anywhere else
+        /// The field to test, as a dotted path.
         #[schemars(extend("x-message-field" = true))]
         field: String,
-        /// how the field is compared
+        /// How to compare the field.
         operator: StringFilterOperatorKind,
-        /// the string it is compared to
+        /// The string to compare to.
         value: String,
     },
-    /// The field is a string equal to one of `values`. A message whose field
-    /// is missing or isn't a string does not match.
+    /// Matches when the field is a string equal to one of `values`. A message
+    /// whose field is missing or is not a string does not match.
     OneOf {
-        /// the field to test — a dotted path, like anywhere else
+        /// The field to test, as a dotted path.
         #[schemars(extend("x-message-field" = true))]
         field: String,
-        /// the strings that match
+        /// The strings that match.
         values: Vec<String>,
     },
-    /// The field is a string equal to none of `values`. A message whose field
-    /// is missing or isn't a string does not match this either — absence is
-    /// not a value, so it is in no list and outside none.
+    /// Matches when the field is a string equal to none of `values`. A message
+    /// whose field is missing or is not a string also does not match.
     NoneOf {
-        /// the field to test — a dotted path, like anywhere else
+        /// The field to test, as a dotted path.
         #[schemars(extend("x-message-field" = true))]
         field: String,
-        /// the strings that do not match
+        /// The strings that do not match.
         values: Vec<String>,
     },
 }
 
-/// One thing to put in the pipeline's state bucket, and what to call it there.
+/// One value to write into the state bucket of the pipeline, and its name
+/// there.
 #[derive(Clone, Debug, Deserialize, Serialize, JsonSchema, PartialEq)]
 pub struct Remembered {
-    /// the field to take the value from
+    /// The field to take the value from.
     pub field: String,
-    /// the name to remember it under, which is the name `recall` asks for it
-    /// by. Two entries may not share one.
+    /// The name for the value in the bucket. `recall` reads the value by this
+    /// name. Each entry must have a different name.
     #[serde(rename = "as")]
     pub output: String,
 }
 
-/// Writes values from matching messages into the pipeline's state bucket,
-/// keyed by whatever the pipeline's `state.key` names.
+/// Writes values from the messages that match into the state bucket of the
+/// pipeline. The key is the field that `state.key` of the pipeline names.
 ///
-/// The message itself is **passed on unchanged** — this is a tap on the stream,
-/// not a filter. A transform called `remember` that quietly swallowed what it
-/// remembered would be a surprise, and the message is usually still wanted.
+/// The transform sends each message on without changes. It does not filter.
 ///
-/// Needs a `state` on the pipeline; it fails to build without one.
+/// The pipeline must have a `state`, or the transform fails to build.
 #[derive(Clone, Debug, Deserialize, Serialize, JsonSchema, PartialEq)]
 #[schemars(title = "remember")]
 pub struct RememberTransformConfig {
-    /// which messages to remember from — all of these have to match. Leave it
-    /// out to remember from every message, which is right for a stream carrying
-    /// one kind of thing and wrong for one carrying several.
+    /// The conditions that a message must match to be remembered. All of them
+    /// must match. If you do not set it, the transform remembers values from
+    /// each message. Set it when the stream contains more than one type of
+    /// message.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub when: Vec<Condition>,
-    /// what to take from a matching message. At least one, each with a distinct
-    /// `as`.
+    /// The values to take from a message that matches. At least one entry is
+    /// required. Each entry must have a different `as`.
     pub remember: Vec<Remembered>,
 }
 
-/// Writes values from the pipeline's state bucket onto every message, under the
-/// names they were remembered by.
+/// Writes values from the state bucket of the pipeline onto each message,
+/// with the names from `remember`.
 ///
-/// This is how a slow-moving fact — the unit being produced, the recipe in
-/// force — reaches the fast stream that has to be attributed to it. The values
-/// land as top-level fields, so a `reducer` downstream can group by them
-/// without knowing where they came from.
+/// Use it to add a slow fact to a fast stream, for example the current recipe
+/// of a machine. The values become top-level fields, so a `reducer` after it
+/// can group by them.
 ///
-/// Needs a `state` on the pipeline; it fails to build without one.
+/// The pipeline must have a `state`, or the transform fails to build.
 #[derive(Clone, Debug, Deserialize, Serialize, JsonSchema, PartialEq)]
 #[schemars(title = "recall")]
 pub struct RecallTransformConfig {
-    /// the names to read out of the bucket, as `remember` wrote them. Each one
-    /// is written onto the message under the same name.
+    /// The names to read from the bucket, as `remember` wrote them. The
+    /// transform writes each value onto the message with the same name.
     pub recall: Vec<String>,
-    /// what to do about a message whose key has nothing remembered under it yet
+    /// What to do with a message when the bucket has no value for its key.
+    /// The default is `skip`.
     #[serde(default, skip_serializing_if = "RecallMissingPolicy::is_default")]
     pub on_missing: RecallMissingPolicy,
 }
 
-/// What `recall` does when the bucket has nothing for a message's key.
+/// What `recall` does when the bucket has no value for the key of a message.
 ///
-/// It has its own set rather than sharing the reducer's [`MissingFieldPolicy`]
-/// because the right default is the opposite one: every stateful pipeline has a
-/// warm-up in which nothing has been remembered yet, so `error` would fail
-/// every pipeline on startup, and it is `null` that has no counterpart there.
+/// The default is `skip`, because the bucket is empty when the pipeline
+/// starts. With `error`, the batches fail until the bucket has values.
 #[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, JsonSchema, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum RecallMissingPolicy {
-    /// Drop the message. The default: a reading that can't be attributed to the
-    /// thing it is about is usually noise, and passing it on unattributed makes
-    /// a reducer downstream lump every such message into one bogus group.
+    /// Drop the message. The default. Without the recalled values, a reducer
+    /// after this transform puts all these messages into one wrong group.
     #[default]
     Skip,
-    /// Pass the message on with the missing names as `null`.
+    /// Send the message on with the missing names as `null`.
     Null,
-    /// Fail the pipeline. Only right when the bucket is filled by something
-    /// that has certainly run first.
+    /// Fail the batch. Use it only when another component always fills the
+    /// bucket first.
     Error,
 }
 
@@ -1449,109 +1371,103 @@ impl RecallMissingPolicy {
     }
 }
 
-/// Cuts one batch into several smaller ones — the opposite of `buffer`.
+/// Divides one batch into smaller batches.
 ///
-/// Note the current limitation: messages left over after the last whole chunk
-/// are dropped, so 4 messages with `out_size: 3` emit one batch, not two.
+/// The last batch contains the messages that remain and can be smaller. For
+/// example, 4 messages with `out_size: 3` give a batch of 3 and a batch of 1.
 #[derive(Clone, Debug, Deserialize, Serialize, JsonSchema)]
 #[schemars(title = "splitter")]
 pub struct SplitterTransformConfig {
-    /// how many messages go in each emitted batch
+    /// The number of messages in each sent batch.
     pub out_size: usize,
 }
 
-/// Reads a postgres table, view or query on a timer and hands each row on as
+/// Reads a postgres table, view or query at an interval and sends each row as
 /// a message.
 ///
-/// Every other input is pushed to; this one asks. It runs a query every
-/// `interval_secs`, either the whole relation (`snapshot`) or only the rows
-/// past where the last read got to (`incremental`, following a column that
-/// grows), and each row becomes one JSON object with the column names as its
-/// fields — rendered by the server itself with `row_to_json`, so a timestamp
-/// is ISO 8601, a `numeric` keeps its digits and a `jsonb` column arrives as
-/// the nested value it holds:
+/// The input runs a query each `interval_secs`. In `snapshot` mode, it reads
+/// the full relation. In `incremental` mode, it reads only the rows after the
+/// last read, by a column that increases. Each row becomes one JSON object
+/// with the column names as fields. Postgres makes the object with
+/// `row_to_json`. A timestamp is ISO 8601, a `numeric` keeps its digits, and
+/// a `jsonb` column is a nested value:
 ///
 /// ```json
 /// {"id": 42, "sensor": "press-3", "value": 21.5, "recorded_at": "2026-01-01T12:00:00.123456+00:00"}
 /// ```
 ///
-/// An incremental read is *at least once* across a restart — the watermark is
-/// held in memory and the first read starts over from `start_from` — and it
-/// never sees a delete. Index the field it follows, or every read scans the
-/// table. See "database inputs" in the guide for the whole argument.
+/// An incremental read is at-least-once across a restart. The input keeps the
+/// watermark in memory, and after a restart it starts again from `start_from`.
+/// An incremental read does not see a deleted row. Put an index on the column
+/// that it follows, or each read scans the full table.
 #[derive(Clone, Debug, Deserialize, Serialize, JsonSchema)]
 #[schemars(title = "postgres")]
 pub struct PostgresInputConfig {
-    /// name of the postgres connection to read through — see "connections" in
-    /// the readme. The server is declared once, in the connections file, and a
-    /// pipeline names what it wants from it here.
+    /// The name of the postgres connection to read through. Declare the
+    /// connection in the connections file.
     #[schemars(extend("x-connection" = "postgres"))]
     pub connection: ConnectionId,
     #[serde(flatten)]
     pub poll: SqlPollConfig,
 }
 
-/// Reads a `ClickHouse` table, view or query on a timer and hands each row on
-/// as a message — the same input as `postgres`, over `ClickHouse`'s HTTP
-/// interface.
+/// Reads a `ClickHouse` table, view or query at an interval and sends each row
+/// as a message. It uses the HTTP interface of `ClickHouse`.
 ///
-/// Rows come back as `JSONEachRow`, rendered by the server: a `DateTime` is
-/// ISO 8601, an `Int64` is a number rather than the quoted string the server
-/// would otherwise send, a `Decimal` keeps its digits. Everything the
-/// `postgres` input says about snapshots, watermarks and what an incremental
-/// read cannot see applies here unchanged — the polling is shared, only the
-/// SQL differs.
+/// `ClickHouse` sends the rows as `JSONEachRow`. A `DateTime` is ISO 8601, an
+/// `Int64` is a number, and a `Decimal` keeps its digits. The modes, the
+/// watermark and the limits of an incremental read are the same as on the
+/// `postgres` input.
 #[derive(Clone, Debug, Deserialize, Serialize, JsonSchema)]
 #[schemars(title = "clickhouse")]
 pub struct ClickhouseInputConfig {
-    /// name of the clickhouse connection to read through — see "connections"
-    /// in the readme.
+    /// The name of the clickhouse connection to read through. Declare the
+    /// connection in the connections file.
     #[schemars(extend("x-connection" = "clickhouse"))]
     pub connection: ConnectionId,
     #[serde(flatten)]
     pub poll: SqlPollConfig,
 }
 
-/// Fetches a url on a timer and hands on what it returns — the `snapshot`
-/// mode of the database inputs, for an api.
+/// Gets a url at an interval and sends the full reply each time.
 ///
-/// Every read is a `GET`, and every read hands on the whole answer: an array
-/// is one message per element, anything else is one message. `items` points
-/// into a reply that wraps its records (`{"data": {"machines": [...]}}`). This
-/// is the reference-data case — a list of machines, recipes or thresholds that
-/// changes rarely and that a downstream system needs all of — so there is no
-/// watermark, no paging and no notion of what changed since the last read: a
-/// sink that upserts by key makes the repetition harmless.
+/// Each read is a `GET`. A reply that is an array gives one message for each
+/// element. Any other reply gives one message. Use `items` for a reply that
+/// has the records inside it, for example `{"data": {"machines": [...]}}`.
 ///
-/// A read that fails (unreachable, a status other than 2xx, a body that is not
-/// JSON, an `items` that points at nothing) is reported once and retried on the
-/// usual backoff, and the interval starts again from the next read that works.
+/// Use this input for reference data, for example a list of machines or
+/// recipes that changes rarely. The input has no watermark and no pages. Each
+/// read sends all records again. Send them to an output that writes the latest
+/// value for each key.
+///
+/// A read fails when the url cannot be reached, when the status is not 2xx,
+/// when the body is not JSON, or when `items` finds nothing. The input reports
+/// the failure one time and tries again with backoff. The interval starts
+/// again after the next successful read.
 #[derive(Clone, Debug, Deserialize, Serialize, JsonSchema)]
 #[schemars(title = "http_poll")]
 pub struct HttpPollConfig {
-    /// the url to fetch, e.g. `https://erp.example.com/api/machines`
+    /// The url to get, for example `https://erp.example.com/api/machines`.
     pub url: String,
-    /// how long to wait between reads, in seconds, counted from the end of one
-    /// read to the start of the next. The first read happens as soon as the
-    /// pipeline starts.
+    /// The time between two reads, in s. The time starts at the end of one
+    /// read. The first read occurs when the pipeline starts.
     pub interval_secs: u64,
-    /// where the records are in the reply, as a JSON pointer: `/data/machines`
-    /// reads the array at `data.machines`. Absent reads the reply itself. What
-    /// it points at is split like a whole reply would be — an array into its
-    /// elements, anything else as one message.
+    /// The position of the records in the reply, as a JSON pointer. For
+    /// example, `/data/machines` reads the array at `data.machines`. If you do
+    /// not set it, the input uses the full reply. An array gives one message
+    /// for each element. Any other value gives one message.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub items: Option<String>,
-    /// what this input presents to the api. Absent — the default — sends no
-    /// credential, which is what an open endpoint wants.
+    /// The credential that the input sends. If you do not set it, the input
+    /// sends no credential.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub auth: Option<HttpAuthConfig>,
-    /// how long one request may take before it is given up on, in seconds.
-    /// Defaults to 30.
+    /// The maximum time for one request, in s. The default is 30.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub timeout_seconds: Option<u64>,
-    /// most messages to put in one batch. Defaults to 1, as on every input.
-    /// Messages already read are grouped up to this many; the input never
-    /// waits for a batch to fill.
+    /// The maximum number of messages in one batch. The default is 1. The input
+    /// puts only messages that are already read into a batch. It does not wait
+    /// for a batch to fill.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_batch: Option<usize>,
 }
@@ -1572,85 +1488,79 @@ pub enum InputKind {
     Clickhouse(ClickhouseInputConfig),
     HttpPoll(HttpPollConfig),
 }
-/// How an input's messages are gathered into batches before the transforms see
-/// them.
+/// How an input collects its messages into batches before the transforms.
 ///
-/// All three shapes are the same two limits with different halves left off — a
-/// count, a time, or both, whichever is reached first. **A buffer never emits an
-/// empty batch**: the clock starts when the first message of a batch arrives,
-/// not when the window was asked for, so an input that goes quiet emits nothing
-/// rather than a tick of nothing.
+/// The three types use two limits: a count, a time, or both. With both, the
+/// first limit that is reached closes the batch. A buffer never sends an empty
+/// batch. The time starts when the first message of a batch arrives, so a
+/// quiet input sends nothing.
 ///
-/// `size` is a floor rather than a ceiling, the same rule a file output's
-/// `max_rows` follows: an arriving batch is never split, so an input already
-/// producing batches of its own (`max_batch` on kafka and nats) can overshoot.
+/// `size` is a minimum, not a maximum. The buffer does not divide a batch
+/// that arrives. Thus an input with `max_batch` can give a larger batch.
 #[derive(Clone, Debug, Deserialize, Serialize, JsonSchema)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum BufferConfig {
-    /// Wait for a number of messages, however long that takes.
+    /// Wait for a number of messages. There is no time limit.
     Static {
-        /// how many messages to gather before the batch is handed on
+        /// The number of messages in a batch.
         size: usize,
     },
-    /// Wait for a length of time, however few messages that gathers — but at
-    /// least one. The window opens when the first message arrives.
+    /// Wait for a time. The batch contains at least one message. The time
+    /// starts when the first message arrives.
     Tumbling {
-        /// how long to gather messages for, measured from the first one
+        /// The time to collect messages, in s, from the first message.
         window_seconds: usize,
     },
-    /// Both limits: whichever is reached first ends the batch. The usual
-    /// choice for a stream whose rate varies, since it bounds the batch size
-    /// when the input is busy and the latency when it is quiet.
+    /// Use both limits. The first limit that is reached closes the batch. Use
+    /// this type when the rate of the input changes. `size` sets the largest
+    /// batch when the input is busy. `window_seconds` sets the longest wait
+    /// when the input is quiet.
     Batch {
-        /// how many messages end the batch immediately
+        /// The number of messages that closes the batch immediately.
         size: usize,
-        /// how long to wait for them, measured from the first message in the
-        /// batch
+        /// The maximum time to wait, in s, from the first message in the batch.
         window_seconds: usize,
     },
 }
 
-/// Whether — and how — an input attaches metadata about where a message came
-/// from.
+/// How an input adds metadata about the source of each message.
 ///
-/// The metadata itself is documented per input under "metadata" on this page:
-/// the subject a nats message arrived on, the topic, partition and offset of a
-/// kafka record, and so on, plus the pipeline and input kind that read it. It
-/// is attached **in band**, as ordinary fields on the message, so every
-/// transform can filter, group and aggregate on it exactly as it does on the
-/// payload's own fields — `"group_by": ["_meta.subject"]` needs nothing new.
+/// The "metadata" section of each input lists its metadata. Examples are the
+/// subject of a nats message and the topic, partition and offset of a kafka
+/// record. The metadata also contains the pipeline and the input type.
 ///
-/// Leaving this out is the default and means what it always meant: the message
-/// is passed on exactly as it arrived. Attaching metadata changes the shape of
-/// every message from this input, which is not something to do to a running
-/// config without being asked.
+/// The input adds the metadata as ordinary fields on the message. Thus each
+/// transform can use it as it uses the fields of the payload, for example
+/// `"group_by": ["_meta.subject"]`.
+///
+/// If you do not set an envelope, the input sends each message without
+/// changes. An envelope changes the shape of each message from the input.
+/// Update the field paths downstream when you add one.
 #[derive(Clone, Debug, Deserialize, Serialize, JsonSchema, PartialEq, Eq)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum EnvelopeConfig {
-    /// Add the metadata as one more field on the message. The payload's own
-    /// fields stay exactly where they were, so nothing downstream has to
-    /// change.
+    /// Add the metadata as one more field on the message. The fields of the
+    /// payload do not move.
     ///
-    /// Only works on a payload that is a JSON *object*: a message that is a
-    /// bare number or string has nowhere to put the field, and is skipped with
-    /// a warning rather than taking the pipeline down. Use `wrap` for those.
+    /// This type works only on a payload that is a JSON object. The input
+    /// skips a message that is a number or a string and writes a warning to
+    /// the log. Use `wrap` for these payloads.
     Merge {
-        /// the field the metadata object is written to. Defaults to `_meta`.
+        /// The field for the metadata object. The default is `_meta`.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         meta: Option<String>,
     },
-    /// Put the whole payload under a field of its own, beside the metadata —
-    /// `{"value": <what arrived>, "_meta": {…}}`.
+    /// Put the full payload under a field, next to the metadata:
+    /// `{"value": …, "_meta": {…}}`.
     ///
-    /// Works whatever the payload is, which is what a source of bare readings
-    /// (a `1`, a `"recipe-a"`) needs. The cost is that every field reference
-    /// downstream now goes through the payload field: `value.temperature`
-    /// rather than `temperature`.
+    /// This type works with all payloads, for example a `1` or a `"recipe-a"`.
+    /// Each field path downstream must then start with the payload field, for
+    /// example `value.temperature`.
     Wrap {
-        /// the field the original payload is written to. Defaults to `value`.
+        /// The field for the original payload. The default is `value`.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         payload: Option<String>,
-        /// the field the metadata object is written to. Defaults to `_meta`.
+        /// The field for the metadata object. The default is `_meta`.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         meta: Option<String>,
     },
@@ -1695,48 +1605,43 @@ pub struct InputConfig {
     #[serde(flatten)]
     pub kind: InputKind,
 
-    /// batch messages from this input before the transforms see them — by
-    /// count (`static`), by time (`tumbling`) or by whichever comes first
-    /// (`batch`). Never emits an empty batch. Available on every input kind.
-    /// Not to be confused with the `buffer` transform.
+    /// Collect messages from this input into batches before the transforms.
+    /// Use a count (`static`), a time (`tumbling`) or the first of the two
+    /// (`batch`). The buffer never sends an empty batch. Available on all
+    /// input types. This is not the `buffer` transform.
     // omitted rather than emitted as `null` when absent, so a config that comes
     // back out of `GET /api/pipelines` is byte-identical to the one that went in
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub buffer: Option<BufferConfig>,
 
-    /// attach metadata about where each message came from — the subject, topic,
-    /// partition and so on listed under "metadata" below. Available on every
-    /// input kind. Omit it and messages are passed on exactly as they arrive.
+    /// Add metadata about the source of each message, for example the subject,
+    /// the topic or the partition. The "metadata" section lists the fields.
+    /// Available on all input types. If you do not set it, the input sends each
+    /// message without changes.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub envelope: Option<EnvelopeConfig>,
 
-    /// when this input tells its broker a message is done with. Available on
-    /// every input kind in the schema, but only honoured by ones with a
-    /// broker-side notion of "received" vs "delivered" of their own (`kafka`,
-    /// for now) — an input with nothing to acknowledge refuses to build rather
-    /// than silently treating this as `on_receipt`. Defaults to `on_receipt`,
-    /// which is what every input has always done. See "acknowledgement modes"
-    /// in the guide.
+    /// When the input acknowledges a message to its broker. The default is
+    /// `on_receipt`. Only the `kafka` and `mqtt` inputs support `on_delivery`.
+    /// The `mqtt` input requires a `qos` of `at_least_once` or higher for it.
+    /// On all other inputs, `on_delivery` fails to build.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ack: Option<AckMode>,
 }
 
-/// When an input acknowledges a message to its broker — see "acknowledgement
-/// modes" in the guide for the reasoning and, importantly, its current scope.
+/// When an input acknowledges a message to its broker.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize, Serialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum AckMode {
-    /// Acknowledge as soon as the message arrives, before any transform or
-    /// output has touched it. The default, and the behaviour every input has
-    /// always had — a crash between receipt and output can lose the message.
+    /// Acknowledge the message when it arrives, before the transforms and the
+    /// outputs. The default. A crash before the output writes the message can
+    /// lose it.
     OnReceipt,
-    /// Acknowledge once the message has left *this* pipeline: every output
-    /// this pipeline owns has returned, successfully or not, and every
-    /// downstream pipeline fed from here has accepted it into its inbox. A
-    /// failing output does not hold up the acknowledgement — see the
-    /// architecture notes on why that is the current line, not a permanent
-    /// one. Not yet propagated any further than this pipeline: a downstream
-    /// pipeline's own outputs are not waited on.
+    /// Acknowledge the message when it leaves this pipeline. Each output of
+    /// this pipeline must return, with or without success. Each downstream
+    /// pipeline must accept the message into its queue. A failed output does
+    /// not stop the acknowledgement. kayak does not wait for the outputs of the
+    /// downstream pipelines.
     OnDelivery,
 }
 /////// TRANSFORM
@@ -1791,25 +1696,27 @@ pub struct OutputConfig {
     pub kind: OutputKind,
 }
 
-/// One pipeline: every input is merged into one stream, that stream runs
-/// through the transform chain in order, and each resulting batch goes to every
+/// One pipeline. kayak merges all inputs into one stream. The stream goes
+/// through the transforms in sequence. Each batch that results goes to each
 /// output.
 #[derive(Clone, Debug, Deserialize, Serialize, JsonSchema)]
 pub struct Config {
     pub id: Option<String>,
-    /// at least one. Batches arrive interleaved in the order the inputs produce
-    /// them; there is no ordering between two different inputs.
+    /// The inputs of the pipeline. At least one input is required. Batches
+    /// arrive in the sequence in which the inputs make them. There is no
+    /// sequence between two different inputs.
     pub inputs: Vec<InputConfig>,
-    /// may be omitted — a pipeline that only moves messages needs no transform.
+    /// The transforms, in sequence. Optional. A pipeline that only moves
+    /// messages needs no transform.
     #[serde(default)]
     pub transforms: Vec<TransformConfig>,
-    /// may be omitted — a pipeline that only feeds downstream pipelines needs no
-    /// output of its own.
+    /// The outputs. Optional. A pipeline that only sends to downstream
+    /// pipelines needs no output.
     #[serde(default)]
     pub outputs: Vec<OutputConfig>,
-    /// the state bucket this pipeline remembers things in, and what its
-    /// messages are keyed by. Only needed by a pipeline with a `remember` or
-    /// `recall` transform; those fail to build without it.
+    /// The state bucket of this pipeline, and the key of its messages. Required
+    /// for `remember`, `recall` and the streaming transforms that keep state,
+    /// for example `rolling`. These transforms fail to build without it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub state: Option<PipelineState>,
 }

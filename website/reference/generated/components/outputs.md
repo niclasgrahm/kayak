@@ -2,7 +2,7 @@
 
 ## `stdout` {#output-stdout}
 
-Prints each batch to the server's stdout. Useful while building a pipeline up; takes no settings.
+Prints each batch to the standard output of the server. Use it to test a pipeline. It has no settings.
 
 This component takes no configuration.
 
@@ -11,234 +11,236 @@ This component takes no configuration.
 
 Writes each batch to files in a directory on the server.
 
-The directory comes from a `file` connection and the `path` below is relative to it; the server's `--data-dir` is what both are confined to, so a server started without that flag cannot write files at all. Names are generated rather than configured — `<open time>-<sequence>.<ext>`, which sorts chronologically and cannot collide across rotations.
+A `file` connection gives the root directory, and `path` is relative to it. The root must be inside the `--data-dir` of the server. Without that flag, a `file` output fails to build. The output names each file `<open time>-<sequence>.<ext>`, so the names sort by time and are unique.
 
-Meant for local development and testing. The object-store output is what this shape is being built towards for anything else.
+Use the `file` output for local development and tests.
 
 | field | type | | description |
 | --- | --- | --- | --- |
-| `connection` | `file` connection | <Badge type="warning" text="required" /> | name of the file connection to write under — see "connections" in the readme. The root directory lives there; the path below is this output's own. |
-| `path` | `string` | <Badge type="warning" text="required" /> | directory to write into, relative to the connection's root, e.g. `orders`. Must stay inside the root: an absolute path or one containing `..` is refused rather than trimmed. |
-| `format` | `ndjson` \| `json_array` | <Badge type="info" text="optional" /> | how the messages are laid out. Defaults to `ndjson`. |
-| `rotate` | `object` | <Badge type="info" text="optional" /> | when to close a file and start the next one. Without this, one file per run. |
+| `connection` | `file` connection | <Badge type="warning" text="required" /> | The name of the file connection to write under. Declare the connection in the connections file. The connection gives the root directory. |
+| `path` | `string` | <Badge type="warning" text="required" /> | The directory to write into, relative to the root of the connection, for example `orders`. The path must stay inside the root. kayak refuses an absolute path and a path that contains `..`. |
+| `format` | `ndjson` \| `json_array` | <Badge type="info" text="optional" /> | The layout of the messages. The default is `ndjson`. |
+| `rotate` | `object` | <Badge type="info" text="optional" /> | When to close a file and start the next file. Without this setting, the output writes one file while the pipeline runs. |
 
 **`rotate`**
 
 | field | type | | description |
 | --- | --- | --- | --- |
-| `interval_secs` | `integer` | <Badge type="info" text="optional" /> | close the file this many seconds after it was opened. Measured from the open, not from the last write, so files line up on a predictable cadence. |
-| `max_rows` | `integer` | <Badge type="info" text="optional" /> | close the file once it holds this many messages |
+| `interval_secs` | `integer` | <Badge type="info" text="optional" /> | Close the file this number of seconds after the output opened it. The time starts when the file opens, not at the last write. |
+| `max_rows` | `integer` | <Badge type="info" text="optional" /> | Close the file when it contains this number of messages. The output does not divide a batch, so a file can contain more messages. |
 
 
 ## `s3` {#output-s3}
 
 Writes each batch to objects under a prefix in an S3-compatible bucket.
 
-The same writer as the `file` output — the same part naming, the same formats, the same rotation policy — pointed at a bucket instead of a directory. What differs is that an object store has no append: a part is buffered in memory and uploaded whole when it rotates, so `rotate` is **required** here and is what decides both how often objects appear and how much a running pipeline holds.
+The `s3` output uses the same file names, formats and rotation as the `file` output. An object store cannot append to an object. Thus the output keeps the current object in memory and uploads it when it rotates. `rotate` is required. It sets how frequently objects appear and how much memory the pipeline uses.
 
 | field | type | | description |
 | --- | --- | --- | --- |
-| `connection` | `s3` connection | <Badge type="warning" text="required" /> | name of the s3 connection to write through — see "connections" in the readme. The bucket and credentials live there; the prefix below is this output's own. |
-| `prefix` | `string` | <Badge type="warning" text="required" /> | key prefix to write under, e.g. `orders` — objects land at `<prefix>/<generated part name>`. Leave it empty to write at the root of the bucket. |
-| `rotate` | `object` | <Badge type="warning" text="required" /> | when to finish an object and start the next one. Required: an object store cannot be appended to, so without a rotation trigger a pipeline would hold its entire run in memory and upload it once, at the end. |
-| `format` | `ndjson` \| `json_array` | <Badge type="info" text="optional" /> | how the messages are laid out. Defaults to `ndjson`. |
+| `connection` | `s3` connection | <Badge type="warning" text="required" /> | The name of the s3 connection to write through. Declare the connection in the connections file. The connection gives the bucket and the credentials. |
+| `prefix` | `string` | <Badge type="warning" text="required" /> | The key prefix to write under, for example `orders`. The output writes each object to `<prefix>/<part name>`. Set an empty prefix to write at the root of the bucket. |
+| `rotate` | `object` | <Badge type="warning" text="required" /> | When to close an object and start the next object. Required. A `rotate` with no trigger fails to build. |
+| `format` | `ndjson` \| `json_array` | <Badge type="info" text="optional" /> | The layout of the messages. The default is `ndjson`. |
 
 **`rotate`**
 
 | field | type | | description |
 | --- | --- | --- | --- |
-| `interval_secs` | `integer` | <Badge type="info" text="optional" /> | close the file this many seconds after it was opened. Measured from the open, not from the last write, so files line up on a predictable cadence. |
-| `max_rows` | `integer` | <Badge type="info" text="optional" /> | close the file once it holds this many messages |
+| `interval_secs` | `integer` | <Badge type="info" text="optional" /> | Close the file this number of seconds after the output opened it. The time starts when the file opens, not at the last write. |
+| `max_rows` | `integer` | <Badge type="info" text="optional" /> | Close the file when it contains this number of messages. The output does not divide a batch, so a file can contain more messages. |
 
 
 ## `kafka` {#output-kafka}
 
-Publishes every message in the batch to a kafka topic, one message per record. Records are sent without a key, so they round-robin across the topic's partitions.
+Publishes each message in the batch to a kafka topic, one record for each message.
+
+The records have no key, so kafka distributes them across the partitions of the topic.
 
 | field | type | | description |
 | --- | --- | --- | --- |
-| `connection` | `kafka` connection | <Badge type="warning" text="required" /> | name of the kafka connection to publish to — see "connections" in the readme. |
-| `topic` | `string` | <Badge type="warning" text="required" /> | the topic to publish to |
+| `connection` | `kafka` connection | <Badge type="warning" text="required" /> | The name of the kafka connection to publish to. Declare the connection in the connections file. |
+| `topic` | `string` | <Badge type="warning" text="required" /> | The topic to publish to. |
 
 
 ## `nats` {#output-nats}
 
-Publishes every message in the batch to a nats subject, one message per publish.
+Publishes each message in the batch to a nats subject, one message for each publish.
 
 | field | type | | description |
 | --- | --- | --- | --- |
-| `connection` | `nats` connection | <Badge type="warning" text="required" /> | name of the nats connection to publish on — see "connections" in the readme. |
-| `subject` | `string` | <Badge type="warning" text="required" /> | the subject to publish to |
+| `connection` | `nats` connection | <Badge type="warning" text="required" /> | The name of the nats connection to publish on. Declare the connection in the connections file. |
+| `subject` | `string` | <Badge type="warning" text="required" /> | The subject to publish to. |
 
 
 ## `postgres` {#output-postgres}
 
-Inserts every message in the batch into a postgres table, one row per message.
+Inserts each message in the batch into a postgres table, one row for each message.
 
-With `columns`, each entry names a column, its type and the field to read — `{"name": "temperature", "type": "float", "field": "reading.temp_c"}`, and `field` defaults to the column's name. Without them the table gets a single `jsonb` column holding the whole message, which is what this output has always done.
+With `columns`, each entry names a column, its type and the field to read, for example `{"name": "temperature", "type": "float", "field": "reading.temp_c"}`. The default `field` is the name of the column. Without `columns`, the table has an `id`, a `received_at` timestamp and a `payload` column of type `jsonb` that contains the full message.
 
-The table is created if it isn't there, from the columns above; set `create_table` to false for a table someone else owns. Creation never *alters* an existing table — a table whose shape has moved on fails the insert with the server's own error rather than being migrated from a config file.
+The output creates the table if it does not exist. Set `create_table` to false for a table that another system owns. The output does not change an existing table. If the table does not agree with the columns, the insert fails with the error from postgres.
 
 | field | type | | description |
 | --- | --- | --- | --- |
-| `connection` | `postgres` connection | <Badge type="warning" text="required" /> | name of the postgres connection to insert through — see "connections" in the readme. The host, database and role live there; the table below is this output's own. |
-| `table` | `string` | <Badge type="warning" text="required" /> | the table to insert into, created if it does not exist. Optionally schema-qualified (`analytics.readings`); letters, digits and underscores only, since it cannot be sent as a query parameter. |
-| `columns` | `list of column` | <Badge type="info" text="optional" /> | which message field goes in which column. Leave it out to store each message whole, as JSON, in a `payload` column. |
-| `create_table` | `boolean` | <Badge type="info" text="optional" /> | create the table on connect if it does not exist. Defaults to true. |
-| `indexes` | `list of index` | <Badge type="info" text="optional" /> | indexes to create with the table. Each names mapped columns, in order. |
-| `on_extra_fields` | `ignore` \| `error` | <Badge type="info" text="optional" /> | what to do about a message carrying fields no column reads |
-| `primary_key` | `list of string` | <Badge type="info" text="optional" /> | the columns forming the created table's primary key. With none, the table gets an `id` of its own and a `received_at` timestamp; naming one here says the data carries its own identity and drops both. |
+| `connection` | `postgres` connection | <Badge type="warning" text="required" /> | The name of the postgres connection to insert through. Declare the connection in the connections file. The connection gives the host, the database and the role. |
+| `table` | `string` | <Badge type="warning" text="required" /> | The table to insert into. The output creates it if it does not exist. You can add a schema (`analytics.readings`). Use only letters, digits and underscores. |
+| `columns` | `list of column` | <Badge type="info" text="optional" /> | The column for each message field. If you do not set it, the output keeps each full message as JSON in a `payload` column. |
+| `create_table` | `boolean` | <Badge type="info" text="optional" /> | Create the table on connect if it does not exist. The default is true. |
+| `indexes` | `list of index` | <Badge type="info" text="optional" /> | The indexes to create with the table. Each index names mapped columns, in sequence. |
+| `on_extra_fields` | `ignore` \| `error` | <Badge type="info" text="optional" /> | What to do with a message that has fields that no column reads. |
+| `primary_key` | `list of string` | <Badge type="info" text="optional" /> | The columns of the primary key of the created table. If you do not set it, the table gets an `id` and a `received_at` timestamp. If you set it, the table does not get these two columns. |
 
 **`columns` — each entry**
 
 | field | type | | description |
 | --- | --- | --- | --- |
-| `name` | `string` | <Badge type="warning" text="required" /> | the column's name in the table. Letters, digits and underscores only, since it cannot be sent as a query parameter. |
-| `type` | `text` \| `integer` \| `bigint` \| `float` \| `decimal` \| `boolean` \| `timestamp` \| `date` \| `uuid` \| `json` | <Badge type="warning" text="required" /> | what the column holds. Values are checked against it rather than coerced into it. |
-| `field` | `string` | <Badge type="info" text="optional" /> | the field to read, as a dotted path. Defaults to the column's name. |
-| `message` | `boolean` | <Badge type="info" text="optional" /> | store the whole message in this column instead of one of its fields. Only for a `json` column, and not together with `field`. |
-| `nullable` | `boolean` | <Badge type="info" text="optional" /> | whether the column accepts `NULL`. Defaults to true; `false` makes the created column `NOT NULL` and makes a missing field an error. |
-| `on_missing` | `null` \| `error` \| `skip_row` | <Badge type="info" text="optional" /> | what to do about a message that doesn't carry the field. Defaults to `null`, or to `error` for a column that is not nullable. |
+| `name` | `string` | <Badge type="warning" text="required" /> | The name of the column in the table. Use only letters, digits and underscores. |
+| `type` | `text` \| `integer` \| `bigint` \| `float` \| `decimal` \| `boolean` \| `timestamp` \| `date` \| `uuid` \| `json` | <Badge type="warning" text="required" /> | The type of the column. The output checks each value against it. |
+| `field` | `string` | <Badge type="info" text="optional" /> | The field to read, as a dotted path. The default is the name of the column. |
+| `message` | `boolean` | <Badge type="info" text="optional" /> | Write the full message to this column. Use it only with a `json` column. Do not use it with `field`. |
+| `nullable` | `boolean` | <Badge type="info" text="optional" /> | Whether the column accepts `NULL`. The default is true. With `false`, the output makes the column `NOT NULL`, and a missing field is an error. |
+| `on_missing` | `null` \| `error` \| `skip_row` | <Badge type="info" text="optional" /> | What to do with a message that does not have the field. The default is `null`, or `error` for a column that is not nullable. |
 
 **`indexes` — each entry**
 
 | field | type | | description |
 | --- | --- | --- | --- |
-| `columns` | `list of string` | <Badge type="warning" text="required" /> | the columns to index, in order. Each must be one of the mapped columns. |
-| `unique` | `boolean` | <Badge type="info" text="optional" /> | whether the index is unique. Defaults to false. |
+| `columns` | `list of string` | <Badge type="warning" text="required" /> | The columns to index, in order. Each column must be a mapped column. |
+| `unique` | `boolean` | <Badge type="info" text="optional" /> | Whether the index is unique. The default is false. |
 
 
 ## `clickhouse` {#output-clickhouse}
 
-Inserts every batch into a ClickHouse table, one insert per batch.
+Inserts each batch into a `ClickHouse` table, one insert for each batch.
 
-`columns` is spelled exactly as the postgres output's is — each entry names a column, its type and the field to read, and `field` defaults to the column's name. Without them the table gets a single column holding each message as JSON text.
+`columns` has the same format as on the `postgres` output. Each entry names a column, its type and the field to read. The default `field` is the name of the column. Without `columns`, the table has a `payload` column that contains each message as JSON text.
 
-Where it differs from postgres is what a created table is *sorted* by. ClickHouse has no auto-increment column and no unique constraint, so there is no surrogate `id` to fall back on: `order_by` names the MergeTree sorting key, and a table that names none is sorted by the `received_at` timestamp it gets for free. A sorting key does not deduplicate — naming one says how the table is laid out and indexed, not that its rows are unique.
+`ClickHouse` has no auto-increment column and no unique constraint. `order_by` names the sorting key of the `MergeTree` table. If you do not set it, the table gets a `received_at` timestamp and is sorted by it. A sorting key does not remove duplicate rows.
 
-The table is created if it isn't there; set `create_table` to false for a table someone else owns. Creation never *alters* an existing table.
+The output creates the table if it does not exist. Set `create_table` to false for a table that another system owns. The output does not change an existing table.
 
 | field | type | | description |
 | --- | --- | --- | --- |
-| `connection` | `clickhouse` connection | <Badge type="warning" text="required" /> | name of the clickhouse connection to insert through — see "connections" in the readme. The url, database and user live there; the table below is this output's own. |
-| `table` | `string` | <Badge type="warning" text="required" /> | the table to insert into, created if it does not exist. Optionally database-qualified (`analytics.readings`), which overrides the connection's database; letters, digits and underscores only, since it cannot be sent as a query parameter. |
-| `columns` | `list of column` | <Badge type="info" text="optional" /> | which message field goes in which column. Leave it out to store each message whole, as JSON text, in a `payload` column. |
-| `create_table` | `boolean` | <Badge type="info" text="optional" /> | create the table on start if it does not exist. Defaults to true. |
-| `on_extra_fields` | `ignore` \| `error` | <Badge type="info" text="optional" /> | what to do about a message carrying fields no column reads |
-| `order_by` | `list of string` | <Badge type="info" text="optional" /> | the columns the created table is sorted by — MergeTree's sorting key, and its index. With none, the table gets a `received_at` timestamp of its own and is sorted by that. Named columns are made `NOT NULL`, since a nullable key is not something ClickHouse sorts by. |
+| `connection` | `clickhouse` connection | <Badge type="warning" text="required" /> | The name of the clickhouse connection to insert through. Declare the connection in the connections file. The connection gives the url, the database and the user. |
+| `table` | `string` | <Badge type="warning" text="required" /> | The table to insert into. The output creates it if it does not exist. You can add a database (`analytics.readings`). This database replaces the database of the connection. Use only letters, digits and underscores. |
+| `columns` | `list of column` | <Badge type="info" text="optional" /> | The column for each message field. If you do not set it, the output keeps each full message as JSON text in a `payload` column. |
+| `create_table` | `boolean` | <Badge type="info" text="optional" /> | Create the table on start if it does not exist. The default is true. |
+| `on_extra_fields` | `ignore` \| `error` | <Badge type="info" text="optional" /> | What to do with a message that has fields that no column reads. |
+| `order_by` | `list of string` | <Badge type="info" text="optional" /> | The columns that sort the created table. This is the sorting key of the `MergeTree` table and its index. If you do not set it, the table gets a `received_at` timestamp and is sorted by it. The output makes these columns `NOT NULL`, because `ClickHouse` cannot sort by a nullable key. |
 
 **`columns` — each entry**
 
 | field | type | | description |
 | --- | --- | --- | --- |
-| `name` | `string` | <Badge type="warning" text="required" /> | the column's name in the table. Letters, digits and underscores only, since it cannot be sent as a query parameter. |
-| `type` | `text` \| `integer` \| `bigint` \| `float` \| `decimal` \| `boolean` \| `timestamp` \| `date` \| `uuid` \| `json` | <Badge type="warning" text="required" /> | what the column holds. Values are checked against it rather than coerced into it. |
-| `field` | `string` | <Badge type="info" text="optional" /> | the field to read, as a dotted path. Defaults to the column's name. |
-| `message` | `boolean` | <Badge type="info" text="optional" /> | store the whole message in this column instead of one of its fields. Only for a `json` column, and not together with `field`. |
-| `nullable` | `boolean` | <Badge type="info" text="optional" /> | whether the column accepts `NULL`. Defaults to true; `false` makes the created column `NOT NULL` and makes a missing field an error. |
-| `on_missing` | `null` \| `error` \| `skip_row` | <Badge type="info" text="optional" /> | what to do about a message that doesn't carry the field. Defaults to `null`, or to `error` for a column that is not nullable. |
+| `name` | `string` | <Badge type="warning" text="required" /> | The name of the column in the table. Use only letters, digits and underscores. |
+| `type` | `text` \| `integer` \| `bigint` \| `float` \| `decimal` \| `boolean` \| `timestamp` \| `date` \| `uuid` \| `json` | <Badge type="warning" text="required" /> | The type of the column. The output checks each value against it. |
+| `field` | `string` | <Badge type="info" text="optional" /> | The field to read, as a dotted path. The default is the name of the column. |
+| `message` | `boolean` | <Badge type="info" text="optional" /> | Write the full message to this column. Use it only with a `json` column. Do not use it with `field`. |
+| `nullable` | `boolean` | <Badge type="info" text="optional" /> | Whether the column accepts `NULL`. The default is true. With `false`, the output makes the column `NOT NULL`, and a missing field is an error. |
+| `on_missing` | `null` \| `error` \| `skip_row` | <Badge type="info" text="optional" /> | What to do with a message that does not have the field. The default is `null`, or `error` for a column that is not nullable. |
 
 
 ## `mqtt` {#output-mqtt}
 
-Publishes every message in the batch to an mqtt topic, one message per publish.
+Publishes each message in the batch to an mqtt topic, one message for each publish.
 
-A stable client id is derived from the pipeline's id and this topic, the same as the mqtt input — not configurable, for the same reason.
+kayak makes the client id from the pipeline id and the topic. You cannot set the client id.
 
 | field | type | | description |
 | --- | --- | --- | --- |
-| `connection` | `mqtt` connection | <Badge type="warning" text="required" /> | name of the mqtt connection to publish on — see "connections" in the readme. |
-| `topic` | `string` | <Badge type="warning" text="required" /> | the topic to publish to |
-| `qos` | `at_most_once` \| `at_least_once` \| `exactly_once` | <Badge type="info" text="optional" /> | the quality of service to publish with. Defaults to `at_most_once`. |
-| `retain` | `boolean` | <Badge type="info" text="optional" /> | ask the broker to keep this as the topic's *retained* message, handed to every future subscriber immediately on subscribe. Defaults to false. |
+| `connection` | `mqtt` connection | <Badge type="warning" text="required" /> | The name of the mqtt connection to publish on. Declare the connection in the connections file. |
+| `topic` | `string` | <Badge type="warning" text="required" /> | The topic to publish to. |
+| `qos` | `at_most_once` \| `at_least_once` \| `exactly_once` | <Badge type="info" text="optional" /> | The quality of service for each publish. The default is `at_most_once`. |
+| `retain` | `boolean` | <Badge type="info" text="optional" /> | Tell the broker to keep the message as the retained message of the topic. The broker sends it to each new subscriber. The default is false. |
 
 
 ## `redis` {#output-redis}
 
-Publishes every message in the batch to a redis channel, one message per publish.
+Publishes each message in the batch to a redis channel, one message for each publish.
 
 | field | type | | description |
 | --- | --- | --- | --- |
-| `connection` | `redis` connection | <Badge type="warning" text="required" /> | name of the redis connection to publish on — see "connections" in the readme. |
-| `channel` | `string` | <Badge type="warning" text="required" /> | the channel to publish to |
+| `connection` | `redis` connection | <Badge type="warning" text="required" /> | The name of the redis connection to publish on. Declare the connection in the connections file. |
+| `channel` | `string` | <Badge type="warning" text="required" /> | The channel to publish to. |
 
 
 ## `http` {#output-http}
 
-Sends the batch to an http endpoint — the pipeline pushes its results at a webhook or an ingest API rather than at a broker.
+Sends the batch to an http endpoint, for example a webhook or an ingest API.
 
-The counterpart of the `http` *input*, and the sending half of what the `http` transform does: the transform replaces the batch with the reply, this one is the end of the chain and the reply's body is discarded. What is not discarded is its **status** — anything but a 2xx fails the batch, which is what makes a webhook that is rejecting the data show up on the card rather than being written off as delivered.
+The output ignores the body of the reply. A status other than 2xx fails the batch. The error contains the reply of the endpoint. Use the `http` transform if the pipeline needs the reply.
 
 | field | type | | description |
 | --- | --- | --- | --- |
-| `url` | `string` | <Badge type="warning" text="required" /> | endpoint to send to, e.g. `https://example.com/hooks/readings` |
-| `auth` | `bearer \| header` | <Badge type="info" text="optional" /> | what this output presents to be allowed to send. Absent — the default — sends no credential at all, which is what an open webhook wants. |
-| `body` | `batch` \| `message` | <Badge type="info" text="optional" /> | what one request carries. Defaults to `batch`, which is one request per batch. |
-| `timeout_seconds` | `integer` | <Badge type="info" text="optional" /> | how long one request may take before it is given up on, in seconds. Defaults to 30. A batch whose request times out is a failed batch, so this is also the longest a slow endpoint can hold the pipeline up. |
-| `verb` | `GET` \| `POST` \| `PUT` \| `PATCH` \| `DELETE` | <Badge type="info" text="optional" /> | http method. Defaults to `POST`. `GET` and `DELETE` are refused at build time — an output exists to send the messages somewhere, and a method with no body has nowhere to put them. |
+| `url` | `string` | <Badge type="warning" text="required" /> | The endpoint to send to, for example `https://example.com/hooks/readings`. |
+| `auth` | `bearer \| header` | <Badge type="info" text="optional" /> | The credential that the output sends. If you do not set it, the output sends no credential. |
+| `body` | `batch` \| `message` | <Badge type="info" text="optional" /> | The content of one request. The default is `batch`, one request for each batch. |
+| `timeout_seconds` | `integer` | <Badge type="info" text="optional" /> | The maximum time for one request, in s. The default is 30. A request that times out fails the batch. Thus a slow endpoint stops the pipeline for this time at most. |
+| `verb` | `GET` \| `POST` \| `PUT` \| `PATCH` \| `DELETE` | <Badge type="info" text="optional" /> | The http method. The default is `POST`. `GET` and `DELETE` fail to build, because a request with no body cannot send the messages. |
 
 **`auth` — `type: "bearer"`**
 
 | field | type | | description |
 | --- | --- | --- | --- |
-| `token` | `string` | <Badge type="warning" text="required" /> | the token. A `${NAME}` reference, so the config file holds the name and the secret store holds the value. |
+| `token` | `string` | <Badge type="warning" text="required" /> | The token. Use a `${NAME}` reference, so that the config file keeps only the name and the secret store keeps the value. |
 
 **`auth` — `type: "header"`**
 
 | field | type | | description |
 | --- | --- | --- | --- |
-| `name` | `string` | <Badge type="warning" text="required" /> | the header's name, matched case-insensitively on the way in. On an `http` input it may not be one of the headers an `envelope` passes through, since that would write the credential into the messages. |
-| `value` | `string` | <Badge type="warning" text="required" /> | the exact value that header must have. A `${NAME}` reference, as above. |
+| `name` | `string` | <Badge type="warning" text="required" /> | The name of the header. The `http` input compares the name without case. On an `http` input, the name must not be a header that an `envelope` copies into the messages. |
+| `value` | `string` | <Badge type="warning" text="required" /> | The exact value of the header. Use a `${NAME}` reference. |
 
 
 ## `indu` {#output-indu}
 
-Writes messages into Indu Cloud as **streams** — series that are not sensors — through `POST /ingest/v1/streams`.
+Writes messages into Indu Cloud as streams through `POST /ingest/v1/streams`. A stream is a series that is not a sensor.
 
-Every message yields one reading per entry in `series`; a reducer emitting `{machine, oee, availability}` with two series entries writes two streams per machine. An unknown stream is created on the Indu side on first sight, when the connection's key may create streams. Anything but a full acceptance fails the batch with Indu's own row errors quoted, so a stream the key may not write to shows up on the card rather than being written off as delivered.
+Each message gives one reading for each entry in `series`. For example, a reducer that sends `{machine, oee, availability}` with two series entries writes two streams for each machine. Indu creates an unknown stream when the key of the connection has permission to create streams. If Indu does not accept all rows, the batch fails. The error contains the row errors from Indu.
 
 | field | type | | description |
 | --- | --- | --- | --- |
-| `connection` | `indu` connection | <Badge type="warning" text="required" /> | name of the indu connection to write through — see "connections". |
-| `series` | `list of object` | <Badge type="warning" text="required" /> | the streams to write, one reading each per message. At least one. |
-| `at` | `string` | <Badge type="info" text="optional" /> | the field holding the reading's time — an RFC 3339 string or epoch milliseconds. Absent, the time the batch is sent is used. An `envelope` puts an input's receive time at `_meta.received_at`. |
-| `timeout_seconds` | `integer` | <Badge type="info" text="optional" /> | how long one request may take before it is given up on, in seconds. Defaults to 30. |
+| `connection` | `indu` connection | <Badge type="warning" text="required" /> | The name of the indu connection to write through. Declare the connection in the connections file. |
+| `series` | `list of object` | <Badge type="warning" text="required" /> | The streams to write, one reading for each message. At least one entry is required. |
+| `at` | `string` | <Badge type="info" text="optional" /> | The field that contains the time of the reading, as an RFC 3339 string or as ms since the epoch. If you do not set it, the output uses the time at which it sends the batch. An `envelope` puts the receive time of an input at `_meta.received_at`. |
+| `timeout_seconds` | `integer` | <Badge type="info" text="optional" /> | The maximum time for one request, in s. The default is 30. |
 
 **`series` — each entry**
 
 | field | type | | description |
 | --- | --- | --- | --- |
-| `stream` | `string` | <Badge type="warning" text="required" /> | the stream's name on the Indu side, e.g. `press-3/oee`. May contain `{field}` placeholders filled from the message — `{machine}/oee` — so one output serves every machine a pipeline reduces over. A message missing a placeholder's field is skipped for this series. |
-| `value` | `string` | <Badge type="warning" text="required" /> | the field holding the value, as a path (`oee`, `stats.mean`). Must be a number; a message where it is missing or not a number is skipped for this series rather than failing the batch. |
-| `unit` | `string` | <Badge type="info" text="optional" /> | the unit Indu records when it creates the stream, e.g. `%`. Ignored once the stream exists. |
+| `stream` | `string` | <Badge type="warning" text="required" /> | The name of the stream in Indu, for example `press-3/oee`. The name can contain `{field}` placeholders that the output fills from the message, for example `{machine}/oee`. Thus one output can write a stream for each machine. The output skips this series for a message that does not have the field of a placeholder. |
+| `value` | `string` | <Badge type="warning" text="required" /> | The field that contains the value, as a path (`oee`, `stats.mean`). The value must be a number. The output skips this series for a message where the value is missing or is not a number. The batch does not fail. |
+| `unit` | `string` | <Badge type="info" text="optional" /> | The unit that Indu records when it creates the stream, for example `%`. Indu ignores it when the stream exists. |
 
 
 ## `tidepool` {#output-tidepool}
 
-Writes every batch into a Tidepool table, one request per batch.
+Writes each batch into a Tidepool table, one request for each batch.
 
-The table has to exist: Tidepool's project declares it, with its column types, and this output checks against that on start — every mapped column has to be one of the table's, of a type it can write, and every column the table requires has to be written. A mismatch fails the start rather than the first batch.
+The table must exist in the Tidepool project. On start, the output checks the columns against the table. Each mapped column must be in the table and have a type that the mapping can write. Each required column of the table must be written. If the check fails, the start fails.
 
-`columns` is spelled as the database outputs spell it. Leave it out to send each message as a row as it is, for messages already shaped like the table: Tidepool checks every value and refuses a batch with any problem in it, so nothing is coerced on either side.
+`columns` has the same format as on the database outputs. If you do not set it, the output sends each message as a row without changes. Tidepool checks each value and refuses a batch that has a problem.
 
-A batch Tidepool refuses fails with its problems quoted by row and column. A busy server (`503`) or one that can't be reached is retried for up to `retry_seconds` under the same idempotency key, so a retry never writes a batch twice.
+A refused batch fails. The error gives the problems by row and column. The output tries again when the server is busy (`503`), when the server cannot be reached and on other `5xx` errors. It tries again for up to `retry_seconds`. Each try uses the same idempotency key, so Tidepool does not write a batch two times.
 
 | field | type | | description |
 | --- | --- | --- | --- |
-| `connection` | `tidepool` connection | <Badge type="warning" text="required" /> | name of the tidepool connection to write through — see "connections" in the readme. |
-| `table` | `string` | <Badge type="warning" text="required" /> | the table to write into, as Tidepool's project names it |
-| `columns` | `list of column` | <Badge type="info" text="optional" /> | which message field goes in which column. Leave it out to send each message as a row as it is. |
-| `on_extra_fields` | `ignore` \| `error` | <Badge type="info" text="optional" /> | what to do about a message carrying fields no column reads |
-| `retry_seconds` | `integer` | <Badge type="info" text="optional" /> | how long one batch keeps being retried while the server is busy or unreachable, in seconds. Defaults to 30. |
-| `timeout_seconds` | `integer` | <Badge type="info" text="optional" /> | how long one request may take, in seconds. Defaults to 30. |
+| `connection` | `tidepool` connection | <Badge type="warning" text="required" /> | The name of the tidepool connection to write through. Declare the connection in the connections file. |
+| `table` | `string` | <Badge type="warning" text="required" /> | The table to write into, with the name from the Tidepool project. |
+| `columns` | `list of column` | <Badge type="info" text="optional" /> | The column for each message field. If you do not set it, the output sends each message as a row without changes. |
+| `on_extra_fields` | `ignore` \| `error` | <Badge type="info" text="optional" /> | What to do with a message that has fields that no column reads. |
+| `retry_seconds` | `integer` | <Badge type="info" text="optional" /> | The maximum time to try one batch again while the server is busy or cannot be reached, in s. The default is 30. |
+| `timeout_seconds` | `integer` | <Badge type="info" text="optional" /> | The maximum time for one request, in s. The default is 30. |
 
 **`columns` — each entry**
 
 | field | type | | description |
 | --- | --- | --- | --- |
-| `name` | `string` | <Badge type="warning" text="required" /> | the column's name in the table. Letters, digits and underscores only, since it cannot be sent as a query parameter. |
-| `type` | `text` \| `integer` \| `bigint` \| `float` \| `decimal` \| `boolean` \| `timestamp` \| `date` \| `uuid` \| `json` | <Badge type="warning" text="required" /> | what the column holds. Values are checked against it rather than coerced into it. |
-| `field` | `string` | <Badge type="info" text="optional" /> | the field to read, as a dotted path. Defaults to the column's name. |
-| `message` | `boolean` | <Badge type="info" text="optional" /> | store the whole message in this column instead of one of its fields. Only for a `json` column, and not together with `field`. |
-| `nullable` | `boolean` | <Badge type="info" text="optional" /> | whether the column accepts `NULL`. Defaults to true; `false` makes the created column `NOT NULL` and makes a missing field an error. |
-| `on_missing` | `null` \| `error` \| `skip_row` | <Badge type="info" text="optional" /> | what to do about a message that doesn't carry the field. Defaults to `null`, or to `error` for a column that is not nullable. |
+| `name` | `string` | <Badge type="warning" text="required" /> | The name of the column in the table. Use only letters, digits and underscores. |
+| `type` | `text` \| `integer` \| `bigint` \| `float` \| `decimal` \| `boolean` \| `timestamp` \| `date` \| `uuid` \| `json` | <Badge type="warning" text="required" /> | The type of the column. The output checks each value against it. |
+| `field` | `string` | <Badge type="info" text="optional" /> | The field to read, as a dotted path. The default is the name of the column. |
+| `message` | `boolean` | <Badge type="info" text="optional" /> | Write the full message to this column. Use it only with a `json` column. Do not use it with `field`. |
+| `nullable` | `boolean` | <Badge type="info" text="optional" /> | Whether the column accepts `NULL`. The default is true. With `false`, the output makes the column `NOT NULL`, and a missing field is an error. |
+| `on_missing` | `null` \| `error` \| `skip_row` | <Badge type="info" text="optional" /> | What to do with a message that does not have the field. The default is `null`, or `error` for a column that is not nullable. |

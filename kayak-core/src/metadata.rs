@@ -16,10 +16,10 @@
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
-/// One metadata field an input attaches, and what it holds.
+/// One metadata field that an input attaches, and its contents.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct MetaFieldDoc {
-    /// The field's name inside the metadata object.
+    /// The name of the field in the metadata object.
     pub name: String,
     pub description: String,
 }
@@ -36,13 +36,13 @@ impl MetaFieldDoc {
 /// The fields every input attaches, whatever its kind.
 fn common() -> Vec<MetaFieldDoc> {
     vec![
-        MetaFieldDoc::new("pipeline", "id of the pipeline that read the message"),
-        MetaFieldDoc::new("input", "kind of input it was read by, e.g. `nats`"),
+        MetaFieldDoc::new("pipeline", "The id of the pipeline that read the message."),
+        MetaFieldDoc::new("input", "The type of the input that read the message, for example `nats`."),
         MetaFieldDoc::new(
             "received_at",
-            "when kayak read it, RFC 3339. This is an arrival time and not an \
-             event time: it says when the message reached this pipeline, not \
-             when whatever it describes happened.",
+            "The time when kayak read the message, as RFC 3339. This is the \
+             arrival time at this pipeline. It is not the time of the event \
+             in the message.",
         ),
     ]
 }
@@ -57,122 +57,117 @@ pub fn for_input(kind: &str) -> Option<Vec<MetaFieldDoc>> {
     let own: Vec<MetaFieldDoc> = match kind {
         "dummy" => Vec::new(),
         "http" => vec![
-            MetaFieldDoc::new("method", "http method the messages were posted with"),
+            MetaFieldDoc::new("method", "The HTTP method of the request."),
             MetaFieldDoc::new(
                 "remote_addr",
-                "address the request came from, when the server can see one",
+                "The address that sent the request, when the server knows it.",
             ),
             MetaFieldDoc::new(
                 "headers",
-                "request headers, **restricted to a fixed list** — \
-                 `content-type`, `user-agent`, `x-request-id`, \
-                 `x-correlation-id` and `traceparent`. Everything else is \
-                 dropped rather than passed on: a header carrying a \
-                 credential (`authorization`, `x-api-key`) written into a \
-                 file or an object store is a leak that outlives the request \
-                 by years, and no allow-list-by-prefix is safe enough to \
-                 offer instead.",
+                "The request headers from a **fixed list**: `content-type`, \
+                 `user-agent`, `x-request-id`, `x-correlation-id` and \
+                 `traceparent`. The input drops all other headers. Thus, a \
+                 credential header such as `authorization` or `x-api-key` \
+                 never goes into the message.",
             ),
         ],
         "kafka" => vec![
             MetaFieldDoc::new(
                 "connection",
-                "name of the connection it was consumed through",
+                "The name of the connection that the input consumed from.",
             ),
-            MetaFieldDoc::new("topic", "topic the record came from"),
-            MetaFieldDoc::new("partition", "partition within that topic"),
+            MetaFieldDoc::new("topic", "The topic of the record."),
+            MetaFieldDoc::new("partition", "The partition of the record in the topic."),
             MetaFieldDoc::new(
                 "offset",
-                "the record's offset in the partition. Together with `topic` \
-                 and `partition` this identifies the record exactly.",
+                "The offset of the record in the partition. With `topic` and \
+                 `partition`, it identifies the record.",
             ),
             MetaFieldDoc::new(
                 "key",
-                "the record's key as a string, or `null` when it was sent \
-                 without one",
+                "The key of the record as a string, or `null` when the record \
+                 has no key.",
             ),
             MetaFieldDoc::new(
                 "timestamp",
-                "the record's own timestamp, RFC 3339, when kafka reports one",
+                "The timestamp of the record, as RFC 3339, when kafka gives one.",
             ),
         ],
         "nats" => vec![
-            MetaFieldDoc::new("connection", "name of the connection it was received on"),
+            MetaFieldDoc::new("connection", "The name of the connection that received the message."),
             MetaFieldDoc::new(
                 "subject",
-                "the subject this message was published to. This is the \
-                 *concrete* subject rather than the pattern subscribed to, \
-                 which is what makes a wildcard subscription usable: \
-                 subscribe to `*.temperature` and the machine's name is here.",
+                "The subject that the message was published to. This is the \
+                 full subject, not the subscription pattern. For example, \
+                 when you subscribe to `*.temperature`, this field holds the \
+                 name of the machine.",
             ),
             MetaFieldDoc::new(
                 "reply",
-                "the reply subject, when the publisher set one, else `null`",
+                "The reply subject, when the publisher set one. Otherwise `null`.",
             ),
-            MetaFieldDoc::new("headers", "nats headers, as an object of arrays"),
+            MetaFieldDoc::new("headers", "The nats headers, as an object of arrays."),
         ],
         "indu" => vec![
-            MetaFieldDoc::new("connection", "name of the connection it was read through"),
+            MetaFieldDoc::new("connection", "The name of the connection that the input read from."),
             MetaFieldDoc::new(
                 "event",
-                "which platform event carried it: `reading` for a sensor, \
-                 `stream_reading` for a stream",
+                "The platform event of the message: `reading` for a sensor, \
+                 `stream_reading` for a stream.",
             ),
         ],
         "mqtt" => vec![
-            MetaFieldDoc::new("connection", "name of the connection it was received on"),
+            MetaFieldDoc::new("connection", "The name of the connection that received the message."),
             MetaFieldDoc::new(
                 "topic",
-                "the concrete topic this message arrived on — useful when the \
-                 input subscribes to a filter containing `+` or `#` wildcards",
+                "The full topic of the message. Use it when the input \
+                 subscribes to a filter with `+` or `#` wildcards.",
             ),
-            MetaFieldDoc::new("qos", "the quality of service it was delivered at"),
+            MetaFieldDoc::new("qos", "The quality of service of the delivery."),
             MetaFieldDoc::new(
                 "retain",
-                "whether the broker sent this as a topic's retained message \
-                 rather than a live publish",
+                "True when the broker sent the retained message of the topic. \
+                 False for a live publish.",
             ),
         ],
         "redis" => vec![
-            MetaFieldDoc::new("connection", "name of the connection it was received on"),
-            MetaFieldDoc::new("channel", "the channel this message was published to"),
+            MetaFieldDoc::new("connection", "The name of the connection that received the message."),
+            MetaFieldDoc::new("channel", "The channel that the message was published to."),
         ],
         "opcua" => vec![MetaFieldDoc::new(
             "connection",
-            "name of the connection the session was opened through. Which \
-             *node* the reading came from is deliberately not here: it is on \
-             the message itself, as `node` and `name`, because a value without \
-             its tag is not a reading and metadata is opt-in.",
+            "The name of the connection of the session. The node of the \
+             reading is not metadata. It is always in the message, as `node` \
+             and `name`.",
         )],
         "http_poll" => vec![
             MetaFieldDoc::new(
                 "url",
-                "the url the message was read from, without any username or \
-                 password it carried",
+                "The url that the input read the message from, with no \
+                 username and no password.",
             ),
             MetaFieldDoc::new(
                 "polled_at",
-                "when the read that returned this message started, RFC 3339. \
-                 Every message of one read carries the same value, which is \
-                 what tells one snapshot's messages apart from the next's.",
+                "The start time of the read that returned the message, as RFC \
+                 3339. All messages of one read have the same value. Use it to \
+                 tell one snapshot from the next.",
             ),
         ],
         "postgres" | "clickhouse" => vec![
-            MetaFieldDoc::new("connection", "name of the connection it was read through"),
+            MetaFieldDoc::new("connection", "The name of the connection that the input read from."),
             MetaFieldDoc::new(
                 "polled_at",
-                "when the read that returned this row started, RFC 3339. Every \
-                 row of one read carries the same value, which is what tells a \
-                 snapshot's rows apart from the previous snapshot's — and it is \
-                 the input's clock, not the server's.",
+                "The start time of the read that returned the row, as RFC \
+                 3339. All rows of one read have the same value. Use it to \
+                 tell one snapshot from the next. The time comes from the \
+                 clock of kayak, not from the database server.",
             ),
         ],
         "pipeline" => vec![MetaFieldDoc::new(
             "upstream",
-            "id of the pipeline this batch came from. Note that metadata \
-             already attached upstream arrives with the message and is not \
-             replaced — being in band, it flows through the graph like any \
-             other field.",
+            "The id of the pipeline that sent the batch. Metadata from an \
+             upstream input stays in the message. This input does not \
+             replace it.",
         )],
         _ => return None,
     };

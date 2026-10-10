@@ -1,79 +1,75 @@
 # how the reference is generated
 
-Nothing in this section is written by hand, and that is the point.
+Nobody writes this section by hand. kayak generates it from the source code.
 
-kayak's config types derive `JsonSchema`, and `schemars` carries their doc
-comments through as descriptions — so **the doc comments on the config structs
+The config types of kayak derive `JsonSchema`. `schemars` carries their doc
+comments through as descriptions. Thus **the doc comments on the config structs
 are the documentation**. `kayak_core::docs` reflects over those schemas and
-produces a description of every component: kind, family, fields, types, which
-are required, what the closed sets accept, and what a nested field's own shape
-is. Three things read it, and none of them restate it:
+describes every component: its kind, family, fields, types, required fields,
+the values of each closed set, and the shape of each nested field. Three
+consumers read that description:
 
-- the **`/docs` page** on a running server, and the "add pipeline" form that
-  generates its controls from the same field types;
-- **`GET /api/docs`**, for anything that isn't a browser;
-- **this site** — `just docs` writes markdown partials under
-  `website/reference/generated/`, and the pages here pull them in.
+- the **`/docs` page** of a server, and the "add pipeline" form of the web UI;
+- **`GET /api/docs`**, for clients that are not browsers;
+- **this site**: `just docs` writes markdown partials under
+  `website/reference/generated/`, and the pages here include them.
 
-The HTTP tables come the same way from one level up. `kayak_core::api_docs::endpoints()`
-is not a *description* of the routes — the router is a fold over it, so an
-endpoint that isn't in the table is never registered and an entry with no
-handler doesn't compile. This site, `/api/openapi.json` and the `/docs` tab are
-three renderings of that one table.
+The HTTP tables come from `kayak_core::api_docs::endpoints()`. The router is a
+fold over that table. Thus an endpoint that is not in the table is never
+registered, and an entry with no handler does not compile. This site,
+`/api/openapi.json` and the `/docs` tab are three renderings of the one table.
 
-::: tip what this means for you
-If a table here is wrong, the fix is in the Rust source — a doc comment in
-`kayak-core/src/config.rs` or an entry in `kayak-core/src/api_docs.rs` — and
-every consumer picks it up at once. A component with no doc comment fails a
-unit test, and a site that has drifted from the source fails another
-(`kayak-docsgen`'s `tests/site.rs`), so neither can be left behind.
+::: tip if a table is wrong
+Fix the Rust source: a doc comment in `kayak-core/src/config.rs` or an entry in
+`kayak-core/src/api_docs.rs`. Every consumer gets the fix at once. A component
+with no doc comment fails a unit test. A site that does not match the source
+fails another test (`tests/site.rs` in `kayak-docsgen`).
 :::
 
-Adding to any of it is documented from the other side: [how the component
-reference works](/contributing/how-the-component-reference-works) and [how the
-api reference works](/contributing/how-the-api-reference-works).
+To add to the reference, see [how the component reference
+works](/contributing/how-the-component-reference-works) and [how the api
+reference works](/contributing/how-the-api-reference-works).
 
 ## the sections
 
 | | |
 | --- | --- |
-| [inputs](/reference/inputs) | where messages come from, and the `buffer`, `envelope` and `ack` every input shares |
+| [inputs](/reference/inputs) | where messages come from, and the `buffer`, `envelope` and `ack` fields of every input |
 | [transforms](/reference/transforms) | what happens between the input and the output |
 | [outputs](/reference/outputs) | where messages go |
-| [connections](/reference/connections) | the systems components name rather than configure inline |
+| [connections](/reference/connections) | the systems that components refer to by name |
 | [state buckets](/reference/state) | what pipelines remember between batches |
-| [http api](/reference/api) | every endpoint, its access, and everything it can fail with |
-| [schemas](/reference/schemas) | the request and response bodies those endpoints name |
+| [http api](/reference/api) | every endpoint, its access, and each failure it can return |
+| [schemas](/reference/schemas) | the request and response bodies of those endpoints |
 
 ## how to read a component table
 
-Every component is selected by a `type` tag in the config file, and the fields
-in its table sit beside that tag:
+A `type` tag in the config file selects each component. The fields in its table
+go beside that tag:
 
 ```json
 { "type": "nats", "connection": "local-nats", "subject": "sensors.>" }
 ```
 
-A field whose type is a closed set lists what it accepts. A field with a shape
-of its own — an input's `buffer`, a file output's `rotate` — gets its own table
-underneath the main one, one per variant where it is a choice between shapes. A
-component whose *whole* shape is a choice, like `filter`, has a table per
-variant instead of one of its own.
+A field with a closed set of values lists the values. A field with a shape of
+its own, such as `buffer` on an input or `rotate` on a file output, has its own
+table below the main table. When the field is a choice between shapes, it has
+one table per shape. A component whose complete shape is a choice has one table
+per variant.
 
-Inputs additionally carry a **metadata** table: the fields that input attaches
-to each message when its [`envelope`](/pipelines/message-metadata) is set. That
-half can't be reflected — a schema cannot know what a nats subscription knows —
-so it is declared in `kayak-core/src/metadata.rs`, and an input added without
-declaring it fails the test suite.
+Inputs also have a **metadata** table. It lists the fields that the input adds
+to each message when you set its [`envelope`](/pipelines/message-metadata). A
+schema cannot know what a nats subscription knows, so kayak cannot reflect this
+part. `kayak-core/src/metadata.rs` declares it. An input without a declaration
+fails the test suite.
 
-::: details reading it as data instead
-The same content is served as JSON by a running kayak, and as an OpenAPI 3.1
-document:
+::: details read it as data
+A server serves the same content as JSON and as an OpenAPI 3.1 document:
 
 ```bash
 curl localhost:6767/api/docs          # every component
-curl localhost:6767/api/openapi.json  # the whole HTTP surface
+curl localhost:6767/api/openapi.json  # the complete HTTP surface
 ```
 
-This site ships that spec too, at [`/openapi.json`](/openapi.json).
+This site also has the document, at [`/openapi.json`](/openapi.json).
 :::

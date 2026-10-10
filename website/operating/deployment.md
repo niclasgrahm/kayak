@@ -1,167 +1,373 @@
 # deployment
 
-The `Dockerfile` builds one image that is the *runtime* and nothing else: the
-server binary, with the WASM bundle and the assets compiled *into* it. **No
-config is baked in.** Started bare it comes up with an empty graph and serves the UI, which is a
-container that runs with no arguments and a Kubernetes Deployment that needs no
-volume:
+Run kayak as a container image. Keep the config file and the connections file
+in version control. Mount them into the container and give the path of the
+config as a flag. This is the complete deployment.
 
 ```bash
-docker run -p 6767:6767 ghcr.io/niclasgrahm/kayak
+docker run -p 6767:6767 -v "$PWD:/kayak" ghcr.io/niclasgrahm/kayak:0.2.2 \
+  --config /kayak/config.yaml
 ```
 
-Every push to `main` publishes that image, tagged `latest` and `sha-<short>`;
-a `v1.2.3` tag additionally publishes `1.2.3` and `1.2`. Pin a version for
-anything you care about — `latest` is the tip of `main`, not a release.
+To change the deployment, change the file, review the diff and deploy again.
 
-`linux/amd64` and `linux/arm64` are both published, each built on a runner of
-its own architecture rather than under emulation, and joined into one manifest
-list — so a pull picks the right one with no `--platform` flag.
+## the image
 
-Building it yourself is the same image:
+The image is `ghcr.io/niclasgrahm/kayak`. It contains these items:
+
+- the `kayak` binary at `/usr/local/bin/kayak`, with the web UI compiled into it;
+- a CA bundle, for outbound TLS;
+- the license, at `/usr/share/kayak/LICENSE`;
+- the sample graph, at `/usr/share/kayak/example`.
+
+The image does not contain a config, connections, secrets or a server config.
+Without arguments, the server starts with an empty graph.
+
+The `ENTRYPOINT` is the binary. Thus the arguments of the container are the
+flags of the server.
+
+### tags
+
+| tag | what it is |
+| --- | --- |
+| `0.2.2` | one release (from the git tag `v0.2.2`) |
+| `0.2` | the newest release of that minor version |
+| `sha-<short>` | one commit on `main` |
+| `latest` | the newest commit on `main` |
+
+Pin a release tag in production. `latest` is the tip of `main` and is not a
+release.
+
+Each tag is a manifest list for `linux/amd64` and `linux/arm64`. Each
+architecture is built on a runner of that architecture, without emulation. A
+pull selects the correct architecture without a `--platform` flag.
+
+## flags
+
+| flag | what it does |
+| --- | --- |
+| `--config <path>` | the pipelines, as JSON or YAML. The extension selects the format. |
+| `--connections <path>` | the connections file. Optional. Without it, kayak reads `<config-stem>.connections.<ext>` beside the config. |
+| `--secrets <path>` | a JSON file of `"NAME": "value"` pairs for `${NAME}` references. Environment variables have priority. |
+| `--server-config <path>` | authentication and history settings, as JSON or YAML. Without it, the server authenticates nobody. |
+| `--data-dir <path>` | the directory that `file` outputs can write to. kayak creates it. Without it, `file` outputs do not build. |
+| `--listen <addr>` | the address and port, as one value: `0.0.0.0:6767`, `[::]:6767`. |
+| `--debug` | more detail in the log. |
+
+Most deployments do not need `--connections`. Put the connections file beside
+the config with the same stem: `config.yaml` and `config.connections.yaml`.
+Mount the directory, not the single file, so that kayak finds both. The layout
+file of the web UI (`config.layout.json`) uses the same rule.
+
+The server config is separate from the config because it belongs to the
+process. See [authentication](/operating/authentication) and
+[history](/operating/history) for its contents.
+
+### the listen address
+
+The image sets `LEPTOS_SITE_ADDR=0.0.0.0:6767`. Thus the container listens on
+port 6767 on all interfaces. Use `--listen` to change the address:
+
+```bash
+docker run -p 8080:8080 ghcr.io/niclasgrahm/kayak:0.2.2 --listen 0.0.0.0:8080
+```
+
+The order of priority is `--listen`, then `LEPTOS_SITE_ADDR`, then
+`127.0.0.1:6767`.
+
+Do not expose a server without authentication. Any client that can reach the
+port can delete pipelines and change the config. kayak logs a warning at startup
+when the server has no authentication and the address is not loopback. Inside a
+container, `0.0.0.0` is correct. Control access with the ports that you publish
+and with `--server-config`.
+
+### secrets
+
+A `${NAME}` reference resolves against the environment first, and then against
+the `--secrets` file. Thus environment variables are sufficient, and you do not
+need a secrets file. The server does not start when a reference does not
+resolve. See [secrets](/io/secrets).
+
+## docker
+
+Put the config, the connections and the server config in one directory:
+
+```
+deploy/
+  config.yaml
+  config.connections.yaml
+  kayak.server.yaml
+```
+
+Run the image with that directory at `/kayak`:
+
+```bash
+docker run -d --name kayak -p 6767:6767 \
+  -v "$PWD/deploy:/kayak" \
+  -v kayak-data:/data \
+  -e POSTGRES_PASSWORD \
+  -e KAYAK_ADMIN_PASSWORD \
+  ghcr.io/niclasgrahm/kayak:0.2.2 \
+  --config /kayak/config.yaml \
+  --server-config /kayak/kayak.server.yaml \
+  --data-dir /data
+```
+
+`/kayak` is the working directory of the image. Relative paths in the config
+resolve against it. The run user owns it, so a save from the web UI can write
+the config back to it.
+
+## docker compose
+
+```yaml
+services:
+  kayak:
+    image: ghcr.io/niclasgrahm/kayak:0.2.2
+    command:
+      - --config=/kayak/config.yaml
+      - --server-config=/kayak/kayak.server.yaml
+      - --data-dir=/data
+    ports:
+      - "6767:6767"
+    volumes:
+      - ./deploy:/kayak
+      - kayak-data:/data
+    environment:
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      KAYAK_ADMIN_PASSWORD: ${KAYAK_ADMIN_PASSWORD}
+    stop_grace_period: 30s
+
+volumes:
+  kayak-data:
+```
+
+Use the service names of the other containers in the connections file, for
+example `postgres`. Do not use `localhost`. Inside the container, `localhost`
+is the kayak container.
+
+## kubernetes
+
+Put the config and the connections in a ConfigMap. Put the credentials in a
+Secret. Give the Secret to the container as environment variables.
+
+```yaml
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: kayak-config
+data:
+  config.yaml: |
+    - id: sensors
+      inputs:
+        - type: nats
+          connection: plant-nats
+          subject: sensors.>
+      outputs:
+        - type: postgres
+          connection: archive
+          table: readings
+  config.connections.yaml: |
+    plant-nats:
+      type: nats
+      urls: nats://nats:4222
+    archive:
+      type: postgres
+      host: postgres
+      port: 5432
+      database: kayak
+      user: kayak
+      password: ${POSTGRES_PASSWORD}
+  kayak.server.yaml: |
+    auth:
+      type: basic
+      users:
+        admin:
+          password: ${KAYAK_ADMIN_PASSWORD}
+          role: admin
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: kayak-secrets
+type: Opaque
+stringData:
+  POSTGRES_PASSWORD: change-me
+  KAYAK_ADMIN_PASSWORD: change-me
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: kayak
+spec:
+  replicas: 1
+  selector:
+    matchLabels: { app: kayak }
+  template:
+    metadata:
+      labels: { app: kayak }
+    spec:
+      terminationGracePeriodSeconds: 30
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        runAsGroup: 10001
+        fsGroup: 10001
+      containers:
+        - name: kayak
+          image: ghcr.io/niclasgrahm/kayak:0.2.2
+          args:
+            - --config=/etc/kayak/config.yaml
+            - --server-config=/etc/kayak/kayak.server.yaml
+            - --data-dir=/data
+          ports:
+            - containerPort: 6767
+          envFrom:
+            - secretRef: { name: kayak-secrets }
+          volumeMounts:
+            - { name: config, mountPath: /etc/kayak, readOnly: true }
+            - { name: data, mountPath: /data }
+          securityContext:
+            readOnlyRootFilesystem: true
+            allowPrivilegeEscalation: false
+          readinessProbe:
+            httpGet: { path: /api/auth/me, port: 6767 }
+          livenessProbe:
+            httpGet: { path: /api/auth/me, port: 6767 }
+            periodSeconds: 20
+      volumes:
+        - name: config
+          configMap: { name: kayak-config }
+        - name: data
+          emptyDir: {}
+```
+
+The [connections reference](/reference/connections) gives the fields of each
+connection kind.
+
+Obey these rules:
+
+- **Mount the ConfigMap as a directory.** kayak finds `config.connections.yaml`
+  because it is beside `config.yaml`. A `subPath` mount of one key breaks this.
+- **Use one replica per config.** Two replicas run every pipeline two times.
+  For example, two kafka inputs share the partitions of one consumer group.
+- **Give `--data-dir` a writable volume.** Use an `emptyDir` or a
+  PersistentVolumeClaim. Omit `--data-dir` when the config has no `file`
+  output.
+- **Expect a read-only config.** A ConfigMap mount is read-only. A save or a
+  layout change from the web UI fails. Change the config in git and deploy
+  again.
+
+### probes
+
+Use an `httpGet` probe. The image has no `curl` and no `wget`, so an `exec`
+probe has nothing to run. Use `GET /api/auth/me`. It answers `200` without
+credentials, also on a server with authentication. `GET /api/pipelines` also
+works, but only on a server without authentication.
+
+The server opens its port after it builds every pipeline in the config. Thus a
+successful probe means that the config loaded. A pipeline that fails later
+does not fail the probe. Use [history](/operating/history) to monitor the
+pipelines.
+
+### user and file system
+
+The image runs as uid 10001 and gid 10001. The uid is a number, so
+`runAsNonRoot` accepts it. Use the same number when you `chown` a volume.
+kayak writes only to these locations:
+
+- the `--data-dir` directory, for `file` outputs;
+- the directory of the config, when you save from the web UI or move a card.
+
+Thus `readOnlyRootFilesystem: true` is safe.
+
+## the sample graph
+
+The image contains the sample graph of the repository. Use it to look at kayak
+without a config of your own:
+
+```bash
+docker run -p 6767:6767 \
+  -e NATS_PASSWORD=hunter2 -e POSTGRES_PASSWORD=hunter2 -e CLICKHOUSE_PASSWORD=hunter2 \
+  -e S3_ACCESS_KEY_ID=rustfsadmin -e S3_SECRET_ACCESS_KEY=rustfsadmin \
+  ghcr.io/niclasgrahm/kayak:0.2.2 \
+  --config /usr/share/kayak/example/config.json --data-dir /kayak/dev_data
+```
+
+The sample needs two things:
+
+- the secrets that its connections refer to (without them, the server does not
+  start);
+- `--data-dir`, because the sample has a `file` output.
+
+The pipelines that use nats, kafka, postgres, clickhouse and s3 report
+connection errors until the container can reach those systems. `docker compose
+up` in the repository starts them. `heartbeat` and its outputs work without
+them.
+
+## build the image yourself
 
 ```bash
 docker build -t kayak .
 docker run -p 6767:6767 kayak
 ```
 
-A deployment is then a config mounted in and named on the command line. The
-image's `ENTRYPOINT` is the binary, so the container's arguments *are* the
-server's flags:
+The build stage runs `cargo leptos build --release --bin-features embed-assets`.
+The cargo registry and `target/` are BuildKit cache mounts. Thus a rebuild is
+incremental, and no build artifact goes into a layer. The builder installs
+`cmake` to compile `librdkafka`. TLS is rustls and zlib is vendored, so the
+build needs no other system packages.
 
-```bash
-docker run -p 6767:6767 -v "$PWD/pipelines:/kayak" kayak \
-  --config /kayak/config.json \
-  --secrets /kayak/secrets.json \
-  --data-dir /data
-```
+## the binary carries the frontend {#the-binary-carries-the-frontend}
 
-`/kayak` is the working directory and is owned by the run user, which matters
-twice: relative paths in a config resolve against it, and *saving* a config
-writes back beside the file it was loaded from. Everything else is the flags
-documented on `--help`; the connections and layout files are found by derived
-name beside the config, so mounting the directory rather than the one file is
-what you want.
-
-The sample graph travels along at `/usr/share/kayak/example` for a tour with
-nothing mounted. It needs two things on the command line, both of them the
-design working rather than packaging gaps: the data directory, because it has a
-file output, and the secrets its connections reference — as environment
-variables here, which is the shortest way to see the env-first resolution
-working:
-
-```bash
-docker run -p 6767:6767 \
-  -e NATS_PASSWORD=hunter2 -e POSTGRES_PASSWORD=hunter2 -e CLICKHOUSE_PASSWORD=hunter2 \
-  kayak --config /usr/share/kayak/example/config.json --data-dir /kayak/dev_data
-```
-
-Without the secrets the server refuses to start rather than connecting without
-credentials, which is what an unresolved `${NAME}` is supposed to do. The nats,
-kafka, postgres and s3 pipelines then report connection errors on their cards
-unless the container can reach those systems — `docker compose up` brings them
-up on the host, so join that network and name the services rather than
-`localhost`. `heartbeat` and its file output run regardless.
-
-Points worth knowing before it goes anywhere real:
-
-- **It runs as uid 10001**, declared as a number so a `runAsNonRoot` pod and the
-  image's own default are the same identity, and a `chown` on a mounted volume
-  is a number that survives a rebuild. Nothing in the image needs write access;
-  the filesystem can be read-only if the config isn't going to be saved from the
-  UI.
-- **Port 6767**, set through `LEPTOS_SITE_ADDR` in the image (`0.0.0.0`, since
-  the `Cargo.toml` default of `127.0.0.1` reaches nothing from outside a
-  container). `--listen 0.0.0.0:8080` on the command line overrides it; without
-  the flag that env var is what binds. Binding every interface is right *here* —
-  the isolation is which ports the container publishes, not which address it
-  listens on — and is the thing to think twice about on a host, since an
-  unauthenticated kayak is a control plane.
-- **Probes are plain HTTP.** The image carries no `curl` or `wget`, so an
-  exec-style healthcheck has nothing to run: use a Kubernetes `httpGet` against
-  `GET /api/pipelines`, which is also what a compose healthcheck should reach
-  from outside. There is no dedicated health endpoint yet.
-- **File outputs stay off without `--data-dir`**, in a container as everywhere
-  else. That is the closed default working, not a packaging oversight — see
-  "file output".
-- **Secrets are environment variables first.** `${NAME}` references resolve
-  against the process environment before the `--secrets` file, so a k8s
-  `Secret` reaching the container as env vars needs no file mounted at all.
-
-The build stage is `cargo leptos build --release --bin-features embed-assets`
-with the cargo registry and `target/` on BuildKit cache mounts, so a rebuild
-after a code change is incremental locally and no build artifacts reach a
-layer. `librdkafka` is compiled from source, which is why the builder installs
-`cmake`; TLS is rustls and zlib is vendored, so nothing else is.
-
-## the binary carries the frontend
-
-`embed-assets` is what makes the release artifact **one file**. Without it the
-server reads the WASM bundle, the stylesheet and the vendored API-reference
-renderer off a `target/site` directory at runtime, found through
-`LEPTOS_SITE_ROOT` — so the binary and that directory have to travel together,
-and a binary moved on its own serves a page whose bundle 404s. That failure
-looks like a blank canvas rather than like a missing file, which is the reason
-this is not left to whoever does the copying.
+A release build compiles the web UI into the binary: the WASM bundle, the
+stylesheet and the API reference renderer. Thus a release is one file.
 
 ```bash
 just build   # cargo leptos build --release --bin-features embed-assets
 ```
 
-The feature is **off in every development build**, and deliberately: the site
-directory is a build output, so embedding it would make `cargo check`,
-`cargo test` and `just ci` all wait on a WASM toolchain. `cargo leptos watch`
-and `just dev` therefore keep serving off disk, which is also what makes hot
-reload work. Nothing else differs — a build without the feature behaves exactly
-as the server did before it existed.
+The `embed-assets` feature is off in development builds. Without it, the server
+reads the files from `target/site`, through `LEPTOS_SITE_ROOT`. Thus
+`cargo check`, `cargo test` and `just ci` do not need a WASM build. The hot
+reload of `cargo leptos watch` and `just dev` also needs the feature off.
 
-What the embedded server adds on top of a directory read: an `ETag` per file
-and a `304` for a browser that already holds it, and `br`/`gzip` negotiation
-against precompressed variants if there are any. `--precompress` on the build
-produces them, at the cost of carrying three copies of the bundle in the
-binary; the image does not pass it. Responses are `cache-control: no-cache`,
-which means revalidate rather than do not store — asset names are stable across
-releases, so anything longer-lived would serve last release's bundle after a
-deploy.
+The embedded server sends an `ETag` for each file and a `304` when the browser
+has the file. It also serves `br` and `gzip` variants when the build made them
+with `--precompress`. The image does not use `--precompress`, because it puts
+three copies of the bundle in the binary. Responses have
+`cache-control: no-cache`. The asset names do not change between releases, so a
+browser must revalidate each file.
 
-`LEPTOS_SITE_ROOT` is unset in the image because there is no such directory in
-it. `LEPTOS_SITE_PKG_DIR` stays: that one is the URL prefix the rendered page
-links its bundle under, which is a path in the page rather than a path on
-disk.
+The image does not set `LEPTOS_SITE_ROOT`, because the image has no site
+directory. It sets `LEPTOS_SITE_PKG_DIR`, which is the URL prefix of the bundle
+in the page.
 
 ## shutting down
 
-`SIGTERM` and `SIGINT` both stop the server, and they stop it in a defined
-order: the process stops accepting new connections, ends the `/events` streams,
-drains the requests that are still open, and only then cancels the pipelines and
-waits for the run loops to end.
+`SIGTERM` and `SIGINT` stop the server in this sequence:
 
-That last step is the one worth knowing about, because it is where each output
-gets its `finish`. A `file` output writing a `json_array` closes the bracket
-there, so the part it was filling is a file a reader can parse rather than a
-truncated one. The `s3` output has more at stake: an object store has no append,
-so a part that has not rotated yet exists **only in memory**, and a process that
-dies without running `finish` loses it outright rather than truncating it.
+1. The server refuses new connections.
+2. It closes the `/events` streams.
+3. It lets the open requests complete.
+4. It stops the pipelines and waits for each run loop to end.
 
-Two bounds, neither configurable:
+In step 4, each output runs `finish`. A `file` output with `json_array` writes
+the closing bracket. An `s3` output uploads its current part. That part exists
+only in memory, so a process that stops without `finish` loses it.
 
-- **ten seconds** for the connections to drain. A client that will not go away
-  does not get to hold the process open.
-- **five seconds** for the run loops, which is normally instant — a loop checks
-  its cancellation on every pass. The bound is for an output already inside a
-  write, waiting on a socket that is not answering.
+Two limits apply. You cannot configure them:
 
-Past either bound the process says so in the log and carries on stopping. Send a
-second signal and it dies immediately, as it always would.
+- **10 s** for the open connections to close;
+- **5 s** for the run loops to end.
 
-A shutdown **never writes the config file**. The file is a load source and a
-save target, not a mirror of what is running, and that does not change because
-the process is on its way out — unsaved changes are still unsaved after a
-restart. The same is true of state buckets and history, which are in memory by
-design.
+After a limit, the server writes a log line and continues to stop. A second
+signal stops the process immediately.
 
-Under docker this matters more than it looks. The image's `ENTRYPOINT` is the
-binary, so kayak runs as pid 1, and pid 1 has no default action for a signal it
-has not handled. `docker stop` therefore relies on the server handling `SIGTERM`
-itself; give it a `--stop-timeout` longer than the bounds above if your outputs
-are slow to land.
+A shutdown does not write the config file. Unsaved changes from the web UI are
+lost on a restart. State buckets and history are in memory, so a restart also
+loses them.
+
+kayak is pid 1 in the container, and it handles `SIGTERM` itself. Set a stop
+timeout longer than 15 s: `docker stop --time`, `stop_grace_period` in compose,
+or `terminationGracePeriodSeconds` in Kubernetes. The Kubernetes default of
+30 s is sufficient.

@@ -2,9 +2,9 @@
 
 ## `redis` {#output-redis}
 
-Publishes every message in the batch to a redis channel, one message per publish.
+Publishes each message in the batch to a redis channel, one message for each publish.
 
 | field | type | | description |
 | --- | --- | --- | --- |
-| `connection` | `redis` connection | <Badge type="warning" text="required" /> | name of the redis connection to publish on — see "connections" in the readme. |
-| `channel` | `string` | <Badge type="warning" text="required" /> | the channel to publish to |
+| `connection` | `redis` connection | <Badge type="warning" text="required" /> | The name of the redis connection to publish on. Declare the connection in the connections file. |
+| `channel` | `string` | <Badge type="warning" text="required" /> | The channel to publish to. |

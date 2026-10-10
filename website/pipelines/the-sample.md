@@ -1,207 +1,189 @@
 # the sample
 
-`example_config/` is what to point the server at while working on it, and what
-`just dev` uses:
+The directory `example_config/` holds a sample graph. It uses every component
+kind and every connection kind. `just dev` runs the server against it.
 
-| | |
+| file | content |
 | --- | --- |
-| `config.json` | the worked example: every component kind, and the state buckets |
-| `config.yaml` | the same graph, spelled as YAML |
-| `config.connections.{json,yaml}` | the systems those pipelines name |
-| `config.layout.json` | where the cards sit on the canvas |
-| `secrets.example.json` | what the `${NAME}` references resolve against |
-| `server.yaml` | the accounts `just dev` runs with |
+| `config.json` | the pipelines and the state buckets |
+| `config.yaml` | the same graph in YAML |
+| `config.connections.{json,yaml}` | the systems that the pipelines name |
+| `config.layout.json` | the positions of the cards in the web UI |
+| `secrets.example.json` | the values for the `${NAME}` references |
+| `server.yaml` | the accounts for `just dev` |
+| `scripts/` | the rhai files that the script pipelines use |
 
-One directory because the set travels together: the connections and layout files
-are *derived* from the config's path, so they only find each other when they sit
-side by side. `tests/config.rs` and `tests/graph.rs` load these files, so a
-sample that stops parsing — or a component added to the JSON and not the YAML —
-fails `just test` rather than rotting quietly.
+Keep the files in one directory. kayak finds the connections file and the layout
+file from the path of the config file. See [the config file](/pipelines/the-config-file).
 
-`server.yaml` is the odd one out: it is not part of the graph and is not
-derived from the config's path, because it describes *the server* rather than
-the work (see [authentication](/operating/authentication)). It is here so that `just dev` runs
-**with a login** — sign in as `niclas` / `hunter2` for an admin, or
-`viewer` / `hunter2` to see what a read-only account gets. Developing against
-the open path would leave the login page and the role checks as the one part of
-the UI nobody ever looks at. `just dev-yaml` passes no `--server-config` and is
-the way past the login when the login is not what is being worked on.
+`just dev` makes `secrets.json` from `secrets.example.json` if it does not
+exist. It also passes `--data-dir dev_data`. Without that flag, the file output
+of `heartbeat_to_disk` does not build, and the server does not start. To run the
+sample from the container image, give the same flag. See
+[deployment](/operating/deployment).
 
-`ingest` is the http input's sample and needs nothing running either — it is a
-root pipeline with no source, waiting to be posted to (see [posting into a
-pipeline](/io/posting-into-a-pipeline)).
+## what the sample needs
 
-Three of them are the OPC UA sample and want `docker compose up opcua`, which is
-Microsoft's PLC simulator: `opcua_line1` names three of its nodes, gives them
-plant-ish names and `pivot`s them, so every reading also carries the latest of
-all three as a row; `opcua_anomalies` browses a folder instead of naming anything
-and puts a deadband on it, and `opcua_line1_10s_avg` reduces the first per tag
-over ten seconds — which is a plain `group_by` on `name`, because an opcua
-reading carries its tag in the message rather than behind the envelope (see
-[opcua input](/io/opcua-input)).
+- **Without other services.** The pipelines below `heartbeat` and `ingest` need
+  nothing else. `heartbeat` is a `dummy` input that sends a sine wave (±10, one
+  period per minute) one time per second.
+- **With `docker compose up`.** The pipelines that read from or write to nats,
+  kafka, mqtt, redis, OPC UA, postgres, clickhouse and s3 need the services in
+  `docker-compose.yaml`.
+- **Tidepool.** `sensors_to_tidepool` waits in its start-up until a Tidepool
+  server runs on port 7070.
 
-Two of the roots are the SQL inputs, and both read what other pipelines in
-the sample wrote, so they do real work under `docker compose up` and show a
-round trip: `readings_from_postgres` follows the `readings` table that
-`sensors_archive` fills, incrementally by `id` and starting from the newest
-row, so it echoes each archived reading a few seconds after it lands;
-`sensor_peaks_from_clickhouse` is the snapshot shape over a *query* — a
-`GROUP BY` the server runs every thirty seconds over what `sensors_to_clickhouse`
-inserted — which is the reference-data case, an aggregate polled rather than a
-stream followed (see [database inputs](/io/database-inputs)).
+`server.yaml` turns on authentication. Sign in as `niclas` (admin) or `viewer`
+(read only). The password for both is `hunter2`, from `secrets.example.json`.
+`just dev-yaml` loads `config.yaml` without `--server-config`, so it has no
+sign-in. See [authentication](/operating/authentication).
 
-`components_from_api` is the same shape over an api: an `http_poll` input
-that fetches kayak's own component reference (`/api/docs`, which needs no
-sign-in) every five minutes and hands on one message per component, trimmed
-by a `map` to its `kind`, its `family` and the `polled_at` every message of
-one read shares. It needs nothing but the server it runs in (see
-[polling an api](/io/polling-an-api)).
+## the roots
+
+| pipeline | input | notes |
+| --- | --- | --- |
+| `heartbeat` | `dummy` | no envelope; it feeds most of the samples below |
+| `ingest` | `http` | `wrap` envelope, payload under `body`; see [posting into a pipeline](/io/posting-into-a-pipeline) |
+| `sensors` | `nats` | `merge` envelope; it feeds the sensor samples |
+| `kafka_events`, `mqtt_events`, `redis_events` | `kafka`, `mqtt`, `redis` | `merge` envelope |
+| `opcua_line1` | `opcua` | three named nodes, then a `pivot` |
+| `opcua_anomalies` | `opcua` | browses a folder, with a deadband on the input |
+| `readings_from_postgres` | `postgres` | incremental by `id`, from the newest row |
+| `sensor_peaks_from_clickhouse` | `clickhouse` | a snapshot of a `GROUP BY` query, every 30 s |
+| `components_from_api` | `http_poll` | the component reference of the same server, every 5 minutes |
+
+`ingest` uses `wrap` because a client can post any JSON value to it, also a bare
+number. `merge` cannot add a field to a value that is not an object.
+
+The two SQL inputs read what other sample pipelines write.
+`readings_from_postgres` reads the `readings` table that `sensors_archive`
+writes. `sensor_peaks_from_clickhouse` reads the table that
+`sensors_to_clickhouse` writes. See [database inputs](/io/database-inputs).
+
+`components_from_api` fetches `/api/docs`, which needs no sign-in. A `map` with
+`keep: mapped` keeps `kind`, `family` and `polled_at`. See
+[polling an api](/io/polling-an-api).
+
+`opcua_line1_10s_avg` groups the OPC UA readings by `name`. An `opcua` reading
+contains its tag in the message, not in the envelope. See
+[opcua input](/io/opcua-input).
+
+## the graph
+
+- `everything` has three inputs: the `sensors` pipeline, the `heartbeat`
+  pipeline, and the nats subject that `sensors_100_max` publishes to. It has two
+  outputs: stdout and nats.
+- `heartbeat_pairs` uses the `buffer` transform and the `splitter` transform.
+- `slow_requests` filters `kafka_events` and writes to kafka and stdout.
+- `hot_alerts` is at depth 3: `sensors` → `hot_readings` → `hot_alerts`.
+
+## metadata
+
+- `sensors_10s_avg` groups by `["sensor", "_meta.subject"]`. The reducer writes
+  the grouped path as `subject`. This needs the `merge` envelope on `sensors`.
+- `heartbeat` has no envelope. Its output in the file and in the s3 bucket is
+  the plain message.
+
+## state
+
+| pipeline | bucket | what it shows |
+| --- | --- | --- |
+| `heartbeat_peaks` | `heartbeat_peaks` | `remember` with `when` (value above 8), then `recall` with `on_missing: null` |
+| `sensor_state` | `sensor_state` | a keyed bucket, one entry for each sensor |
+| `heartbeat_swings` | `heartbeat_swings` | a script with `remember` and `recall` |
+| `opcua_line1` | `line1_tags` | `pivot` |
+| `heartbeat_trend`, `heartbeat_grid` | `heartbeat_stats` | the streaming statistics |
+
+`heartbeat_peaks`, `heartbeat_swings` and `line1_tags` have `max_keys: 1`. Their
+pipelines declare no `key`, so each bucket holds one value. `heartbeat_stats`
+has `max_keys: 8`, because each transform keeps its own state under the key.
+
+## map
+
+- `heartbeat_shaped` uses `keep: all`. It has a `constant`, a `concat` that reads
+  the constant, and a calculation in two steps through `_scaled`. The last
+  mapping drops `_scaled`.
+- `sensors_projected` uses `keep: mapped` and `on_missing: omit`. It writes four
+  fields: it copies `_meta.subject`, and it coalesces two spellings of the
+  reading.
+
+## scripts
+
+| pipeline | source | scope |
+| --- | --- | --- |
+| `heartbeat_banded` | inline | message |
+| `heartbeat_swings` | `scripts/swings.rhai` | message |
+| `heartbeat_extremes` | `scripts/extremes.rhai` | batch |
+
+- `heartbeat_banded` writes a band onto the message with a condition. `map`
+  cannot do this.
+- `heartbeat_swings` recalls the previous reading, remembers the current one,
+  and sends the direction and the change.
+- `heartbeat_extremes` has a 10 s `tumbling` buffer on its input. Without it,
+  each batch holds one message. It sends `lowest`, `highest` and the `spread`
+  between them.
+- The two file scripts import `scripts/shared/readings.rhai`. See
+  [sharing code between scripts](/pipelines/scripting#sharing-code-between-scripts).
+
+The inline script in `config.json` is hard to read, because JSON escapes the
+newlines. `config.yaml` shows the same script as a block.
+
+## streaming statistics
+
+- `heartbeat_trend` adds values to each message: `smooth`, `derive`, `rolling`
+  and `detect`. A `throttle` at the end passes one message every 10 s.
+- `heartbeat_grid` has a `deadband` (delta 2, confirmation every 15 s) and a
+  `resample` with `forward_fill` on a 5 s grid. Some grid points come from the
+  clock, because the deadband holds readings back.
+
+See [streaming statistics](/pipelines/streaming-statistics).
+
+`heartbeat_features` is the [model round trip](/pipelines/model-round-trip). It
+has a 10 s buffer, a `features` transform with a sample rate of 1 Hz, and an
+`http` transform. The `http` transform posts to the `ingest` endpoint and
+merges the reply `{"accepted": 1}` under `ingest`.
+
+## outputs
+
+| pipeline | output | needs |
+| --- | --- | --- |
+| `heartbeat_to_disk` | `file`, ndjson, a new part every 20 rows or 60 s | `--data-dir` |
+| `heartbeat_to_s3` | `s3`, the same rotation | rustfs |
+| `heartbeat_to_redis` | `redis` | redis |
+| `heartbeat_to_webhook` | `http`, to the `ingest` endpoint | nothing |
+| `sensors_archive` | `postgres` without `columns`, and stdout | postgres |
+| `hot_readings` | `postgres` with `columns` and an index | postgres |
+| `sensors_60s_sum` | `postgres` with `columns`, table `sensor_sums` | postgres |
+| `sensors_to_clickhouse` | `clickhouse` | clickhouse |
+| `sensors_to_tidepool` | `tidepool` | Tidepool on port 7070 |
+
+`heartbeat_to_webhook` uses the port 6767 from `Cargo.toml`. If you change the
+port, change the URL too.
+
+`sensors_archive` has no `columns`, so it writes the default table with one
+`payload` column. `hot_readings` maps columns: a `timestamp` from `ts`, a
+`text` from `_meta.subject`, a `json` column with the whole message, and an
+index. `sensors_60s_sum` maps the three results of its reducer.
+
+kayak makes a mapped table with `IF NOT EXISTS`. It does not change a table that
+exists. If your database has an old `hot_readings` table with a different shape,
+drop it.
 
 ## the four broken ones
 
-`broken_cast`, `broken_aggregate`, `broken_webhook` and `broken_intermittently`
-fail on purpose, and **they are meant to be red**. There is nowhere else to see
-what a failing pipeline looks like: everything worth looking at in a card's
-history — a failure signature with a tally climbing, throughput arriving and
-nothing leaving, a chart with holes in it — only exists once something is
-actually broken, and an example graph where everything works is an example of
-exactly half the UI.
+Four pipelines contain errors. They show how a failure looks in the history
+and on a card. All four read from `heartbeat`, so they fail one time per second
+without other services.
 
-All four hang off `heartbeat`, which is a `dummy` ticking once a second, so they
-fail at that rate whether or not `docker compose` is up, and they need no
-service to be down in order to do it. Each breaks somewhere different on
-purpose:
-
-| | how it breaks |
+| pipeline | how it breaks |
 | --- | --- |
-| `broken_cast` | casts a timestamp to a number. A present value that will not convert is an error whatever `on_missing` says — see [casting](/pipelines/reshaping-messages#casting) |
-| `broken_aggregate` | sums a field the heartbeat does not carry, with the reducer's default `on_missing: error` |
-| `broken_webhook` | posts to a port nothing listens on. A long, ugly, real network error — the one that tests what a card does with a message too wide for it |
-| `broken_intermittently` | the same bad cast behind a `value > 8` filter, so it only fails at the top of the heartbeat's sine wave: a burst of about twelve seconds in every sixty, and quiet in between |
+| `broken_cast` | casts a timestamp string to a number. A present value that does not convert is an error. See [casting](/pipelines/reshaping-messages#casting) |
+| `broken_aggregate` | sums a field that the heartbeat does not contain, with the default `on_missing: error` |
+| `broken_webhook` | posts to a port where nothing listens. This gives a long network error |
+| `broken_intermittently` | the same bad cast after a `value > 8` filter. It fails for about 12 s in every 60 s |
 
-The last one is the one to look at. A pipeline that fails *constantly* is a
-solid block of red and tells you nothing about the shape of an outage; a chart
-that goes wrong for twelve seconds a minute is what an intermittent fault
-actually looks like, and it is the case the history feature exists to make
-legible.
+`broken_intermittently` fails in bursts, which is the shape of a real outage.
 
-They are noisy by design: four error lines a second in the `just dev` console.
-Deleting them from the config file is a fine thing to do while working on
-something else — nothing else in the sample depends on them.
-
-**Three of the roots attach metadata, and the choice of shape is the point.**
-`sensors` and `kafka_events` use `merge`, so their downstream pipelines — which
-filter and group on `value`, `sensor`, `ts` and `latency_ms` — carry on reading
-exactly the fields they always did and gain a `_meta` beside them. `ingest` uses
-`wrap`, because it is the one input whose payload isn't ours to assume: anything
-can be posted to an endpoint, including a bare number, and `merge` has nowhere
-to attach a field on one. Its payload lands under `body`.
-
-`heartbeat` deliberately has **no** envelope — the default is worth seeing in
-the sample too, and it is the pipeline whose output is written to disk and to a
-bucket, where the un-enveloped shape is the easier one to read.
-
-`sensors_10s_avg` then groups by `["sensor", "_meta.subject"]`, which is the
-whole in-band argument in one line: the reducer needs nothing new to reach the
-subject, and the grouped path comes out as `subject`. It is paired with the
-`sensors` envelope — a test fails if that envelope is ever dropped, since
-`on_missing: skip` would leave that reducer silently emitting nothing.
-
-`heartbeat_peaks` is the state sample, and it hangs off `heartbeat` for the
-reason `heartbeat_to_disk` does — it fills a bucket on a bare `just dev` with
-nothing else running. It remembers the last heartbeat above 8 and stamps every
-message with it, which is `when`, `remember` and `recall` in one four-line
-chain; `on_missing: null` is what makes the messages before the first peak
-readable rather than dropped. Its bucket is `max_keys: 1` because the pipeline
-declares no `key` — one bucket-wide value, shown in the card as "the whole
-bucket". `sensor_state` beside it is the keyed shape, one entry per sensor, and
-needs `docker compose up`.
-
-**All three script pipelines hang off `heartbeat`** for the reason
-`heartbeat_to_disk` does, and between them they cover both sources and both
-scopes. `heartbeat_banded` is the inline one and is deliberately two lines: a
-conditional writing a band onto the message, which is the smallest thing `map`
-cannot express at all. `heartbeat_swings` is the file-sourced one at
-`scripts/swings.rhai` and is the script-plus-state sample — it recalls the
-previous reading, remembers this one, and emits the direction and the delta,
-which is the comparison `remember`/`recall` have no spelling for. Its bucket is
-`max_keys: 1` for the reason `heartbeat_peaks`' is.
-
-`heartbeat_extremes` is the `batch` scope one, and the `buffer` on its input is
-the point rather than a detail: without one the heartbeat arrives a message at a
-time and every batch would hold a single reading, which is what makes batch
-scope look pointless. It emits `spread` alongside `lowest` and `highest` —
-arithmetic *between* two aggregates, which a reducer cannot do.
-
-The two file-sourced scripts also share a module: `scripts/shared/readings.rhai`
-holds the classification both use, `import`ed by a path relative to the config's
-directory — the [shared-code sample](/pipelines/scripting#sharing-code-between-scripts),
-and the shape a project grows into once two scripts want the same helper.
-
-Note the sample is JSON, which is the format inline scripts read worst in: the
-inline one is a single escaped `\n` away from being unreadable, and that is a
-fair advertisement for keeping scripts in files or writing the config in YAML.
-`config.yaml` beside it renders the same script as a literal block.
-
-`heartbeat_trend` and `heartbeat_grid` are the
-[streaming statistics](/pipelines/streaming-statistics) samples, and between
-them they run all six transforms off the heartbeat with nothing else up.
-`heartbeat_trend` is the annotating chain — `smooth`, `derive`, `rolling`,
-`detect` — so one card shows a reading arriving and leaving with its smoothed
-value, its rate, a rolling average and trend, and an anomaly flag beside it.
-`heartbeat_grid` is the cardinality-changing pair: a `deadband` that lets a
-sine through every couple of degrees and confirms it every fifteen seconds,
-then a `resample` that puts what is left back on a five-second grid by forward
-fill, which is the tick at work — with the deadband holding readings back, some
-grid points are emitted by the clock rather than by a reading. Both share the
-`heartbeat_stats` bucket, which is what a stateful transform needs to build,
-and it is `max_keys: 8` rather than 1 because every transform in a pipeline
-keeps its own state under the key, and the state tab shows each of them.
-
-`heartbeat_features` is the [model round trip](/pipelines/model-round-trip)
-in miniature: a ten-second `buffer` on its input, a `features` that folds each
-window into one descriptor — mean, spread, slope, a dominant frequency off a
-declared one-hertz sample rate — and an `http` transform that posts that
-descriptor to the server's own `ingest` endpoint and merges the reply
-(`{"accepted": 1}`) back onto it under `ingest`. It stands in for a model
-endpoint the way `heartbeat_to_webhook` stands in for a webhook, so the whole
-loop runs on a bare `just dev`.
-
-`heartbeat_to_disk` is the file output's sample, and it hangs off `heartbeat`
-rather than off the nats source on purpose: the dummy input needs nothing
-running, so it is the one pipeline in here that writes real output on a bare
-`just dev` with no `docker compose up`. Twenty messages a part at one a second,
-so you see it rotate while you watch. `heartbeat` emits its numeric payload — a
-sine wave, ±10 over a minute — so what lands on disk has a shape rather than
-being the same message a thousand times; `payload: text` swaps it for random
-sentences. It is also why `just dev` and
-`tests/graph.rs` both pass `--data-dir dev_data`, and why the sample can't be
-run out of the container image without the same flag — without it that pipeline
-refuses to build and takes the whole load down with it, which is the closed
-default working as intended.
-
-`heartbeat_to_s3` is its object-store twin, off the same `heartbeat` and with the
-same rotation, so the two can be watched side by side — one directory filling up,
-one bucket. Unlike its twin it does need `docker compose up`, for the rustfs it
-writes to.
-
-**Both `keep` shapes of `map` are in there on purpose too.**
-`heartbeat_shaped` hangs off `heartbeat` for the reason `heartbeat_to_disk`
-does — it is the map sample that reshapes real messages on a bare `just dev` —
-and it uses `keep: all`, so the heartbeat's own fields are still there under the
-ones it adds. It is also the worked two-step arithmetic: `value` scaled and
-offset through a `_scaled` the last mapping drops again, plus a `concat` reading
-the `line` a `constant` wrote two mappings earlier. `sensors_projected` is the
-other shape — `keep: mapped` and `on_missing: omit`, promoting `_meta.subject`
-and coalescing two spellings of the reading into four fields and nothing else.
-
-**Both spellings of the postgres output are in there on purpose.**
-`hot_readings` maps columns — a nullable and a not-null one, a `timestamp` read
-from `ts`, a `text` read from `_meta.subject`, an audit column holding the whole
-message, and an index — while `sensors_archive` maps none and so still writes
-the single-`payload` table, which is the compatibility promise being exercised
-rather than described. `sensor_sums` maps the reducer's three answers, which is
-the case column mapping is really for: a rollup whose columns are the query.
-Note that the mapped tables are created from the config, so a database that
-already holds a `hot_readings` from before this landed has to have it dropped —
-creation is `IF NOT EXISTS` and never alters.
+The four pipelines write four error lines per second to the console of
+`just dev`. No other sample pipeline depends on them. You can remove them from
+your copy of the file.

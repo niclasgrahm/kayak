@@ -1,30 +1,30 @@
 # inputs
 
-An input is where a pipeline's messages come from. A pipeline may have several
-— they are merged into one stream, each pumped by its own task so a slow or
-timer-driven input can't be starved by a busy one — and one input failing is
-reported and survived; the pipeline stops only when the last one is gone.
+An input is where the messages of a pipeline come from. A pipeline can have
+several inputs. kayak merges them into one stream. Each input has its own task,
+so a busy input cannot starve a slow input or an input on a timer. When one
+input fails, kayak reports the failure and the other inputs continue. The
+pipeline stops only when its last input stops.
 
-Three fields are declared by no input kind and accepted by all of them, because
-they sit on the wrapper rather than on the kind:
+Every input kind accepts three more fields. They are on the wrapper of the
+input, so the tables below do not show them:
 
-- **`buffer`** gathers messages before the transforms see them, by count, by
-  time, or by whichever comes first. It never emits an empty batch, and its
-  window opens at the first message rather than at the clock — so what it
-  promises is a latency bound, not a cadence. See
+- **`buffer`** collects messages before the transforms see them: by count, by
+  time, or by the first of the two. It never sends an empty batch. Its window
+  opens at the first message, not at a clock boundary. Thus it limits the
+  latency, and it does not give a fixed cadence. See
   [buffering an input](/pipelines/pipelines#buffering-an-input).
-- **`envelope`** attaches what the input knows about a message *to* the message,
-  in band, as ordinary JSON fields. Absent, messages are passed on byte for
-  byte as they arrive. See [message metadata](/pipelines/message-metadata).
-- **`ack`** says when the input tells its broker a message is done with. Only
-  inputs with a broker-side notion of the difference honour it; the rest refuse
-  to build rather than quietly ignoring it. See
+- **`envelope`** adds what the input knows about a message to the message, as
+  ordinary JSON fields. Without it, kayak passes messages on as they arrive.
+  See [message metadata](/pipelines/message-metadata).
+- **`ack`** sets when the input acknowledges a message to its broker. Only
+  inputs with a broker that can tell the difference accept it. The other inputs
+  refuse to build with it. See
   [acknowledging an input](/pipelines/pipelines#acknowledging-an-input).
 
-`max_batch`, on the inputs that have it, is a third thing again: it never
-*waits*. It takes one message and then drains whatever has already arrived, so
-a quiet topic yields batches of one however high the cap is and only a catch-up
-ever fills one. That is what makes it the cheapest fix there is for a consumer
-replaying a backlog.
+`max_batch`, on the inputs that have it, is different from `buffer`. It never
+waits. It takes one message and then adds the messages that already arrived.
+Thus a quiet topic gives batches of one, whatever the limit is. Only a backlog
+fills a batch. Increase `max_batch` to let a consumer catch up on a backlog.
 
 <!--@include: ./generated/components/inputs.md-->

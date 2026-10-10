@@ -1,10 +1,12 @@
 # the model round trip
 
-Kayak runs models; it does not fit them. Anything that has to be *trained*
-lives behind an http endpoint where the data scientists are, and this page is
-about making that a good place to be rather than a dead end: a window of
-readings goes out as the handful of numbers a model wants, and the answer
-comes back onto the message that asked, with every identifier intact.
+kayak runs models. It does not train them. A trained model runs behind an HTTP
+endpoint. Two transforms connect a pipeline to it:
+
+- `features` makes one message with a small set of numbers from a window of
+  readings.
+- The `http` transform sends that message to the model and writes the answer
+  back onto the message. The identifiers stay on the message.
 
 ```json
 {
@@ -21,26 +23,25 @@ comes back onto the message that asked, with every identifier intact.
 }
 ```
 
-Each cycle arrives as a batch, leaves `features` as one message —
-`{machine_id, unit_id, mean, std, slope, rms, n_peaks, duration}` — goes to
-the model as exactly that, and comes back as the same message with
-`prediction` written on it. The nats output publishes it with the machine and
-unit still there to route by.
+Each cycle arrives as a batch. `features` makes one message from it:
+`{machine_id, unit_id, mean, std, slope, rms, n_peaks, duration}`. The `http`
+transform sends that message to the model. It writes the answer onto the same
+message under `prediction`. The nats output publishes the message with the
+machine and the unit still on it.
 
 ## features: the window as seven numbers
 
-A model endpoint rarely wants four hundred raw temperatures, and a vibration
-waveform should never leave the edge at all. `features` folds a window into
-one descriptor per group: the reducer's shape — a batch in, one message per
-`group_by` combination out, the group fields kept under their leaf names —
-with a closed set of waveform descriptors in place of the aggregation list.
-Pair it with a [`buffer`](/pipelines/pipelines#buffering-an-input) or a
-session's worth of readings, or it only ever sees one at a time.
+`features` makes one message for each `group_by` combination in a batch. It
+keeps the group fields under the last segment of their path, the same as the
+reducer. Use it to send a small descriptor to a model, not the raw readings.
+Put a [`buffer`](/pipelines/pipelines#buffering-an-input) on the input. Without
+a buffer, each batch can have only one reading.
 
-`include` picks from: `mean`, `std`, `min`, `max`, `range`, `slope`, `skew`,
-`kurtosis`, `rms`, `crest_factor`, `zero_crossings`, `n_peaks`, `autocorr_1`,
-`dominant_frequency`, `count`, `duration`. Each is written under its own
-name. `bands` adds the power in named frequency bands:
+`include` selects from these features: `mean`, `std`, `min`, `max`, `range`,
+`slope`, `skew`, `kurtosis`, `rms`, `crest_factor`, `zero_crossings`,
+`n_peaks`, `autocorr_1`, `dominant_frequency`, `count`, `duration`. kayak writes
+each feature under its own name. `bands` adds the power in named frequency
+bands:
 
 ```json
 { "type": "features", "field": "vibration", "group_by": ["_meta.machine_id"],
@@ -50,67 +51,79 @@ name. `bands` adds the power in named frequency bands:
             { "low_hz": 100, "high_hz": 1000, "as": "high_band" }] }
 ```
 
-Three things to know. `slope` and `duration` are in seconds off the `time`
-field, and per message without one. The spectral features
-(`dominant_frequency`, `bands`) need a sample rate: `sample_rate_hz` when
-given, which wins because a source with coarse timestamps would derive
-nonsense, and otherwise one derived from `time`; with neither, they refuse to
-build. And a feature the window can't answer — the slope of one reading, a
-tone in a flat signal — is `null` rather than a failed batch, because a short
-cycle is still data. Band power is in mean-square units, so the bands of a
-signal sum to its `rms` squared.
+Rules:
 
-Nothing here keeps state, so unlike the
-[streaming statistics](/pipelines/streaming-statistics) it needs no bucket.
+- `slope` and `duration` are in seconds, from the `time` field. Without `time`,
+  they are per message.
+- The spectral features (`dominant_frequency`, `bands`) need a sample rate.
+  `sample_rate_hz` sets it. Without `sample_rate_hz`, kayak calculates it from
+  `time`. With neither, the transform does not build. Set `sample_rate_hz` for
+  a source with coarse timestamps.
+- A feature that the window cannot calculate is `null`. Examples are the slope
+  of one reading, or a tone in a flat signal. The batch does not fail.
+- Band power is in mean-square units. The bands of a signal sum to the square
+  of its `rms`.
+
+`features` keeps no state. It does not need a bucket, unlike the
+[streaming statistics](/pipelines/streaming-statistics).
 
 ## the http transform: out, and back onto the message
 
-The `http` transform sends the batch somewhere and carries on with the
-answer. What it always did — and still does by default — is `response:
-replace`: the reply *is* the new batch, so the service on the other end is
-the transform. That is right when the service reshapes the data. It is wrong
-for a model: a service that answers `{"score": 0.93}` has thrown away the
-machine id the pipeline needs to publish that under.
+The `http` transform sends the batch to an endpoint. `response` sets what it
+does with the reply:
 
-`response: merge` is the round trip. The reply is written onto the message
-that caused it, under `as`, and nothing the pipeline sent is lost. Under
-`body: message` each message goes on its own and gets its own reply. Under
-`body: batch` the whole batch goes as one array, and a reply that is an array
-of the batch's length is a verdict per message, written element-wise; any
-other reply is a verdict on the batch and goes onto every message.
+- `replace` is the default. The reply becomes the new batch. Use it when the
+  service changes the shape of the data.
+- `merge` writes the reply onto the message that caused it, under `as`. The
+  message keeps all its fields. Use it for a model, which usually replies only
+  with a result, for example `{"score": 0.93}`.
 
-The shape of the request is otherwise the shape of the message — that is what
-`features`, `reduce` and `map` in front of it are for — with two knobs for
-the API's own conventions: `wrap` puts the body under a key
-(`{"instances": [...]}`), and `unwrap` reads the reply out from under one
-(`{"predictions": [...]}`).
+`body` sets how kayak sends the batch:
 
-The rest is what any endpoint needs: `auth` is the same block the http input
-and output take, `timeout_seconds` bounds a request (thirty seconds when left
-out), and `verb` is honoured — `GET` and `DELETE` are refused, since a request
-with no body sends no messages.
+- `body: message` sends each message in its own request. Each message gets its
+  own reply.
+- `body: batch` sends the whole batch as one array. If the reply is an array
+  with the same length as the batch, kayak writes element *n* onto message *n*.
+  kayak writes any other reply onto every message.
+
+The request body is the message. Use `features`, `reduce` and `map` in front of
+the transform to give it the correct shape. Two settings adapt to the
+conventions of an API:
+
+- `wrap` puts the body under a key, for example `{"instances": [...]}`.
+- `unwrap` reads the reply from under a key, for example
+  `{"predictions": [...]}`.
+
+Other settings:
+
+- `auth` is the same block as on the http input and output.
+- `timeout_seconds` is the limit for one request. The default is 30 s.
+- `verb` sets the method. kayak refuses `GET` and `DELETE`, because a request
+  without a body sends no messages.
 
 ## when it fails
 
-Anything but a 2xx fails the batch, with the endpoint's own words quoted on
-the card. Two mechanisms sit around that, and they are different things:
+A reply that is not 2xx fails the batch. The error contains the text from the
+endpoint. Two settings control what happens around a failure:
 
-- **`retries` sleeps.** A request that failed to reach the endpoint, or was
-  answered 5xx or 429, is tried again that many times, each wait a little
-  longer than the last, *inside the pass* — because failing a batch of real
-  readings over a proxy hiccup is worse than a second's delay. A 4xx is not
-  retried: the endpoint has said no, and asking again is not going to change
-  its mind. Zero when left out.
-- **The gate skips.** Once a batch has failed for good, the next batches are
-  refused without a round trip until the backoff says to try again — the same
-  thing the http and clickhouse outputs do, and what keeps a down endpoint from
-  being hammered on every batch.
+- **`retries`** sets how many times to try a request again in the same pass.
+  kayak retries when the request did not reach the endpoint, or when the reply
+  is 5xx or 429. Each wait is longer than the one before. A 4xx is not retried.
+  The default is 0.
+- **The gate** applies after a batch fails on all its tries. kayak then refuses
+  the next batches without a request, until the backoff ends. The http and
+  clickhouse outputs do the same. This prevents a stream of requests to an
+  endpoint that is down.
 
-They compose: each pass the gate allows may retry.
+The two work together. Each pass that the gate allows can retry.
 
-## seeing it run
+## an example that runs {#seeing-it-run}
 
-`heartbeat_features` in the [sample](/pipelines/the-sample) runs the whole
-loop against the server's own `ingest` endpoint, so it works on a bare
-`just dev`: a ten-second window off the heartbeat, seven features, a POST of
-the descriptor, and `{"accepted": 1}` merged back under `ingest`.
+`heartbeat_features` in the [sample](/pipelines/the-sample) runs the full round
+trip against the `ingest` endpoint of the same server. It needs no other
+service. It does these steps:
+
+1. It collects a ten-second window from the heartbeat.
+2. It calculates seven features.
+3. It posts the descriptor to `ingest`.
+4. It merges the reply `{"accepted": 1}` back under `ingest`.

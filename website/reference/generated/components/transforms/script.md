@@ -2,30 +2,30 @@
 
 ## `script` {#transform-script}
 
-Runs a [rhai](https://rhai.rs) script over each message, or over the batch as a whole, and emits whatever the script asks for.
+Runs a [rhai](https://rhai.rs) script over each message, or over the full batch, and sends the values that the script emits.
 
-A script reaches the message as `msg`, and emits with `emit(value)` — zero times to drop it, once to replace it, many times to split it. That covers `filter`, `map` and `splitter` in one, which is the point: what a script is for is the case none of those three reach.
+The script gets the message as `msg`, and sends values with `emit(value)`. Call `emit` zero times to drop the message, one time to replace it, or more times to split it. Use a script when `filter`, `map` and `splitter` are not sufficient.
 
-The script is **compiled when the pipeline is built**, so a syntax error is a pipeline that refuses to start rather than one that fails every batch forever — the same rule the reducer's build-time checks follow. What cannot be checked until a message arrives (a field that isn't there, a type that won't convert) fails that batch and shows up on the card.
+kayak **compiles the script when it builds the pipeline**. Thus, a syntax error stops the pipeline from starting. An error that occurs only with a message fails that batch. For example, a missing field or a value that does not convert fails the batch.
 
-Every script runs under an **operation budget**. That is not a tuning knob with a safe default, it is what makes this component safe to have: the script runs synchronously inside the run loop's task, so a script that loops forever would wedge a worker thread rather than merely breaking its own pipeline.
+Each run of the script has an **operation limit** (`max_operations`). When the script reaches the limit, kayak stops it and fails the batch. Thus, a script with an endless loop cannot block the pipeline.
 
-A script may **`import`** other rhai files — shared helpers, written once — by a literal path relative to the config file's directory, which it may not climb out of; the `.rhai` extension is implied. Imports resolve when the pipeline is built, so a broken one refuses to start rather than failing batches, and a running script never touches the filesystem.
+A script can **`import`** other rhai files. Give a literal path relative to the directory of the config file. The path must stay in that directory. You can leave out the `.rhai` extension. kayak reads the imports when it builds the pipeline. Thus, a bad import stops the pipeline from starting, and a running script does not read the filesystem.
 
 | field | type | | description |
 | --- | --- | --- | --- |
-| `source` | `inline \| file` | <Badge type="warning" text="required" /> | the script itself, written inline or kept in a file beside the config |
-| `max_operations` | `integer` | <Badge type="info" text="optional" /> | how many rhai operations one run of the script may take before it is stopped and the batch failed. Leave it out for the default, which is generous for anything that isn't looping by mistake; raise it for a script that legitimately walks a large array. |
-| `scope` | `message` \| `batch` | <Badge type="info" text="optional" /> | whether the script sees one message at a time or the whole batch |
+| `source` | `inline \| file` | <Badge type="warning" text="required" /> | The script: inline in the config, or in a file beside the config. |
+| `max_operations` | `integer` | <Badge type="info" text="optional" /> | The maximum number of rhai operations in one run of the script. At the limit, kayak stops the script and fails the batch. The default is 100000. Increase it for a script that walks a large array. |
+| `scope` | `message` \| `batch` | <Badge type="info" text="optional" /> | Whether the script gets one message at a time or the full batch. The default is `message`. |
 
 **`source` — `type: "inline"`**
 
 | field | type | | description |
 | --- | --- | --- | --- |
-| `code` | `rhai script` | <Badge type="warning" text="required" /> | the rhai source |
+| `code` | `rhai script` | <Badge type="warning" text="required" /> | The rhai source. |
 
 **`source` — `type: "file"`**
 
 | field | type | | description |
 | --- | --- | --- | --- |
-| `path` | `string` | <Badge type="warning" text="required" /> | the path, relative to the config file's directory. It may not climb out of that directory. |
+| `path` | `string` | <Badge type="warning" text="required" /> | The path, relative to the directory of the config file. The path must stay in that directory. |

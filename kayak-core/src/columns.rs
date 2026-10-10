@@ -21,39 +21,38 @@
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
-/// The type a column holds, named the way the *config* thinks about it rather
-/// than the way any one server spells it.
+/// The type of a column. The names are the same for all database outputs.
+/// Each output changes them into the types of its server.
 ///
-/// Values are checked against this before they are sent: a string `"12.5"` into
-/// a `float` column is an error, not a coercion. Guessing is the failure mode
-/// nobody sees, and a type that can be coerced from anything makes the mapping
-/// worth nothing.
+/// The output checks each value against the type before it sends the value.
+/// It does not convert values. For example, the string `"12.5"` in a `float`
+/// column is an error. To convert a value, use a `cast` in a `map` transform.
 #[derive(Clone, Copy, Debug, Deserialize, Serialize, JsonSchema, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum ColumnType {
     /// A string of any length. Only a JSON string is accepted.
     Text,
-    /// A 32-bit whole number. A JSON number with a fractional part, or one
-    /// outside the range, is an error rather than a rounding.
+    /// A 32-bit whole number. A JSON number with a fractional part is an
+    /// error. A number outside the range is an error.
     Integer,
     /// A 64-bit whole number.
     Bigint,
     /// A double-precision floating point number.
     Float,
-    /// An exact decimal. The digits are carried across as they were written, so
-    /// nothing is lost to a binary float on the way.
+    /// An exact decimal. The output sends the digits as they are in the
+    /// message, so no precision is lost.
     Decimal,
     /// True or false. Only a JSON boolean is accepted.
     Boolean,
-    /// A date and time with a time zone. A JSON string is parsed by the server
-    /// (ISO 8601 / RFC 3339); a JSON number is read as **seconds** since the
-    /// epoch, fractions included.
+    /// A date and time with a time zone. The server parses a JSON string as
+    /// ISO 8601 or RFC 3339. The output reads a JSON number as **seconds**
+    /// since the epoch, with fractions.
     Timestamp,
     /// A calendar date, as a JSON string (`2026-08-10`).
     Date,
     /// A UUID, as a JSON string.
     Uuid,
-    /// Any JSON value at all, stored as JSON.
+    /// Any JSON value, stored as JSON.
     Json,
 }
 
@@ -77,56 +76,51 @@ impl ColumnType {
     }
 }
 
-/// What to do about a message that doesn't carry a column's field.
-///
-/// A field that is present but `null` counts as missing — the same reading the
-/// reducer's [`crate::config::MissingFieldPolicy`] takes, and the same fact
-/// said two ways.
+/// What to do with a message that does not have the field of a column. A
+/// field with the value `null` counts as missing.
 #[derive(Clone, Copy, Debug, Deserialize, Serialize, JsonSchema, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum MissingColumnPolicy {
-    /// Write `NULL`. The default for a nullable column: a stream where some
-    /// messages carry a field and some don't is the ordinary case, and a table
-    /// that says so is a table you can still query.
+    /// Write `NULL`. This is the default for a nullable column.
     Null,
-    /// Fail the pipeline. The default for a column declared `"nullable": false`,
-    /// since there is nothing else such a column could do.
+    /// Fail the batch. This is the default for a column with
+    /// `"nullable": false`.
     Error,
-    /// Leave the whole message out of the table. Nothing about that row is
-    /// written, including the columns that *were* present.
+    /// Do not write the message. The output writes no column of that row.
     SkipRow,
 }
 
-/// One message field mapped onto one column.
+/// One message field that the output writes to one column.
 ///
-/// `field` defaults to `name`, so a message that already uses the column names
-/// needs nothing but the name and the type. It is a dotted path like every
-/// other field reference in kayak, so `_meta.subject` reaches whatever the
-/// input's envelope attached and a literal key containing dots still wins.
+/// The default of `field` is `name`. When the message uses the column names,
+/// give only `name` and `type`. `field` is a dotted path, for example
+/// `_meta.subject`. A key that contains a dot and matches exactly has
+/// priority over the path.
 #[derive(Clone, Debug, Deserialize, Serialize, JsonSchema, PartialEq, Eq)]
 #[schemars(title = "column")]
 pub struct ColumnMapping {
-    /// the column's name in the table. Letters, digits and underscores only,
-    /// since it cannot be sent as a query parameter.
+    /// The name of the column in the table. Use only letters, digits and
+    /// underscores.
     pub name: String,
-    /// what the column holds. Values are checked against it rather than
-    /// coerced into it.
+    /// The type of the column. The output checks each value against it.
     #[serde(rename = "type")]
     pub column_type: ColumnType,
-    /// the field to read, as a dotted path. Defaults to the column's name.
+    /// The field to read, as a dotted path. The default is the name of the
+    /// column.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[schemars(extend("x-message-field" = true))]
     pub field: Option<String>,
-    /// store the whole message in this column instead of one of its fields.
-    /// Only for a `json` column, and not together with `field`.
+    /// Write the full message to this column. Use it only with a `json`
+    /// column. Do not use it with `field`.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub message: bool,
-    /// whether the column accepts `NULL`. Defaults to true; `false` makes the
-    /// created column `NOT NULL` and makes a missing field an error.
+    /// Whether the column accepts `NULL`. The default is true. With `false`,
+    /// the output makes the column `NOT NULL`, and a missing field is an
+    /// error.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub nullable: Option<bool>,
-    /// what to do about a message that doesn't carry the field. Defaults to
-    /// `null`, or to `error` for a column that is not nullable.
+    /// What to do with a message that does not have the field. The default is
+    /// `null`, or `error` for a column that is not nullable.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub on_missing: Option<MissingColumnPolicy>,
 }
@@ -156,17 +150,14 @@ impl ColumnMapping {
     }
 }
 
-/// An index to create alongside the table.
-///
-/// Only created when the table is — like the table itself it is
-/// `IF NOT EXISTS`, and an index on a table someone else owns is theirs to
-/// manage.
+/// An index to make with the table. The output makes the index only when it
+/// makes the table, with `IF NOT EXISTS`.
 #[derive(Clone, Debug, Deserialize, Serialize, JsonSchema, PartialEq, Eq)]
 #[schemars(title = "index")]
 pub struct TableIndex {
-    /// the columns to index, in order. Each must be one of the mapped columns.
+    /// The columns to index, in order. Each column must be a mapped column.
     pub columns: Vec<String>,
-    /// whether the index is unique. Defaults to false.
+    /// Whether the index is unique. The default is false.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub unique: Option<bool>,
 }
@@ -179,16 +170,16 @@ impl TableIndex {
     }
 }
 
-/// What to do about a message carrying fields no column reads.
+/// What to do with a message that has fields that no column reads.
 #[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, JsonSchema, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum ExtraFieldPolicy {
-    /// Write the columns that are mapped and let the rest go. The default —
-    /// mapping a subset of a wide message is the ordinary reason to map at all.
+    /// Write the mapped columns and ignore the other fields. This is the
+    /// default.
     #[default]
     Ignore,
-    /// Fail the pipeline. For a stream whose shape is supposed to be fixed,
-    /// where a new field appearing is news rather than noise.
+    /// Fail the batch. Use it for a stream with a fixed shape, where a new
+    /// field is a problem.
     Error,
 }
 

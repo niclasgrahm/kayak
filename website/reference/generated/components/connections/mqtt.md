@@ -4,11 +4,11 @@
 
 An mqtt broker.
 
-Plaintext TCP only for now — there is no TLS field here yet, and that is a deliberate gap (see `docs/roadmap.md`) rather than an oversight: a CA certificate needs somewhere to live (a `Secret`? a file path resolved against `--data-dir`?) and that question deserves its own pass rather than a field bolted on to get this connection working.
+The connection uses plain TCP. TLS is not available.
 
 | field | type | | description |
 | --- | --- | --- | --- |
-| `host` | `string` | <Badge type="warning" text="required" /> | broker hostname, e.g. `localhost` |
-| `password` | `string` | <Badge type="info" text="optional" /> | that username's password. May reference secrets as `${NAME}` — see "secrets" in the readme, and prefer a reference to a literal here. |
-| `port` | `integer` | <Badge type="info" text="optional" /> | broker port. Defaults to 1883, mqtt's conventional plaintext port. |
-| `username` | `string` | <Badge type="info" text="optional" /> | username to connect with, if the broker requires one. Must be set together with `password` or not at all. |
+| `host` | `string` | <Badge type="warning" text="required" /> | The hostname of the broker, for example `localhost`. |
+| `password` | `string` | <Badge type="info" text="optional" /> | The password of the user. Use a `${NAME}` secret reference for this value. |
+| `port` | `integer` | <Badge type="info" text="optional" /> | The port of the broker. The default is 1883. |
+| `username` | `string` | <Badge type="info" text="optional" /> | The username, if the broker requires one. Set `username` and `password` together, or set neither. |

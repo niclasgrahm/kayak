@@ -2,24 +2,24 @@
 
 ## pipelines {#tag-pipelines}
 
-The running graph. Creating and deleting pipelines takes effect immediately and writes nothing to disk.
+The running graph. A create or a delete has an immediate effect. It writes nothing to disk.
 
 ### `GET /api/pipelines` {#get-api-pipelines}
 
-Every pipeline the server is running
+List the running pipelines
 
 <Badge type="warning" text="read" /> <Badge type="info" text="listPipelines" /> — Any signed-in user.
 
-The running graph, as the configs the pipelines were built from — each with the id it is actually running under, which is generated when the config omitted one.
+Returns the config of each running pipeline, with the id that it runs under. If the config has no `id`, kayak generates one.
 
-This is the runtime's view rather than the file's: a pipeline created since startup is here and not in the config file, and `GET /api/settings` is what says whether the two have diverged.
+This is the state of the server, not of the config file. A pipeline that you created after startup is in this list, but not in the file. `GET /api/settings` tells you if the two are different.
 
 **responses**
 
 | status | body | description |
 | --- | --- | --- |
-| `200` | [[PipelineDto](#schema-pipelinedto)] | The running pipelines, in no particular order. |
-| `500` | [ApiError](#schema-apierror) | Something went wrong on the server. The body says what. |
+| `200` | [[PipelineDto](#schema-pipelinedto)] | The running pipelines, in no specified order. |
+| `500` | [ApiError](#schema-apierror) | An error occurred on the server. The body describes the error. |
 
 ### `POST /api/pipelines` {#post-api-pipelines}
 
@@ -27,9 +27,11 @@ Build and start a pipeline
 
 <Badge type="warning" text="admin" /> <Badge type="info" text="createPipeline" /> — Signed-in users with the `admin` role.
 
-The body is one pipeline's config, exactly as it would appear in the `pipelines` array of a config file. Omitting `id` generates a readable random one, which comes back in the response.
+The body is the config of one pipeline, as in the `pipelines` array of a config file. If you leave out `id`, kayak generates a random id that people can read. The response contains the id.
 
-The pipeline is built and started before the response is sent, so a 201 means it is running — a component that could not be built (an unknown connection, an unresolved secret) is a 422 and nothing is started. Nothing is written to disk: the config file is a load source and a save target, never a mirror of the runtime.
+kayak builds and starts the pipeline before it sends the response. Thus, a 201 means that the pipeline runs. If a component does not build, the response is a 422 and nothing starts. For example, an unknown connection or a missing secret gives a 422.
+
+This endpoint writes nothing to disk. To write the config file, use `POST /api/config/save`.
 
 **request body** — [Config](#schema-config) The pipeline to build.
 
@@ -37,10 +39,10 @@ The pipeline is built and started before the response is sent, so a 201 means it
 
 | status | body | description |
 | --- | --- | --- |
-| `201` | [PipelineDto](#schema-pipelinedto) | Built and running, with the id it took. |
-| `409` | [ApiError](#schema-apierror) | A pipeline with this id is already running. |
-| `422` | [ApiError](#schema-apierror) | The config is well-formed JSON but could not be built — an unknown connection, a missing secret, an upstream that does not exist. |
-| `500` | [ApiError](#schema-apierror) | Something went wrong on the server. The body says what. |
+| `201` | [PipelineDto](#schema-pipelinedto) | The pipeline is built and runs. The body contains its id. |
+| `409` | [ApiError](#schema-apierror) | A pipeline with this id already runs. |
+| `422` | [ApiError](#schema-apierror) | The JSON is valid, but the pipeline does not build. For example, a connection is unknown, a secret is missing, or an upstream pipeline does not exist. |
+| `500` | [ApiError](#schema-apierror) | An error occurred on the server. The body describes the error. |
 
 ### `DELETE /api/pipelines/{pipeline_id}` {#delete-api-pipelines--pipeline_id-}
 
@@ -48,37 +50,37 @@ Stop and remove a pipeline
 
 <Badge type="warning" text="admin" /> <Badge type="info" text="deletePipeline" /> — Signed-in users with the `admin` role.
 
-Cancels the pipeline's run loop and drops it from the graph. Pipelines downstream of it keep running and stop receiving from it.
+Stops the run loop of the pipeline and removes the pipeline from the graph. Downstream pipelines continue to run. They receive nothing more from this pipeline.
 
-Like creating one, this writes nothing to disk.
+This endpoint writes nothing to disk.
 
 **path parameters**
 
 | name | description |
 | --- | --- |
-| `pipeline_id` | The id the pipeline is running under. |
+| `pipeline_id` | The id of the pipeline. |
 
 **responses**
 
 | status | body | description |
 | --- | --- | --- |
-| `204` | — | Stopped and removed. |
-| `404` | [ApiError](#schema-apierror) | No pipeline is running under that id. |
-| `500` | [ApiError](#schema-apierror) | Something went wrong on the server. The body says what. |
+| `204` | — | The pipeline is stopped and removed. |
+| `404` | [ApiError](#schema-apierror) | No pipeline runs with that id. |
+| `500` | [ApiError](#schema-apierror) | An error occurred on the server. The body describes the error. |
 
 ### `POST /api/pipelines/{pipeline_id}/messages` {#post-api-pipelines--pipeline_id--messages}
 
 Post messages into a pipeline
 
-<Badge type="tip" text="public" /> <Badge type="info" text="ingestMessages" /> — Callable without credentials, even when authentication is on.
+<Badge type="tip" text="public" /> <Badge type="info" text="ingestMessages" /> — No credentials are necessary, also when authentication is on.
 
-The endpoint a pipeline's `http` input serves. Every pipeline with one has this path, derived from its id, and it exists for as long as the pipeline is running — this is how a system pushes data into kayak without a broker in between.
+The endpoint of the `http` input of a pipeline. The path comes from the id of the pipeline. The endpoint exists while the pipeline runs. A system can use it to send data to kayak without a broker.
 
-The body is one JSON message or an array of them; an array arrives as a single batch, so posting ten messages is one pass through the transforms rather than ten. There is no envelope and no schema: whatever is posted is what the transforms see.
+The body is one JSON message or an array of messages. An array becomes one batch, so ten messages go through the transforms in one pass. The transforms get the posted JSON with no change.
 
-Accepted means queued, not processed. The batch is handed to the pipeline's run loop and the response is sent without waiting for the outputs, so a 202 says nothing about whether the data has landed anywhere.
+A 202 means that the pipeline put the batch in its queue. kayak sends the response before the outputs write the batch. Thus, a 202 does not tell you that the data arrived at an output.
 
-This endpoint does not use the server's sign-in — it is a data plane, and a system pushing readings should not need an account that can rewrite the graph. Protecting it is the `http` input's own `auth` field: a token the sender repeats in a header, declared per pipeline. Without one the endpoint takes anything that reaches it, which is the default.
+This endpoint does not use the sign-in of the server. To protect it, set `auth` on the `http` input of the pipeline. The sender then puts a token in a header. Without `auth`, the endpoint accepts all requests. This is the default.
 
 **path parameters**
 
@@ -86,116 +88,114 @@ This endpoint does not use the server's sign-in — it is a data plane, and a sy
 | --- | --- |
 | `pipeline_id` | The id of the pipeline to post to. |
 
-**request body** — [IngestRequest](#schema-ingestrequest) One message, or an array of messages to deliver as one batch.
+**request body** — [IngestRequest](#schema-ingestrequest) One message, or an array of messages to send as one batch.
 
 **responses**
 
 | status | body | description |
 | --- | --- | --- |
-| `202` | [IngestResponse](#schema-ingestresponse) | Queued for the pipeline, with the number of messages taken. |
-| `404` | [ApiError](#schema-apierror) | No pipeline is running under that id, or the one that is has no `http` input to post to. |
-| `401` | [ApiError](#schema-apierror) | The input has an `auth` and this post didn't satisfy it. This is the input's own credential, not the server's sign-in: an account on the server does not let you post, and the token does not let you do anything else. |
-| `503` | [ApiError](#schema-apierror) | The pipeline's queue is full — it is not reading as fast as this is being posted. Nothing was taken; send it again. |
-| `500` | [ApiError](#schema-apierror) | Something went wrong on the server. The body says what. |
+| `202` | [IngestResponse](#schema-ingestresponse) | The pipeline accepted the messages. The body contains the number of messages. |
+| `404` | [ApiError](#schema-apierror) | No pipeline runs with that id, or the pipeline has no `http` input. |
+| `401` | [ApiError](#schema-apierror) | The input has `auth`, and the request did not satisfy it. This is the credential of the input, not the sign-in of the server. A server account does not give access to this endpoint. The token gives access to nothing else. |
+| `503` | [ApiError](#schema-apierror) | The queue of the pipeline is full, because the pipeline reads slower than the requests arrive. The pipeline accepted nothing. Send the request again. |
+| `500` | [ApiError](#schema-apierror) | An error occurred on the server. The body describes the error. |
 
 ### `GET /api/pipelines/{pipeline_id}/history` {#get-api-pipelines--pipeline_id--history}
 
-What a pipeline has been doing, after the fact
+Get the history of a pipeline
 
 <Badge type="warning" text="read" /> <Badge type="info" text="getPipelineHistory" /> — Any signed-in user.
 
-Throughput and failures over time, kept in the server's memory so that something which broke overnight can still be read in the morning.
+Returns the throughput and the failures of a pipeline over time. The server keeps this data in memory.
 
-This is the counterpart to `/events`, not a replay of it. The event stream is a live sample: it is only produced while a browser is attached and it drops passes under load on purpose. History is fed by counters the run loop keeps regardless of who is watching, so it is complete in what it counts — and correspondingly it carries no message payloads at all, only counts, and failures aggregated to one entry per distinct message with a first-seen, a last-seen and a tally.
+The history is not a copy of `/events`. The event stream is a live sample. It runs only while a client listens, and it drops passes under load. The history comes from counters that the run loop always updates. Thus, its counts are complete. It contains no message payloads. It contains counts, and one failure record for each different error message, with the first time, the last time and a count.
 
-Buckets are contiguous and oldest first, including empty ones: a run of zeroes is a pipeline that stopped, which is a different fact from a gap and is spelled differently.
+The buckets are oldest first, with no gaps, and empty buckets are included. A sequence of zero counts means that the pipeline stopped.
 
-An unknown or newly created pipeline answers with an empty history rather than a 404 — a pipeline that has not done anything yet is not an error. How much is kept is the `history.retention_secs` in the server config; when that is zero nothing is recorded and this always answers empty.
+For an unknown pipeline or a new pipeline, the response is an empty history, not a 404. `history.retention_secs` in the server config sets how long the server keeps the history. When it is zero, the server records nothing and the response is always empty.
 
 **path parameters**
 
 | name | description |
 | --- | --- |
-| `pipeline_id` | Id of the pipeline. |
+| `pipeline_id` | The id of the pipeline. |
 
 **query parameters** — all optional, so a bare request to this path is a working request.
 
 | name | description |
 | --- | --- |
-| `resolution` | `coarse` (the default) — a minute a bucket, over the configured retention, which is the overnight record. `fine` — five seconds a bucket over the last half hour, which is what a card's live chart is backfilled from so it starts full rather than drawing itself over the next two minutes. |
+| `resolution` | `coarse` (the default): one bucket for each minute, over the configured retention. `fine`: one bucket for each 5 s, over the last 30 minutes. An unknown value gives `coarse`. |
 
 **responses**
 
 | status | body | description |
 | --- | --- | --- |
-| `200` | [PipelineHistory](#schema-pipelinehistory) | The pipeline's history at the resolution asked for. |
+| `200` | [PipelineHistory](#schema-pipelinehistory) | The history of the pipeline at the requested resolution. |
 
 ### `GET /api/pipelines/{pipeline_id}/transforms/{index}/script` {#get-api-pipelines--pipeline_id--transforms--index--script}
 
-The script a running transform was built from
+Get the script of a running transform
 
 <Badge type="warning" text="read" /> <Badge type="info" text="getPipelineScript" /> — Any signed-in user.
 
-The rhai source of one `script` transform in a running pipeline, and every module it imported — which is what a card's viewer reads, and the only way to see a `file` script from the browser at all.
+Returns the rhai source of one `script` transform in a running pipeline, and each module that it imports. Use it to read the script of a `file` source over HTTP.
 
-This is the text the pipeline was **built** with, not the file as it stands now. A file source and its imports are read once, when the pipeline is built, and a running script never reads the filesystem again, so the code worth showing is the code that is running. When a file has been edited (or removed) since, `changed_on_disk` says so on the script or the module concerned; reloading the config from disk picks the change up.
+This is the text that kayak used to **build** the pipeline. kayak reads a file source and its imports one time, when it builds the pipeline. A running script does not read the filesystem again. If a file changed or was removed after the build, `changed_on_disk` is true on that script or module. To use the change, reload the config from disk.
 
 **path parameters**
 
 | name | description |
 | --- | --- |
-| `pipeline_id` | Id of the pipeline. |
-| `index` | Position of the transform in the pipeline's chain, counted from zero. |
+| `pipeline_id` | The id of the pipeline. |
+| `index` | The position of the transform in the chain of the pipeline, from zero. |
 
 **responses**
 
 | status | body | description |
 | --- | --- | --- |
 | `200` | [LoadedScript](#schema-loadedscript) | The script, as built. |
-| `404` | [ApiError](#schema-apierror) | No pipeline of that id is running, or the transform at that position is not a `script` — or there is no transform there at all. |
+| `404` | [ApiError](#schema-apierror) | No pipeline runs with that id, or the transform at that position is not a `script`, or there is no transform at that position. |
 
 ### `GET /api/pipelines/{pipeline_id}/config` {#get-api-pipelines--pipeline_id--config}
 
-One pipeline's config, as a config file would write it
+Get the config of one pipeline as text
 
 <Badge type="warning" text="read" /> <Badge type="info" text="getPipelineConfig" /> — Any signed-in user.
 
-The config of a running pipeline rendered as text, in YAML or JSON — what a card's source view shows and copies. It is rendered by the same code a save writes the config file with, so it is spelled exactly as that pipeline's entry in a saved file would be, with the `id` filled in.
+Returns the config of a running pipeline as YAML or JSON text. kayak uses the same code as a save to the config file. Thus, the text is the same as the entry of the pipeline in a saved file, with the `id` included.
 
-This is the config the pipeline is **running**, which is not necessarily what is on disk: the graph can be edited without being saved. Credentials are the unresolved `${NAME}` templates they are configured as, and live on the connections the config names rather than in it.
+This is the config that the pipeline **runs**. It can be different from the file on disk, because you can change the graph without a save. Credentials appear as their `${NAME}` references. They are on the connections that the config names, not in the config.
 
 **path parameters**
 
 | name | description |
 | --- | --- |
-| `pipeline_id` | Id of the pipeline. |
+| `pipeline_id` | The id of the pipeline. |
 
 **query parameters** — all optional, so a bare request to this path is a working request.
 
 | name | description |
 | --- | --- |
-| `format` | `yaml` or `json`. Without one — or with one that is neither — the config file's own format, and JSON for a server with no config file. The response says which it is. |
+| `format` | `yaml` or `json`. Without a value, or with a different value, the response uses the format of the config file. On a server with no config file, it uses JSON. The response tells you the format. |
 
 **responses**
 
 | status | body | description |
 | --- | --- | --- |
-| `200` | [PipelineSource](#schema-pipelinesource) | The pipeline's config as text. |
-| `404` | [ApiError](#schema-apierror) | No pipeline of that id is running. |
+| `200` | [PipelineSource](#schema-pipelinesource) | The config of the pipeline as text. |
+| `404` | [ApiError](#schema-apierror) | No pipeline runs with that id. |
 
 ### `POST /api/scripts/dry-run` {#post-api-scripts-dry-run}
 
-Run a script over some messages, without creating a pipeline
+Run a script over messages, without a pipeline
 
 <Badge type="warning" text="admin" /> <Badge type="info" text="dryRunScript" /> — Signed-in users with the `admin` role.
 
-A `script` transform is the one component whose configuration can be wrong in a way the config's *shape* cannot express: for every other component, a config that deserializes and builds does what it says, and for this one the interesting mistakes are all inside a string. This endpoint is where that string gets checked.
+Compiles a `script` and runs it over the messages in the body. Use it to test a script before you put it in a pipeline. The dry run uses the same runner, the same operation limit and the same sandbox as a running transform.
 
-It compiles the script and runs it over the messages in the body, through the same runner and under the same operation budget and sandbox a running transform gets — a dry run that could disagree with production would be worse than none, because it would be trusted.
+**A script with an error gives a 200, not a 400.** The response is a tagged union on `outcome`. With `emitted`, it contains the batches. With `failed`, it contains the error message, with a line and a column. A 400 means that the request is not valid: the JSON is malformed, or a `file` source cannot be read.
 
-**A script with a bug in it is a 200, not a 400.** The request was well formed and the server answered it completely; where the bug is *is* the answer. The response is a tagged union: `emitted` carries the batches, `failed` carries the message with a line and column an editor can point at. A 400 here means the request itself was wrong — malformed JSON, or a `file` source naming something unreadable.
-
-State is **never live**. The run gets a private bucket seeded from `state` in the body and thrown away afterwards, and what it holds at the end comes back in the response. Reading production state would make the answer depend on what the server happened to be doing; writing it would give a dry run side effects.
+The dry run **never uses live state**. It gets a private bucket, filled from `state` in the body. The response contains the contents of the bucket at the end. Then kayak discards the bucket.
 
 **request body** — [DryRunRequest](#schema-dryrunrequest) The script, and the messages to run it over.
 
@@ -203,49 +203,49 @@ State is **never live**. The run gets a private bucket seeded from `state` in th
 
 | status | body | description |
 | --- | --- | --- |
-| `200` | [DryRunResponse](#schema-dryrunresponse) | The script ran, or it did not compile — the `outcome` field says which. |
-| `400` | [ApiError](#schema-apierror) | The request itself was wrong: malformed JSON, or a `file` source that could not be read. |
-| `500` | [ApiError](#schema-apierror) | Something went wrong on the server. The body says what. |
+| `200` | [DryRunResponse](#schema-dryrunresponse) | The script ran, or it did not compile. The `outcome` field tells you which. |
+| `400` | [ApiError](#schema-apierror) | The request is not valid: the JSON is malformed, or a `file` source cannot be read. |
+| `500` | [ApiError](#schema-apierror) | An error occurred on the server. The body describes the error. |
 
 ### `POST /api/inputs/sample` {#post-api-inputs-sample}
 
-Fetch a few real messages from an input, without creating a pipeline
+Read a few messages from an input, without a pipeline
 
 <Badge type="warning" text="admin" /> <Badge type="info" text="sampleInput" /> — Signed-in users with the `admin` role.
 
-Configuring a stream you cannot see is guesswork, and every field reference downstream — a column's `field`, a filter's comparison — is a name someone had to already know. This builds the input in the body exactly as a pipeline would, takes up to `max_messages` from it within `timeout_ms`, and drops it.
+Builds the input in the body as a pipeline does. Then it reads up to `max_messages` messages in `timeout_ms`, and stops the input. Use it to see the fields of a stream before you configure the transforms and the outputs.
 
-The **real** input, including its `envelope`, so the metadata fields the messages will actually carry are in the sample too. Its `buffer` is the one thing ignored: a buffer's job is to make the pipeline wait, which is not what a sample is for. Anything the sample did differently comes back in `notes`.
+The sample uses the **real** input, with its `envelope`. Thus, the sample contains the metadata fields. The sample ignores the `buffer` of the input. `notes` in the response lists each change that the sample made.
 
-**Sampling is not free for every kind of input, and the ones where it isn't say so.** A kafka sample runs under a throwaway consumer group, so it neither rebalances the pipeline's group nor commits on its behalf; an mqtt sample connects under a client id of its own, because a broker disconnects the older client holding one. An `http` input is refused outright with a 400 — it is posted to rather than read from, so there is nothing to fetch.
+**Some inputs change their behavior for a sample, and `notes` tells you.** A kafka sample uses a temporary consumer group. Thus, it does not rebalance the group of the pipeline and does not commit offsets. An mqtt sample uses its own client id, because a broker disconnects the older client with the same id. An `http` input gives a 400, because clients post to it and there is nothing to read.
 
-**No messages is a 200 with an empty list.** A subject nobody is publishing to is a real state of the world and the answer to the question asked; none of these inputs can replay what was published before the sample started.
+**No messages gives a 200 with an empty list.** These inputs cannot read messages that were published before the sample started.
 
-**request body** — [SampleRequest](#schema-samplerequest) The input to read from, and how much to take.
+**request body** — [SampleRequest](#schema-samplerequest) The input to read from, and the limits of the read.
 
 **responses**
 
 | status | body | description |
 | --- | --- | --- |
-| `200` | [SampleResponse](#schema-sampleresponse) | The sample was taken — `outcome` says whether it produced messages or failed on the way. |
-| `400` | [ApiError](#schema-apierror) | The request itself was wrong: malformed JSON, an input that isn't a kind of input, or one that cannot be sampled at all. |
-| `500` | [ApiError](#schema-apierror) | Something went wrong on the server. The body says what. |
+| `200` | [SampleResponse](#schema-sampleresponse) | kayak took the sample. `outcome` tells you if it contains messages or if it failed. |
+| `400` | [ApiError](#schema-apierror) | The request is not valid: the JSON is malformed, the input type is unknown, or the input cannot be sampled. |
+| `500` | [ApiError](#schema-apierror) | An error occurred on the server. The body describes the error. |
 
 ### `POST /api/pipelines/dry-run` {#post-api-pipelines-dry-run}
 
-Run a draft's transforms over some messages, without creating a pipeline
+Run transforms over messages, without a pipeline
 
 <Badge type="warning" text="admin" /> <Badge type="info" text="dryRunPipeline" /> — Signed-in users with the `admin` role.
 
-What a `map` writes, what a `filter` drops, what a `reduce` collapses a batch to — questions the config cannot answer and one real message can. This builds the transforms in the body exactly as a pipeline would and puts the messages down the chain, reporting **what each stage handed on**.
+Builds the transforms in the body as a pipeline does, and puts the messages through the chain. The response tells you **what each stage sent on**. Use it to see what a `map` writes, what a `filter` drops or what a `reduce` makes from a batch.
 
-Per stage and as a list of batches, because that is where the answer usually is: a `splitter` hands on several batches, a `filter` that dropped everything hands on none, and a `buffer` hands on nothing because it is still holding what it was given. What a transform only releases when the chain is drained is reported separately, as `on_flush`, so a buffer doesn't look like it passes everything straight through. A transform that is *still* holding what it was given hands on nothing at all, and the chain says so rather than pretending the messages came through: a dry run has no tick to give a window that has thirty seconds left on it.
+The response gives a list of batches for each stage. For example, a `splitter` sends many batches, and a `filter` that dropped all messages sends none. A `buffer` sends nothing while it holds the messages. At the end, kayak drains the chain. The response gives what a transform releases then as `on_flush`. A transform that still holds messages after the drain sends nothing, and the response shows that. A dry run has no clock tick, so a window with 30 s left does not close.
 
-**There are no outputs and there cannot be.** A dry run that emitted would be a pipeline; everything up to the outputs is a question about the data, and the outputs are the part that changes somebody else's system.
+**A dry run has no outputs.** It changes no external system.
 
-**State is never live**, exactly as for a script dry run: the buckets are private to the request, seeded from `buckets` in the body, returned in the response and thrown away with it.
+The dry run **never uses live state**, as with a script dry run. The buckets are private to the request. `buckets` in the body fills them, the response returns them, and then kayak discards them.
 
-A transform that cannot be built, or that fails on a message, is a 200 whose `outcome` is `failed` — the request was carried out and where it broke is the answer. The stages that completed first come back with it.
+A transform that does not build, or that fails on a message, gives a 200 with `outcome` set to `failed`. The response also contains the stages that completed before the failure.
 
 **request body** — [PipelineDryRunRequest](#schema-pipelinedryrunrequest) The messages, and the transforms to put them through.
 
@@ -253,29 +253,29 @@ A transform that cannot be built, or that fails on a message, is a 200 whose `ou
 
 | status | body | description |
 | --- | --- | --- |
-| `200` | [PipelineDryRunResponse](#schema-pipelinedryrunresponse) | The chain ran, or it broke on the way — the `outcome` field says which. |
-| `400` | [ApiError](#schema-apierror) | The request itself was wrong: malformed JSON, or a transform that isn't a kind of transform. |
-| `500` | [ApiError](#schema-apierror) | Something went wrong on the server. The body says what. |
+| `200` | [PipelineDryRunResponse](#schema-pipelinedryrunresponse) | The chain ran, or it failed. The `outcome` field tells you which. |
+| `400` | [ApiError](#schema-apierror) | The request is not valid: the JSON is malformed, or a transform type is unknown. |
+| `500` | [ApiError](#schema-apierror) | An error occurred on the server. The body describes the error. |
 
 ## connections {#tag-connections}
 
-The systems pipelines talk to, named once and referred to by the components that use them.
+The systems that pipelines connect to. You declare each system one time, with a name, and components refer to the name.
 
 ### `GET /api/connections` {#get-api-connections}
 
-The connections pipelines can name
+List the connections
 
 <Badge type="warning" text="read" /> <Badge type="info" text="listConnections" /> — Any signed-in user.
 
-Keyed by name, which is the same shape as the connections file itself — what the UI lists and what gets committed are one thing, so there is no second format to keep in step.
+Returns the connections, as an object from name to connection. This is the same shape as the connections file.
 
-Credentials come back as the unresolved `${NAME}` templates they are configured as, never as their values.
+Credentials appear as their `${NAME}` references. The response never contains the secret values.
 
 **responses**
 
 | status | body | description |
 | --- | --- | --- |
-| `200` | [Connections](#schema-connections) | Every configured connection, in name order. |
+| `200` | [Connections](#schema-connections) | All connections, in alphabetical order of name. |
 
 ### `POST /api/connections` {#post-api-connections}
 
@@ -283,19 +283,19 @@ Add a connection
 
 <Badge type="warning" text="admin" /> <Badge type="info" text="createConnection" /> — Signed-in users with the `admin` role.
 
-Changes what the *next* pipeline build can name, and nothing else: a component reads its connection once, when it is built, so editing or adding one reaches only new and rebuilt pipelines.
+Adds a connection. A component reads its connection one time, when kayak builds the component. Thus, a new or changed connection has an effect only on new and rebuilt pipelines.
 
-Like creating a pipeline this writes nothing to disk; the save does, and it writes the config and the connections file together.
+This endpoint writes nothing to disk. A save writes the config file and the connections file together.
 
-**request body** — [CreateConnectionRequest](#schema-createconnectionrequest) The connection, and the name to file it under.
+**request body** — [CreateConnectionRequest](#schema-createconnectionrequest) The connection, and its name.
 
 **responses**
 
 | status | body | description |
 | --- | --- | --- |
-| `201` | [CreateConnectionRequest](#schema-createconnectionrequest) | Added, echoed back as stored. |
-| `409` | [ApiError](#schema-apierror) | A connection of that name already exists. |
-| `500` | [ApiError](#schema-apierror) | Something went wrong on the server. The body says what. |
+| `201` | [CreateConnectionRequest](#schema-createconnectionrequest) | The connection is added. The body is the connection as stored. |
+| `409` | [ApiError](#schema-apierror) | A connection with that name already exists. |
+| `500` | [ApiError](#schema-apierror) | An error occurred on the server. The body describes the error. |
 
 ### `DELETE /api/connections/{connection_id}` {#delete-api-connections--connection_id-}
 
@@ -303,85 +303,85 @@ Remove a connection
 
 <Badge type="warning" text="admin" /> <Badge type="info" text="deleteConnection" /> — Signed-in users with the `admin` role.
 
-Refused while a running pipeline still names it — that comes back as a 409 listing the pipelines, so the answer says what to do about it.
+Removes a connection. If a running pipeline uses the connection, kayak does not remove it. The response is then a 409, and the body lists the pipelines.
 
 **path parameters**
 
 | name | description |
 | --- | --- |
-| `connection_id` | The name the connection is filed under. |
+| `connection_id` | The name of the connection. |
 
 **responses**
 
 | status | body | description |
 | --- | --- | --- |
-| `204` | — | Removed. |
-| `404` | [ApiError](#schema-apierror) | No connection of that name exists. |
-| `409` | [ApiError](#schema-apierror) | Running pipelines still name it; the body lists them. |
-| `500` | [ApiError](#schema-apierror) | Something went wrong on the server. The body says what. |
+| `204` | — | The connection is removed. |
+| `404` | [ApiError](#schema-apierror) | No connection with that name exists. |
+| `409` | [ApiError](#schema-apierror) | Running pipelines use the connection. The body lists them. |
+| `500` | [ApiError](#schema-apierror) | An error occurred on the server. The body describes the error. |
 
 ## state {#tag-state}
 
-What the pipelines remember between batches. Read-only: buckets are declared in the config and filled by `remember` transforms, so there is nothing here to write.
+The contents of the state buckets. These endpoints are read-only. You declare buckets in the config, and `remember` transforms write to them.
 
 ### `GET /api/state` {#get-api-state}
 
-The state buckets and how full they are
+List the state buckets
 
 <Badge type="warning" text="read" /> <Badge type="info" text="listStateBuckets" /> — Any signed-in user.
 
-One entry per bucket declared under `state` in the config, in name order, with the number of keys it is currently holding and the bounds it is held to.
+Returns one entry for each bucket under `state` in the config, in alphabetical order. Each entry has the number of keys in the bucket and the limits of the bucket.
 
-Buckets are not created or deleted through the API — they are part of the graph's logic and live in the config file, so this family is read-only.
+The API cannot make or remove buckets. You declare buckets in the config file. These endpoints are read-only.
 
 **responses**
 
 | status | body | description |
 | --- | --- | --- |
-| `200` | [BucketSummary](#schema-bucketsummary) | Every declared bucket, in name order. |
+| `200` | [BucketSummary](#schema-bucketsummary) | All declared buckets, in alphabetical order. |
 
 ### `GET /api/state/{bucket}` {#get-api-state--bucket-}
 
-What one bucket is holding
+Get the contents of a bucket
 
 <Badge type="warning" text="read" /> <Badge type="info" text="getStateBucket" /> — Any signed-in user.
 
-The keys and the values remembered under each, most recently written first — which is the order that makes a live bucket readable, since the key that just changed is the one worth seeing.
+Returns the keys and the values for each key. The key with the most recent write is first.
 
-Capped: a bucket may hold thousands of keys and this returns a page of them, with `truncated` saying so and `keys` giving the real total. It is a snapshot taken under the bucket's lock, so it is consistent with itself and stale the moment it is sent.
+The response has a limit. A bucket can hold thousands of keys, and the response returns one page of them. `truncated` tells you that the response is not complete, and `keys` gives the total. kayak takes the snapshot under the lock of the bucket. Thus, the snapshot is consistent, but it can be out of date when it arrives.
 
 **path parameters**
 
 | name | description |
 | --- | --- |
-| `bucket` | Name of the bucket, as declared in the config. |
+| `bucket` | The name of the bucket, as declared in the config. |
 
 **responses**
 
 | status | body | description |
 | --- | --- | --- |
-| `200` | [BucketContents](#schema-bucketcontents) | The bucket's contents. |
-| `404` | [ApiError](#schema-apierror) | No bucket of that name is declared. |
+| `200` | [BucketContents](#schema-bucketcontents) | The contents of the bucket. |
+| `404` | [ApiError](#schema-apierror) | No bucket with that name is declared. |
 
 ## config {#tag-config}
 
-The config file: how the server was started, writing the running graph out to it, and throwing the graph away to start again from it.
+The config file: how the server started, a save of the running graph to the file, and a reload of the graph from the file.
 
 ### `GET /api/settings` {#get-api-settings}
 
-How the server was started, and whether it has drifted
+Get the config state of the server
 
 <Badge type="warning" text="read" /> <Badge type="info" text="getSettings" /> — Any signed-in user.
 
-Which config file the server is working against, where a save would land, and whether the running graph has diverged from what was last loaded or saved.
+Returns the config file of the server, the location where a save writes, and whether the running graph is different from the last load or save.
 
-The absence of a config file doesn't mean edits can't be saved: it means there is no file *yet*, and a save creates one.
+If the server has no config file, you can still save. The save makes the file.
 
 **responses**
 
 | status | body | description |
 | --- | --- | --- |
-| `200` | [SettingsDto](#schema-settingsdto) | The server's configuration state. |
+| `200` | [SettingsDto](#schema-settingsdto) | The config state of the server. |
 
 ### `POST /api/config/save` {#post-api-config-save}
 
@@ -389,96 +389,96 @@ Write the running graph to a config file
 
 <Badge type="warning" text="admin" /> <Badge type="info" text="saveConfig" /> — Signed-in users with the `admin` role.
 
-Writes the running pipelines out in a deterministic order (topological, ties by id) via a temp file and a rename, because the result is meant to be committed. The connections file and the canvas layout are written beside it by the same save — a config saved without the connections it names would not start.
+Writes the running pipelines to a config file, in a deterministic order: topological, then by id. kayak writes a temporary file and then renames it. The same save writes the connections file and the layout file beside the config file. A config file without its connections does not start.
 
-`name` is a **bare file name**, not a path, and is validated as one: the file lands in the server's save directory and nowhere else. Using the loaded file's own name is how you overwrite it.
+`name` must be a **file name with no path**. kayak writes the file only to the save directory of the server. To overwrite the loaded file, use its name.
 
-`format` picks JSON or YAML; leaving it out takes the format from the name's extension. On a server started without `--config` this is how a config file comes into existence at all, and from that save on it is the file `revert` reloads.
+`format` selects JSON or YAML. Without `format`, the extension of the name sets the format. On a server started without `--config`, a save makes the config file. After that save, `revert` reloads this file.
 
-`overwrite` defaults to `true`, which is what makes saving over the loaded file the ordinary thing it has always been. Sending `false` turns the save into a **create**: if the name — or either of the two files written beside it — is already on disk, the request is refused with a 409 and nothing is written. That is what the UI's project creator sends, since it suggests a file name into a directory its user has often never looked at.
+The default of `overwrite` is `true`. With `false`, the save only makes new files. If the file, or one of the two files beside it, exists, the response is a 409 and kayak writes nothing.
 
-**request body** — [SaveConfigRequest](#schema-saveconfigrequest) The file name to write, optionally the format, and whether an existing file may be replaced.
+**request body** — [SaveConfigRequest](#schema-saveconfigrequest) The file name, the format (optional), and whether to replace an existing file.
 
 **responses**
 
 | status | body | description |
 | --- | --- | --- |
-| `200` | [SaveConfigResponse](#schema-saveconfigresponse) | Written, with the path it landed at. |
-| `409` | [ApiError](#schema-apierror) | `overwrite` was `false` and the file — or one of the two written beside it — is already there. Nothing was written; the message names the files. |
-| `422` | [ApiError](#schema-apierror) | `name` is not a bare file name. |
-| `500` | [ApiError](#schema-apierror) | Something went wrong on the server. The body says what. |
+| `200` | [SaveConfigResponse](#schema-saveconfigresponse) | The file is written. The body contains its path. |
+| `409` | [ApiError](#schema-apierror) | `overwrite` is `false`, and the file or one of the two files beside it exists. kayak wrote nothing. The message names the files. |
+| `422` | [ApiError](#schema-apierror) | `name` is not a file name with no path. |
+| `500` | [ApiError](#schema-apierror) | An error occurred on the server. The body describes the error. |
 
 ### `POST /api/config/revert` {#post-api-config-revert}
 
-Throw the running graph away and reload the config file
+Stop the running graph and reload the config file
 
 <Badge type="warning" text="admin" /> <Badge type="info" text="revertConfig" /> — Signed-in users with the `admin` role.
 
-The undo for a session of editing, and as destructive as it sounds: every running pipeline is stopped and the graph is rebuilt from the file.
+Stops all running pipelines and builds the graph again from the config file. Use it to discard the changes of a session. You cannot undo it.
 
-The file is parsed *before* the runtime is torn down, so a file broken by hand costs you nothing. The connections are reloaded first, since the pipelines being rebuilt name them. It waits for the old pipelines to actually stop before rebuilding, so the response landing means the new graph is the only one running.
+kayak parses the file **before** it stops the pipelines. If the file has an error, the running graph does not change. kayak reloads the connections first, because the pipelines use them. kayak waits for the old pipelines to stop before it builds the new ones. Thus, when the response arrives, only the new graph runs.
 
 **responses**
 
 | status | body | description |
 | --- | --- | --- |
-| `204` | — | Reloaded; the graph is what the file says. |
-| `500` | [ApiError](#schema-apierror) | There is no config file to revert to, or it could not be read or parsed — in which case the running graph is left alone. |
+| `204` | — | The graph is reloaded and is the same as the file. |
+| `500` | [ApiError](#schema-apierror) | There is no config file, or kayak cannot read or parse it. The running graph does not change. |
 
 ## layout {#tag-layout}
 
-Where the cards sit on the canvas. Not configuration — this is written to its own file, and immediately.
+The positions of the pipelines in the web UI. kayak writes the layout to its own file immediately. It is not configuration.
 
 ### `GET /api/layout` {#get-api-layout}
 
-Where the cards sit on the canvas
+Get the layout of the web UI
 
 <Badge type="warning" text="read" /> <Badge type="info" text="getLayout" /> — Any signed-in user.
 
-Served separately from `/api/pipelines` because it is a different kind of thing: that is what the server is running, this is how someone chose to look at it. A client that ignores this endpoint gets an automatically laid out graph, which is the point.
+Returns the positions of the pipelines in the web UI. The layout is separate from `/api/pipelines`, because it does not change what the server runs. A client that ignores the layout gets an automatic layout.
 
-Only pipelines someone has actually moved appear.
+The layout contains only the pipelines that a user moved.
 
 **responses**
 
 | status | body | description |
 | --- | --- | --- |
-| `200` | [LayoutFile](#schema-layoutfile) | The stored arrangement. |
+| `200` | [LayoutFile](#schema-layoutfile) | The stored layout. |
 
 ### `PUT /api/layout` {#put-api-layout}
 
-Replace the arrangement and write it to disk
+Replace the layout and write it to disk
 
 <Badge type="warning" text="admin" /> <Badge type="info" text="replaceLayout" /> — Signed-in users with the `admin` role.
 
-The whole map, not a patch: the canvas already holds the complete arrangement, and a full replacement is what makes "reset everything to automatic" a send of `{}` rather than its own endpoint.
+Replaces the full layout. This is not a patch. To reset all positions to automatic, send `{}`.
 
-This is the one edit that writes immediately rather than waiting for a save, and it never counts as an unsaved change — moving a card changes nothing the server runs, so there is nothing worth reviewing before it lands. Without a config file there is nowhere to write, and the arrangement is kept in memory until a save creates one.
+kayak writes the layout to disk immediately. A layout change is never an unsaved change, because it does not change what the server runs. Without a config file, kayak keeps the layout in memory until a save makes the file.
 
-**request body** — [LayoutFile](#schema-layoutfile) The complete arrangement.
+**request body** — [LayoutFile](#schema-layoutfile) The complete layout.
 
 **responses**
 
 | status | body | description |
 | --- | --- | --- |
-| `204` | — | Stored, and written if there is a file to write. |
-| `500` | [ApiError](#schema-apierror) | Something went wrong on the server. The body says what. |
+| `204` | — | The layout is stored, and written to disk if there is a config file. |
+| `500` | [ApiError](#schema-apierror) | An error occurred on the server. The body describes the error. |
 
 ## events {#tag-events}
 
-What the pipelines are doing, as it happens.
+A live feed of the activity of the pipelines.
 
 ### `GET /events` {#get-events}
 
-What the pipelines are doing, as it happens
+Stream the activity of the pipelines
 
 <Badge type="warning" text="read" /> <Badge type="info" text="streamEvents" /> — Any signed-in user.
 
-A `text/event-stream` of `UiEvent`s: a batch arriving at a stage, or a failure handling one. Each SSE `data:` field is one event as JSON.
+A `text/event-stream` of `UiEvent`s. An event is a batch that arrives at a stage, or a failure. Each SSE `data:` field is one event as JSON.
 
-It is a broadcast that drops rather than blocks, so a slow consumer misses events instead of slowing the pipelines down — which is what `seq` is for, since a gap in it is the honest report of what was missed. Run loops only publish at all while somebody is listening.
+The stream is a broadcast. A slow client misses events, and the pipelines do not wait for it. A gap in `seq` shows the missed events. The run loops publish events only while a client listens.
 
-The stream is explicitly a dev-tooling affordance rather than a durable feed, and is marked temporary in the source.
+The stream is a tool for development. It is not a durable feed, and it can change.
 
 **responses**
 
@@ -488,37 +488,37 @@ The stream is explicitly a dev-tooling affordance rather than a durable feed, an
 
 ## auth {#tag-auth}
 
-Signing in and out. Present on every server; on one with no accounts configured they report that there is nothing to sign into.
+Sign in and sign out. These endpoints exist on every server. On a server with no accounts, they report that there is nothing to sign in to.
 
 ### `GET /api/auth/me` {#get-api-auth-me}
 
-Who the caller is, and whether this server asks
+Get the caller, and whether the server asks for credentials
 
-<Badge type="tip" text="public" /> <Badge type="info" text="whoAmI" /> — Callable without credentials, even when authentication is on.
+<Badge type="tip" text="public" /> <Badge type="info" text="whoAmI" /> — No credentials are necessary, also when authentication is on.
 
-`authentication_required` says whether this server checks credentials at all — a server started without a `--server-config`, or with one declaring `auth: {type: none}`, answers `false` and lets everybody do everything.
+`authentication_required` tells you whether the server checks credentials. It is `false` on a server started without `--server-config`, or with `auth: {type: none}`. Such a server permits all operations to all callers.
 
-`username` and `role` describe the caller, and are both null for one who presented nothing. Note that a null `role` is not the same as `read`: a reader may see the graph, a signed-out caller may not.
+`username` and `role` describe the caller. Both are null for a caller with no credentials. A null `role` is different from `read`: a `read` user can see the graph, and a caller with no credentials cannot.
 
-Callable without credentials, necessarily — it is the endpoint that answers 'do I need to show a login page'.
+This endpoint needs no credentials. A client uses it to decide whether to show a login page.
 
 **responses**
 
 | status | body | description |
 | --- | --- | --- |
-| `200` | [AuthDto](#schema-authdto) | Who you are. Not an error even when the answer is nobody. |
+| `200` | [AuthDto](#schema-authdto) | The caller. This is not an error, also when the caller has no credentials. |
 
 ### `POST /api/auth/login` {#post-api-auth-login}
 
-Exchange credentials for a session
+Change credentials into a session
 
-<Badge type="tip" text="public" /> <Badge type="info" text="login" /> — Callable without credentials, even when authentication is on.
+<Badge type="tip" text="public" /> <Badge type="info" text="login" /> — No credentials are necessary, also when authentication is on.
 
-Checks a username and password against the accounts in the server's settings file and, on success, sets an `HttpOnly` session cookie.
+Checks a username and a password against the accounts in the server settings file. If they are correct, the response sets an `HttpOnly` session cookie.
 
-This is for browsers. Everything else should send `Authorization: Basic` on each request instead and never come here — the cookie exists because `EventSource`, which the UI consumes `/events` with, cannot send headers.
+This endpoint is for browsers. Other clients send `Authorization: Basic` with each request and do not use this endpoint. The cookie exists because `EventSource` cannot send headers, and the web UI reads `/events` with `EventSource`.
 
-A wrong password and an unknown username are the same 401, deliberately: the endpoint is not a way to find out who has an account. On a server with no accounts configured this is not an error either — it answers 200 with `authentication_required` false, because there is nothing to sign into.
+A wrong password and an unknown username give the same 401. Thus, the endpoint does not tell a caller which accounts exist. On a server with no accounts, the response is a 200 with `authentication_required` set to false.
 
 **request body** — [LoginRequest](#schema-loginrequest) The credentials to check.
 
@@ -526,23 +526,25 @@ A wrong password and an unknown username are the same 401, deliberately: the end
 
 | status | body | description |
 | --- | --- | --- |
-| `200` | [AuthDto](#schema-authdto) | Signed in. The session cookie is in `Set-Cookie`. |
-| `401` | [ApiError](#schema-apierror) | Wrong username or password — the body does not say which. |
-| `500` | [ApiError](#schema-apierror) | Something went wrong on the server. The body says what. |
+| `200` | [AuthDto](#schema-authdto) | Signed in. The `Set-Cookie` header contains the session cookie. |
+| `401` | [ApiError](#schema-apierror) | The username or the password is wrong. The body does not tell you which. |
+| `500` | [ApiError](#schema-apierror) | An error occurred on the server. The body describes the error. |
 
 ### `POST /api/auth/token` {#post-api-auth-token}
 
-Exchange an identity provider's JWT for a session
+Change a JWT from an identity provider into a session
 
-<Badge type="tip" text="public" /> <Badge type="info" text="tokenLogin" /> — Callable without credentials, even when authentication is on.
+<Badge type="tip" text="public" /> <Badge type="info" text="tokenLogin" /> — No credentials are necessary, also when authentication is on.
 
-The embedding flow's endpoint, on a server whose auth section is `jwt`: a host application that already holds a token from the shared identity provider — Cognito, Keycloak — puts it on the iframe URL as `?auth_token=`, and the UI posts it here once. The token is checked against the issuer's published keys and, on success, exchanged for the same `HttpOnly` session cookie a password login sets — so the token itself appears in exactly one request and never in an access log again.
+Use this endpoint on a server with the `jwt` auth scheme, to embed kayak in a host application. The host has a token from an identity provider, for example Cognito or Keycloak. It puts the token on the iframe URL as `?auth_token=`, and the web UI posts it here one time.
 
-The session ends no later than the token's `exp`: the cookie must not outlive the identity provider's word that the caller is signed in.
+kayak checks the token against the published keys of the issuer. If the token is valid, the response sets the same `HttpOnly` session cookie as a password login. Thus, the token is in one request only, and not in later access logs.
 
-API callers don't need this exchange — on a `jwt` server, `Authorization: Bearer <token>` works directly on every endpoint.
+The session ends at the `exp` of the token, or earlier.
 
-Every way of being refused is the same 401, deliberately: an expired token, a wrong issuer and a server that doesn't take tokens at all are not distinctions worth handing to a guesser.
+API clients do not need this endpoint. On a `jwt` server, `Authorization: Bearer <token>` works on all endpoints.
+
+All refusals give the same 401. For example, an expired token, a wrong issuer and a server that does not accept tokens all give a 401.
 
 **request body** — [TokenLoginRequest](#schema-tokenloginrequest) The token to check.
 
@@ -550,19 +552,19 @@ Every way of being refused is the same 401, deliberately: an expired token, a wr
 
 | status | body | description |
 | --- | --- | --- |
-| `200` | [AuthDto](#schema-authdto) | Signed in. The session cookie is in `Set-Cookie`. |
-| `401` | [ApiError](#schema-apierror) | The token was not accepted, or this server does not take tokens. |
-| `500` | [ApiError](#schema-apierror) | Something went wrong on the server. The body says what. |
+| `200` | [AuthDto](#schema-authdto) | Signed in. The `Set-Cookie` header contains the session cookie. |
+| `401` | [ApiError](#schema-apierror) | kayak did not accept the token, or this server does not accept tokens. |
+| `500` | [ApiError](#schema-apierror) | An error occurred on the server. The body describes the error. |
 
 ### `POST /api/auth/logout` {#post-api-auth-logout}
 
-End the session this request carries
+End the session of this request
 
 <Badge type="warning" text="read" /> <Badge type="info" text="logout" /> — Any signed-in user.
 
-Clears the cookie in the browser and drops the session on the server, so a copy of the cookie taken from somewhere else stops working too.
+Clears the cookie in the browser and removes the session on the server. Thus, a copy of the cookie also stops working.
 
-Idempotent: 204 whether or not there was a session to end.
+The response is a 204, also when there was no session.
 
 **responses**
 
@@ -572,33 +574,33 @@ Idempotent: 204 whether or not there was a session to end.
 
 ## reference {#tag-reference}
 
-The API describing itself.
+The description of the API.
 
 ### `GET /api/docs` {#get-api-docs}
 
-The component reference, as data
+Get the component reference as data
 
-<Badge type="tip" text="public" /> <Badge type="info" text="listComponents" /> — Callable without credentials, even when authentication is on.
+<Badge type="tip" text="public" /> <Badge type="info" text="listComponents" /> — No credentials are necessary, also when authentication is on.
 
-Every input, transform, output and connection kayak can build, with their fields, types and documentation — reflected out of the config schemas, so it cannot drift from what the server actually accepts.
+Returns all inputs, transforms, outputs and connections that kayak can build, with their fields, types and documentation. kayak generates the data from the config schemas. Thus, the data agrees with what the server accepts.
 
-The `/docs` *page* generates the same thing in the browser from the same code, so this endpoint isn't what renders it. It exists because the component reference is useful to things that aren't a browser: a config linter, editor completion, a test.
+The `/docs` page generates the same data in the browser. Use this endpoint for other tools, for example a config linter, editor completion or a test.
 
 **responses**
 
 | status | body | description |
 | --- | --- | --- |
-| `200` | [[ComponentDoc](#schema-componentdoc)] | Every component, grouped by nothing — `family` says which plugin point each one plugs into. |
+| `200` | [[ComponentDoc](#schema-componentdoc)] | All components. `family` gives the family of each component. |
 
 ### `GET /api/openapi.json` {#get-api-openapi.json}
 
-This API, as an OpenAPI 3.1 document
+Get this API as an OpenAPI 3.1 document
 
-<Badge type="tip" text="public" /> <Badge type="info" text="getOpenApi" /> — Callable without credentials, even when authentication is on.
+<Badge type="tip" text="public" /> <Badge type="info" text="getOpenApi" /> — No credentials are necessary, also when authentication is on.
 
-Generated from the same table the routes are registered from, with schemas reflected out of the Rust types — so it describes the server that is serving it.
+kayak generates the document from the same table that registers the routes. The schemas come from the Rust types. Thus, the document describes the server that serves it.
 
-Point a renderer, a client generator or a contract test at it. `GET /api/reference` is one such renderer, served alongside.
+Use it with a renderer, a client generator or a contract test. `GET /api/reference` is a renderer on the same server.
 
 **responses**
 
@@ -608,13 +610,13 @@ Point a renderer, a client generator or a contract test at it. `GET /api/referen
 
 ### `GET /api/reference` {#get-api-reference}
 
-The rendered API reference
+Get the rendered API reference
 
-<Badge type="tip" text="public" /> <Badge type="info" text="apiReference" /> — Callable without credentials, even when authentication is on.
+<Badge type="tip" text="public" /> <Badge type="info" text="apiReference" /> — No credentials are necessary, also when authentication is on.
 
-An HTML page rendering `/api/openapi.json`, with a request panel for trying endpoints against this server.
+An HTML page that renders `/api/openapi.json`. It has a request panel to try the endpoints on this server.
 
-The `/docs` page in the UI covers the same endpoints in kayak's own furniture; this is the full reference, schemas and all.
+The `/docs` page in the web UI shows the same endpoints. This page is the full reference, with the schemas.
 
 **responses**
 

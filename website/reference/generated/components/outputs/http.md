@@ -2,27 +2,27 @@
 
 ## `http` {#output-http}
 
-Sends the batch to an http endpoint — the pipeline pushes its results at a webhook or an ingest API rather than at a broker.
+Sends the batch to an http endpoint, for example a webhook or an ingest API.
 
-The counterpart of the `http` *input*, and the sending half of what the `http` transform does: the transform replaces the batch with the reply, this one is the end of the chain and the reply's body is discarded. What is not discarded is its **status** — anything but a 2xx fails the batch, which is what makes a webhook that is rejecting the data show up on the card rather than being written off as delivered.
+The output ignores the body of the reply. A status other than 2xx fails the batch. The error contains the reply of the endpoint. Use the `http` transform if the pipeline needs the reply.
 
 | field | type | | description |
 | --- | --- | --- | --- |
-| `url` | `string` | <Badge type="warning" text="required" /> | endpoint to send to, e.g. `https://example.com/hooks/readings` |
-| `auth` | `bearer \| header` | <Badge type="info" text="optional" /> | what this output presents to be allowed to send. Absent — the default — sends no credential at all, which is what an open webhook wants. |
-| `body` | `batch` \| `message` | <Badge type="info" text="optional" /> | what one request carries. Defaults to `batch`, which is one request per batch. |
-| `timeout_seconds` | `integer` | <Badge type="info" text="optional" /> | how long one request may take before it is given up on, in seconds. Defaults to 30. A batch whose request times out is a failed batch, so this is also the longest a slow endpoint can hold the pipeline up. |
-| `verb` | `GET` \| `POST` \| `PUT` \| `PATCH` \| `DELETE` | <Badge type="info" text="optional" /> | http method. Defaults to `POST`. `GET` and `DELETE` are refused at build time — an output exists to send the messages somewhere, and a method with no body has nowhere to put them. |
+| `url` | `string` | <Badge type="warning" text="required" /> | The endpoint to send to, for example `https://example.com/hooks/readings`. |
+| `auth` | `bearer \| header` | <Badge type="info" text="optional" /> | The credential that the output sends. If you do not set it, the output sends no credential. |
+| `body` | `batch` \| `message` | <Badge type="info" text="optional" /> | The content of one request. The default is `batch`, one request for each batch. |
+| `timeout_seconds` | `integer` | <Badge type="info" text="optional" /> | The maximum time for one request, in s. The default is 30. A request that times out fails the batch. Thus a slow endpoint stops the pipeline for this time at most. |
+| `verb` | `GET` \| `POST` \| `PUT` \| `PATCH` \| `DELETE` | <Badge type="info" text="optional" /> | The http method. The default is `POST`. `GET` and `DELETE` fail to build, because a request with no body cannot send the messages. |
 
 **`auth` — `type: "bearer"`**
 
 | field | type | | description |
 | --- | --- | --- | --- |
-| `token` | `string` | <Badge type="warning" text="required" /> | the token. A `${NAME}` reference, so the config file holds the name and the secret store holds the value. |
+| `token` | `string` | <Badge type="warning" text="required" /> | The token. Use a `${NAME}` reference, so that the config file keeps only the name and the secret store keeps the value. |
 
 **`auth` — `type: "header"`**
 
 | field | type | | description |
 | --- | --- | --- | --- |
-| `name` | `string` | <Badge type="warning" text="required" /> | the header's name, matched case-insensitively on the way in. On an `http` input it may not be one of the headers an `envelope` passes through, since that would write the credential into the messages. |
-| `value` | `string` | <Badge type="warning" text="required" /> | the exact value that header must have. A `${NAME}` reference, as above. |
+| `name` | `string` | <Badge type="warning" text="required" /> | The name of the header. The `http` input compares the name without case. On an `http` input, the name must not be a header that an `envelope` copies into the messages. |
+| `value` | `string` | <Badge type="warning" text="required" /> | The exact value of the header. Use a `${NAME}` reference. |

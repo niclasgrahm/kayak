@@ -1,9 +1,7 @@
 # database inputs
 
-Every other input is reached by its messages: a broker pushes, a device
-publishes, a client posts. A database does none of that, so the `postgres`
-and `clickhouse` inputs *ask* — a query on a timer, each row handed on as one
-message with the column names as its fields.
+The `postgres` and `clickhouse` inputs run a query on a timer. Each row becomes
+one message, with the column names as its fields.
 
 ```jsonc
 // config.json — follow a table as rows are added to it
@@ -20,10 +18,9 @@ message with the column names as its fields.
   "mode": { "type": "snapshot" } }
 ```
 
-The row is rendered by the server itself — `row_to_json` on postgres,
-`JSONEachRow` on ClickHouse — so a timestamp is ISO 8601, a `numeric` keeps
-its digits, a `jsonb` column arrives as the value it holds, and the list of
-what each type looks like is the server's rather than one maintained here:
+The server converts each row to JSON: postgres with `row_to_json`, ClickHouse
+with `JSONEachRow`. A timestamp is ISO 8601, a `numeric` keeps its digits, and a
+`jsonb` column gives the value that it holds:
 
 ```json
 {"id": 42, "sensor": "press-3", "value": 21.5, "recorded_at": "2026-01-01T12:00:00.123456+00:00"}
@@ -31,112 +28,132 @@ what each type looks like is the server's rather than one maintained here:
 
 ## a table and a query are the same thing
 
-`table` and `query` are two ways of naming a relation, and exactly one of them
-is given. Everything else is wrapped *around* it as a subquery — the `columns`
-projection, the cursor condition, the ordering, the page limit — so a
-hand-written query is the source and not the whole statement. An incremental
-read of a query needs no placeholder and no `ORDER BY` of its own; it needs
-only to return the field it follows. The query is one `SELECT`, with no
-trailing semicolon, and anything the server accepts in a subquery is fine,
-a `WITH` included.
+Give exactly one of `table` and `query`. The input puts it in a subquery. Then
+it adds the `columns` projection, the cursor condition, the order and the page
+limit around it.
 
-`columns` is a projection and nothing more: it generates the select list.
-There is deliberately no `exclude` — that would need the table's own column
-list to subtract from, and dropping a field is what a [`map`](/pipelines/reshaping-messages)
-already does. The one case an exclusion is really for, a blob column not worth
-transferring, is a `columns` list that leaves it out.
+- An incremental read of a `query` needs no placeholder and no `ORDER BY`. The
+  query must only return the field that the input follows.
+- The query must be one `SELECT` with no semicolon at the end. Anything that
+  the server accepts in a subquery is valid, including `WITH`.
+- `columns` is a list of the columns to select. To leave out a large column,
+  do not put it in the list. To remove a field later in the pipeline, use a
+  [`map`](/pipelines/reshaping-messages).
 
 ## the two modes
 
-**`snapshot`** reads the whole relation every tick, in one query, and hands on
-every row. That is for reference data — a table of recipes or thresholds that
-a `remember` transform keeps current, an aggregate the server computes — and
-for relations that fit in memory, since there is no page limit on a snapshot.
-With an `envelope`, every row of one read carries the same `polled_at`, which
-is what tells one snapshot's rows from the previous one's.
+### snapshot
 
-**`incremental`** follows a column that grows — an `id`, an `updated_at` — and
-reads only rows past the highest value already handed on, in pages ordered by
-that column. Everything worth knowing about it is a consequence of that
-**watermark**:
+**`snapshot`** reads the whole relation on each read, in one query. It sends
+every row. Use it for reference data, for example a table of recipes or
+thresholds that a `remember` transform keeps. Use it also for an aggregate that
+the server calculates.
 
-- **It lives in memory.** A restart starts over from `start_from`, so an
-  incremental input is *at least once* across a restart. `start_from`
-  defaults to `newest` — the first read finds the highest value there is and
-  reads only rows above it — because replaying a whole table into a pipeline
-  is the surprising outcome and the one to ask for. `oldest` reads the table
-  through first, page by page, and then follows it.
-- **It moves when rows are handed on**, not when they are delivered. The run
-  loop acknowledges a batch whether or not its outputs succeeded (see
-  [acknowledging an input](/pipelines/pipelines#acknowledging-an-input)), so
-  tying the watermark to the acknowledgement would buy nothing today, and
-  `ack: on_delivery` is refused rather than accepted as a promise the input
-  cannot keep.
-- **Ties at a page boundary are handled.** Several rows can share a timestamp,
-  and a page that ends in the middle of them would lose the rest. A full page
-  is cut before its last distinct value and those rows are read again on the
-  next page, whole. The one page that cannot be cut — every row on it shares
-  the value — is handed on as it is, with a warning; raise `page_size` or
-  follow a field with fewer ties.
-- **Rows that commit late are never seen.** A row written with a cursor value
-  below the watermark — a long transaction, a clock behind the others — is
-  behind the input by the time it is visible. `lag_secs` holds the input back
-  from `now()` by that much to give such rows time to land. It cannot turn a
-  polling input into change-data capture; if you need every change the moment
-  it commits, that is a replication slot and a different component.
-- **Deletes are invisible, and updates only as visible as the field makes
-  them.** A row that is updated is read again only if the update moves its
-  cursor, which is what an `updated_at` column is for.
+A snapshot has no page limit. Use it only for a relation that fits in memory.
 
-**Index the field you follow.** Every read is `WHERE field > $1 ORDER BY field
-LIMIT n`, which is one index probe on an indexed column and a scan of the whole
-table on an unindexed one, once per tick, against a database that has other
-work to do.
+With an `envelope`, all rows of one read have the same `polled_at`. Use it to
+tell the rows of one snapshot from the rows of the previous one.
+
+### incremental
+
+**`incremental`** follows a column that grows, for example an `id` or an
+`updated_at`. It reads only the rows above the highest value that it sent. This
+value is the **watermark**. The input reads in pages, in the order of the
+column.
+
+- **`field`**: the column to follow. The input never reads rows where this
+  column is `null`.
+- **`start_from`**: `newest` (the default) or `oldest`. With `newest`, the
+  first read finds the highest value and reads only rows above it. With
+  `oldest`, the input reads the whole table first, page by page, and then
+  follows it.
+- **`lag_secs`**: for a timestamp column only. The input leaves rows that are
+  newer than `now()` minus this many seconds for a later read. This gives a
+  late transaction time to commit. The server refuses it on a numeric column.
+
+Rules for the watermark:
+
+- **It is in memory.** After a restart, the input starts again from
+  `start_from`. Thus an incremental input is *at least once* across a restart.
+- **It moves when the input sends the rows.** It does not wait for the
+  outputs. The run loop acknowledges a batch whether or not its outputs
+  succeed (see [acknowledging an input](/pipelines/pipelines#acknowledging-an-input)).
+  Thus `ack: on_delivery` fails at build time.
+- **The input handles ties at a page boundary.** Many rows can have the same
+  timestamp. The input cuts a full page before its last distinct value. It
+  reads those rows again, complete, on the next page. If all rows on a page have
+  the same value, the input cannot cut the page. It sends the page as it is and
+  logs a warning. Increase `page_size`, or follow a field with fewer ties.
+- **The input does not see rows that commit late.** A long transaction can
+  commit a row with a value below the watermark. Use `lag_secs` for this case.
+  For every change at commit time, you need change data capture. This input
+  does not do that.
+- **The input does not see deletes.** It sees an update only if the update
+  increases the cursor field. Use an `updated_at` column for this.
+
+**Index the field that you follow.** Each read is `WHERE field > $1 ORDER BY
+field LIMIT n`. On an indexed column, this is one index lookup. On a column
+without an index, it is a scan of the whole table on each read.
 
 ## paging, batching and the interval
 
-`page_size` (1000 by default) bounds one query and so bounds what the input
-holds. A read that fills a page asks for the next one straight away; only a
-page that comes back short ends the read, and only then does `interval_secs`
-start — counted from the *end* of one read to the start of the next, so a read
-that takes longer than the interval never overlaps itself. The first read
-happens as soon as the pipeline starts.
+- **`page_size`**: the largest number of rows in one query. The default is
+  1000. A full page starts the next query at once. A short page ends the read.
+- **`interval_secs`**: the wait after the end of one read and before the next
+  read. Thus a slow read never overlaps the next one. The first read occurs when
+  the pipeline starts.
+- **`max_batch`**: the largest number of rows in one batch. The default is 1.
+  The input does not wait for a batch to fill.
 
-`max_batch` is the same knob it is everywhere: rows already read are grouped
-up to that many, and the input never waits for a batch to fill. It defaults
-to one message per batch, which is the promise every input makes; a poll that
-returns a thousand rows is a thousand passes through the run loop unless it is
-raised, and raising it is the cheapest fix there is.
+### performance
 
-A database that is down is a read that fails: reported once on the card,
-retried on the same backoff every broker input reconnects on, and the
-watermark untouched, so nothing is skipped over an outage. A table that does
-not exist yet is the same case and comes right when the table does.
+Set `max_batch`. With the default of 1, a read of 1000 rows makes 1000 passes
+through the run loop. With `max_batch: 1000`, it makes one pass.
+
+## failures
+
+If the database is down, the read fails. The input reports the error one time
+and retries with backoff. The watermark does not change, so the input skips no
+rows. A table that does not exist yet is the same case. The input starts to
+read when the table exists.
 
 ## sampling
 
-The sample button works, and better than on a broker: a database still holds
-what was written before the sample started, so the rows are there to show.
-An input that would start from the newest rows is sampled from the oldest
-instead, and the sample says so — the pipeline itself is untouched.
+To see some rows before you create the pipeline, post the input to
+`POST /api/inputs/sample`:
+
+```bash
+curl -X POST localhost:6767/api/inputs/sample \
+     -H 'content-type: application/json' \
+     -d '{"input": {"type": "postgres", "connection": "local-postgres",
+          "table": "readings", "interval_secs": 5,
+          "mode": {"type": "incremental", "field": "id"}}}'
+```
+
+If the input starts from the newest rows, the sample reads from the oldest
+rows. The `notes` in the reply say so. The sample does not change the pipeline.
+The web UI uses the same endpoint.
 
 ## what is on the wire
 
-The watermark travels as **text**. Postgres hands back `(field)::text` beside
-each row and the next query casts it with `($1::text)::<type>`, the type
-read off a prepared statement; ClickHouse hands back `toString(field)` and
-the next query does `CAST({cursor:String} AS <type>)`, the type read off a
-`DESCRIBE`. Text is the one representation every type round-trips exactly, and
-it means the input never has to bind a timestamp or a numeric as a value of
-its own — the same division of labour the [database outputs](/io/database-outputs)
-buy with `$n::text::NUMERIC`, in the other direction.
+The watermark goes to the server as **text**. The server casts it to the type
+of the column.
 
-Two ClickHouse settings ride on every request and are the difference between
-rows a pipeline can use and rows it cannot:
-`output_format_json_quote_64bit_integers=0`, because the server quotes every
-`Int64` as a string by default, and `date_time_output_format=iso`, so a
-`DateTime` arrives as `2026-01-01T12:00:00Z` rather than a bare date the
-postgres output would refuse to write.
+- Postgres returns `(field)::text` with each row. The next query uses
+  `($1::text)::<type>`. The input reads the type from a prepared statement.
+- ClickHouse returns `toString(field)`. The next query uses
+  `CAST({cursor:String} AS <type>)`. The input reads the type with `DESCRIBE`.
+
+Text keeps the exact value of every type. The
+[database outputs](/io/database-outputs) use the same method in the other
+direction.
+
+The ClickHouse input sends two settings with each request:
+
+- `output_format_json_quote_64bit_integers=0`, so an `Int64` arrives as a
+  number. By default, ClickHouse sends it as a string.
+- `date_time_output_format=iso`, so a `DateTime` arrives as
+  `2026-01-01T12:00:00Z`. The postgres output refuses the default format.
 
 <!--@include: ../reference/generated/components/inputs/postgres.md-->
 

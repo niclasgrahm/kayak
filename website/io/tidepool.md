@@ -1,9 +1,8 @@
 # tidepool
 
-Tidepool is the live analytics server kayak was built beside: tables held in
-memory, a semantic model declared as code, dashboards that update as data
-arrives. kayak is its connector layer. The `tidepool` **output** writes a
-pipeline's messages into one of its tables, one request per batch.
+Tidepool is a live analytics server. It keeps tables in memory and updates its
+dashboards as data arrives. The `tidepool` **output** writes the messages of a
+pipeline into one Tidepool table, with one request for each batch.
 
 ## the connection
 
@@ -16,10 +15,13 @@ tidepool:
   allow_http: true                  # a token over plaintext has to be asked for
 ```
 
-`token` is the server's ingest token (its admin token works too). Leave it out
-for a server whose ingest is open, which is how a local one runs. With a token,
-a plaintext `http://` url needs `allow_http`, for the clickhouse connection's
-reason: the token goes with every batch.
+- **`url`**: the address of the Tidepool server.
+- **`token`**: the ingest token of the server. The admin token also works.
+  Omit it when the ingest of the server is open. A local server is open by
+  default.
+- **`allow_http`**: set this to `true` to send a token over a plain `http://`
+  url. Without it, kayak refuses the connection, because the token goes with
+  every batch.
 
 ## the output
 
@@ -40,18 +42,22 @@ outputs:
         type: decimal
 ```
 
-The table has to exist: Tidepool's project declares it, with its column
-types, and kayak never creates one. On start the output reads the table and
-checks the mapping against it, so these fail the start rather than every
-batch:
+The table must exist. The Tidepool project declares the table and its column
+types. kayak does not create tables in Tidepool.
 
-- a column the table doesn't have (the error lists the ones it has)
-- a type Tidepool can't take from that mapping type
-- a column Tidepool needs in every row that the mapping writes null for, or
-  doesn't write at all
+At startup, the output reads the table and compares the mapping with it. These
+problems stop the start, before any batch:
 
-`columns` is spelled as the [database outputs](./database-outputs) spell it.
-The pairs that fit:
+- a column that the table does not have (the error lists the columns that it
+  has);
+- a mapping type that the Tidepool column cannot take;
+- a column that Tidepool requires in every row, which the mapping does not
+  write or writes as null.
+
+If Tidepool is not reachable at startup, the output tries again with backoff.
+
+`columns` uses the same format as the
+[database outputs](./database-outputs#column-mapping). These pairs are valid:
 
 | mapping type | Tidepool column |
 | --- | --- |
@@ -64,33 +70,50 @@ The pairs that fit:
 | `timestamp` | `timestamptz` |
 | `date` | `date` |
 
-A decimal goes across with the digits it was written with, never through a
-float. Leave `columns` out to send each message as a row as it is, for messages
-already shaped like the table.
+A `decimal` keeps the digits of the message. It does not go through a float.
+
+Omit `columns` when the messages already have the shape of the table. The
+output then sends each message as one row.
+
+Other fields:
+
+- **`on_extra_fields`**: `ignore` (the default) or `error`, for a message with
+  fields that no column reads.
+- **`retry_seconds`**: how long the output retries one batch. The default
+  is 30.
+- **`timeout_seconds`**: the longest time for one request. The default is 30.
 
 ## what fails a batch, and what is retried
 
-Tidepool checks every value and writes a batch whole or not at all. A batch
-it refuses fails with its problems quoted by row and column, as the card
-shows them:
+Tidepool checks every value. It writes all of a batch or none of it. When it
+refuses a batch, the error quotes the problems by row and column:
 
 ```
 tidepool at http://localhost:7070/ (table 'readings') refused the batch
 (400 Bad Request): row 0, column at: a value is required; and 2 more
 ```
 
-That batch isn't sent again; it would be refused the same way. After a
-refusal the output reads the table again before the next batch, because
-Tidepool's config changes live: if a column was dropped meanwhile, the card
-says so instead of repeating row errors.
+The output does not send a refused batch again, because Tidepool refuses it
+again. Before the next batch, the output reads the table again. The table
+config of Tidepool can change while it runs. If someone removed a column, the
+error then names the column.
 
-A busy server (`503`, which is Tidepool's backpressure) or one that can't be
-reached is retried after its `Retry-After`, for up to `retry_seconds` (30 by
-default). The pipeline waits meanwhile, which is the point: there is nowhere
-better to put the messages. Every attempt carries the same `Idempotency-Key`,
-`{pipeline}:{run}:{batch}`, and Tidepool answers a key it has seen with the
-first answer, so a request that landed and lost its reply is never written
-twice.
+The output retries these failures for up to `retry_seconds`:
 
-Batches are worth making big: put a `buffer` on the input (a second, or a few
-thousand messages) rather than sending a request per message.
+- a `503` (Tidepool is busy);
+- other `5xx` statuses;
+- a `409` that says Tidepool still processes the same idempotency key;
+- a server that is not reachable.
+
+The output waits for the `Retry-After` time of the reply, or uses its backoff.
+The pipeline waits during the retries. All attempts for one batch use the same
+`Idempotency-Key`, `{pipeline}:{run}:{batch}`. For 24 hours, Tidepool returns
+the first answer for a key that it knows. Thus a retry never writes a batch two
+times.
+
+A `400`, a `404`, a `422` or another `409` fails the batch at once.
+
+## performance
+
+Send large batches. Put a `buffer` on the input, for example 1 second or a few
+thousand messages. One request for each message is slow.

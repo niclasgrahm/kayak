@@ -1,144 +1,169 @@
 # kayak
 
-**kayak** is a graph-based stream processing engine: you describe pipelines as
-`inputs → transforms → outputs` in a config file, kayak runs them, and a live
-web canvas shows the graph while it's working — a card for every pipeline,
-edges for how data flows between them, and a log and throughput chart on each
-one.
+**kayak** is a stream processor. It is one Rust binary. You write pipelines as
+`inputs → transforms → outputs` in a config file, and you keep that file in
+version control. You run the container image with that file. That is the
+complete deployment.
 
-Messages are plain JSON the whole way through. There is no schema to define up
-front, and a pipeline can feed another pipeline, so the graph is a DAG rather
-than a list of independent jobs.
+Users of Benthos / Redpanda Connect, Vector or Fluent Bit know this model.
+kayak works the same way.
 
-![the state tab, showing a running graph and a bucket inspector](state-tab.png)
+## try it
 
-## try it, in one command
-
-```bash
-docker run --rm -p 6767:6767 --entrypoint sh ghcr.io/niclasgrahm/kayak \
-  -c 'echo "[{id: ticker, inputs: [{type: dummy, duration: 1}]}]" > c.yaml && exec kayak --config c.yaml'
-```
-
-Open **http://localhost:6767** — one pipeline, ticking once a second. Click the
-card to watch its log, drag it around, add another pipeline fed by it.
-
-That config really is the whole thing: `transforms` and `outputs` are optional,
-so an input on its own is a complete pipeline. Add a `stdout` output and the
-messages show up in your terminal too:
+This command starts one pipeline. The pipeline sends a message to stdout each
+second:
 
 ```bash
 docker run --rm -p 6767:6767 --entrypoint sh ghcr.io/niclasgrahm/kayak \
   -c 'echo "[{id: ticker, inputs: [{type: dummy, duration: 1}], outputs: [{type: stdout}]}]" > c.yaml && exec kayak --config c.yaml'
 ```
 
-## running your own pipelines
-
-Write a config and mount it:
-
-```yaml
-# pipelines/config.yaml
-- id: readings
-  inputs:
-    - type: dummy
-      duration: 1
-  outputs:
-    - type: stdout
-```
+`transforms` and `outputs` are optional. An input with no output is also a
+complete pipeline:
 
 ```bash
-docker run -p 6767:6767 -v "$PWD/pipelines:/kayak" \
-  ghcr.io/niclasgrahm/kayak --config /kayak/config.yaml
+docker run --rm -p 6767:6767 --entrypoint sh ghcr.io/niclasgrahm/kayak \
+  -c 'echo "[{id: ticker, inputs: [{type: dummy, duration: 1}]}]" > c.yaml && exec kayak --config c.yaml'
 ```
 
-JSON works everywhere YAML does — the extension decides.
+## run your own pipelines
 
-Swap the dummy for a real source when you're ready. Inputs and outputs that
-talk to a broker, a database or a bucket name a **connection** instead of
-repeating a host: connections are declared once in a file beside the config,
-and their credentials are `${NAME}` references resolved from the environment
-or a secrets file, never written back out. See
+1. Write a config file:
+
+   ```yaml
+   # pipelines/config.yaml
+   - id: readings
+     inputs:
+       - type: dummy
+         duration: 1
+     outputs:
+       - type: stdout
+   ```
+
+2. Commit the file.
+3. Mount the directory and name the file:
+
+   ```bash
+   docker run -p 6767:6767 -v "$PWD/pipelines:/kayak" \
+     ghcr.io/niclasgrahm/kayak --config /kayak/config.yaml
+   ```
+
+4. To change a pipeline, change the file, review the diff and deploy again.
+
+JSON works in all places where YAML works. The file extension sets the format.
+
+When you replace the dummy with a real source, declare the system as a
+**connection**. A connection is a broker, a database or a bucket with a name.
+kayak reads connections from a file beside the config
+(`config.connections.yaml`). Each component refers to a connection by name.
+Credentials are `${NAME}` references. kayak resolves them from the environment
+or from a secrets file. See
 [connections](https://propell.dev/kayak/io/connections).
 
-## what you can wire together
+## why kayak
+
+**Performance.** kayak has no garbage collector. The `just bench` harness
+measures the cost of the run loop. On an Apple M1 Max, in process, the harness
+measured these numbers:
+
+| scenario | result |
+| --- | --- |
+| one pipeline, no transforms | about 7 million passes per second |
+| one pipeline, batches of 100, one `filter` | about 31 million messages per second |
+| 1000 pipelines at the same time, batches of 100 | about 5.6 billion messages per second, 14 MiB resident |
+| one pipeline | about 9 MiB resident |
+
+The numbers exclude I/O (no network, no disk). They show that the runtime is
+not the bottleneck. They are not end-to-end throughput.
+
+**Composability.** The parts are small and they connect:
+
+- A pipeline can have many inputs and many outputs.
+- The `pipeline` input reads the output of another pipeline. You can make
+  fan-out, fan-in and chains of any depth.
+- A connection declares a system one time. Many components refer to it.
+- State buckets are shared between pipelines.
+- Each transform does one thing. Use `script` (rhai) when the other transforms
+  are not sufficient.
+- Message metadata is ordinary JSON fields, so each transform can use it.
+
+**Feature completeness.** The inventory is below. The
+[reference](https://propell.dev/kayak/reference/) documents each component and
+each field. kayak generates the reference from its code, and your server shows
+it at `/docs`.
+
+## the components
 
 | | |
 | --- | --- |
-| **inputs** | nats, kafka, mqtt, redis, OPC UA, http (pushed to, rather than polled), another pipeline, and a dummy source for testing |
-| **transforms** | filter, reduce/aggregate with grouping, map (reshape and cast fields), buffer, split, a scripted transform in [rhai](https://rhai.rs), an http call out, and `remember`/`recall` over named state buckets |
-| **outputs** | postgres and ClickHouse with real column mapping, files and S3-compatible object storage with rotation, kafka, nats, mqtt, redis, http, and stdout |
+| **inputs** | `nats`, `kafka`, `mqtt`, `redis`, `opcua`, `http` (other systems post to it), `http_poll`, `postgres`, `clickhouse`, `indu`, `pipeline` (the output of another pipeline), `dummy` (for tests) |
+| **transforms** | `filter`, `map`, `reducer` (aggregate, with `group_by`), `splitter`, `buffer`, `remember` / `recall` (state buckets), `http` (call a service or a model), `script` (rhai), and the streaming statistics: `deadband`, `throttle`, `pivot`, `derive`, `rolling`, `smooth`, `detect`, `resample`, `features` |
+| **outputs** | `postgres` and `clickhouse` with column mapping, `file` and `s3` with rotation, `kafka`, `nats`, `mqtt`, `redis`, `http`, `indu`, `tidepool`, `stdout` |
+| **connections** | `kafka`, `nats`, `mqtt`, `redis`, `postgres`, `clickhouse`, `s3`, `file`, `opcua`, `indu`, `tidepool` |
 
-Any input can be batched by count, by time window, or both. Every component and
-every field is documented in the [reference](https://propell.dev/kayak/reference/),
-which is generated from the code — and served by your own server at `/docs`.
-
-## why
-
-Most stream-processing tools are either code — write a consumer, wire it up
-yourself — or heavyweight platforms that hide the running graph behind logs and
-dashboards you assemble separately. kayak aims at the space between: pipelines
-you describe in a config file, watch running as a graph, and reshape from the
-same screen. It's built for small-to-medium data-wrangling jobs where you want
-to *see* what's happening rather than trust that it is.
-
-The canvas is a real view onto the running server, not a mockup. Watching it,
-editing the graph from it, and driving the same JSON/HTTP API by hand are the
-same interface.
+Each input can buffer by count, by time window, or by the first of the two.
 
 ## running it for real
 
-The image is the runtime and nothing else — no config is baked in, so bare it
-serves an empty graph. A deployment is a config mounted in and named on the
-command line; the `ENTRYPOINT` is the binary, so the container's arguments are
-the server's flags.
+The image contains the runtime and nothing else. It contains no config, so a
+container with no arguments serves an empty graph. To deploy, mount a config
+and name it on the command line. The `ENTRYPOINT` of the image is the binary,
+so the arguments of the container are the flags of the server.
 
-Four things worth knowing before you put it anywhere real:
+Read these points before you deploy kayak:
 
-- **Pin a tag.** `latest` is the tip of `main`. Release tags are `0.1.1` and
-  `0.1`. Both `linux/amd64` and `linux/arm64` are published, built natively.
-- **Turn authentication on.** Without `--server-config`, anyone who can reach
-  the port can create and delete pipelines and rewrite the config. kayak warns
-  about this at startup when it isn't bound to loopback.
-- **`--data-dir` bounds where pipelines may write.** Without it, file outputs
-  refuse to build at all — a closed default rather than a stub.
-- **Pre-1.0.** The config format isn't stable yet, and breaking changes will
-  happen between minor versions.
+- **Pin a tag.** `latest` is the tip of `main`. A release tag such as `v0.2.2`
+  publishes the image tags `0.2.2` and `0.2`. The images are for `linux/amd64`
+  and `linux/arm64`.
+- **Turn on authentication.** Without `--server-config`, any user who can
+  reach the port can create and delete pipelines and rewrite the config. kayak
+  shows a warning at startup when it has no authentication and binds to an
+  address other than loopback. The two roles are `admin` and `read`.
+- **Set `--data-dir`.** `file` outputs can write only under this directory.
+  Without the flag, `file` outputs do not build.
+- **kayak is pre-1.0.** The config format is not stable. Breaking changes can
+  occur between minor versions.
 
-[Deployment](https://propell.dev/kayak/operating/deployment) covers
-Kubernetes, probes, the uid the image runs as, and what it deliberately
-doesn't bake in.
+[Deployment](https://propell.dev/kayak/operating/deployment) tells you about
+Kubernetes, probes and the uid of the image.
 
 ## documentation
 
-- **[the docs site](https://propell.dev/kayak/)** — the guide: the canvas and
-  the editor, the pipeline and metadata model, every transform and output,
-  connections, secrets, authentication and deployment, plus a generated
-  reference for every component and every endpoint.
-- **`/docs` on your own server** — the same reference, generated from the
-  binary you're running. The HTTP API is also served as OpenAPI at
+- **[The doc site](https://propell.dev/kayak/)**: the guide (the pipeline
+  model, metadata, transforms, outputs, connections, secrets, authentication
+  and deployment) and a generated reference for each component and each
+  endpoint.
+- **`/docs` on your server**: the same reference, generated from the binary
+  that you run. The server also gives the HTTP API as OpenAPI 3.1 at
   `/api/openapi.json`.
-- **[docs/roadmap.md](docs/roadmap.md)** — what's in flight, planned, or known
-  to be broken.
+- **[docs/roadmap.md](docs/roadmap.md)**: the work in progress, the planned
+  work and the known problems.
+
+The server also has a web UI. Use it to look at the running graph and the
+messages in each pipeline. You do not need it to run kayak.
 
 ## contributing
 
-Bug reports and "I tried to do X and couldn't" issues are the most useful thing
-right now. [CONTRIBUTING.md](CONTRIBUTING.md) has how to build from source, how
-to run the tests, and what a contribution is licensed under.
-[CLAUDE.md](CLAUDE.md) is the architecture tour — how the crates fit together
-and why particular things are built the way they are.
+Bug reports are the most useful contribution now. Reports of the type "I tried
+to do X and could not" are also useful.
+[CONTRIBUTING.md](CONTRIBUTING.md) tells you how to build from source, how to
+run the tests, and the licence of a contribution.
+[CLAUDE.md](CLAUDE.md) describes the architecture: how the crates fit together
+and the reasons for the design.
 
-Security issues go through [SECURITY.md](SECURITY.md), not the issue tracker.
+Report security issues through [SECURITY.md](SECURITY.md). Do not use the
+issue tracker for them.
 
 ## licence
 
-kayak is **AGPL-3.0-or-later**, except `kayak-core` — the shared config types
-and DTOs — which is **Apache-2.0** so anything talking to kayak can be built
-against it freely.
+kayak is **AGPL-3.0-or-later**. The exception is `kayak-core` (the shared
+config types and DTOs), which is **Apache-2.0**. Any software that talks to
+kayak can use `kayak-core` freely.
 
-Self-hosting, modifying and running kayak inside a company are what the licence
-is for, and ask nothing of you beyond keeping the notices. Offering a *modified*
-kayak to others over a network is the case the AGPL covers, and a commercial
-licence is available for anyone that doesn't suit.
+You can self-host kayak, modify it and run it inside a company. The licence
+asks only that you keep the notices. The AGPL applies when you offer a
+*modified* kayak to other users over a network. A commercial licence is
+available if the AGPL does not suit you.
 
-[licensing.md](licensing.md) has the reasoning, the third-party notices and what
-a contribution is licensed under.
+[licensing.md](licensing.md) gives the reasons, the third-party notices and the
+licence of a contribution.
