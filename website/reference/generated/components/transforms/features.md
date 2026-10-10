@@ -2,24 +2,28 @@
 
 ## `features` {#transform-features}
 
-Folds a window of readings into one descriptor message per group — the seven numbers with the identifiers that a model endpoint actually wants, rather than the four hundred raw readings. Pair it with a `buffer` on the input, or it will only ever see one reading at a time.
+Changes a batch of readings into one message of features for each group. Use it to send a small set of numbers to a model, in place of the raw readings. Put a `buffer` on the input. Without it, each batch has only one reading.
 
-Each feature in `include` is written under its own name (`mean`, `rms`, `crest_factor` …), each `bands` entry under its `as`, and the `group_by` fields under their leaf names, the reducer's way. A feature that has no answer for the window — a slope of one point, a tone in a flat signal — is `null`. The spectral ones (`dominant_frequency`, `bands`) need a sample rate, which is `sample_rate_hz` when given and otherwise derived from the `time` field; without either they refuse to build. Nothing here keeps state, so no bucket is needed.
+The transform writes:
+
+- each feature in `include` under its own name, for example `mean`, `rms` or `crest_factor`, - each entry in `bands` under its `as`, - the `group_by` fields under their leaf names, as `reduce` does.
+
+A feature with no value for the window is `null`. For example, a slope of one point is `null`. The spectral features (`dominant_frequency`, `bands`) need a sample rate. kayak uses `sample_rate_hz`, or calculates the rate from the `time` field. Without one of the two, the pipeline does not build. This transform keeps no state and needs no state bucket.
 
 | field | type | | description |
 | --- | --- | --- | --- |
-| `field` | `string` | <Badge type="warning" text="required" /> | the numeric field the window is of |
-| `bands` | `list of band` | <Badge type="info" text="optional" /> | frequency bands whose power is wanted, each under its `as` |
-| `group_by` | `list of string` | <Badge type="info" text="optional" /> | the fields that identify a series, the reducer's way. Leave it out for the whole batch as one window |
-| `include` | `list of mean \| std \| min \| max \| range \| slope \| skew \| kurtosis \| rms \| crest_factor \| zero_crossings \| n_peaks \| autocorr1 \| dominant_frequency \| count \| duration` | <Badge type="info" text="optional" /> | which features to compute, each written under its own name |
-| `on_missing` | `error` \| `skip` | <Badge type="info" text="optional" /> | what to do about a reading missing the field or a group field |
-| `sample_rate_hz` | `number` | <Badge type="info" text="optional" /> | the readings' sample rate in hertz, for the spectral features. Wins over one derived from `time`, for a source whose timestamps are coarse |
-| `time` | `string` | <Badge type="info" text="optional" /> | the field carrying each reading's time — RFC 3339 or milliseconds since the epoch. Gives `slope` and `duration` their seconds and the spectral features their sample rate |
+| `field` | `string` | <Badge type="warning" text="required" /> | The numeric field to read. |
+| `bands` | `list of band` | <Badge type="info" text="optional" /> | The frequency bands to calculate the power of. The transform writes each one under its `as`. Give `include`, `bands` or both. |
+| `group_by` | `list of string` | <Badge type="info" text="optional" /> | The fields that identify a series, as in `reduce`. Leave it out to use the full batch as one window. |
+| `include` | `list of mean \| std \| min \| max \| range \| slope \| skew \| kurtosis \| rms \| crest_factor \| zero_crossings \| n_peaks \| autocorr1 \| dominant_frequency \| count \| duration` | <Badge type="info" text="optional" /> | The features to calculate. The transform writes each one under its own name. |
+| `on_missing` | `error` \| `skip` | <Badge type="info" text="optional" /> | What to do with a reading that does not have the field or a group field. The default is `error`. |
+| `sample_rate_hz` | `number` | <Badge type="info" text="optional" /> | The sample rate of the readings in hertz, for the spectral features. It must be more than zero. kayak uses it in place of the rate from `time`. Use it when the source has timestamps with low resolution. |
+| `time` | `string` | <Badge type="info" text="optional" /> | The field that holds the time of each reading, as an RFC 3339 string or as milliseconds since the epoch. `slope` and `duration` use it for seconds. The spectral features use it for the sample rate. |
 
 **`bands` — each entry**
 
 | field | type | | description |
 | --- | --- | --- | --- |
-| `low_hz` | `number` | <Badge type="warning" text="required" /> | the bottom of the band, in hertz, inclusive |
-| `high_hz` | `number` | <Badge type="warning" text="required" /> | the top of the band, in hertz, exclusive |
-| `as` | `string` | <Badge type="warning" text="required" /> | the field the band's power is written under |
+| `low_hz` | `number` | <Badge type="warning" text="required" /> | The lower limit of the band, in hertz. The band includes this value. |
+| `high_hz` | `number` | <Badge type="warning" text="required" /> | The upper limit of the band, in hertz. The band does not include this value. It must be more than `low_hz`. |
+| `as` | `string` | <Badge type="warning" text="required" /> | The field to write the power of the band to. |

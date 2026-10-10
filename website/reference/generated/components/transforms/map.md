@@ -2,45 +2,45 @@
 
 ## `map` {#transform-map}
 
-Rewrites the shape of every message: renames, promotions, constants, casts and projections, applied in order.
+Changes the shape of every message. A mapping can rename, move, cast or remove a field, or write a constant. The transform applies the mappings in order.
 
-Each entry in `mappings` reads fields from the message and writes one field back, and **later entries see what earlier ones wrote** — so an intermediate value is just a mapping whose target a later mapping reads (and, under `keep: all`, a `drop` takes away again).
+Each entry in `mappings` reads fields from the message and writes one field. A mapping can read the fields that earlier mappings wrote. Use this for intermediate values. With `keep: all`, a `drop` can remove them again.
 
-Reads are dotted paths, like everywhere else. Writes are too: an `as` of `sensor.id` puts the value inside a `sensor` object, creating it if it isn't there.
+Reads and writes use dotted paths. For example, an `as` of `sensor.id` writes the value inside a `sensor` object. If the object does not exist, the transform makes it.
 
-The message is passed through unchanged, with the mappings laid over it, unless `keep` says otherwise. One message always comes out — this never drops one, and never makes two. Reach for `filter` or `splitter` for those.
+By default, the message passes through with the mappings applied to it. `keep` can change this. One message goes in and one message comes out. To drop a message, use `filter`. To make many messages, use `splitter`.
 
 | field | type | | description |
 | --- | --- | --- | --- |
-| `mappings` | `list of copy \| constant \| coalesce \| cast \| concat \| arithmetic \| time_bucket \| drop` | <Badge type="warning" text="required" /> | what to write, in the order it is written. At least one, and no two may write the same field. |
-| `keep` | `all` \| `mapped` | <Badge type="info" text="optional" /> | whether fields nothing mapped survive |
-| `on_missing` | `error` \| `omit` \| `null` | <Badge type="info" text="optional" /> | what to do about a message missing a field a mapping reads. A `default` on the mapping itself is answered first, and is the better way to say that one particular field is expected to be absent. |
+| `mappings` | `list of copy \| constant \| coalesce \| cast \| concat \| arithmetic \| time_bucket \| drop` | <Badge type="warning" text="required" /> | The fields to write, in order. Give one mapping or more. Two mappings must not write the same field. |
+| `keep` | `all` \| `mapped` | <Badge type="info" text="optional" /> | Which fields of the input message the output keeps. The default is `all`. |
+| `on_missing` | `error` \| `omit` \| `null` | <Badge type="info" text="optional" /> | What to do with a message that does not have a field that a mapping reads. The default is `error`. A `default` on the mapping applies first. Use a `default` when you expect one field to be absent. |
 
 **`mappings` — each entry — `type: "copy"`**
 
 | field | type | | description |
 | --- | --- | --- | --- |
-| `from` | `string` | <Badge type="warning" text="required" /> | the field to read — a dotted path, like anywhere else |
-| `as` | `string` | <Badge type="info" text="optional" /> | the field to write. Left out, it is `from`'s last segment, which is the reading that makes promoting a nested value the short spelling. |
-| `default` | `text \| number \| boolean \| null` | <Badge type="info" text="optional" /> | what to write when `from` isn't there, instead of applying `on_missing` |
+| `from` | `string` | <Badge type="warning" text="required" /> | The field to read, as a dotted path. |
+| `as` | `string` | <Badge type="info" text="optional" /> | The field to write. The default is the last segment of `from`. |
+| `default` | `text \| number \| boolean \| null` | <Badge type="info" text="optional" /> | The value to write when the message does not have `from`. With it, `on_missing` does not apply. |
 
 **`mappings` — each entry.`default` — `type: "text"`**
 
 | field | type | | description |
 | --- | --- | --- | --- |
-| `value` | `string` | <Badge type="warning" text="required" /> | the text |
+| `value` | `string` | <Badge type="warning" text="required" /> | The text. |
 
 **`mappings` — each entry.`default` — `type: "number"`**
 
 | field | type | | description |
 | --- | --- | --- | --- |
-| `value` | `number` | <Badge type="warning" text="required" /> | the number |
+| `value` | `number` | <Badge type="warning" text="required" /> | The number. |
 
 **`mappings` — each entry.`default` — `type: "boolean"`**
 
 | field | type | | description |
 | --- | --- | --- | --- |
-| `value` | `boolean` | <Badge type="warning" text="required" /> | the flag |
+| `value` | `boolean` | <Badge type="warning" text="required" /> | The boolean value. |
 
 **`mappings` — each entry.`default` — `type: "null"`**
 
@@ -50,26 +50,26 @@ This component takes no configuration.
 
 | field | type | | description |
 | --- | --- | --- | --- |
-| `value` | `text \| number \| boolean \| null` | <Badge type="warning" text="required" /> | the value to write |
-| `as` | `string` | <Badge type="warning" text="required" /> | the field to write it to |
+| `value` | `text \| number \| boolean \| null` | <Badge type="warning" text="required" /> | The value to write. |
+| `as` | `string` | <Badge type="warning" text="required" /> | The field to write the value to. |
 
 **`mappings` — each entry.`value` — `type: "text"`**
 
 | field | type | | description |
 | --- | --- | --- | --- |
-| `value` | `string` | <Badge type="warning" text="required" /> | the text |
+| `value` | `string` | <Badge type="warning" text="required" /> | The text. |
 
 **`mappings` — each entry.`value` — `type: "number"`**
 
 | field | type | | description |
 | --- | --- | --- | --- |
-| `value` | `number` | <Badge type="warning" text="required" /> | the number |
+| `value` | `number` | <Badge type="warning" text="required" /> | The number. |
 
 **`mappings` — each entry.`value` — `type: "boolean"`**
 
 | field | type | | description |
 | --- | --- | --- | --- |
-| `value` | `boolean` | <Badge type="warning" text="required" /> | the flag |
+| `value` | `boolean` | <Badge type="warning" text="required" /> | The boolean value. |
 
 **`mappings` — each entry.`value` — `type: "null"`**
 
@@ -79,27 +79,27 @@ This component takes no configuration.
 
 | field | type | | description |
 | --- | --- | --- | --- |
-| `from` | `list of string` | <Badge type="warning" text="required" /> | the fields to try, in order. At least two — with one, this is a `copy`. |
-| `as` | `string` | <Badge type="warning" text="required" /> | the field to write the first value found to |
-| `default` | `text \| number \| boolean \| null` | <Badge type="info" text="optional" /> | what to write when none of them is there |
+| `from` | `list of string` | <Badge type="warning" text="required" /> | The fields to try, in order. Give two fields or more. |
+| `as` | `string` | <Badge type="warning" text="required" /> | The field to write the first value to. |
+| `default` | `text \| number \| boolean \| null` | <Badge type="info" text="optional" /> | The value to write when the message has none of the fields. |
 
 **`mappings` — each entry.`default` — `type: "text"`**
 
 | field | type | | description |
 | --- | --- | --- | --- |
-| `value` | `string` | <Badge type="warning" text="required" /> | the text |
+| `value` | `string` | <Badge type="warning" text="required" /> | The text. |
 
 **`mappings` — each entry.`default` — `type: "number"`**
 
 | field | type | | description |
 | --- | --- | --- | --- |
-| `value` | `number` | <Badge type="warning" text="required" /> | the number |
+| `value` | `number` | <Badge type="warning" text="required" /> | The number. |
 
 **`mappings` — each entry.`default` — `type: "boolean"`**
 
 | field | type | | description |
 | --- | --- | --- | --- |
-| `value` | `boolean` | <Badge type="warning" text="required" /> | the flag |
+| `value` | `boolean` | <Badge type="warning" text="required" /> | The boolean value. |
 
 **`mappings` — each entry.`default` — `type: "null"`**
 
@@ -109,28 +109,28 @@ This component takes no configuration.
 
 | field | type | | description |
 | --- | --- | --- | --- |
-| `from` | `string` | <Badge type="warning" text="required" /> | the field to read |
-| `to` | `text` \| `integer` \| `float` \| `boolean` \| `timestamp` \| `date` \| `uuid` \| `json` | <Badge type="warning" text="required" /> | what to convert it to |
-| `as` | `string` | <Badge type="info" text="optional" /> | the field to write. Left out, it is `from`'s last segment — so casting a field in place is `{"from": "value", "to": "float"}`. |
-| `default` | `text \| number \| boolean \| null` | <Badge type="info" text="optional" /> | what to write when `from` isn't there. A value that *is* there and won't convert is an error either way — that is a stream that isn't what the config says it is, not a missing field. |
+| `from` | `string` | <Badge type="warning" text="required" /> | The field to read. |
+| `to` | `text` \| `integer` \| `float` \| `boolean` \| `timestamp` \| `date` \| `uuid` \| `json` | <Badge type="warning" text="required" /> | The type to convert the value to. |
+| `as` | `string` | <Badge type="info" text="optional" /> | The field to write. The default is the last segment of `from`. For example, `{"from": "value", "to": "float"}` converts `value` in place. |
+| `default` | `text \| number \| boolean \| null` | <Badge type="info" text="optional" /> | The value to write when the message does not have `from`. A value that is present and does not convert is always an error. |
 
 **`mappings` — each entry.`default` — `type: "text"`**
 
 | field | type | | description |
 | --- | --- | --- | --- |
-| `value` | `string` | <Badge type="warning" text="required" /> | the text |
+| `value` | `string` | <Badge type="warning" text="required" /> | The text. |
 
 **`mappings` — each entry.`default` — `type: "number"`**
 
 | field | type | | description |
 | --- | --- | --- | --- |
-| `value` | `number` | <Badge type="warning" text="required" /> | the number |
+| `value` | `number` | <Badge type="warning" text="required" /> | The number. |
 
 **`mappings` — each entry.`default` — `type: "boolean"`**
 
 | field | type | | description |
 | --- | --- | --- | --- |
-| `value` | `boolean` | <Badge type="warning" text="required" /> | the flag |
+| `value` | `boolean` | <Badge type="warning" text="required" /> | The boolean value. |
 
 **`mappings` — each entry.`default` — `type: "null"`**
 
@@ -140,54 +140,54 @@ This component takes no configuration.
 
 | field | type | | description |
 | --- | --- | --- | --- |
-| `parts` | `list of field \| value` | <Badge type="warning" text="required" /> | the pieces, in order. At least one. |
-| `as` | `string` | <Badge type="warning" text="required" /> | the field to write the joined string to |
+| `parts` | `list of field \| value` | <Badge type="warning" text="required" /> | The parts, in order. Give one part or more. |
+| `as` | `string` | <Badge type="warning" text="required" /> | The field to write the string to. |
 
 **`mappings` — each entry.`parts` — each entry — `type: "field"`**
 
 | field | type | | description |
 | --- | --- | --- | --- |
-| `field` | `string` | <Badge type="warning" text="required" /> | the field to read |
+| `field` | `string` | <Badge type="warning" text="required" /> | The field to read. |
 
 **`mappings` — each entry.`parts` — each entry — `type: "value"`**
 
 | field | type | | description |
 | --- | --- | --- | --- |
-| `value` | `string` | <Badge type="warning" text="required" /> | the text |
+| `value` | `string` | <Badge type="warning" text="required" /> | The text. |
 
 **`mappings` — each entry — `type: "arithmetic"`**
 
 | field | type | | description |
 | --- | --- | --- | --- |
-| `left` | `field \| value` | <Badge type="warning" text="required" /> | the left-hand operand |
-| `operator` | `add` \| `subtract` \| `multiply` \| `divide` \| `min` \| `max` | <Badge type="warning" text="required" /> | what to do with them |
-| `right` | `field \| value` | <Badge type="warning" text="required" /> | the right-hand operand |
-| `as` | `string` | <Badge type="warning" text="required" /> | the field to write the answer to |
-| `on_zero` | `error \| null \| value` | <Badge type="info" text="optional" /> | for `divide`: what a right-hand field holding zero produces. Fails the batch when left out |
+| `left` | `field \| value` | <Badge type="warning" text="required" /> | The left operand. |
+| `operator` | `add` \| `subtract` \| `multiply` \| `divide` \| `min` \| `max` | <Badge type="warning" text="required" /> | The operation to do. |
+| `right` | `field \| value` | <Badge type="warning" text="required" /> | The right operand. |
+| `as` | `string` | <Badge type="warning" text="required" /> | The field to write the result to. |
+| `on_zero` | `error \| null \| value` | <Badge type="info" text="optional" /> | For `divide`: what to do when the right field holds zero. The default is `error`, which fails the batch. |
 
 **`mappings` — each entry.`left` — `type: "field"`**
 
 | field | type | | description |
 | --- | --- | --- | --- |
-| `field` | `string` | <Badge type="warning" text="required" /> | the field to read — it has to hold a number |
+| `field` | `string` | <Badge type="warning" text="required" /> | The field to read. It must hold a number. |
 
 **`mappings` — each entry.`left` — `type: "value"`**
 
 | field | type | | description |
 | --- | --- | --- | --- |
-| `value` | `number` | <Badge type="warning" text="required" /> | the number |
+| `value` | `number` | <Badge type="warning" text="required" /> | The number. |
 
 **`mappings` — each entry.`right` — `type: "field"`**
 
 | field | type | | description |
 | --- | --- | --- | --- |
-| `field` | `string` | <Badge type="warning" text="required" /> | the field to read — it has to hold a number |
+| `field` | `string` | <Badge type="warning" text="required" /> | The field to read. It must hold a number. |
 
 **`mappings` — each entry.`right` — `type: "value"`**
 
 | field | type | | description |
 | --- | --- | --- | --- |
-| `value` | `number` | <Badge type="warning" text="required" /> | the number |
+| `value` | `number` | <Badge type="warning" text="required" /> | The number. |
 
 **`mappings` — each entry.`on_zero` — `type: "error"`**
 
@@ -201,21 +201,21 @@ This component takes no configuration.
 
 | field | type | | description |
 | --- | --- | --- | --- |
-| `value` | `number` | <Badge type="warning" text="required" /> | the answer to write instead |
+| `value` | `number` | <Badge type="warning" text="required" /> | The number to write. |
 
 **`mappings` — each entry — `type: "time_bucket"`**
 
 | field | type | | description |
 | --- | --- | --- | --- |
-| `from` | `string` | <Badge type="warning" text="required" /> | the field holding the time — an RFC 3339 string or milliseconds since the epoch |
-| `every_seconds` | `integer` | <Badge type="warning" text="required" /> | how long a bucket is, in seconds |
-| `as` | `string` | <Badge type="warning" text="required" /> | the field to write the bucket's start to |
-| `format` | `rfc3339` \| `millis` | <Badge type="info" text="optional" /> | how the bucket's start is written. `rfc3339` when left out |
-| `offset_seconds` | `integer` | <Badge type="info" text="optional" /> | how far past the line-up the buckets start, in seconds — less than `every_seconds` |
-| `timezone` | `string` | <Badge type="info" text="optional" /> | the IANA time zone whose clock the periods are counted on, e.g. `Europe/Stockholm`. UTC when left out |
+| `from` | `string` | <Badge type="warning" text="required" /> | The field that holds the time, as an RFC 3339 string or as milliseconds since the epoch. |
+| `every_seconds` | `integer` | <Badge type="warning" text="required" /> | The length of a period, in seconds. |
+| `as` | `string` | <Badge type="warning" text="required" /> | The field to write the start time to. |
+| `format` | `rfc3339` \| `millis` | <Badge type="info" text="optional" /> | The format of the start time. The default is `rfc3339`. |
+| `offset_seconds` | `integer` | <Badge type="info" text="optional" /> | The offset of the start of the periods, in seconds. It must be less than `every_seconds`. |
+| `timezone` | `string` | <Badge type="info" text="optional" /> | The IANA time zone of the periods, for example `Europe/Stockholm`. The default is UTC. |
 
 **`mappings` — each entry — `type: "drop"`**
 
 | field | type | | description |
 | --- | --- | --- | --- |
-| `from` | `list of string` | <Badge type="warning" text="required" /> | the fields to remove. At least one. |
+| `from` | `list of string` | <Badge type="warning" text="required" /> | The fields to remove. Give one field or more. |

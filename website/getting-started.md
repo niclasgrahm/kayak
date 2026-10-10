@@ -1,90 +1,54 @@
 # getting started
 
-kayak is a graph-based stream processing engine: you describe pipelines as
-`inputs → transforms → outputs` in a config file, kayak runs them, and a live
-web canvas shows the graph while it's running.
+kayak is a stream processor in one binary. You write pipelines as
+`inputs → transforms → outputs` in a config file. You keep the file in version
+control and run the container image with it.
 
-## try it, in one command
+## try it
+
+This command starts one pipeline. The pipeline sends a message to stdout each
+second:
 
 ```bash
 docker run --rm -p 6767:6767 --entrypoint sh ghcr.io/niclasgrahm/kayak \
-  -c 'echo "[{id: ticker, inputs: [{type: dummy, duration: 1}]}]" > c.yaml && exec kayak --config c.yaml'
+  -c 'echo "[{id: ticker, inputs: [{type: dummy, duration: 1}], outputs: [{type: stdout}]}]" > c.yaml && exec kayak --config c.yaml'
 ```
 
-Open `localhost:6767` — one pipeline, ticking once a
-second. `transforms` and `outputs` are optional, so an input on its own is a
+`transforms` and `outputs` are optional. An input with no output is also a
 complete pipeline.
 
-To run your own, write a config and mount it:
+## run your own config
 
-```yaml
-# pipelines/config.yaml
-- id: readings
-  inputs:
-    - type: dummy
-      duration: 1
-  outputs:
-    - type: stdout
-```
+1. Write a config file:
 
-```bash
-docker run -p 6767:6767 -v "$PWD/pipelines:/kayak" \
-  ghcr.io/niclasgrahm/kayak --config /kayak/config.yaml
-```
+   ```yaml
+   # pipelines/config.yaml
+   - id: readings
+     inputs:
+       - type: dummy
+         duration: 1
+     outputs:
+       - type: stdout
+   ```
 
-The image is the runtime and nothing else — no config is baked in, and the
-`ENTRYPOINT` is the binary, so the container's arguments are the server's
-flags. [Deployment](/operating/deployment) covers running it properly.
+2. Commit the file.
+3. Mount the directory and name the file:
 
-## the worked example
+   ```bash
+   docker run -p 6767:6767 -v "$PWD/pipelines:/kayak" \
+     ghcr.io/niclasgrahm/kayak --config /kayak/config.yaml
+   ```
 
-`example_config/` is the sample everything is tried against, and it needs a
-checkout rather than the image: it names the systems in `docker-compose.yaml`
-and reads credentials from a secrets file. You'll need [Rust](https://rustup.rs),
-[`just`](https://github.com/casey/just) and
-[`cargo-leptos`](https://github.com/leptos-rs/cargo-leptos)
-(`cargo install cargo-leptos`).
+4. To change a pipeline, change the file, review the diff and deploy again.
 
-```bash
-just dev
-```
+The image contains the runtime and no config. The `ENTRYPOINT` of the image is
+the binary, so the arguments of the container are the flags of the server.
+[Deployment](/operating/deployment) tells you how to run kayak in production.
 
-That builds the frontend, starts the server on `localhost:6767` against the
-worked example, and creates a secrets file for you on first run. Sign in as
-`niclas` / `hunter2` (admin) or `viewer` / `hunter2` (read-only) — the sample
-runs with [authentication](/operating/authentication) on by default, so both
-sides of the login are there to look at.
+## a complete pipeline
 
-To see every pipeline in it actually flowing, bring up the systems it talks to
-first:
-
-```bash
-docker compose up
-just dev
-```
-
-Without Docker the sample still runs; the pipelines with nothing to talk to
-show a connection error on their card, and the dummy-input pipelines
-(`heartbeat`, `ingest`) work regardless. [the sample graph](/pipelines/the-sample)
-walks through what's in there and why, including the four pipelines that are
-deliberately broken.
-
-## once it's up
-
-- the canvas is at `/` — pan and zoom, click a card to open its log
-- `/docs` is the same generated reference this site's [reference](/reference/)
-  section renders, served by the running server
-- push a message straight into the `ingest` pipeline:
-
-```bash
-curl -X POST localhost:6767/api/pipelines/ingest/messages \
-  -d '{"sensor":"a","value":1}'
-```
-
-## a pipeline, whole
-
-The smallest useful config file: read a subject, drop the messages that don't
-matter, write what's left to a file.
+This config reads a NATS subject, drops the readings of 30 or less, and writes
+the other readings to a file:
 
 ```json
 {
@@ -116,17 +80,71 @@ matter, write what's left to a file.
 }
 ```
 
-The systems named there — `local-nats`, `local-files` — are
-[connections](/io/connections), declared once in a file beside this one rather
-than repeated in every pipeline that uses them. What each component accepts is
-in the [reference](/reference/).
+`local-nats` and `local-files` are [connections](/io/connections). You declare
+them one time, in a file beside the config. Each pipeline that uses a system
+refers to its connection by name. The [reference](/reference/) gives the fields
+of each component.
+
+The `file` output can write only under the directory that `--data-dir` names.
+Without that flag, the pipeline does not build.
+
+## the worked example
+
+`example_config/` is the sample graph. It uses each component kind and each
+connection kind. To run it, you need a checkout of the repository, because it
+names the systems in `docker-compose.yaml` and reads credentials from a secrets
+file. You also need these tools:
+
+- [Rust](https://rustup.rs)
+- [`just`](https://github.com/casey/just)
+- [`cargo-leptos`](https://github.com/leptos-rs/cargo-leptos) (`cargo install cargo-leptos`)
+
+Do these steps:
+
+1. Start the systems that the sample uses:
+
+   ```bash
+   docker compose up
+   ```
+
+2. Start the server against the sample:
+
+   ```bash
+   just dev
+   ```
+
+`just dev` builds the server, starts it on `localhost:6767` and creates the
+secrets file on the first run. The sample has
+[authentication](/operating/authentication) on. Sign in as `niclas` / `hunter2`
+(admin) or `viewer` / `hunter2` (read-only).
+
+You can run the sample without `docker compose up`. The pipelines that have no
+system to connect to then report a connection error. The `heartbeat` pipeline
+(a `dummy` input) and the `ingest` pipeline (an `http` input) work.
+[The sample graph](/pipelines/the-sample) describes each pipeline. It also
+describes the four `broken_*` pipelines. These pipelines fail when they run, so
+the sample has failure records to show.
+
+To send a message to the `ingest` pipeline:
+
+```bash
+curl -X POST localhost:6767/api/pipelines/ingest/messages \
+  -d '{"sensor":"a","value":1}'
+```
+
+The server shows the generated reference at `/docs`. It is the same reference as
+the [reference](/reference/) section of this site.
+
+The server also has a web UI at `/`. Use it to look at the running graph and the
+messages in each pipeline. It is optional.
 
 ## where to go next
 
 | | |
 | --- | --- |
-| [the canvas](/canvas/the-canvas) | what you're looking at, and how edges are routed |
 | [the pipeline model](/pipelines/pipelines) | inputs, transforms, outputs, and how pipelines feed each other |
-| [connections](/io/connections) | declaring the systems pipelines talk to |
-| [reference](/reference/) | every component and every endpoint, generated |
-| [deployment](/operating/deployment) | the container image, and what it deliberately doesn't bake in |
+| [the config file](/pipelines/the-config-file) | the format of the file, and how to keep it in version control |
+| [connections](/io/connections) | how to declare the systems that pipelines use |
+| [reference](/reference/) | each component and each endpoint, generated from the code |
+| [deployment](/operating/deployment) | the container image, its flags, and Kubernetes |
+| [web ui](/canvas/the-canvas) | the optional view of the running graph |

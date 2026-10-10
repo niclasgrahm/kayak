@@ -4,20 +4,17 @@ outline: [2, 2]
 
 # http api
 
-Every endpoint the server serves. This is generated from
-`kayak_core::api_docs::endpoints()` — the table `api_router` is folded over —
-so it describes the routes that exist and cannot describe any that don't. The
-same table is served as an [OpenAPI 3.1 document](/openapi.json), which a
-running server also renders at `/api/reference` with a panel you can fire calls
-from.
+This page lists every endpoint of the server. kayak generates it from
+`kayak_core::api_docs::endpoints()`. The router is built from the same table.
+Thus the page describes exactly the routes that exist. The same table is also
+an [OpenAPI 3.1 document](/openapi.json). A server renders it at
+`/api/reference`, with a panel that sends requests.
 
-**Access** is the badge on each endpoint, and it is enforced by the middleware
-the router applies from this same entry rather than being a second fact that
-agrees with it today. On a server with no accounts configured, none of it
-applies: nobody is identified, so nothing is checked. See
-[authentication](/operating/authentication).
+**Access** is the badge on each endpoint. The middleware applies the access
+from the same table entry. On a server with no accounts, kayak checks nothing.
+See [authentication](/operating/authentication).
 
-Bodies link to the [schemas](/reference/schemas) they name, which are generated
-from the Rust types the handlers actually deserialize into.
+Each body links to its [schema](/reference/schemas). The schemas come from the
+Rust types that the handlers deserialize.
 
 <!--@include: ./generated/api/endpoints.md-->

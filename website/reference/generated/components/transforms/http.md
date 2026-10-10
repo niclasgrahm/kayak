@@ -2,32 +2,36 @@
 
 ## `http` {#transform-http}
 
-Sends the batch to an http endpoint and carries on with what comes back — so the service on the other end is the transform. The round trip to a model: a `buffer` and a `features` in front of it make the request the seven numbers with the identifiers, and `response: merge` writes the answer onto that message so the identifiers survive the trip.
+Sends the batch to an http endpoint and continues with the reply. Use it to call a model or another service.
 
-`body` says whether one request carries the whole batch as a JSON array or each message goes on its own; `wrap` puts that under a key (`{"instances": …}`) for an API that wants one. `response` says what the reply is: `replace` makes it the new batch — the JSON array it holds under `batch`, the message (or array of messages) it holds under `message` — and `merge` writes it onto the message under `as` instead. `unwrap` reads the reply out from under a key first. Anything but a 2xx fails the batch with the endpoint's own words quoted; a network failure or a 5xx is retried `retries` times with backoff before it does.
+`body` sets the content of one request: the full batch as a JSON array, or one message. `wrap` puts the body under a key, for example `{"instances": …}`. `response` sets what the transform does with the reply. `replace` makes the reply the new batch. `merge` writes the reply onto the message under `as`. `unwrap` reads the reply from under a key first.
+
+A status other than 2xx fails the batch. The error contains the reply of the endpoint. A network failure, a 5xx or a 429 is tried again `retries` times with backoff.
+
+For a model, put a `buffer` and a `features` transform before this transform. Use `response: merge` to keep the identifiers of the message.
 
 | field | type | | description |
 | --- | --- | --- | --- |
-| `url` | `string` | <Badge type="warning" text="required" /> | endpoint to send to |
-| `verb` | `GET` \| `POST` \| `PUT` \| `PATCH` \| `DELETE` | <Badge type="warning" text="required" /> | http method. `GET` and `DELETE` are refused — a request with no body would send none of the messages |
-| `as` | `string` | <Badge type="info" text="optional" /> | for `response: merge`: the field the reply is written under |
-| `auth` | `bearer \| header` | <Badge type="info" text="optional" /> | what this transform presents to be allowed to send. Absent sends no credential |
-| `body` | `batch` \| `message` | <Badge type="info" text="optional" /> | what one request carries. Defaults to `batch` |
-| `response` | `replace` \| `merge` | <Badge type="info" text="optional" /> | what to do with the reply. Defaults to `replace` |
-| `retries` | `integer` | <Badge type="info" text="optional" /> | how many times a request that failed to reach the endpoint, or was answered 5xx or 429, is tried again before the batch fails. Defaults to 0. Each retry waits a little longer than the last, and the pipeline waits with it |
-| `timeout_seconds` | `integer` | <Badge type="info" text="optional" /> | how long one request may take before it is given up on, in seconds. Defaults to 30 |
-| `unwrap` | `string` | <Badge type="info" text="optional" /> | a key to read the reply out from under, for an API that answers `{"predictions": …}` |
-| `wrap` | `string` | <Badge type="info" text="optional" /> | a key to put the body under, for an API that wants `{"key": …}` |
+| `url` | `string` | <Badge type="warning" text="required" /> | The endpoint to send to. |
+| `verb` | `GET` \| `POST` \| `PUT` \| `PATCH` \| `DELETE` | <Badge type="warning" text="required" /> | The http method. `GET` and `DELETE` fail to build, because a request with no body cannot send the messages. |
+| `as` | `string` | <Badge type="info" text="optional" /> | The field to write the reply under. Applies to `response: merge`. |
+| `auth` | `bearer \| header` | <Badge type="info" text="optional" /> | The credential that the transform sends. If you do not set it, the transform sends no credential. |
+| `body` | `batch` \| `message` | <Badge type="info" text="optional" /> | The content of one request. The default is `batch`. |
+| `response` | `replace` \| `merge` | <Badge type="info" text="optional" /> | What to do with the reply. The default is `replace`. |
+| `retries` | `integer` | <Badge type="info" text="optional" /> | The number of times to send a request again before the batch fails. Applies to a network failure, a 5xx and a 429. The default is 0. Each try waits longer than the previous try, and the pipeline waits too. |
+| `timeout_seconds` | `integer` | <Badge type="info" text="optional" /> | The maximum time for one request, in s. The default is 30. |
+| `unwrap` | `string` | <Badge type="info" text="optional" /> | A key to read the reply from, for an API that replies with `{"predictions": …}`. |
+| `wrap` | `string` | <Badge type="info" text="optional" /> | A key to put the body under, for an API that expects `{"key": …}`. |
 
 **`auth` — `type: "bearer"`**
 
 | field | type | | description |
 | --- | --- | --- | --- |
-| `token` | `string` | <Badge type="warning" text="required" /> | the token. A `${NAME}` reference, so the config file holds the name and the secret store holds the value. |
+| `token` | `string` | <Badge type="warning" text="required" /> | The token. Use a `${NAME}` reference, so that the config file keeps only the name and the secret store keeps the value. |
 
 **`auth` — `type: "header"`**
 
 | field | type | | description |
 | --- | --- | --- | --- |
-| `name` | `string` | <Badge type="warning" text="required" /> | the header's name, matched case-insensitively on the way in. On an `http` input it may not be one of the headers an `envelope` passes through, since that would write the credential into the messages. |
-| `value` | `string` | <Badge type="warning" text="required" /> | the exact value that header must have. A `${NAME}` reference, as above. |
+| `name` | `string` | <Badge type="warning" text="required" /> | The name of the header. The `http` input compares the name without case. On an `http` input, the name must not be a header that an `envelope` copies into the messages. |
+| `value` | `string` | <Badge type="warning" text="required" /> | The exact value of the header. Use a `${NAME}` reference. |

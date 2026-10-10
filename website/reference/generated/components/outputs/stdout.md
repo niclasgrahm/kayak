@@ -2,6 +2,6 @@
 
 ## `stdout` {#output-stdout}
 
-Prints each batch to the server's stdout. Useful while building a pipeline up; takes no settings.
+Prints each batch to the standard output of the server. Use it to test a pipeline. It has no settings.
 
 This component takes no configuration.

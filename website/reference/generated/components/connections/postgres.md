@@ -2,14 +2,12 @@
 
 ## `postgres` {#connection-postgres}
 
-A postgres database, as one role connects to it.
-
-The database and the role are part of the connection; the *table* is not — that is what a particular output writes into, so it stays on the output.
+A postgres database and the role that kayak connects as. The output or the input sets the table.
 
 | field | type | | description |
 | --- | --- | --- | --- |
-| `host` | `string` | <Badge type="warning" text="required" /> | server hostname, e.g. `localhost` |
-| `database` | `string` | <Badge type="warning" text="required" /> | the database to connect to |
-| `user` | `string` | <Badge type="warning" text="required" /> | the role to connect as |
-| `password` | `string` | <Badge type="warning" text="required" /> | that role's password. May reference secrets as `${NAME}` — see "secrets" in the readme, and prefer a reference to a literal here. |
-| `port` | `integer` | <Badge type="info" text="optional" /> | server port. Defaults to 5432. |
+| `host` | `string` | <Badge type="warning" text="required" /> | The hostname of the server, for example `localhost`. |
+| `database` | `string` | <Badge type="warning" text="required" /> | The database to connect to. |
+| `user` | `string` | <Badge type="warning" text="required" /> | The role to connect as. |
+| `password` | `string` | <Badge type="warning" text="required" /> | The password of the role. Use a `${NAME}` secret reference for this value. |
+| `port` | `integer` | <Badge type="info" text="optional" /> | The port of the server. The default is 5432. |

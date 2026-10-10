@@ -4,20 +4,20 @@
 
 Writes each batch to files in a directory on the server.
 
-The directory comes from a `file` connection and the `path` below is relative to it; the server's `--data-dir` is what both are confined to, so a server started without that flag cannot write files at all. Names are generated rather than configured — `<open time>-<sequence>.<ext>`, which sorts chronologically and cannot collide across rotations.
+A `file` connection gives the root directory, and `path` is relative to it. The root must be inside the `--data-dir` of the server. Without that flag, a `file` output fails to build. The output names each file `<open time>-<sequence>.<ext>`, so the names sort by time and are unique.
 
-Meant for local development and testing. The object-store output is what this shape is being built towards for anything else.
+Use the `file` output for local development and tests.
 
 | field | type | | description |
 | --- | --- | --- | --- |
-| `connection` | `file` connection | <Badge type="warning" text="required" /> | name of the file connection to write under — see "connections" in the readme. The root directory lives there; the path below is this output's own. |
-| `path` | `string` | <Badge type="warning" text="required" /> | directory to write into, relative to the connection's root, e.g. `orders`. Must stay inside the root: an absolute path or one containing `..` is refused rather than trimmed. |
-| `format` | `ndjson` \| `json_array` | <Badge type="info" text="optional" /> | how the messages are laid out. Defaults to `ndjson`. |
-| `rotate` | `object` | <Badge type="info" text="optional" /> | when to close a file and start the next one. Without this, one file per run. |
+| `connection` | `file` connection | <Badge type="warning" text="required" /> | The name of the file connection to write under. Declare the connection in the connections file. The connection gives the root directory. |
+| `path` | `string` | <Badge type="warning" text="required" /> | The directory to write into, relative to the root of the connection, for example `orders`. The path must stay inside the root. kayak refuses an absolute path and a path that contains `..`. |
+| `format` | `ndjson` \| `json_array` | <Badge type="info" text="optional" /> | The layout of the messages. The default is `ndjson`. |
+| `rotate` | `object` | <Badge type="info" text="optional" /> | When to close a file and start the next file. Without this setting, the output writes one file while the pipeline runs. |
 
 **`rotate`**
 
 | field | type | | description |
 | --- | --- | --- | --- |
-| `interval_secs` | `integer` | <Badge type="info" text="optional" /> | close the file this many seconds after it was opened. Measured from the open, not from the last write, so files line up on a predictable cadence. |
-| `max_rows` | `integer` | <Badge type="info" text="optional" /> | close the file once it holds this many messages |
+| `interval_secs` | `integer` | <Badge type="info" text="optional" /> | Close the file this number of seconds after the output opened it. The time starts when the file opens, not at the last write. |
+| `max_rows` | `integer` | <Badge type="info" text="optional" /> | Close the file when it contains this number of messages. The output does not divide a batch, so a file can contain more messages. |

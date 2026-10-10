@@ -1,239 +1,113 @@
 # editing the graph
 
-The canvas has two modes and **starts in read-only**. That is the default
-because the primary use of this page is watching a running system: a live view
-should not have a delete button one click from the pipeline list. The edit
-controls are not disabled in read-only, they are absent.
+The canvas starts in read-only mode. In read-only mode, the edit controls are
+not shown. Click `edit` in the navbar to show them. A `read` user does not see
+the `edit` button. See [authentication](/operating/authentication).
 
-`edit` in the navbar reveals them. The `+` in the sidebar header opens a modal
-that builds a pipeline: an id, then any number of inputs, transforms and
-outputs, each picked from a dropdown and configured field by field. Submitting
-it is a `POST /api/pipelines`; the `×` on a sidebar row is a `DELETE`, armed by
-the first click and fired by the second.
+The mode is a property of the browser tab. The server does not know about it.
+The server checks the role of the user on each request.
 
-**Edits are live, not staged.** Creating a pipeline starts it running
-immediately; deleting one cancels its run loop immediately. The canvas stays a
-true window onto the server — a pipeline you just added streams messages like
-any other — which is the whole reason the editor and the live view are the same
-screen. The price is that there is no draft to throw away, so `revert` (below)
-is the undo.
+## add and delete a pipeline
 
-Note that the mode is a property of the browser tab, not of the server: the API
-still accepts writes regardless. This is a local development tool and the API is
-its documented interface. If you ever want the mode enforced, that belongs on
-the server as a flag, not in the UI.
+The `+` in the sidebar header opens the "add pipeline" form. Give an id, then
+add inputs, transforms and outputs. Select each component from a list and fill
+in its fields. The form sends `POST /api/pipelines`.
 
-**The form is generated, like the docs are.** It is built from the same
-`kayak_core::docs` reflection over the config schemas, so a new component
-appears in the dropdown with the right fields, the right required markers, the
-right dropdowns for closed-value fields, and the right validation — without
-anyone touching the frontend. Field doc comments become the labels' tooltips.
+The `×` on a sidebar row deletes that pipeline. The first click arms the
+button, and the second click sends `DELETE /api/pipelines/{id}`.
 
-Four things the field types decide:
+The `+` at the bottom edge of a card opens the same form. Its first input is a
+`pipeline` input that reads from that card.
 
-- a field with a closed set of values (`sum | avg | min | max`) is a dropdown,
-  and starts blank rather than showing the first value it hasn't recorded;
-- a field with fields of its own — a file output's `rotate` — is those fields,
-  indented under it;
-- a field that is a *choice* of shapes — an input's `buffer`, which is `static`
-  with a `size`, `tumbling` with a `window_seconds`, or `batch` with both — is
-  the choice first and then whichever fields it implies. Pick `tumbling` and the
-  `size` box is replaced by a `window_seconds` box; nothing you filled in for the
-  other one is sent;
-- a list whose rows are each a choice — a `filter`'s `conditions`, a
-  `remember`'s `when` — is both of the above at once: rows you add and remove,
-  each with its own `type` picker and the fields that choice implies.
+**Changes apply immediately.** A new pipeline starts at once. A delete stops
+the pipeline at once. There is no draft. The undo is `revert`, which loads the
+config file again.
 
-Between them that is the whole config surface: there is no field anywhere that
-has to be filled in as raw JSON, and a test fails if a new one ever is.
+The connections tab has the same `+` and `×` for connections. kayak refuses to
+delete a connection that a pipeline uses.
 
-Validation is `frontend/src/form.rs`: pure, unit tested, and the same rules
-serde applies, so what it accepts the server accepts. It reports every problem
-at once rather than one per submit, against the field and the component it
-belongs to — two `nats` inputs stay distinguishable. It is not a security
-boundary; the server still rejects what it must, and its message (a duplicate
-id, an unknown upstream) is shown verbatim in the modal footer.
+## the form
 
-## seeing the data while you build
+kayak generates the form from the same schema as the
+[reference](/reference/). Thus a new component has a form without a change to
+the frontend. The doc comment of each field is the tooltip of its label.
 
-Every field reference in a pipeline — a column's `field`, a filter's
-comparison, an aggregation's source — is a name you have to already know, and
-a config file is a bad place to find out you didn't. So the form can go and
-look.
+- A field with a fixed set of values is a dropdown. It starts empty.
+- A field with fields of its own, such as `rotate`, shows those fields below it.
+- A field that is a choice of shapes, such as `buffer`, shows the choice first.
+  Then it shows the fields of the selected shape. kayak sends only the fields
+  of the selected shape.
+- A list, such as the `conditions` of a `filter`, has rows that you add and
+  remove.
 
-**`fetch messages`**, on any input in the modal, builds that input exactly as a
-pipeline would, takes a few real messages from it and shows them in a panel
-beside the form. Nothing is created: there is no pipeline afterwards, and
-nothing is acknowledged to the broker — a sample has not delivered anything
-anywhere.
+No field needs raw JSON. A test fails if a new field needs it.
 
-It stops at **whichever bound it reaches first: five messages, or five
-seconds**, and the panel counts while it waits. That is why a source ticking
-once a second gives you four — the first message arrives a second after the
-input is built, and the fifth would land just as the window closes. A quiet
-subject samples empty and says so: none of these inputs can replay what was
-published before the sample started.
+The form checks every field before it sends the request. It shows all problems
+at once, at the field. The rules are the same as the rules of the server. The
+server also checks the request. The form shows the error text of the server at
+the bottom.
 
-The whole sample arrives at once, when the request answers. Watching them
-trickle in would mean a streaming response, which is a different endpoint
-shape — see the roadmap.
+## see the data while you build {#seeing-the-data-while-you-build}
 
-**Sampling is not free for every kind of input, and the ones where it isn't say
-what they did.** A kafka sample reads under a throwaway consumer group, so it
-neither rebalances your pipeline's group nor commits on its behalf — which also
-means it starts where the input's `start_at` says rather than where the
-pipeline has got to. An mqtt sample connects under a client id of its own,
-because a broker disconnects the older client holding one. An input `buffer` is
-ignored, since a buffer's job is to make the pipeline wait. Each of those shows
-as a note above the messages.
+The form can read sample messages from an input. Use them to find the field
+names before you configure the transforms and the outputs.
 
-An `http` input cannot be sampled at all and says so: it is posted to rather
-than read from. Create the pipeline and post a message to its endpoint.
+**`fetch messages`** on an input builds that input and reads some messages from
+it. kayak does not create a pipeline and does not acknowledge the messages. The
+form shows the messages in a panel beside it.
 
-**The messages then go down the rest of the draft.** The transforms you have
-configured are built and run over the sample — through the production
-`build()`, so a transform that will not build here would not have built there
-either — and the panel shows what each stage handed on. That is per stage and
-per batch because that is where the answer usually is: a `splitter` hands on
-several batches, a `filter` that matched nothing hands on none, and a `buffer`
-hands on nothing at all because it is still holding what it was given. Nothing
-is emitted to any output; a dry run that emitted would be a pipeline.
+The sample stops at 5 messages or after 5 s, at the first limit. An input that
+sends one message per second thus gives 4 messages. A quiet input gives an
+empty sample. No input can replay messages from before the sample started.
 
-**A whole mapping can be filled in from it.** A list whose rows map a message
-field onto something — a database output's `columns` — grows a `fill from
-sample` button beside `+ add` once something has been sampled. It adds a row
-per field the sample carried: the path in the field box, a name made from it
-(the whole path, since `sensor.id` and `device.id` must not become one column),
-and the type the sample suggests.
+Some inputs change their behavior for a sample. The panel shows a note for each
+change:
 
-Three things it deliberately will not decide for you. A field the sample
-disagreed about — a number in one message, a string in the next — gets its row
-with the **type left blank**, because there is no honest suggestion and an
-unanswered required box is what that should look like. **Nullability is never
-guessed**: five messages cannot prove a field is always there, and a column
-declared `NOT NULL` on that evidence is a pipeline that fails at three in the
-morning, so every filled row is nullable and you tighten the ones you know
-about. And it **appends**, skipping fields already mapped, so pressing it twice
-adds nothing and a row you have edited is never overwritten.
+- `kafka` reads with a temporary consumer group. It does not affect the group
+  of the pipeline and starts where `start_at` says.
+- `mqtt` connects with its own client id.
+- An input `buffer` has no effect.
+- An `http` input cannot give a sample. Create the pipeline and post a message
+  to its endpoint.
 
-**What it learns fills in the field boxes.** Every box that names a field of the
-messages offers what the sample carried, with the type and an example value —
-and offers it *as of that point in the chain*, so an output's column mapping is
-suggested the fields that will actually reach it rather than the ones the input
-produced. They are suggestions and never a closed list: a sample is a handful
-of messages, so a field that only appears when something breaks is still a
-field you can type.
+**The form then runs the transforms over the sample.** kayak builds each
+transform with the production code and shows what each stage gives. A
+`splitter` gives several batches. A `filter` that matches nothing gives none. A
+`buffer` holds the messages and gives nothing. No output receives a message.
 
-**And it feeds the script editor.** A [`script`](/pipelines/scripting)
-transform is the one component whose configuration cannot be checked by looking
-at it, so what the sample reaches it with is put straight into the editor's
-messages box and the script is run over it as you type. See
+**The field boxes suggest field names.** A box that names a message field
+suggests the fields that reach that point of the chain. Each suggestion shows
+the type and an example value. You can also type a name that the sample did not
+contain.
+
+**`fill from sample`** fills a mapping, such as the `columns` of a database
+output. It adds one row per field: the path, a name from the path, and the
+suggested type.
+
+- A field with different types in the sample gets no type.
+- Every row is nullable. Five messages cannot prove that a field is always
+  present. Make a column not-null yourself when you know that it is.
+- A second click adds nothing. kayak skips fields that are already mapped.
+
+**The sample also feeds the script editor.** See
 [writing one in the ui](/pipelines/scripting#writing-one-in-the-ui).
 
-Both halves are ordinary endpoints — `POST /api/inputs/sample` and
-`POST /api/pipelines/dry-run` — so the same thing is available to anything
-else that wants it.
+The two halves are endpoints: `POST /api/inputs/sample` and
+`POST /api/pipelines/dry-run`. Other clients can use them too.
 
-## the config file
+## save, save as and revert {#the-config-file}
 
-The `--config` file is a **load source and a save target, never a mirror**. The
-server reads it at startup and writes it only when asked. Nothing you do to the
-graph reaches disk on its own.
+Changes in the UI do not go to the config file. Write them to the file
+yourself:
 
-That is deliberate, and it was not the first design. Writing through on every
-edit conflates "what the server is running" with "what's in the file", and that
-conflation has sharp edges in both directions: merely *loading* a file rewrote
-it (load goes through create, create wrote), and a stray click in a live view
-became a committed change. Separating the two makes both impossible.
+- **`save as…`** writes the running graph to a file in the directory of the
+  config. You can choose JSON or YAML.
+- **`revert`** loads the config file again and rebuilds every pipeline.
+- **`unsaved changes`** in the navbar shows that the running graph is different
+  from the file.
+- **`create config file`** replaces `save as…` when the server started without
+  `--config`. The new file becomes the config file of the server.
 
-So the loop is explicit and symmetric:
-
-| | |
-| --- | --- |
-| load | file → runtime, at startup |
-| `revert` | file → runtime, again — the undo for a session of editing |
-| `save as…` | runtime → file |
-
-**JSON or YAML.** The file can be either, and the extension decides which:
-`.yaml` and `.yml` are read as YAML, anything else as JSON. That is the whole
-rule — a `.yaml` file that isn't YAML fails to start rather than being retried as
-something else, because a second guess would hide the typo. The format is a
-property of the *file* and stops at the parser: a `Config` doesn't remember which
-one it came from, so the two describe exactly the same pipelines and can be
-mixed freely (load JSON, save YAML, restart from that).
-
-The `save as…` modal offers the choice, wired to the file name — picking a format
-renames the file, and typing a `.yaml` name selects YAML — so the two halves of
-the decision can't disagree. `POST /api/config/save` takes an optional `format`
-of `"json"` or `"yaml"`; leaving it out takes the format from the name.
-
-**Unsaved changes.** Because edits are live and the file is untouched, the two
-can diverge invisibly, and a restart would drop the work. The navbar says
-`unsaved changes` whenever they have. The check is exact rather than a heuristic:
-`persist::render` is deterministic, so the server compares the rendered graph
-against the rendering of what it last loaded or saved. Add a pipeline and remove
-it again and the warning goes away, because the graph really is back where it
-started. That comparison is always made in JSON, whatever the file is written
-in — it is a fingerprint of the graph, and re-spelling it as YAML hasn't changed
-which pipelines are running.
-
-**Saving** takes a bare file name, written into the one directory the server
-saves to. That constraint is a security boundary, not a convenience: the browser
-can't write to the server's disk, the server does on request, so an
-unconstrained path would be an arbitrary-write primitive for anyone who can
-reach the UI. Names containing a separator, a `..` or a root are refused rather
-than normalised — normalising is where these checks go wrong. Overwriting the
-loaded file is just typing its own name, which the modal warns about.
-
-**Starting without a config file.** `--config` is optional, and a server without
-one still runs whatever you build in the UI — so it can also be asked to write
-that graph out. In edit mode the navbar offers `create config file` instead of
-`save as…`, and the modal names the directory the file will appear in: the
-process's working directory, chosen when the server was started and never by the
-request, exactly as `--config`'s directory would be. The file that save creates
-*becomes* the server's config file, so from then on there is a `revert` to go
-back to, an `unsaved changes` marker that means something, and a home for both
-the canvas arrangement and the connections — which are written out at that
-moment rather than being lost.
-Saving under a second name later is still a copy: the loaded file stays the one
-the server works against.
-
-Two properties make the output worth version controlling, both in
-`src/persist.rs` and both tested:
-
-- **Deterministic.** Pipelines are topologically sorted — parents before the
-  children that name them as `upstream`, which is the order a config file has to
-  be in to replay — and ties are broken by id. The same graph always renders the
-  same bytes, so a diff means the graph changed, not that a `HashMap` was
-  iterated twice.
-- **Atomic.** The whole file is rendered before anything is replaced, so a
-  failure partway through leaves the previous file rather than half a new one.
-
-A generated petname is written out, since it's the name a downstream's
-`upstream` would have to reference. `revert` parses the file before tearing
-anything down, so reverting to a file that has been broken by hand leaves the
-running graph alone; it also *picks up* hand edits, which makes it the way to
-reload a file you changed in an editor.
-
-Reverting also **waits for the old run loops to stop before building the new
-ones**, bounded by a few seconds for the one thing that can't be cancelled — an
-output already inside `emit()`. Overlapping the two graphs isn't merely untidy:
-two run loops for the same pipeline would share a kafka consumer group or a nats
-subscription and double up on every output.
-
-That teardown is also where a subtle bug lived, worth knowing about because the
-shape recurs. Cancelling every pipeline and *then* dropping the upstreams wakes
-each downstream with two things ready at once — its own cancellation, and an
-"upstream pipeline 'x' is gone" from the closing channel. `select!` picks
-randomly between ready branches, so a third of the time the run loop reported
-the shutdown *it had been asked to perform* as a pipeline failure. Those errors
-went to the UI, where they landed on the cards of the newly built pipelines that
-had just inherited the same ids — so a perfectly good revert looked like it had
-produced a broken graph. The fix is `biased;` in the run loop's `select!` plus a
-cancellation check before reporting any input failure: an input dying because we
-asked it to is not news. An input dying on a pipeline that is *still running*
-still is, which is the distinction the check makes.
-
-`GET /api/settings` reports the file name, the directory saves land in, and
-whether there are unsaved changes. No file name means there is no config file
-*yet*, which is what turns the navbar's `save as…` into `create config file`.
+The file is the source of truth. Commit it, and use the UI only to try
+changes. See [the config file](/pipelines/the-config-file) for its format and
+for what save and revert do.

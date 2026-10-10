@@ -189,75 +189,37 @@ onBeforeUnmount(() => {
 <header class="hero grid-bg" id="top">
   <div class="hero-inner">
     <div>
-      <h1>stream processing <span class="thin">you can watch</span></h1>
-      <p class="lede">kayak runs <code>inputs → transforms → outputs</code> pipelines from a config file and draws the whole graph while it's running — a card per pipeline, an edge for every hand-off, and on each card the config, a throughput chart and the actual messages going through.</p>
-      <pre class="install"><span class="p">$ </span>git clone https://github.com/niclasgrahm/kayak &amp;&amp; cd kayak
-<span class="p">$ </span>docker compose up -d        <span class="c"># optional: the brokers and stores</span>
-<span class="p">$ </span>just dev                    <span class="c"># → localhost:6767</span></pre>
+      <h1>stream processing <span class="thin">in one binary</span></h1>
+      <p class="lede">kayak is a stream processor written in Rust. You write pipelines in a config file and keep the file in version control. You run the container image with that file. That is the complete deployment.</p>
+      <pre class="install"><span class="p">$ </span>docker run -p 6767:6767 -v "$PWD:/kayak" \
+    ghcr.io/niclasgrahm/kayak --config /kayak/config.yaml</pre>
       <div class="hero-links">
-        <span>one rust binary · no database of its own · no signup</span>
+        <a href="https://propell.dev/kayak/getting-started">getting started</a>
+        <a href="https://propell.dev/kayak/reference/">reference</a>
+        <a href="https://github.com/niclasgrahm/kayak">github</a>
       </div>
+      <p class="hero-fine">one rust binary · JSON or YAML · no cluster · no database of its own</p>
     </div>
 
-    <svg class="hero-graph" viewBox="0 0 520 330" role="img" aria-label="one pipeline fanning out to four downstream pipelines, with batches crossing the edges">
-      <!-- root -->
-      <g transform="translate(180 20)">
-        <rect class="node" width="160" height="76" rx="3"/>
-        <rect class="bar" x="1" y="1" width="158" height="18"/>
-        <text x="8" y="14">sensors</text>
-        <text class="small" x="8" y="32">NATS · sensors.&gt;</text>
-        <g class="bars" transform="translate(8 40)">
-          <rect class="in" x="0" y="8" width="3" height="18"/><rect class="out" x="4" y="9" width="3" height="17"/>
-          <rect class="in" x="10" y="4" width="3" height="22"/><rect class="out" x="14" y="5" width="3" height="21"/>
-          <rect class="in" x="20" y="10" width="3" height="16"/><rect class="out" x="24" y="11" width="3" height="15"/>
-          <rect class="in" x="30" y="2" width="3" height="24"/><rect class="out" x="34" y="3" width="3" height="23"/>
-          <rect class="in" x="40" y="7" width="3" height="19"/><rect class="out" x="44" y="8" width="3" height="18"/>
-          <rect class="in" x="50" y="5" width="3" height="21"/><rect class="out" x="54" y="6" width="3" height="20"/>
-          <rect class="in" x="60" y="9" width="3" height="17"/><rect class="out" x="64" y="10" width="3" height="16"/>
-          <rect class="in" x="70" y="3" width="3" height="23"/><rect class="out" x="74" y="4" width="3" height="22"/>
-          <rect class="in" x="80" y="6" width="3" height="20"/><rect class="out" x="84" y="7" width="3" height="19"/>
-          <rect class="in" x="90" y="8" width="3" height="18"/><rect class="out" x="94" y="9" width="3" height="17"/>
-          <rect class="in" x="100" y="4" width="3" height="22"/><rect class="out" x="104" y="5" width="3" height="21"/>
-          <rect class="in" x="110" y="10" width="3" height="16"/><rect class="out" x="114" y="11" width="3" height="15"/>
-          <rect class="in" x="120" y="6" width="3" height="20"/><rect class="out" x="124" y="7" width="3" height="19"/>
-          <rect class="in" x="130" y="2" width="3" height="24"/><rect class="out" x="134" y="3" width="3" height="23"/>
-        </g>
-      </g>
-      <!-- edges: orthogonal, down, a channel between the rows -->
-      <g>
-        <path class="edge" d="M240 96 V150 Q240 156 234 156 H60 Q54 156 54 162 V220"/>
-        <path class="edge" d="M256 96 V170 Q256 176 250 176 H197 Q191 176 191 182 V220"/>
-        <path class="edge" d="M272 96 V170 Q272 176 278 176 H322 Q328 176 328 182 V220"/>
-        <path class="edge" d="M288 96 V150 Q288 156 294 156 H459 Q465 156 465 162 V220"/>
-      </g>
-      <g>
-        <path class="pulse" d="M240 96 V150 Q240 156 234 156 H60 Q54 156 54 162 V220"/>
-        <path class="pulse" d="M256 96 V170 Q256 176 250 176 H197 Q191 176 191 182 V220"/>
-        <path class="pulse" d="M272 96 V170 Q272 176 278 176 H322 Q328 176 328 182 V220"/>
-        <path class="pulse" d="M288 96 V150 Q288 156 294 156 H459 Q465 156 465 162 V220"/>
-      </g>
-      <!-- children -->
-      <g transform="translate(0 220)">
-        <rect class="node" width="109" height="70" rx="3"/><rect class="bar" x="1" y="1" width="107" height="18"/>
-        <text x="8" y="14">sensors_10s_avg</text><text class="small" x="8" y="32">REDUCER → STDOUT</text>
-        <g class="bars" transform="translate(8 40)"><rect class="in" x="0" y="10" width="3" height="16"/><rect class="out" x="4" y="22" width="3" height="4"/><rect class="in" x="10" y="8" width="3" height="18"/><rect class="out" x="14" y="22" width="3" height="4"/><rect class="in" x="20" y="12" width="3" height="14"/><rect class="out" x="24" y="22" width="3" height="4"/><rect class="in" x="30" y="6" width="3" height="20"/><rect class="out" x="34" y="22" width="3" height="4"/><rect class="in" x="40" y="9" width="3" height="17"/><rect class="out" x="44" y="22" width="3" height="4"/><rect class="in" x="50" y="11" width="3" height="15"/><rect class="out" x="54" y="22" width="3" height="4"/><rect class="in" x="60" y="7" width="3" height="19"/><rect class="out" x="64" y="22" width="3" height="4"/><rect class="in" x="70" y="10" width="3" height="16"/><rect class="out" x="74" y="22" width="3" height="4"/><rect class="in" x="80" y="8" width="3" height="18"/><rect class="out" x="84" y="22" width="3" height="4"/><rect class="in" x="90" y="12" width="3" height="14"/><rect class="out" x="94" y="22" width="3" height="4"/></g>
-      </g>
-      <g transform="translate(137 220)">
-        <rect class="node" width="109" height="70" rx="3"/><rect class="bar" x="1" y="1" width="107" height="18"/>
-        <text x="8" y="14">sensors_archive</text><text class="small" x="8" y="32">POSTGRES</text>
-        <g class="bars" transform="translate(8 40)"><rect class="in" x="0" y="8" width="3" height="18"/><rect class="out" x="4" y="8" width="3" height="18"/><rect class="in" x="10" y="4" width="3" height="22"/><rect class="out" x="14" y="4" width="3" height="22"/><rect class="in" x="20" y="10" width="3" height="16"/><rect class="out" x="24" y="10" width="3" height="16"/><rect class="in" x="30" y="2" width="3" height="24"/><rect class="out" x="34" y="2" width="3" height="24"/><rect class="in" x="40" y="7" width="3" height="19"/><rect class="out" x="44" y="7" width="3" height="19"/><rect class="in" x="50" y="5" width="3" height="21"/><rect class="out" x="54" y="5" width="3" height="21"/><rect class="in" x="60" y="9" width="3" height="17"/><rect class="out" x="64" y="9" width="3" height="17"/><rect class="in" x="70" y="3" width="3" height="23"/><rect class="out" x="74" y="3" width="3" height="23"/><rect class="in" x="80" y="6" width="3" height="20"/><rect class="out" x="84" y="6" width="3" height="20"/><rect class="in" x="90" y="8" width="3" height="18"/><rect class="out" x="94" y="8" width="3" height="18"/></g>
-      </g>
-      <g transform="translate(274 220)">
-        <rect class="node" width="109" height="70" rx="3"/><rect class="bar" x="1" y="1" width="107" height="18"/>
-        <text x="8" y="14">hot_readings</text><text class="small" x="8" y="32">FILTER → KAFKA</text>
-        <g class="bars" transform="translate(8 40)"><rect class="in" x="0" y="8" width="3" height="18"/><rect class="out" x="4" y="18" width="3" height="8"/><rect class="in" x="10" y="4" width="3" height="22"/><rect class="out" x="14" y="14" width="3" height="12"/><rect class="in" x="20" y="10" width="3" height="16"/><rect class="out" x="24" y="20" width="3" height="6"/><rect class="in" x="30" y="2" width="3" height="24"/><rect class="out" x="34" y="12" width="3" height="14"/><rect class="in" x="40" y="7" width="3" height="19"/><rect class="out" x="44" y="17" width="3" height="9"/><rect class="in" x="50" y="5" width="3" height="21"/><rect class="out" x="54" y="15" width="3" height="11"/><rect class="in" x="60" y="9" width="3" height="17"/><rect class="out" x="64" y="19" width="3" height="7"/><rect class="in" x="70" y="3" width="3" height="23"/><rect class="out" x="74" y="13" width="3" height="13"/><rect class="in" x="80" y="6" width="3" height="20"/><rect class="out" x="84" y="16" width="3" height="10"/><rect class="in" x="90" y="8" width="3" height="18"/><rect class="out" x="94" y="18" width="3" height="8"/></g>
-      </g>
-      <g transform="translate(411 220)">
-        <rect class="node" width="109" height="70" rx="3"/><rect class="bar" x="1" y="1" width="107" height="18"/>
-        <text x="8" y="14">sensors_to_s3</text><text class="small" x="8" y="32">S3 · ndjson</text>
-        <g class="bars" transform="translate(8 40)"><rect class="in" x="0" y="8" width="3" height="18"/><rect class="out" x="4" y="25" width="3" height="1"/><rect class="in" x="10" y="4" width="3" height="22"/><rect class="out" x="14" y="25" width="3" height="1"/><rect class="in" x="20" y="10" width="3" height="16"/><rect class="out" x="24" y="25" width="3" height="1"/><rect class="in" x="30" y="2" width="3" height="24"/><rect class="out" x="34" y="4" width="3" height="22"/><rect class="in" x="40" y="7" width="3" height="19"/><rect class="out" x="44" y="25" width="3" height="1"/><rect class="in" x="50" y="5" width="3" height="21"/><rect class="out" x="54" y="25" width="3" height="1"/><rect class="in" x="60" y="9" width="3" height="17"/><rect class="out" x="64" y="25" width="3" height="1"/><rect class="in" x="70" y="3" width="3" height="23"/><rect class="out" x="74" y="25" width="3" height="1"/><rect class="in" x="80" y="6" width="3" height="20"/><rect class="out" x="84" y="4" width="3" height="22"/><rect class="in" x="90" y="8" width="3" height="18"/><rect class="out" x="94" y="25" width="3" height="1"/></g>
-      </g>
-    </svg>
+    <div class="code-card">
+      <header>nats → filter → clickhouse <span class="file">config.yaml</span></header>
+<pre>- <span class="k">id</span>: <span class="s">warm_sensors</span>
+  <span class="k">inputs</span>:
+    - <span class="k">type</span>: <span class="s">nats</span>
+      <span class="k">connection</span>: <span class="s">plant-nats</span>
+      <span class="k">subject</span>: <span class="s">sensors.&gt;</span>
+      <span class="k">max_batch</span>: <span class="n">500</span>
+  <span class="k">transforms</span>:
+    - <span class="k">type</span>: <span class="s">filter</span>
+      <span class="k">conditions</span>:
+        - { <span class="k">type</span>: <span class="s">numeric</span>, <span class="k">field</span>: <span class="s">value</span>,
+            <span class="k">operator</span>: <span class="s">greater_than</span>, <span class="k">value</span>: <span class="n">30</span> }
+  <span class="k">outputs</span>:
+    - <span class="k">type</span>: <span class="s">clickhouse</span>
+      <span class="k">connection</span>: <span class="s">analytics</span>
+      <span class="k">table</span>: <span class="s">warm_readings</span></pre>
+      <div class="note">A pipeline is <code>inputs → transforms → outputs</code>. The names <code>plant-nats</code> and <code>analytics</code> are connections. You declare them one time, in <code>config.connections.yaml</code> beside this file.</div>
+    </div>
   </div>
 </header>
 
@@ -269,41 +231,41 @@ onBeforeUnmount(() => {
       <div class="tour-copy">
         <ol class="steps" aria-label="steps">
           <li class="head label">how it works</li>
-          <li class="active"><a href="#s-pipeline" data-step="0">a pipeline <small>card</small></a></li>
-          <li><a href="#s-inputs" data-step="1">inputs <small>tab 1</small></a></li>
-          <li><a href="#s-transforms" data-step="2">transforms <small>tab 2</small></a></li>
-          <li><a href="#s-outputs" data-step="3">outputs <small>tab 3</small></a></li>
+          <li class="active"><a href="#s-pipeline" data-step="0">a pipeline <small>config</small></a></li>
+          <li><a href="#s-inputs" data-step="1">inputs <small>step 1</small></a></li>
+          <li><a href="#s-transforms" data-step="2">transforms <small>step 2</small></a></li>
+          <li><a href="#s-outputs" data-step="3">outputs <small>step 3</small></a></li>
           <li><a href="#s-graph" data-step="4">the graph <small>zoom out</small></a></li>
         </ol>
 
         <div class="tour-texts">
           <div class="tour-text active" id="s-pipeline">
-            <h2>one pipeline is one card</h2>
-            <p>a pipeline is <code>inputs → transforms → outputs</code>. all three are arrays: several inputs are merged into one stream, every output receives every batch, and the transforms run in the order you wrote them.</p>
-            <p class="dim">the card on the right is what kayak draws for it — its config in three tabs, a throughput chart, and a live log of the batches that actually went through. that is the whole interface: there is no dashboard beside the graph, the graph is it.</p>
+            <h2>a pipeline is three lists</h2>
+            <p>A pipeline is <code>inputs → transforms → outputs</code>, and all three are arrays. kayak merges the inputs into one stream. The transforms run in the order of the config. Each output gets every batch.</p>
+            <p class="dim">The card on the right shows one pipeline. The web UI draws it from the same config: the config in three tabs, a throughput chart, and the batches that went through.</p>
           </div>
           <div class="tour-text" id="s-inputs">
             <h2>inputs: where the messages come from</h2>
-            <p>an input reads a subject, a topic, a channel, a set of opc ua nodes — or is posted to, if it's <code>http</code>. it hands the pipeline batches of plain JSON. no schema to declare, no registry, no code generation.</p>
-            <p class="dim">every input can <strong>buffer</strong> (by count, by window, or whichever first), attach an <strong>envelope</strong> of what it knows about a message — the subject, the partition, the offset — as ordinary fields, and acknowledge on receipt or on delivery.</p>
-            <div class="inventory"><code>nats</code><code>kafka</code><code>mqtt</code><code>redis</code><code>opcua</code><code>http</code><code>pipeline</code><code>dummy</code></div>
+            <p>An input reads a subject, a topic, a channel, a table or a set of OPC UA nodes. The <code>http</code> input receives posts. Each input gives the pipeline batches of plain JSON. You do not declare a schema.</p>
+            <p class="dim">Every input can <strong>buffer</strong> by count, by time window, or both. Every input can add an <strong>envelope</strong> with its metadata, for example the subject, the partition or the offset. The envelope is ordinary JSON fields.</p>
+            <div class="inventory"><code>nats</code><code>kafka</code><code>mqtt</code><code>redis</code><code>opcua</code><code>http</code><code>http_poll</code><code>postgres</code><code>clickhouse</code><code>indu</code><code>pipeline</code><code>dummy</code></div>
           </div>
           <div class="tour-text" id="s-transforms">
-            <h2>transforms: what happens on the way</h2>
-            <p>a chain of small, named steps. <code>filter</code> keeps or drops. <code>map</code> copies, casts, concatenates, does one arithmetic operation per mapping. <code>reducer</code> aggregates with a <code>group_by</code> and answers several questions in one message. <code>script</code> is where you write actual code, when the shape of the problem stops being configuration.</p>
-            <p class="dim">every transform addresses fields by path — <code>value</code>, <code>sensor.id</code>, <code>_meta.subject</code> — and a field either exists or it doesn't. what to do about a message that lacks one is always spelled out, never guessed.</p>
-            <div class="inventory"><code>filter</code><code>map</code><code>reducer</code><code>splitter</code><code>buffer</code><code>remember</code><code>recall</code><code>script</code><code>http</code></div>
+            <h2>transforms: what happens between</h2>
+            <p>A transform is a small step that does one thing. <code>filter</code> keeps or drops messages. <code>map</code> copies, casts and calculates fields. <code>reducer</code> aggregates with <code>group_by</code>. The streaming transforms keep state per key. Use <code>script</code> when configuration is not sufficient.</p>
+            <p class="dim">Every transform addresses fields by path, for example <code>sensor.id</code> or <code>_meta.subject</code>. Each transform has a policy for a missing field. kayak does not guess.</p>
+            <div class="inventory"><code>filter</code><code>map</code><code>reducer</code><code>splitter</code><code>buffer</code><code>remember</code><code>recall</code><code>script</code><code>http</code><code>deadband</code><code>throttle</code><code>pivot</code><code>derive</code><code>rolling</code><code>smooth</code><code>detect</code><code>resample</code><code>features</code></div>
           </div>
           <div class="tour-text" id="s-outputs">
-            <h2>outputs: where they end up</h2>
-            <p>every output gets every batch, so "archive to postgres <em>and</em> forward to kafka" is one pipeline with two outputs, not two pipelines. the database outputs map fields onto real columns with real types; the object-store and file outputs rotate parts by rows or by time.</p>
-            <p class="dim">an output that isn't reachable yet is retried on backoff rather than failing the run — a postgres that comes up thirty seconds after kayak did is an outage, not a config error, and the card says which.</p>
-            <div class="inventory"><code>postgres</code><code>clickhouse</code><code>s3</code><code>file</code><code>kafka</code><code>nats</code><code>mqtt</code><code>redis</code><code>http</code><code>stdout</code></div>
+            <h2>outputs: where the messages go</h2>
+            <p>Each output gets every batch. To archive to postgres and also send to kafka, use one pipeline with two outputs. The database outputs map fields to typed columns. The file and s3 outputs rotate parts by rows or by time.</p>
+            <p class="dim">kayak retries an output that it cannot reach at startup. If postgres starts 30 seconds after kayak, the pipeline waits and then continues.</p>
+            <div class="inventory"><code>postgres</code><code>clickhouse</code><code>s3</code><code>file</code><code>kafka</code><code>nats</code><code>mqtt</code><code>redis</code><code>http</code><code>indu</code><code>tidepool</code><code>stdout</code></div>
           </div>
           <div class="tour-text" id="s-graph">
             <h2>pipelines feed pipelines</h2>
-            <p>the <code>pipeline</code> input subscribes to another pipeline's output. so one that reads the broker once can fan out to a rollup, an archive and an alert — each a card of its own, each with its own transforms, chart and log — and what you have configured is a graph, not a list of jobs.</p>
-            <p class="dim">the canvas lays the cards out top to bottom by depth until you drag one somewhere else. edges are square, run along the grid, and light up as a batch crosses them: a busy graph glows, a stalled one doesn't.</p>
+            <p>The <code>pipeline</code> input reads the output of another pipeline. One pipeline reads the broker one time. Many pipelines downstream use its messages: a rollup, an archive, an alert. Your config is a graph of small pipelines.</p>
+            <p class="dim">Each pipeline has its own transforms and outputs. kayak shares each message between them and does not copy it. In the web UI, a line lights up when a batch goes along it.</p>
           </div>
         </div>
       </div>
@@ -475,49 +437,99 @@ onBeforeUnmount(() => {
   </div>
 </section>
 
-<!-- ============================================================= config -->
-<section class="section-page" id="config">
+<!-- ========================================================= performance -->
+<section class="section-page" id="performance">
   <div class="inner">
     <div class="section-head-row">
       <div>
-        <span class="label">the config file</span>
-        <h2>pipelines are configuration</h2>
+        <span class="label">performance</span>
+        <h2>the runtime is not the bottleneck</h2>
       </div>
-      <p class="lede">JSON or YAML — the extension decides. the file is a load source and a save target, never a mirror: editing from the canvas starts the new pipeline immediately and writes nothing until you save, and what it writes is deterministic and meant to be committed.</p>
+      <p class="lede">kayak has no garbage collector. The <code>just bench</code> harness measures the cost of the run loop. These numbers come from an Apple M1 Max, in process, with no network and no disk. They exclude I/O, so they are not end-to-end throughput.</p>
     </div>
 
-    <div class="two-col">
-      <div class="code-card">
-        <header>kafka → postgres <span class="file">pipelines.yaml</span></header>
-<pre><span class="c"># one pipeline, no transforms: every batch off the topic
-# goes into the table as it arrives</span>
-- <span class="k">id</span>: <span class="s">orders_archive</span>
-  <span class="k">inputs</span>:
-    - <span class="k">type</span>: <span class="s">kafka</span>
-      <span class="k">connection</span>: <span class="s">prod-kafka</span>
-      <span class="k">topic</span>: <span class="s">orders</span>
-      <span class="k">group</span>: <span class="s">kayak</span>
-      <span class="k">ack</span>: <span class="s">on_delivery</span>
-  <span class="k">outputs</span>:
-    - <span class="k">type</span>: <span class="s">postgres</span>
-      <span class="k">connection</span>: <span class="s">warehouse</span>
-      <span class="k">table</span>: <span class="s">orders</span></pre>
-        <div class="note">without <code>columns</code> the table is <code>id</code> / <code>received_at</code> / <code>payload jsonb</code> — the whole message, as it came. <code>on_delivery</code> commits the offset once postgres has it.</div>
-      </div>
+    <div class="stats">
+      <div class="stat"><span class="num">7M</span><span class="unit">passes/s</span><p>one pipeline, no transforms</p></div>
+      <div class="stat"><span class="num">31M</span><span class="unit">messages/s</span><p>one pipeline, batches of 100, one <code>filter</code></p></div>
+      <div class="stat"><span class="num">5.6B</span><span class="unit">messages/s</span><p>1000 pipelines at the same time, batches of 100, 14 MiB resident</p></div>
+      <div class="stat"><span class="num">9</span><span class="unit">MiB</span><p>resident memory of one pipeline</p></div>
+    </div>
 
+    <ul class="points">
+      <li><strong>Fan-out does not copy.</strong> Each output and each downstream pipeline gets the same shared batch (<code>Arc</code>).</li>
+      <li><strong>Batches share the cost.</strong> Set <code>max_batch</code> on a broker input, or an input <code>buffer</code>. kayak then does the work per batch one time for many messages.</li>
+      <li><strong>Databases get batches.</strong> The <code>clickhouse</code> output writes one insert per batch.</li>
+      <li><strong>No browser, no UI cost.</strong> A server with no web UI attached does no work for the UI.</li>
+    </ul>
+  </div>
+</section>
+
+<!-- ======================================================= composability -->
+<section class="section-page" id="composability">
+  <div class="inner">
+    <div class="section-head-row">
+      <div>
+        <span class="label">composability</span>
+        <h2>small parts that connect</h2>
+      </div>
+      <p class="lede">Each transform does one thing. You connect transforms in a chain, and you connect pipelines in a graph. A message is plain JSON from the input to the output. There is no schema to declare.</p>
+    </div>
+
+    <div class="compose-grid">
+      <svg class="graph" viewBox="0 0 520 300" role="img" aria-label="one pipeline that reads nats and feeds three downstream pipelines">
+        <g transform="translate(180 20)">
+          <rect class="node" width="160" height="56" rx="3"/>
+          <text x="10" y="24">sensors</text>
+          <text class="small" x="10" y="42">NATS · sensors.&gt;</text>
+        </g>
+        <g>
+          <path class="edge" d="M240 76 V130 Q240 136 234 136 H86 Q80 136 80 142 V200"/>
+          <path class="edge" d="M260 76 V200"/>
+          <path class="edge" d="M280 76 V130 Q280 136 286 136 H434 Q440 136 440 142 V200"/>
+        </g>
+        <g>
+          <path class="pulse" d="M240 76 V130 Q240 136 234 136 H86 Q80 136 80 142 V200"/>
+          <path class="pulse" d="M260 76 V200"/>
+          <path class="pulse" d="M280 76 V130 Q280 136 286 136 H434 Q440 136 440 142 V200"/>
+        </g>
+        <g transform="translate(0 200)">
+          <rect class="node" width="160" height="56" rx="3"/>
+          <text x="10" y="24">sensors_10s_avg</text>
+          <text class="small" x="10" y="42">BUFFER · REDUCER → CLICKHOUSE</text>
+        </g>
+        <g transform="translate(180 200)">
+          <rect class="node" width="160" height="56" rx="3"/>
+          <text x="10" y="24">sensors_archive</text>
+          <text class="small" x="10" y="42">S3 · NDJSON</text>
+        </g>
+        <g transform="translate(360 200)">
+          <rect class="node" width="160" height="56" rx="3"/>
+          <text x="10" y="24">hot_alerts</text>
+          <text class="small" x="10" y="42">FILTER → HTTP</text>
+        </g>
+      </svg>
+
+      <ul class="points">
+        <li><strong>Many inputs, many outputs.</strong> kayak merges the inputs of a pipeline into one stream. Each output gets each batch.</li>
+        <li><strong>Pipelines feed pipelines.</strong> The <code>pipeline</code> input reads the output of another pipeline. You can make fan-out, fan-in and chains of any depth.</li>
+        <li><strong>Connections.</strong> You declare a broker, a database or a bucket one time, with a name. Many components refer to that name.</li>
+        <li><strong>State buckets.</strong> <code>remember</code> writes a value to a named bucket. <code>recall</code> reads it, also in a different pipeline.</li>
+        <li><strong>Metadata is data.</strong> An input can add the subject, topic or offset to the message as ordinary JSON fields. Each transform can then use them.</li>
+        <li><strong>Scripts when you need them.</strong> Use <code>script</code> (rhai) when the other transforms are not sufficient.</li>
+      </ul>
+    </div>
+
+    <div class="two-col" style="margin-top:32px">
       <div class="code-card">
-        <header>buffer, filter, reduce, map columns <span class="file">pipelines.yaml</span></header>
+        <header>a pipeline fed by a pipeline <span class="file">config.yaml</span></header>
 <pre>- <span class="k">id</span>: <span class="s">sensors_10s_avg</span>
   <span class="k">inputs</span>:
     - <span class="k">type</span>: <span class="s">pipeline</span>
-      <span class="k">upstream</span>: <span class="s">sensors</span>            <span class="c"># another pipeline's output</span>
+      <span class="k">upstream</span>: <span class="s">sensors</span>
       <span class="k">buffer</span>: { <span class="k">type</span>: <span class="s">tumbling</span>, <span class="k">window_seconds</span>: <span class="n">10</span> }
   <span class="k">transforms</span>:
-    - <span class="k">type</span>: <span class="s">filter</span>
-      <span class="k">Number</span>: { <span class="k">field</span>: <span class="s">value</span>, <span class="k">operator</span>: <span class="s">gt</span>, <span class="k">value</span>: <span class="n">0</span> }
     - <span class="k">type</span>: <span class="s">reducer</span>
       <span class="k">group_by</span>: [<span class="s">sensor</span>, <span class="s">_meta.subject</span>]
-      <span class="k">on_missing</span>: <span class="s">skip</span>
       <span class="k">aggregations</span>:
         - { <span class="k">function</span>: <span class="s">avg</span>,   <span class="k">field</span>: <span class="s">value</span>, <span class="k">as</span>: <span class="s">mean</span> }
         - { <span class="k">function</span>: <span class="s">max</span>,   <span class="k">field</span>: <span class="s">value</span>, <span class="k">as</span>: <span class="s">highest</span> }
@@ -526,99 +538,104 @@ onBeforeUnmount(() => {
     - <span class="k">type</span>: <span class="s">clickhouse</span>
       <span class="k">connection</span>: <span class="s">analytics</span>
       <span class="k">table</span>: <span class="s">sensor_rollups</span>
+      <span class="k">order_by</span>: [<span class="s">sensor</span>]
       <span class="k">columns</span>:
         - { <span class="k">name</span>: <span class="s">sensor</span>,   <span class="k">type</span>: <span class="s">text</span> }
         - { <span class="k">name</span>: <span class="s">mean</span>,     <span class="k">type</span>: <span class="s">float</span> }
         - { <span class="k">name</span>: <span class="s">highest</span>,  <span class="k">type</span>: <span class="s">float</span> }
-        - { <span class="k">name</span>: <span class="s">readings</span>, <span class="k">type</span>: <span class="s">bigint</span> }
-      <span class="k">order_by</span>: [<span class="s">sensor</span>]
-    - <span class="k">type</span>: <span class="s">stdout</span></pre>
-        <div class="note">the reducer emits one message per distinct <code>(sensor, subject)</code> every ten seconds, and the columns are checked against the plan at build time — a mapped field that isn't there is a decision (<code>on_missing</code>), not a surprise at 3am.</div>
+        - { <span class="k">name</span>: <span class="s">readings</span>, <span class="k">type</span>: <span class="s">bigint</span> }</pre>
+        <div class="note">The reducer sends one message for each <code>(sensor, subject)</code> pair every 10 s. kayak checks the column mapping when it builds the pipeline.</div>
       </div>
-    </div>
 
-    <div class="two-col" style="margin-top:24px">
       <div class="code-card">
-        <header>declare a system once <span class="file">pipelines.connections.yaml</span></header>
-<pre><span class="k">prod-kafka</span>:
-  <span class="k">type</span>: <span class="s">kafka</span>
-  <span class="k">brokers</span>: <span class="s">kafka-1:9092,kafka-2:9092</span>
-<span class="k">warehouse</span>:
-  <span class="k">type</span>: <span class="s">postgres</span>
-  <span class="k">host</span>: <span class="s">db.internal</span>
-  <span class="k">database</span>: <span class="s">events</span>
-  <span class="k">user</span>: <span class="s">kayak</span>
-  <span class="k">password</span>: <span class="l">${POSTGRES_PASSWORD}</span>
+        <header>declare a system one time <span class="file">config.connections.yaml</span></header>
+<pre><span class="k">plant-nats</span>:
+  <span class="k">type</span>: <span class="s">nats</span>
+  <span class="k">urls</span>: <span class="s">nats://nats.internal:4222</span>
 <span class="k">analytics</span>:
   <span class="k">type</span>: <span class="s">clickhouse</span>
   <span class="k">url</span>: <span class="s">https://ch.internal:8443</span>
   <span class="k">database</span>: <span class="s">plant</span>
   <span class="k">user</span>: <span class="s">kayak</span>
-  <span class="k">password</span>: <span class="l">${CLICKHOUSE_PASSWORD}</span></pre>
-        <div class="note">what a system <em>is</em> lives here under a name; a component says which one it uses and only what it wants from it — a topic, a table, a prefix. credentials are <code>${ENV}</code> references, resolved at startup and never sent back out to the browser.</div>
-      </div>
-
-      <div class="code-card">
-        <header>the same thing, as JSON <span class="file">pipelines.json</span></header>
-<pre>[
-  {
-    <span class="k">"id"</span>: <span class="s">"orders_archive"</span>,
-    <span class="k">"inputs"</span>: [
-      { <span class="k">"type"</span>: <span class="s">"kafka"</span>, <span class="k">"connection"</span>: <span class="s">"prod-kafka"</span>,
-        <span class="k">"topic"</span>: <span class="s">"orders"</span>, <span class="k">"group"</span>: <span class="s">"kayak"</span>,
-        <span class="k">"ack"</span>: <span class="s">"on_delivery"</span> }
-    ],
-    <span class="k">"transforms"</span>: [],
-    <span class="k">"outputs"</span>: [
-      { <span class="k">"type"</span>: <span class="s">"postgres"</span>, <span class="k">"connection"</span>: <span class="s">"warehouse"</span>,
-        <span class="k">"table"</span>: <span class="s">"orders"</span> }
-    ]
-  }
-]</pre>
-        <div class="note">every field, every type and every closed set of values is in the generated reference at <code>/docs</code> — reflected out of the config structs kayak actually deserializes, so it cannot drift from what the server accepts.</div>
+  <span class="k">password</span>: <span class="l">${CLICKHOUSE_PASSWORD}</span>
+<span class="k">archive</span>:
+  <span class="k">type</span>: <span class="s">s3</span>
+  <span class="k">bucket</span>: <span class="s">events</span>
+  <span class="k">region</span>: <span class="s">eu-north-1</span>
+  <span class="k">access_key_id</span>: <span class="l">${S3_KEY_ID}</span>
+  <span class="k">secret_access_key</span>: <span class="l">${S3_SECRET}</span></pre>
+        <div class="note">A connection holds what the system is: hosts, URLs and credentials. A component adds only what it wants from the system, for example a subject or a table. kayak reads <code>${NAME}</code> from the environment or from a secrets file.</div>
       </div>
     </div>
   </div>
 </section>
 
-<!-- ============================================================= deploy -->
-<section class="section-page" id="deploy">
+<!-- ========================================================== inventory -->
+<section class="section-page" id="components">
   <div class="inner">
     <div class="section-head-row">
       <div>
-        <span class="label">deploying &amp; configuring</span>
-        <h2>one binary, a handful of flags</h2>
+        <span class="label">feature completeness</span>
+        <h2>the components</h2>
       </div>
-      <p class="lede">axum server, leptos frontend compiled into it, no runtime dependency, no database of its own, no sidecar. the container image has nothing baked in: started bare it serves an empty graph, and a deployment is a directory mounted in and named on the command line.</p>
+      <p class="lede">The reference documents each component and each field. kayak generates the reference from the config types, so it agrees with the server that you run.</p>
+    </div>
+
+    <div class="props inventory-table">
+      <div class="rows">
+        <div class="row"><span class="name">inputs</span><span class="desc inventory"><code>nats</code><code>kafka</code><code>mqtt</code><code>redis</code><code>opcua</code><code>http</code><code>http_poll</code><code>postgres</code><code>clickhouse</code><code>indu</code><code>pipeline</code><code>dummy</code></span></div>
+        <div class="row"><span class="name">transforms</span><span class="desc inventory"><code>filter</code><code>map</code><code>reducer</code><code>splitter</code><code>buffer</code><code>remember</code><code>recall</code><code>http</code><code>script</code><code>deadband</code><code>throttle</code><code>pivot</code><code>derive</code><code>rolling</code><code>smooth</code><code>detect</code><code>resample</code><code>features</code></span></div>
+        <div class="row"><span class="name">outputs</span><span class="desc inventory"><code>postgres</code><code>clickhouse</code><code>s3</code><code>file</code><code>kafka</code><code>nats</code><code>mqtt</code><code>redis</code><code>http</code><code>indu</code><code>tidepool</code><code>stdout</code></span></div>
+        <div class="row"><span class="name">connections</span><span class="desc inventory"><code>kafka</code><code>nats</code><code>mqtt</code><code>redis</code><code>postgres</code><code>clickhouse</code><code>s3</code><code>file</code><code>opcua</code><code>indu</code><code>tidepool</code></span></div>
+      </div>
+    </div>
+
+    <div class="facts" style="margin-top:24px">
+      <div><span class="label">buffers</span><p>Each input can buffer by count, by time window, or by the first of the two.</p></div>
+      <div><span class="label">acknowledgement</span><p>With <code>ack: on_delivery</code>, a <code>kafka</code> or <code>mqtt</code> input acknowledges a message after the outputs return.</p></div>
+      <div><span class="label">column mapping</span><p>The <code>postgres</code> and <code>clickhouse</code> outputs map fields to typed columns and create the table.</p></div>
+      <div><span class="label">rotation</span><p>The <code>file</code> and <code>s3</code> outputs rotate parts by row count or by time.</p></div>
+      <div><span class="label">streaming statistics</span><p>Rolling windows, smoothing, rates, resampling and anomaly detection, per key.</p></div>
+      <div><span class="label">model calls</span><p>The <code>http</code> transform sends messages to a service. It can merge the reply into each message.</p></div>
+      <div><span class="label">industrial</span><p>The <code>opcua</code> input subscribes to nodes and sends one message for each value change.</p></div>
+      <div><span class="label">ingest endpoint</span><p>The <code>http</code> input gives a pipeline its own endpoint, with an optional credential.</p></div>
+    </div>
+  </div>
+</section>
+
+<!-- ========================================================== operation -->
+<section class="section-page" id="operation">
+  <div class="inner">
+    <div class="section-head-row">
+      <div>
+        <span class="label">operation</span>
+        <h2>run it like any other service</h2>
+      </div>
+      <p class="lede">The container image contains the binary and nothing else. You mount your config and name it on the command line. The arguments of the container are the flags of the server.</p>
     </div>
 
     <div class="deploy-grid">
       <div class="stack">
         <div class="code-card term">
           <header>run it</header>
-<pre><span class="c"># the image; the container's arguments are the server's flags</span>
-<span class="prompt">$ </span>docker run -p 6767:6767 -v "$PWD/pipelines:/kayak" \
-    -e POSTGRES_PASSWORD \
+<pre><span class="prompt">$ </span>docker run -p 6767:6767 -v "$PWD:/kayak" \
+    -e CLICKHOUSE_PASSWORD \
     ghcr.io/niclasgrahm/kayak \
-      --config /kayak/pipelines.yaml \
-      --secrets /kayak/secrets.json \
-      --data-dir /data
-
-<span class="c"># or the binary, anywhere</span>
-<span class="prompt">$ </span>kayak --config pipelines.yaml --listen 0.0.0.0:6767</pre>
-          <div class="note">the connections and layout files are found beside the config by name (<code>pipelines.connections.yaml</code>, <code>pipelines.layout.json</code>), so mounting the directory is what you want. <code>linux/amd64</code> and <code>arm64</code>, uid 10001, read-only filesystem unless you'll save from the ui.</div>
+      --config /kayak/config.yaml \
+      --server-config /kayak/server.yaml</pre>
+          <div class="note">kayak finds <code>config.connections.yaml</code> beside the config, so mount the directory. The image is for <code>linux/amd64</code> and <code>linux/arm64</code> and runs as uid 10001. In Kubernetes, put the config in a ConfigMap and the secrets in environment variables.</div>
         </div>
 
         <div class="code-card">
-          <header>the server's own settings <span class="file">server.yaml</span></header>
-<pre><span class="k">auth</span>:                       <span class="c"># off unless declared</span>
+          <header>the settings of the server <span class="file">server.yaml</span></header>
+<pre><span class="k">auth</span>:
   <span class="k">type</span>: <span class="s">basic</span>
   <span class="k">users</span>:
     <span class="k">ops</span>:    { <span class="k">password</span>: <span class="l">${OPS_PASSWORD}</span>,    <span class="k">role</span>: <span class="s">admin</span> }
     <span class="k">viewer</span>: { <span class="k">password</span>: <span class="l">${VIEWER_PASSWORD}</span>, <span class="k">role</span>: <span class="s">read</span> }
 <span class="k">history</span>:
-  <span class="k">retention_secs</span>: <span class="n">86400</span>     <span class="c"># a day of counters per card; 0 turns it off</span></pre>
-          <div class="note">how the server is run, as against what the graph is — a second file so the graph can travel between environments untouched. two roles: <code>admin</code> edits, <code>read</code> looks.</div>
+  <span class="k">retention_secs</span>: <span class="n">86400</span>     <span class="c"># 0 turns history off</span></pre>
+          <div class="note">Authentication has two roles. <code>admin</code> can change the graph. <code>read</code> can only look. Accounts come from this file (<code>basic</code>) or from an identity provider (<code>jwt</code>).</div>
         </div>
       </div>
 
@@ -626,118 +643,77 @@ onBeforeUnmount(() => {
         <div class="props">
           <header><span class="label">flags</span> <span class="dim" style="font-weight:400;font-size:11px;font-family:var(--font-mono)">kayak --help</span></header>
           <div class="rows">
-            <div class="row"><span class="name">--config &lt;path&gt;</span><span class="desc">the pipelines, JSON or YAML. optional: without it the server starts with an empty graph and the first <code>save as…</code> creates the file.</span></div>
-            <div class="row"><span class="name">--connections &lt;path&gt;</span><span class="desc">the systems file, when it isn't beside the config — fixed for the process, so two configs can share one.</span></div>
-            <div class="row"><span class="name">--secrets &lt;path&gt;</span><span class="desc">a JSON map for <code>${NAME}</code> references. environment variables are tried first; an unresolved name refuses to start rather than connecting without credentials.</span></div>
-            <div class="row"><span class="name">--data-dir &lt;path&gt;</span><span class="desc">the one directory <code>file</code> outputs may write under. without it they refuse to build — closed by default.</span></div>
-            <div class="row"><span class="name">--server-config &lt;path&gt;</span><span class="desc">auth and history: what belongs to the deployment rather than to the graph.</span></div>
-            <div class="row"><span class="name">--listen &lt;addr&gt;</span><span class="desc">where to bind. defaults to <code>127.0.0.1:6767</code>; the image sets <code>0.0.0.0</code>.</span></div>
-            <div class="row"><span class="name">--debug</span><span class="desc">more tracing.</span></div>
+            <div class="row"><span class="name">--config &lt;path&gt;</span><span class="desc">The pipelines, as JSON or YAML. The file extension sets the format.</span></div>
+            <div class="row"><span class="name">--connections &lt;path&gt;</span><span class="desc">The connections file. Without the flag, kayak uses <code>&lt;config&gt;.connections.&lt;ext&gt;</code> beside the config.</span></div>
+            <div class="row"><span class="name">--secrets &lt;path&gt;</span><span class="desc">A JSON file of values for <code>${NAME}</code>. kayak reads the environment first. kayak does not start if a name has no value.</span></div>
+            <div class="row"><span class="name">--data-dir &lt;path&gt;</span><span class="desc">The directory for <code>file</code> outputs. Without it, <code>file</code> outputs do not build.</span></div>
+            <div class="row"><span class="name">--server-config &lt;path&gt;</span><span class="desc">Authentication and history. Without it, the server authenticates nobody.</span></div>
+            <div class="row"><span class="name">--listen &lt;addr&gt;</span><span class="desc">The bind address. The default is <code>127.0.0.1:6767</code>. The image binds <code>0.0.0.0:6767</code>.</span></div>
+            <div class="row"><span class="name">--debug</span><span class="desc">More log output.</span></div>
           </div>
         </div>
 
-        <div class="props">
-          <header><span class="label">what it costs to leave running</span></header>
-          <div class="rows">
-            <div class="row"><span class="name">headless</span><span class="desc">nothing for the ui. run loops publish to the event feed only while a browser is attached, and at most ten passes a second when one is.</span></div>
-            <div class="row"><span class="name">history</span><span class="desc">about 58 kB per pipeline for a day, flat in throughput — buckets hold counts, never messages.</span></div>
-            <div class="row"><span class="name">runtime</span><span class="desc">~7M pipeline passes/s on one core, i/o excluded. the pipeline is not the bottleneck; whatever it talks to is.</span></div>
-          </div>
+        <div class="code-card term">
+          <header>the http api</header>
+<pre><span class="c"># send messages to a pipeline with an http input</span>
+<span class="prompt">$ </span>curl -X POST localhost:6767/api/pipelines/ingest/messages \
+    -d '[{"sensor":"line1/temp","value":21.5}]'
+<span class="out">HTTP/1.1 202 Accepted</span>
+
+<span class="c"># counters and failure records of the last day</span>
+<span class="prompt">$ </span>curl localhost:6767/api/pipelines/ingest/history?resolution=coarse
+
+<span class="c"># the complete api, as OpenAPI 3.1</span>
+<span class="prompt">$ </span>curl localhost:6767/api/openapi.json</pre>
+          <div class="note">kayak builds its routes and the OpenAPI document from one table. <code>/api/docs</code> gives the component reference as JSON.</div>
         </div>
       </div>
-    </div>
-
-    <div class="facts">
-      <div><span class="label">one process</span><p>no clustering, no distributed state, no exactly-once across a fleet. the jobs below the line where you'd need one.</p></div>
-      <div><span class="label">state &amp; history in memory</span><p>a decision, not a stage: durable state without checkpointed input positions would be wrong invisibly.</p></div>
-      <div><span class="label">tables created, never altered</span><p><code>IF NOT EXISTS</code> and nothing more. migrating a live table from a config file is a bigger promise than kayak makes.</p></div>
-      <div><span class="label">pre-1.0</span><p>things move. the roadmap is in the repo, and the reference is regenerated by the test suite.</p></div>
     </div>
   </div>
 </section>
 
-<!-- ================================================================ api -->
-<section class="section-page" id="api">
+<!-- ============================================================= limits -->
+<section class="section-page" id="limits">
   <div class="inner">
     <div class="section-head-row">
       <div>
-        <span class="label">the http api</span>
-        <h2>every button is an endpoint</h2>
+        <span class="label">limits</span>
+        <h2>what kayak does not do</h2>
       </div>
-      <p class="lede">the canvas is a client. anything it does — create a pipeline, post messages into one, read a bucket, save the file — is a JSON request you could have made yourself, from a script, a ci job, or an agent that has read the spec.</p>
+      <p class="lede">Read these limits before you choose kayak for a job.</p>
     </div>
-
-    <div class="api-grid">
-      <div class="endpoints">
-        <header>endpoints <span class="count">from the same table the router is built from</span></header>
-        <ul>
-          <li><span class="verb">GET</span><span class="path">/api/pipelines</span><span class="what">the running graph</span></li>
-          <li><span class="verb post">POST</span><span class="path">/api/pipelines</span><span class="what">create one — it starts now</span></li>
-          <li><span class="verb del">DEL</span><span class="path">/api/pipelines/<i>{id}</i></span><span class="what">stop and remove</span></li>
-          <li><span class="verb post">POST</span><span class="path">/api/pipelines/<i>{id}</i>/messages</span><span class="what">ingest, via an http input</span></li>
-          <li><span class="verb">GET</span><span class="path">/api/pipelines/<i>{id}</i>/history</span><span class="what">a day of counters &amp; failures</span></li>
-          <li><span class="verb post">POST</span><span class="path">/api/pipelines/dry-run</span><span class="what">run a chain, emit nothing</span></li>
-          <li><span class="verb post">POST</span><span class="path">/api/inputs/sample</span><span class="what">a few messages off an input</span></li>
-          <li><span class="verb post">POST</span><span class="path">/api/scripts/dry-run</span><span class="what">compile &amp; try a script</span></li>
-          <li><span class="verb">GET</span><span class="path">/api/connections</span><span class="what">the systems</span></li>
-          <li><span class="verb">GET</span><span class="path">/api/state/<i>{bucket}</i></span><span class="what">a bucket, key by key</span></li>
-          <li><span class="verb post">POST</span><span class="path">/api/config/save</span><span class="what">write the file</span></li>
-          <li><span class="verb post">POST</span><span class="path">/api/config/revert</span><span class="what">reload it</span></li>
-          <li><span class="verb put">PUT</span><span class="path">/api/layout</span><span class="what">where the cards are</span></li>
-          <li><span class="verb">GET</span><span class="path">/events</span><span class="what">sse — the live feed</span></li>
-          <li><span class="verb">GET</span><span class="path">/api/docs</span><span class="what">every component, as JSON</span></li>
-          <li><span class="verb">GET</span><span class="path">/api/openapi.json</span><span class="what">openapi 3.1</span></li>
-        </ul>
-        <div class="more">and auth, settings, and a rendered reference at <code>/api/reference</code>. an endpoint missing from the table isn't routed — the table is the routes.</div>
-      </div>
-
-      <div class="stack">
-        <div class="code-card term">
-          <header>from a shell</header>
-<pre><span class="c"># a pipeline with an http input is an ingest endpoint at its own id</span>
-<span class="prompt">$ </span>curl -X POST localhost:6767/api/pipelines/ingest/messages \
-    -H 'authorization: Bearer $DEVICE_TOKEN' \
-    -d '[{"sensor":"line1/temp","value":21.5}]'
-<span class="out">HTTP/1.1 202 Accepted</span>
-
-<span class="c"># try a chain against real messages before it exists</span>
-<span class="prompt">$ </span>curl -X POST localhost:6767/api/pipelines/dry-run -d @draft.json | jq '.stages[].batches'
-
-<span class="c"># what broke overnight, with nobody watching</span>
-<span class="prompt">$ </span>curl localhost:6767/api/pipelines/hot_alerts/history?resolution=coarse
-<span class="out">{ "errors": [ { "stage": "output http", "count": 240,
-                "first_seen": "02:14:07Z", "last_seen": "08:03:11Z",
-                "message": "webhook returned 503 …" } ], … }</span></pre>
-          <div class="note">the ingest endpoint's credential is its own — bearer or header, per pipeline — and not the server's sign-in, because a device posting readings isn't an operator. a full queue is a <code>503</code>, never a request held open.</div>
-        </div>
-
-        <div class="code-card">
-          <header>for software that reads specs</header>
-          <div class="note" style="border-top:none;font-size:13.5px;color:var(--text)">
-            <p><code>/api/openapi.json</code> is generated from the same table the server builds its routes from, and the request and response bodies from the rust types — so it describes the server you are actually talking to, not the one the docs were written against.</p>
-            <p><code>/api/docs</code> is the component reference as JSON: every input, transform, output and connection kind, every field with its type, whether it's required, and the closed set of values it takes. that is enough for an agent to write a valid pipeline without having seen one — and <code>dry-run</code> is how it finds out whether the pipeline does what it meant, without emitting anything.</p>
-            <p style="margin:0" class="dim">integration tokens sign in at <code>/api/auth/token</code>; the same two roles apply.</p>
-          </div>
-        </div>
-      </div>
+    <div class="facts">
+      <div><span class="label">one process</span><p>kayak does not cluster. It has no distributed state and no exactly-once delivery across machines.</p></div>
+      <div><span class="label">state in memory</span><p>State buckets and history are in memory. A restart clears them.</p></div>
+      <div><span class="label">no table migrations</span><p>The <code>postgres</code> and <code>clickhouse</code> outputs create a table if it does not exist. They do not change an existing table.</p></div>
+      <div><span class="label">pre-1.0</span><p>The config format can change between minor versions. The roadmap is in the repository.</p></div>
     </div>
+  </div>
+</section>
+
+<!-- ============================================================= web ui -->
+<section class="section-page" id="web-ui">
+  <div class="inner narrow">
+    <span class="label">optional</span>
+    <h3>web ui</h3>
+    <p class="dim">The server also has a web UI. Use it to look at the running graph and the messages in each pipeline. You do not need it to run kayak. <a href="https://propell.dev/kayak/canvas/the-canvas">Read about the web UI.</a></p>
   </div>
 </section>
 
 <footer class="footer grid-bg">
   <div class="inner">
     <div>
-      <span class="label">run it</span>
-      <pre class="install" style="margin-top:10px"><span class="p">$ </span>git clone https://github.com/niclasgrahm/kayak &amp;&amp; cd kayak
-<span class="p">$ </span>just dev                    <span class="c"># → localhost:6767</span></pre>
+      <span class="label">try it</span>
+      <pre class="install" style="margin-top:10px"><span class="p">$ </span>docker run --rm -p 6767:6767 --entrypoint sh ghcr.io/niclasgrahm/kayak -c \
+    'echo "[{id: ticker, inputs: [{type: dummy, duration: 1}], outputs: [{type: stdout}]}]" &gt; c.yaml &amp;&amp; exec kayak --config c.yaml'</pre>
     </div>
     <div class="links">
       <a href="https://github.com/niclasgrahm/kayak">github</a>
       <a href="https://propell.dev/kayak/getting-started">getting started</a>
-      <a href="https://propell.dev/kayak/reference/">component reference</a>
+      <a href="https://propell.dev/kayak/reference/">reference</a>
       <a href="https://propell.dev/kayak/operating/deployment">deployment</a>
     </div>
-    <p class="fine">kayak — built with rust, axum, tokio and leptos. the name is lowercase, even here.</p>
+    <p class="fine">kayak is built with Rust, Axum, Tokio and Leptos. The name is lowercase.</p>
   </div>
 </footer>
 </div>
@@ -746,16 +722,16 @@ onBeforeUnmount(() => {
 <style>
 /* Every colour is the product's own token (style/main.scss), verbatim. Every
    rule is prefixed `.landing` so nothing here reaches the rest of the site
-   and nothing of the site's reaches in — `.card`, `.tabs` and `.label` are
-   names kayak.css and vitepress both have opinions about. */
-.landing {--bg-canvas: #1d2129; --bg-panel: #262b33; --bg-titlebar: #1b1f26; --bg-hover: #2f3540; --border: #14171c; --text: #cdced2; --text-dim: #85878c; --accent: #699ce8; --error: #e06c75; --error-bg: #3a2226; --stat-in: #699ce8; --stat-out: #d8a657; --json-key: #7fbbb3; --json-str: #a7c080; --json-num: #d8a657; --json-literal: #d699b6; --radius: 4px; --grid: 20px; --font-sans: "Noto Sans", "Open Sans", system-ui, -apple-system, sans-serif; --font-mono: "JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, monospace; --measure: 34rem; --page-x: clamp(20px, 5vw, 72px); }
+   and nothing of the site's reaches in — `.label` and `.row` are names
+   kayak.css and vitepress both have opinions about. */
+.landing {--bg-canvas: #1d2129; --bg-panel: #262b33; --bg-titlebar: #1b1f26; --bg-hover: #2f3540; --border: #14171c; --text: #cdced2; --text-dim: #85878c; --accent: #699ce8; --error: #e06c75; --stat-in: #699ce8; --stat-out: #d8a657; --json-key: #7fbbb3; --json-str: #a7c080; --json-num: #d8a657; --json-literal: #d699b6; --radius: 4px; --grid: 20px; --font-sans: "Noto Sans", "Open Sans", system-ui, -apple-system, sans-serif; --font-mono: "JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, monospace; --measure: 34rem; --page-x: clamp(20px, 5vw, 72px); }
 .landing *, .landing *::before, .landing *::after {box-sizing: border-box; }
 .landing {margin: 0; overflow-x: clip; background: var(--bg-canvas); color: var(--text); font-family: var(--font-sans); font-size: 15px; line-height: 1.6; -webkit-font-smoothing: antialiased; }
 .landing a {color: var(--accent); text-decoration: none; }
 .landing a:hover {text-decoration: underline; text-underline-offset: 2px; }
 .landing :focus-visible {outline: 2px solid var(--accent); outline-offset: 2px; }
 .landing code, .landing kbd, .landing pre {font-family: var(--font-mono); }
-.landing p code, .landing li code, .landing h2 code, .landing h3 code, .landing dt code {font-size: 0.88em; background: var(--bg-titlebar); border: 1px solid var(--border); border-radius: 2px; padding: 0 4px; color: var(--text); }
+.landing p code, .landing li code, .landing h2 code, .landing h3 code {font-size: 0.88em; background: var(--bg-titlebar); border: 1px solid var(--border); border-radius: 2px; padding: 0 4px; color: var(--text); }
 .landing .grid-bg {background-image: linear-gradient(rgba(255,255,255,0.045) 1px, transparent 1px), linear-gradient(90deg, rgba(255,255,255,0.045) 1px, transparent 1px); background-size: var(--grid) var(--grid); }
 .landing .label {font-size: 11px; letter-spacing: 0.07em; text-transform: uppercase; color: var(--text-dim); font-weight: 600; }
 .landing h1, .landing h2, .landing h3 {font-weight: 700; letter-spacing: -0.01em; line-height: 1.15; margin: 0; }
@@ -764,45 +740,132 @@ onBeforeUnmount(() => {
 .landing .lede {color: var(--text-dim); font-size: 17px; max-width: var(--measure); }
 .landing p {margin: 0 0 1em; }
 .landing .dim {color: var(--text-dim); }
-.landing .navbar {position: sticky; top: 0; z-index: 20; background: var(--bg-titlebar); border-bottom: 1px solid var(--border); padding: 6px var(--page-x); font-size: 12px; display: flex; align-items: center; gap: 4px; }
-.landing .navbar .brand {font-weight: 700; color: var(--text); margin-right: 8px; }
-.landing .navbar a.tab, .landing .navbar span.tab {color: var(--text-dim); padding: 2px 8px; border-radius: var(--radius); }
-.landing .navbar a.tab:hover {color: var(--text); background: var(--bg-hover); text-decoration: none; }
-.landing .navbar .tab.active {background: var(--bg-hover); color: var(--text); }
-.landing .navbar .right {margin-left: auto; display: flex; align-items: center; gap: 10px; }
-.landing .navbar .version {font-family: var(--font-mono); color: var(--text-dim); font-size: 11px; }
-.landing .navbar .btn {border: 1px solid var(--border); background: var(--bg-panel); color: var(--text); padding: 2px 8px; border-radius: var(--radius); }
-.landing .navbar .btn:hover {background: var(--bg-hover); text-decoration: none; }
+
+/* hero */
 .landing .hero {position: relative; padding: clamp(64px, 12vh, 140px) var(--page-x) clamp(56px, 10vh, 120px); border-bottom: 1px solid var(--border); overflow: hidden; }
 .landing .hero-inner > * {min-width: 0; }
 .landing .hero-inner {display: grid; grid-template-columns: minmax(0, 1.1fr) minmax(0, 0.9fr); gap: 48px; align-items: center; max-width: 1240px; margin: 0 auto; }
 .landing .hero h1 {font-size: clamp(40px, 6.2vw, 78px); font-weight: 800; letter-spacing: -0.035em; line-height: 1.02; max-width: 12ch; }
 .landing .hero h1 .thin {font-weight: 400; color: var(--text-dim); }
 .landing .hero .lede {margin: 26px 0 30px; font-size: clamp(16px, 1.5vw, 19px); }
-.landing .hero .lede code {font-size: 0.9em; }
 .landing .install {display: inline-block; background: var(--bg-titlebar); border: 1px solid var(--border); border-radius: var(--radius); padding: 12px 16px; font-family: var(--font-mono); font-size: 12.5px; line-height: 1.75; white-space: pre; color: var(--text); max-width: 100%; overflow-x: auto; }
 .landing .install .c {color: var(--text-dim); }
 .landing .install .p {color: var(--text-dim); user-select: none; }
-.landing .hero-links {margin-top: 18px; font-size: 13px; color: var(--text-dim); display: flex; gap: 18px; flex-wrap: wrap; }
-.landing .hero-graph {width: 100%; height: auto; display: block; }
-.landing .hero-graph .node {fill: var(--bg-panel); stroke: var(--border); }
-.landing .hero-graph .bar {fill: var(--bg-titlebar); }
-.landing .hero-graph text {font-family: var(--font-mono); font-size: 10px; fill: var(--text); }
-.landing .hero-graph text.small {font-size: 8px; fill: var(--text-dim); letter-spacing: 0.06em; }
-.landing .hero-graph .edge {fill: none; stroke: var(--text-dim); stroke-width: 2; }
-.landing .hero-graph .pulse {fill: none; stroke: var(--accent); stroke-width: 3; stroke-linecap: round; opacity: 0; }
-.landing .hero-graph .bars rect.in {fill: var(--stat-in); }
-.landing .hero-graph .bars rect.out {fill: var(--stat-out); }
+.landing .hero-links {margin-top: 18px; font-size: 14px; display: flex; gap: 18px; flex-wrap: wrap; }
+.landing .hero-fine {margin-top: 12px; font-size: 13px; color: var(--text-dim); }
+
+/* sections */
+.landing .section-page {padding: clamp(64px, 10vh, 120px) var(--page-x); border-top: 1px solid var(--border); }
+.landing .section-page > .inner {max-width: 1240px; margin: 0 auto; }
+.landing .section-page > .inner.narrow {max-width: 1240px; }
+.landing .section-page > .inner.narrow p {max-width: var(--measure); margin-top: 10px; }
+.landing #web-ui {padding-block: 40px; }
+.landing #web-ui .label {display: block; margin-bottom: 8px; }
+.landing .section-head-row {display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1.3fr); gap: 32px 64px; align-items: end; margin-bottom: 40px; }
+.landing .section-head-row .label {margin-bottom: 12px; display: block; }
+.landing .section-head-row .lede {margin: 0; }
+.landing .two-col {display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 24px; }
+.landing .stack {display: flex; flex-direction: column; gap: 24px; }
+
+/* the performance numbers */
+.landing .stats {display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 1px; background: var(--border); border: 1px solid var(--border); border-radius: var(--radius); overflow: hidden; }
+.landing .stat {background: var(--bg-panel); padding: 18px 18px 14px; }
+.landing .stat .num {font-family: var(--font-mono); font-size: clamp(32px, 4vw, 48px); font-weight: 600; color: var(--stat-in); letter-spacing: -0.02em; line-height: 1; }
+.landing .stat .unit {font-family: var(--font-mono); font-size: 13px; color: var(--stat-out); margin-left: 8px; }
+.landing .stat p {margin: 10px 0 0; font-size: 13px; color: var(--text-dim); }
+.landing .points {list-style: none; margin: 32px 0 0; padding: 0; display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px 32px; }
+.landing .points li {font-size: 14.5px; color: var(--text-dim); padding-left: 14px; border-left: 2px solid var(--border); }
+.landing .points li strong {color: var(--text); font-weight: 600; }
+
+/* composability */
+.landing .compose-grid {display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1.1fr); gap: 48px; align-items: center; }
+.landing .compose-grid .points {margin: 0; grid-template-columns: 1fr; }
+.landing .graph {width: 100%; height: auto; display: block; }
+.landing .graph .node {fill: var(--bg-panel); stroke: var(--border); }
+.landing .graph text {font-family: var(--font-mono); font-size: 12px; fill: var(--text); }
+.landing .graph text.small {font-size: 8.5px; fill: var(--text-dim); letter-spacing: 0.06em; }
+.landing .graph .edge {fill: none; stroke: var(--text-dim); stroke-width: 2; }
+.landing .graph .pulse {fill: none; stroke: var(--accent); stroke-width: 3; stroke-linecap: round; opacity: 0; animation: edge-pulse 2.6s ease-out infinite; }
+.landing .graph .pulse:nth-child(2) {animation-delay: 0.8s; }
+.landing .graph .pulse:nth-child(3) {animation-delay: 1.6s; }
 @keyframes edge-pulse {
   0% {opacity: 0; }
   6% {opacity: 1; }
   100% {opacity: 0; } }
-.landing .hero-graph .pulse {animation: edge-pulse 2.6s ease-out infinite; }
-.landing .hero-graph .pulse:nth-child(2) {animation-delay: 0.7s; }
-.landing .hero-graph .pulse:nth-child(3) {animation-delay: 1.3s; }
-.landing .hero-graph .pulse:nth-child(4) {animation-delay: 1.9s; }
 @media (prefers-reduced-motion: reduce) {
-  .landing .hero-graph .pulse {animation: none; opacity: 0.5; } }
+  .landing .graph .pulse {animation: none; opacity: 0; } }
+
+/* code */
+.landing .code-card {border: 1px solid var(--border); border-radius: var(--radius); background: var(--bg-panel); overflow: hidden; display: flex; flex-direction: column; min-width: 0; }
+.landing .code-card > header {background: var(--bg-titlebar); border-bottom: 1px solid var(--border); padding: 6px 10px; font-size: 12px; font-weight: 600; display: flex; align-items: center; gap: 10px; }
+.landing .code-card > header .file {font-family: var(--font-mono); font-weight: 400; font-size: 11px; color: var(--text-dim); margin-left: auto; }
+.landing .code-card pre {margin: 0; padding: 12px 14px; font-size: 12px; line-height: 1.6; overflow-x: auto; color: var(--text); flex: 1; }
+.landing .code-card .note {padding: 8px 12px; border-top: 1px solid var(--border); font-size: 12.5px; color: var(--text-dim); }
+.landing .code-card .note code {color: var(--text); }
+.landing .k {color: var(--json-key); }
+.landing .s {color: var(--json-str); }
+.landing .n {color: var(--json-num); }
+.landing .l {color: var(--json-literal); }
+.landing .c {color: var(--text-dim); }
+.landing .term pre .out {color: var(--text-dim); }
+.landing .term pre .prompt {color: var(--text-dim); user-select: none; }
+
+/* tables of names */
+.landing .deploy-grid {display: grid; grid-template-columns: minmax(0, 1.15fr) minmax(0, 1fr); gap: 24px; align-items: start; }
+.landing .props {border: 1px solid var(--border); border-radius: var(--radius); background: var(--bg-panel); overflow: hidden; }
+.landing .props > header {background: var(--bg-titlebar); border-bottom: 1px solid var(--border); padding: 6px 10px; font-size: 12px; font-weight: 600; display: flex; gap: 10px; align-items: center; }
+.landing .props > header .label {font-weight: 600; }
+.landing .props .rows {padding: 6px; }
+.landing .props .row {display: grid; grid-template-columns: 200px minmax(0, 1fr); gap: 8px; align-items: baseline; padding: 4px 2px; border-top: 1px solid transparent; }
+.landing .props .row + .row {border-top-color: rgba(20,23,28,0.6); }
+.landing .props .row .name {font-family: var(--font-mono); font-size: 12px; color: var(--text); background: var(--bg-canvas); border: 1px solid var(--border); border-radius: 2px; padding: 1px 6px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.landing .props .row .desc {font-size: 13px; color: var(--text-dim); }
+.landing .props .row .desc code {color: var(--text); }
+.landing .inventory-table .row {grid-template-columns: 140px minmax(0, 1fr); padding: 8px 4px; }
+.landing .inventory {display: flex; flex-wrap: wrap; gap: 4px; }
+.landing .inventory code {font-size: 12px; padding: 1px 6px; background: var(--bg-canvas); border: 1px solid var(--border); border-radius: 2px; color: var(--text); }
+.landing .facts {display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 1px; background: var(--border); border: 1px solid var(--border); border-radius: var(--radius); overflow: hidden; }
+.landing .facts div {background: var(--bg-panel); padding: 14px 16px; }
+.landing .facts .label {display: block; margin-bottom: 6px; }
+.landing .facts p {margin: 0; font-size: 13px; color: var(--text); }
+.landing .facts p code {font-size: 12px; }
+
+/* footer */
+.landing .footer {border-top: 1px solid var(--border); padding: 48px var(--page-x) 40px; }
+.landing .footer .inner {max-width: 1240px; margin: 0 auto; display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 24px 48px; align-items: end; }
+.landing .footer .links {display: flex; gap: 18px; flex-wrap: wrap; font-size: 13px; }
+.landing .footer .fine {font-size: 12px; color: var(--text-dim); margin-top: 24px; grid-column: 1 / -1; }
+
+@media (max-width: 1080px) {
+  .landing .hero-inner {grid-template-columns: 1fr; }
+  .landing .install {display: block; font-size: 11.5px; }
+  .landing .two-col, .landing .deploy-grid, .landing .compose-grid, .landing .section-head-row {grid-template-columns: 1fr; }
+  .landing .graph {max-width: 640px; }
+  .landing .stats, .landing .facts {grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .landing .footer .inner {grid-template-columns: 1fr; } }
+@media (max-width: 560px) {
+  .landing .stats, .landing .facts, .landing .points {grid-template-columns: 1fr; }
+  .landing .props .row, .landing .inventory-table .row {grid-template-columns: 1fr; gap: 4px; }
+  .landing .inventory code {font-size: 11px; } }
+
+/* vitepress' base styles reach into the page; these put back what the design assumes */
+.landing h1, .landing h2, .landing h3 { border: none; padding: 0; margin: 0; letter-spacing: -0.01em; }
+.landing h2 { font-size: clamp(26px, 3.4vw, 40px); }
+.landing h3 { font-size: 18px; }
+.landing p { margin: 0 0 1em; line-height: 1.6; }
+.landing pre, .landing code { font-family: var(--font-mono); }
+.landing pre { background: none; }
+.landing ol, .landing ul { padding: 0; margin: 0; }
+.landing .points { margin-top: 32px; }
+.landing .compose-grid .points { margin-top: 0; }
+.landing a { text-decoration: none; }
+.landing a:hover { text-decoration: underline; }
+
+/* the scroll-driven tour, and the card replica it shows */
+@keyframes edge-pulse {
+  0% {opacity: 0; }
+  6% {opacity: 1; }
+  100% {opacity: 0; } }
 .landing .tour {position: relative; }
 .landing .tour-track {height: 560vh; }
 .landing .tour-stage {position: sticky; top: var(--vp-nav-height, 0px); height: calc(100vh - var(--vp-nav-height, 0px)); height: calc(100svh - var(--vp-nav-height, 0px)); display: grid; grid-template-columns: minmax(0, 0.9fr) minmax(0, 1.1fr); gap: 24px; align-items: center; padding: 0 var(--page-x); max-width: 1240px; margin: 0 auto; overflow: hidden; }
@@ -819,9 +882,6 @@ onBeforeUnmount(() => {
 .landing .tour-text h2 {margin-bottom: 14px; font-size: clamp(24px, 2.6vw, 34px); }
 .landing .tour-text p {max-width: var(--measure); color: var(--text); }
 .landing .tour-text p.dim {color: var(--text-dim); }
-.landing .inventory {display: flex; flex-wrap: wrap; gap: 4px; margin: 14px 0 4px; }
-.landing .inventory code {font-size: 11px; padding: 1px 6px; background: var(--bg-panel); border: 1px solid var(--border); border-radius: 2px; color: var(--text); }
-.landing .inventory code.soon {color: var(--text-dim); }
 @media (prefers-reduced-motion: reduce) {
   .landing .tour-text {transition: none; } }
 .landing .tour-canvas {position: relative; height: min(88vh, 760px); border: 1px solid var(--border); border-radius: var(--radius); overflow: hidden; }
@@ -876,8 +936,6 @@ onBeforeUnmount(() => {
 .landing .chart-svg path.in {fill: var(--stat-in); }
 .landing .chart-svg path.out {fill: var(--stat-out); }
 .landing .chart-axis {position: absolute; inset: 0; pointer-events: none; }
-.landing .axis-mark {position: absolute; left: 0; right: 0; border-top: 1px dashed var(--border); height: 0; }
-.landing .axis-label {position: absolute; right: 0; bottom: 1px; padding-left: 3px; font-family: var(--font-mono); font-size: 9px; line-height: 1; color: var(--text-dim); background: var(--bg-panel); opacity: 0.85; }
 .landing .chart-errors {position: relative; height: 14px; margin-top: 3px; border-bottom: 1px solid var(--border); }
 .landing .chart-errors .chart-svg path {fill: var(--error); }
 .landing .chart-errors.quiet {opacity: 0.25; }
@@ -898,67 +956,11 @@ onBeforeUnmount(() => {
 .landing .card.child.c0 {left: 0; }
 .landing .card.child.c1 {left: 390px; }
 .landing .card.child.c2 {left: 780px; }
-.landing .section-page {padding: clamp(64px, 10vh, 120px) var(--page-x); border-top: 1px solid var(--border); }
-.landing .section-page > .inner {max-width: 1240px; margin: 0 auto; }
 .landing .section-head-row {display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1.3fr); gap: 32px 64px; align-items: end; margin-bottom: 40px; }
 .landing .section-head-row .label {margin-bottom: 12px; display: block; }
 .landing .section-head-row .lede {margin: 0; }
-.landing .two-col {display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 24px; }
-.landing .code-card {border: 1px solid var(--border); border-radius: var(--radius); background: var(--bg-panel); overflow: hidden; display: flex; flex-direction: column; min-width: 0; }
-.landing .code-card > header {background: var(--bg-titlebar); border-bottom: 1px solid var(--border); padding: 6px 10px; font-size: 12px; font-weight: 600; display: flex; align-items: center; gap: 10px; }
-.landing .code-card > header .file {font-family: var(--font-mono); font-weight: 400; font-size: 11px; color: var(--text-dim); margin-left: auto; }
-.landing .code-card pre {margin: 0; padding: 12px 14px; font-size: 12px; line-height: 1.6; overflow-x: auto; color: var(--text); flex: 1; }
-.landing .code-card .note {padding: 8px 12px; border-top: 1px solid var(--border); font-size: 12.5px; color: var(--text-dim); }
-.landing .code-card .note code {color: var(--text); }
-.landing .k {color: var(--json-key); }
-.landing .s {color: var(--json-str); }
-.landing .n {color: var(--json-num); }
-.landing .l {color: var(--json-literal); }
-.landing .c {color: var(--text-dim); }
-.landing .d {color: var(--text-dim); }
-.landing .pre-annot {color: var(--text-dim); }
-.landing .deploy-grid {display: grid; grid-template-columns: minmax(0, 1.15fr) minmax(0, 1fr); gap: 24px; align-items: start; }
-.landing .props {border: 1px solid var(--border); border-radius: var(--radius); background: var(--bg-panel); overflow: hidden; }
-.landing .props > header {background: var(--bg-titlebar); border-bottom: 1px solid var(--border); padding: 6px 10px; font-size: 12px; font-weight: 600; display: flex; gap: 10px; align-items: center; }
-.landing .props > header .label {font-weight: 600; }
-.landing .props .rows {padding: 6px; }
-.landing .props .row {display: grid; grid-template-columns: 200px minmax(0, 1fr); gap: 8px; align-items: baseline; padding: 4px 2px; border-top: 1px solid transparent; }
-.landing .props .row + .row {border-top-color: rgba(20,23,28,0.6); }
-.landing .props .row .name {font-family: var(--font-mono); font-size: 12px; color: var(--text); background: var(--bg-canvas); border: 1px solid var(--border); border-radius: 2px; padding: 1px 6px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.landing .props .row .desc {font-size: 13px; color: var(--text-dim); }
-.landing .props .row .desc code {color: var(--text); }
-.landing .stack {display: flex; flex-direction: column; gap: 24px; }
-.landing .facts {display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 1px; background: var(--border); border: 1px solid var(--border); border-radius: var(--radius); overflow: hidden; margin-top: 40px; }
-.landing .facts div {background: var(--bg-panel); padding: 14px 16px; }
-.landing .facts .label {display: block; margin-bottom: 6px; }
-.landing .facts p {margin: 0; font-size: 13px; color: var(--text); }
-.landing .facts p code {font-size: 12px; }
-.landing .api-grid {display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1.2fr); gap: 24px; align-items: start; }
-.landing .endpoints {border: 1px solid var(--border); border-radius: var(--radius); background: var(--bg-panel); overflow: hidden; }
-.landing .endpoints > header {background: var(--bg-titlebar); border-bottom: 1px solid var(--border); padding: 6px 10px; font-size: 12px; font-weight: 600; display: flex; align-items: center; gap: 10px; }
-.landing .endpoints > header .count {margin-left: auto; font-family: var(--font-mono); font-weight: 400; font-size: 11px; color: var(--text-dim); }
-.landing .endpoints ul {list-style: none; margin: 0; padding: 4px 0; }
-.landing .endpoints li {display: grid; grid-template-columns: 5ch minmax(0, 1fr) auto; gap: 10px; padding: 3px 10px; font-family: var(--font-mono); font-size: 12px; align-items: baseline; }
-.landing .endpoints li:hover {background: var(--bg-hover); }
-.landing .endpoints .verb {color: var(--text-dim); font-size: 10px; letter-spacing: 0.04em; }
-.landing .endpoints .verb.post {color: var(--stat-out); }
-.landing .endpoints .verb.put {color: var(--json-key); }
-.landing .endpoints .verb.del {color: var(--error); }
-.landing .endpoints .path {color: var(--text); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.landing .endpoints .path i {font-style: normal; color: var(--json-literal); }
-.landing .endpoints .what {color: var(--text-dim); font-family: var(--font-sans); font-size: 12px; white-space: nowrap; }
-.landing .endpoints .more {padding: 6px 10px 8px; font-size: 12px; color: var(--text-dim); border-top: 1px solid var(--border); }
-.landing .term pre .out {color: var(--text-dim); }
-.landing .term pre .prompt {color: var(--text-dim); user-select: none; }
-.landing .footer {border-top: 1px solid var(--border); padding: 48px var(--page-x) 40px; }
-.landing .footer .inner {max-width: 1240px; margin: 0 auto; display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 24px 48px; align-items: end; }
-.landing .footer .links {display: flex; gap: 18px; flex-wrap: wrap; font-size: 13px; }
-.landing .footer .fine {font-size: 12px; color: var(--text-dim); margin-top: 24px; grid-column: 1 / -1; }
 @media (max-width: 1080px) {
   .landing .tour-stage {top: 0; height: 100vh; height: 100svh; }
-  .landing .hero-inner {grid-template-columns: 1fr; }
-  .landing .install {display: block; font-size: 11.5px; }
-  .landing .hero-graph {max-width: 640px; }
   .landing .tour-stage {grid-template-columns: 1fr; grid-template-rows: auto minmax(0, 1fr); gap: 12px; align-items: stretch; padding-top: 16px; padding-bottom: 16px; }
   .landing .tour-copy {grid-template-columns: 1fr; gap: 12px; }
   .landing .steps {display: flex; }
@@ -970,24 +972,5 @@ onBeforeUnmount(() => {
   .landing .tour-text h2 {font-size: 20px; margin-bottom: 8px; }
   .landing .tour-text p {font-size: 14px; }
   .landing .tour-canvas {height: auto; min-height: 0; }
-  .landing .two-col, .landing .deploy-grid, .landing .api-grid, .landing .section-head-row {grid-template-columns: 1fr; }
-  .landing .facts {grid-template-columns: repeat(2, minmax(0, 1fr)); }
-  .landing .footer .inner {grid-template-columns: 1fr; } }
-@media (max-width: 560px) {
-  .landing .facts {grid-template-columns: 1fr; }
-  .landing .props .row {grid-template-columns: 1fr; gap: 2px; }
-  .landing .endpoints li {grid-template-columns: 5ch minmax(0, 1fr); }
-  .landing .endpoints .what {display: none; }
-  .landing .inventory code {font-size: 10px; } }
-
-/* vitepress' base styles reach into the page; these put back what the design assumes */
-.landing h1, .landing h2, .landing h3 { border: none; padding: 0; margin: 0; letter-spacing: -0.01em; }
-.landing h2 { font-size: clamp(26px, 3.4vw, 40px); }
-.landing h3 { font-size: 18px; }
-.landing p { margin: 0 0 1em; line-height: 1.6; }
-.landing pre, .landing code { font-family: var(--font-mono); }
-.landing pre { background: none; }
-.landing ol, .landing ul { padding: 0; margin: 0; }
-.landing a { text-decoration: none; }
-.landing a:hover { text-decoration: underline; }
+  .landing .two-col, .landing .deploy-grid, .landing .api-grid, .landing .section-head-row {grid-template-columns: 1fr; } }
 </style>

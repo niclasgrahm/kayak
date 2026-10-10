@@ -2,85 +2,87 @@
 
 ## `rolling` {#transform-rolling}
 
-Writes onto each message aggregations over the last few messages of its series — the last `size` of them, or the last `seconds`' worth, or both limits at once. The reducer's `{function, field, as}` list, the reducer's functions; a second component rather than a `window` on `reduce` because the cardinality differs — one message out per message in, not one per group per batch.
+Writes aggregations over the last messages of the series onto each message. The aggregations use the same `{function, field, as}` list and functions as `reduce`. One message goes in and one message comes out.
 
-`size` is always required, because it is the bound: a window by time alone grows with the rate of the stream, and every piece of state has a bound. `seconds` on top of it also drops what is older than that, off the `time` field. `count` needs a `field` here — it counts how many of the window carried one, which is `size` once the window is warm and the warm-up check before that.
+The window holds a maximum of `size` messages. `size` is always required. With `seconds`, the window also drops messages that are older than that time, from the `time` field.
+
+Here, `count` needs a `field`. It counts the messages in the window that have the field. When the window is full, the count is `size`.
 
 | field | type | | description |
 | --- | --- | --- | --- |
-| `aggregations` | `list of aggregation` | <Badge type="warning" text="required" /> | what to compute over the window. At least one, each with a distinct `as` |
-| `size` | `integer` | <Badge type="warning" text="required" /> | how many messages the window holds at most |
-| `group_by` | `list of string` | <Badge type="info" text="optional" /> | the fields that identify a series, the reducer's way. Leave it out for one series |
-| `on_missing` | `error` \| `skip` | <Badge type="info" text="optional" /> | what to do about a message missing an aggregated field or a group field |
-| `reset_when` | `list of numeric \| string \| one_of \| none_of` | <Badge type="info" text="optional" /> | a message passing all of these clears its key's state first, so the series starts over. Checked before `when` |
-| `seconds` | `number` | <Badge type="info" text="optional" /> | also drop from the window whatever is older than this many seconds, off the `time` field |
-| `time` | `string` | <Badge type="info" text="optional" /> | the field carrying each message's time — RFC 3339 or milliseconds since the epoch. Leave it out for arrival time |
-| `when` | `list of numeric \| string \| one_of \| none_of` | <Badge type="info" text="optional" /> | only messages passing all of these are applied; the rest pass through untouched. Leave it out for every message |
+| `aggregations` | `list of aggregation` | <Badge type="warning" text="required" /> | The aggregations to calculate over the window. Give one or more, each with a different `as`. |
+| `size` | `integer` | <Badge type="warning" text="required" /> | The maximum number of messages in the window. |
+| `group_by` | `list of string` | <Badge type="info" text="optional" /> | The fields that identify a series, as in `reduce`. Leave it out for one series. |
+| `on_missing` | `error` \| `skip` | <Badge type="info" text="optional" /> | What to do with a message that does not have an aggregated field or a group field. The default is `error`. |
+| `reset_when` | `list of numeric \| string \| one_of \| none_of` | <Badge type="info" text="optional" /> | The conditions that clear the state of the message's key. All of them must match. The series then starts again. The transform checks these before `when`. |
+| `seconds` | `number` | <Badge type="info" text="optional" /> | Also drop the messages that are older than this number of seconds, from the `time` field. |
+| `time` | `string` | <Badge type="info" text="optional" /> | The field that holds the time of each message, as an RFC 3339 string or as milliseconds since the epoch. Leave it out to use the arrival time. |
+| `when` | `list of numeric \| string \| one_of \| none_of` | <Badge type="info" text="optional" /> | The conditions that a message must match to be applied. All of them must match. Other messages pass through unchanged. Leave it out to apply every message. |
 
 **`aggregations` — each entry**
 
 | field | type | | description |
 | --- | --- | --- | --- |
-| `function` | `sum` \| `avg` \| `min` \| `max` \| `count` \| `count_distinct` \| `first` \| `last` \| `collect` \| `median` \| `stddev` \| `slope` | <Badge type="warning" text="required" /> | how to combine the values |
-| `as` | `string` | <Badge type="warning" text="required" /> | the field the emitted message carries this answer under. Two aggregations may not share one, and none may collide with a `group_by` field. |
-| `field` | `string` | <Badge type="info" text="optional" /> | the field to aggregate. Required by every function except `count`, which counts messages when it is left out. |
+| `function` | `sum` \| `avg` \| `min` \| `max` \| `count` \| `count_distinct` \| `first` \| `last` \| `collect` \| `median` \| `stddev` \| `slope` | <Badge type="warning" text="required" /> | How to combine the values. |
+| `as` | `string` | <Badge type="warning" text="required" /> | The field that contains the result in the sent message. Each aggregation must have a different `as`. It must not be the same as a `group_by` field. |
+| `field` | `string` | <Badge type="info" text="optional" /> | The field to aggregate. Required for all functions except `count`. Without a `field`, `count` counts the messages. |
 
 **`reset_when` — each entry — `type: "numeric"`**
 
 | field | type | | description |
 | --- | --- | --- | --- |
-| `field` | `string` | <Badge type="warning" text="required" /> | the field to test — a dotted path, like anywhere else |
-| `operator` | `greater_than` \| `less_than` \| `equal_to` \| `not_equal_to` | <Badge type="warning" text="required" /> | how the field is compared |
-| `value` | `number` | <Badge type="warning" text="required" /> | the number it is compared to |
+| `field` | `string` | <Badge type="warning" text="required" /> | The field to test, as a dotted path. |
+| `operator` | `greater_than` \| `less_than` \| `equal_to` \| `not_equal_to` | <Badge type="warning" text="required" /> | How to compare the field. |
+| `value` | `number` | <Badge type="warning" text="required" /> | The number to compare to. |
 
 **`reset_when` — each entry — `type: "string"`**
 
 | field | type | | description |
 | --- | --- | --- | --- |
-| `field` | `string` | <Badge type="warning" text="required" /> | the field to test — a dotted path, like anywhere else |
-| `operator` | `equal_to` \| `not_equal_to` \| `contains` | <Badge type="warning" text="required" /> | how the field is compared |
-| `value` | `string` | <Badge type="warning" text="required" /> | the string it is compared to |
+| `field` | `string` | <Badge type="warning" text="required" /> | The field to test, as a dotted path. |
+| `operator` | `equal_to` \| `not_equal_to` \| `contains` | <Badge type="warning" text="required" /> | How to compare the field. |
+| `value` | `string` | <Badge type="warning" text="required" /> | The string to compare to. |
 
 **`reset_when` — each entry — `type: "one_of"`**
 
 | field | type | | description |
 | --- | --- | --- | --- |
-| `field` | `string` | <Badge type="warning" text="required" /> | the field to test — a dotted path, like anywhere else |
-| `values` | `list of string` | <Badge type="warning" text="required" /> | the strings that match |
+| `field` | `string` | <Badge type="warning" text="required" /> | The field to test, as a dotted path. |
+| `values` | `list of string` | <Badge type="warning" text="required" /> | The strings that match. |
 
 **`reset_when` — each entry — `type: "none_of"`**
 
 | field | type | | description |
 | --- | --- | --- | --- |
-| `field` | `string` | <Badge type="warning" text="required" /> | the field to test — a dotted path, like anywhere else |
-| `values` | `list of string` | <Badge type="warning" text="required" /> | the strings that do not match |
+| `field` | `string` | <Badge type="warning" text="required" /> | The field to test, as a dotted path. |
+| `values` | `list of string` | <Badge type="warning" text="required" /> | The strings that do not match. |
 
 **`when` — each entry — `type: "numeric"`**
 
 | field | type | | description |
 | --- | --- | --- | --- |
-| `field` | `string` | <Badge type="warning" text="required" /> | the field to test — a dotted path, like anywhere else |
-| `operator` | `greater_than` \| `less_than` \| `equal_to` \| `not_equal_to` | <Badge type="warning" text="required" /> | how the field is compared |
-| `value` | `number` | <Badge type="warning" text="required" /> | the number it is compared to |
+| `field` | `string` | <Badge type="warning" text="required" /> | The field to test, as a dotted path. |
+| `operator` | `greater_than` \| `less_than` \| `equal_to` \| `not_equal_to` | <Badge type="warning" text="required" /> | How to compare the field. |
+| `value` | `number` | <Badge type="warning" text="required" /> | The number to compare to. |
 
 **`when` — each entry — `type: "string"`**
 
 | field | type | | description |
 | --- | --- | --- | --- |
-| `field` | `string` | <Badge type="warning" text="required" /> | the field to test — a dotted path, like anywhere else |
-| `operator` | `equal_to` \| `not_equal_to` \| `contains` | <Badge type="warning" text="required" /> | how the field is compared |
-| `value` | `string` | <Badge type="warning" text="required" /> | the string it is compared to |
+| `field` | `string` | <Badge type="warning" text="required" /> | The field to test, as a dotted path. |
+| `operator` | `equal_to` \| `not_equal_to` \| `contains` | <Badge type="warning" text="required" /> | How to compare the field. |
+| `value` | `string` | <Badge type="warning" text="required" /> | The string to compare to. |
 
 **`when` — each entry — `type: "one_of"`**
 
 | field | type | | description |
 | --- | --- | --- | --- |
-| `field` | `string` | <Badge type="warning" text="required" /> | the field to test — a dotted path, like anywhere else |
-| `values` | `list of string` | <Badge type="warning" text="required" /> | the strings that match |
+| `field` | `string` | <Badge type="warning" text="required" /> | The field to test, as a dotted path. |
+| `values` | `list of string` | <Badge type="warning" text="required" /> | The strings that match. |
 
 **`when` — each entry — `type: "none_of"`**
 
 | field | type | | description |
 | --- | --- | --- | --- |
-| `field` | `string` | <Badge type="warning" text="required" /> | the field to test — a dotted path, like anywhere else |
-| `values` | `list of string` | <Badge type="warning" text="required" /> | the strings that do not match |
+| `field` | `string` | <Badge type="warning" text="required" /> | The field to test, as a dotted path. |
+| `values` | `list of string` | <Badge type="warning" text="required" /> | The strings that do not match. |

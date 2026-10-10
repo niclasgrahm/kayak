@@ -2,70 +2,70 @@
 
 ## `http` {#input-http}
 
-Accepts messages posted to this pipeline's own endpoint, `POST /api/pipelines/{id}/messages` — the pipeline is the receiving end of an http API rather than something that reaches out to a broker.
+Accepts messages that are posted to the endpoint of the pipeline, `POST /api/pipelines/{id}/messages`.
 
-The endpoint is derived from the pipeline's id and appears as soon as the pipeline is running; nothing is configured about it here. The body is one JSON message or an array of them, and an array arrives as one batch. A pipeline can only have one of these — two would share an endpoint, and which of them a request went to would be a coin toss — so a second one fails to build.
+kayak makes the endpoint from the pipeline id. The endpoint is available when the pipeline runs. The body is one JSON message or an array of messages. An array becomes one batch. A pipeline can have only one `http` input. A second `http` input fails to build.
 
 | field | type | | description |
 | --- | --- | --- | --- |
-| `auth` | `bearer \| header` | <Badge type="info" text="optional" /> | what a post must present to be accepted. Absent — the default — means the endpoint takes anything that reaches it, which is what every pipeline with an `http` input has always done. |
-| `capacity` | `integer` | <Badge type="info" text="optional" /> | how many posted batches may queue up ahead of the pipeline before it starts refusing them with a `503`. Defaults to 1024. The queue is what lets a burst through; refusing past it is deliberate, since the alternative is holding a request open until the pipeline catches up. |
-| `ack` | `on_receipt` \| `on_delivery` | <Badge type="info" text="optional" /> | when this input tells its broker a message is done with. Available on every input kind in the schema, but only honoured by ones with a broker-side notion of "received" vs "delivered" of their own (`kafka`, for now) — an input with nothing to acknowledge refuses to build rather than silently treating this as `on_receipt`. Defaults to `on_receipt`, which is what every input has always done. See "acknowledgement modes" in the guide. |
-| `buffer` | `static \| tumbling \| batch` | <Badge type="info" text="optional" /> | batch messages from this input before the transforms see them — by count (`static`), by time (`tumbling`) or by whichever comes first (`batch`). Never emits an empty batch. Available on every input kind. Not to be confused with the `buffer` transform. |
-| `envelope` | `merge \| wrap` | <Badge type="info" text="optional" /> | attach metadata about where each message came from — the subject, topic, partition and so on listed under "metadata" below. Available on every input kind. Omit it and messages are passed on exactly as they arrive. |
+| `auth` | `bearer \| header` | <Badge type="info" text="optional" /> | The credential that a post must have. If you do not set it, the endpoint accepts all posts. A post without the correct credential gets `401`. |
+| `capacity` | `integer` | <Badge type="info" text="optional" /> | The maximum number of posted batches in the queue before the pipeline. The default is 1024. When the queue is full, the endpoint refuses a post with `503`. |
+| `ack` | `on_receipt` \| `on_delivery` | <Badge type="info" text="optional" /> | When the input acknowledges a message to its broker. The default is `on_receipt`. Only the `kafka` and `mqtt` inputs support `on_delivery`. The `mqtt` input requires a `qos` of `at_least_once` or higher for it. On all other inputs, `on_delivery` fails to build. |
+| `buffer` | `static \| tumbling \| batch` | <Badge type="info" text="optional" /> | Collect messages from this input into batches before the transforms. Use a count (`static`), a time (`tumbling`) or the first of the two (`batch`). The buffer never sends an empty batch. Available on all input types. This is not the `buffer` transform. |
+| `envelope` | `merge \| wrap` | <Badge type="info" text="optional" /> | Add metadata about the source of each message, for example the subject, the topic or the partition. The "metadata" section lists the fields. Available on all input types. If you do not set it, the input sends each message without changes. |
 
 **`auth` — `type: "bearer"`**
 
 | field | type | | description |
 | --- | --- | --- | --- |
-| `token` | `string` | <Badge type="warning" text="required" /> | the token. A `${NAME}` reference, so the config file holds the name and the secret store holds the value. |
+| `token` | `string` | <Badge type="warning" text="required" /> | The token. Use a `${NAME}` reference, so that the config file keeps only the name and the secret store keeps the value. |
 
 **`auth` — `type: "header"`**
 
 | field | type | | description |
 | --- | --- | --- | --- |
-| `name` | `string` | <Badge type="warning" text="required" /> | the header's name, matched case-insensitively on the way in. On an `http` input it may not be one of the headers an `envelope` passes through, since that would write the credential into the messages. |
-| `value` | `string` | <Badge type="warning" text="required" /> | the exact value that header must have. A `${NAME}` reference, as above. |
+| `name` | `string` | <Badge type="warning" text="required" /> | The name of the header. The `http` input compares the name without case. On an `http` input, the name must not be a header that an `envelope` copies into the messages. |
+| `value` | `string` | <Badge type="warning" text="required" /> | The exact value of the header. Use a `${NAME}` reference. |
 
 **`buffer` — `type: "static"`**
 
 | field | type | | description |
 | --- | --- | --- | --- |
-| `size` | `integer` | <Badge type="warning" text="required" /> | how many messages to gather before the batch is handed on |
+| `size` | `integer` | <Badge type="warning" text="required" /> | The number of messages in a batch. |
 
 **`buffer` — `type: "tumbling"`**
 
 | field | type | | description |
 | --- | --- | --- | --- |
-| `window_seconds` | `integer` | <Badge type="warning" text="required" /> | how long to gather messages for, measured from the first one |
+| `window_seconds` | `integer` | <Badge type="warning" text="required" /> | The time to collect messages, in s, from the first message. |
 
 **`buffer` — `type: "batch"`**
 
 | field | type | | description |
 | --- | --- | --- | --- |
-| `size` | `integer` | <Badge type="warning" text="required" /> | how many messages end the batch immediately |
-| `window_seconds` | `integer` | <Badge type="warning" text="required" /> | how long to wait for them, measured from the first message in the batch |
+| `size` | `integer` | <Badge type="warning" text="required" /> | The number of messages that closes the batch immediately. |
+| `window_seconds` | `integer` | <Badge type="warning" text="required" /> | The maximum time to wait, in s, from the first message in the batch. |
 
 **`envelope` — `type: "merge"`**
 
 | field | type | | description |
 | --- | --- | --- | --- |
-| `meta` | `string` | <Badge type="info" text="optional" /> | the field the metadata object is written to. Defaults to `_meta`. |
+| `meta` | `string` | <Badge type="info" text="optional" /> | The field for the metadata object. The default is `_meta`. |
 
 **`envelope` — `type: "wrap"`**
 
 | field | type | | description |
 | --- | --- | --- | --- |
-| `meta` | `string` | <Badge type="info" text="optional" /> | the field the metadata object is written to. Defaults to `_meta`. |
-| `payload` | `string` | <Badge type="info" text="optional" /> | the field the original payload is written to. Defaults to `value`. |
+| `meta` | `string` | <Badge type="info" text="optional" /> | The field for the metadata object. The default is `_meta`. |
+| `payload` | `string` | <Badge type="info" text="optional" /> | The field for the original payload. The default is `value`. |
 
 **metadata** — what this input attaches to a message when its `envelope` is set.
 
 | field | holds |
 | --- | --- |
-| `pipeline` | id of the pipeline that read the message |
-| `input` | kind of input it was read by, e.g. `nats` |
-| `received_at` | when kayak read it, RFC 3339. This is an arrival time and not an event time: it says when the message reached this pipeline, not when whatever it describes happened. |
-| `method` | http method the messages were posted with |
-| `remote_addr` | address the request came from, when the server can see one |
-| `headers` | request headers, **restricted to a fixed list** — `content-type`, `user-agent`, `x-request-id`, `x-correlation-id` and `traceparent`. Everything else is dropped rather than passed on: a header carrying a credential (`authorization`, `x-api-key`) written into a file or an object store is a leak that outlives the request by years, and no allow-list-by-prefix is safe enough to offer instead. |
+| `pipeline` | The id of the pipeline that read the message. |
+| `input` | The type of the input that read the message, for example `nats`. |
+| `received_at` | The time when kayak read the message, as RFC 3339. This is the arrival time at this pipeline. It is not the time of the event in the message. |
+| `method` | The HTTP method of the request. |
+| `remote_addr` | The address that sent the request, when the server knows it. |
+| `headers` | The request headers from a **fixed list**: `content-type`, `user-agent`, `x-request-id`, `x-correlation-id` and `traceparent`. The input drops all other headers. Thus, a credential header such as `authorization` or `x-api-key` never goes into the message. |

@@ -1,98 +1,86 @@
 # message metadata
 
-An input knows things about a message that the message doesn't say: the nats
-subject it arrived on, the topic, partition and offset of a kafka record, the
-method it was posted with. `envelope` on any input is what attaches that to the
-message, and the exact fields each input attaches are listed under it on
-`/docs` — declared in `kayak-core/src/metadata.rs`, so an input added without
-saying what it attaches fails a test rather than shipping an empty section.
+An input knows facts about a message that the message itself does not contain.
+Examples are the nats subject, the kafka topic, partition and offset, or the
+HTTP method of a post. Add `envelope` to any input to attach these facts to each
+message. The [input reference](/reference/inputs) lists the fields that each
+input attaches.
 
 ```json
 { "type": "nats", "connection": "opc", "subject": "*.temperature",
   "envelope": { "type": "wrap", "payload": "value", "meta": "_meta" } }
 ```
 
-**Metadata is attached in band** — as ordinary fields on the JSON, not as a
-sidecar travelling beside it. That is the whole design decision, and it is
-deliberately not what Benthos does. The reason is the transforms that change
-cardinality: a reducer collapses five hundred messages into one, a splitter
-divides one into several, the http transform replaces the batch with a service's
-reply. Out of band, every one of them has to answer "whose metadata comes out?"
-and there is no good general answer — Benthos picks the first message's, which
-is arbitrary. In band the question doesn't exist. Metadata is data, so
+## metadata is ordinary fields
+
+kayak writes the metadata into the message as ordinary JSON fields. Thus every
+transform can read it with a field path. A reducer groups by the subject the
+same way it groups by any other field:
 
 ```json
 { "type": "reducer", "group_by": ["_meta.subject"],
   "aggregations": [{ "function": "avg", "field": "value", "as": "mean" }] }
 ```
 
-is a `group_by` like any other, and nothing in the reducer knows that metadata
-is a thing. That is also what the machine-data case needs: subscribe to
-`*.temperature` and the machine's name exists *only* in the subject.
+This also works through transforms that change the number of messages, for
+example `reduce`, `splitter` and the `http` transform. The metadata is part of
+each message, so it goes where the message goes.
 
-Two shapes, because a payload is not always an object:
+Use this for machine data. Subscribe to `*.temperature`, and the subject gives
+the name of the machine.
 
-- **`merge`** adds the metadata as one more field. The payload's own fields stay
-  exactly where they were, so nothing downstream of an input that grows an
-  envelope has to change. A payload that isn't a JSON object is skipped with a
-  warning — there is nowhere to put the field — the same way a non-JSON payload
-  already is.
-- **`wrap`** puts the whole payload under a field of its own beside the
-  metadata: `{"value": 1, "_meta": {…}}`. Works whatever the payload is, which
-  is what a source of bare readings needs. The cost is that field references
-  downstream now go through the payload field — `value.temperature` rather than
-  `temperature` — and that is exactly why both shapes exist rather than one.
+## the two shapes
 
-**Leaving `envelope` out is the default and means what it always meant**: the
-message is passed on as it arrived, byte for byte. Attaching metadata changes
-the shape of every message from that input, which is not something to do to a
-running config without being asked — the same promise `max_batch` makes about
-batching.
+- **`merge`** adds the metadata as one more field. The default field is
+  `_meta`. The fields of the payload do not move, so the transforms downstream
+  do not change. If the payload is not a JSON object, kayak skips the message
+  and logs a warning.
+- **`wrap`** puts the payload under a field of its own, beside the metadata:
+  `{"value": 1, "_meta": {…}}`. The default payload field is `value`. This
+  works with any payload, for example a bare number. Field paths downstream
+  must then start with the payload field: `value.temperature`, not
+  `temperature`.
 
-What it costs, said plainly: metadata reaches your outputs (a nats publish or an
-ndjson file carries `_meta` unless something removes it) and the key can collide
-with one the payload already uses. Both are yours to decide, which is what the
-`meta` and `payload` field names are for.
+If you do not set `envelope`, kayak sends each message on as it arrived. Adding
+an envelope changes the shape of every message from that input. Change the
+field references downstream at the same time.
 
-A `pipeline` input usually wants no envelope at all: being in band, whatever the
-upstream attached is already on the message and arrives with it. Setting one
-there says something about *that hop* rather than replacing it, and a `wrap`
-would nest the upstream's message inside a new one.
+The metadata goes to the outputs. A nats output or an ndjson file contains
+`_meta` unless a transform removes it. Use `drop` in a
+[`map`](/pipelines/reshaping-messages) to remove it. The metadata field can
+also have the same name as a field in the payload. Set `meta` and `payload` to
+other names to prevent this.
 
-The `http` input's headers are the one place this is restricted. Only
-`content-type`, `user-agent`, `x-request-id`, `x-correlation-id` and
-`traceparent` are passed on; everything else is dropped. It is an allow-list
-rather than a deny-list or an `x-` prefix rule on purpose — the prefix rule is
-exactly the one that passes `x-api-key` through, and a credential written into a
-file or an object store is a leak that outlives the request by years.
+A `pipeline` input usually needs no envelope. The metadata from the upstream
+pipeline is already in the message. An envelope on a `pipeline` input adds
+facts about that one connection. A `wrap` there puts the upstream message
+inside a new one.
+
+The `http` input passes on only five headers: `content-type`, `user-agent`,
+`x-request-id`, `x-correlation-id` and `traceparent`. It drops all other
+headers. This prevents a credential, for example `x-api-key`, from getting into
+a file or an object store.
 
 ## field paths
 
-Everything that addresses a field by name — `filter`, `reduce`'s `group_by` and
-its aggregations — takes a dotted path, which is what makes `_meta.subject`
-reachable and, incidentally, nested payloads reachable at all.
+All transforms that read a field by name accept a dotted path. Examples are
+`filter`, the `group_by` and the aggregations of `reduce`, and `map`. A path
+reaches `_meta.subject` and fields in nested payloads.
 
-**An exact key wins over a path.** `a.b` is the value under the literal key
-`"a.b"` if the message has one, and only otherwise the `b` inside the `a`. That
-ordering is what makes paths a compatible addition: a source whose field names
-contain dots keeps working exactly as it did, and no config has to learn an
-escaping rule to say what it already said.
+**An exact key has priority over a path.** `a.b` reads the literal key `"a.b"`
+if the message has one. If not, it reads the field `b` inside the object `a`.
+Thus a source with dots in its field names works without an escape rule.
 
-A reducer grouping by a path writes the group out under the path's **last
-segment**: `group_by: ["_meta.machine_id"]` emits `machine_id`, because that is
-the field the next pipeline wants and it shouldn't have to spell the previous
-one's input shape. Two paths that would land on the same leaf are refused when
-the pipeline is built, like every other collision there.
+A reducer that groups by a path writes the group under the **last segment** of
+the path. `group_by: ["_meta.machine_id"]` writes `machine_id`. If two paths
+have the same last segment, kayak refuses to build the pipeline.
 
-Paths can be **written** as well as read — that's what `map` needs, and it's the
-only transform that does it. The read rule has an obvious meaning (both readings
-exist, prefer the exact one) and the write rule doesn't, so it is spelled out:
+`map` can also **write** a path. The write rule is:
 
-1. If the message already has the **literal key**, that's what gets written.
-   Which is what makes a write round-trip a read — copying `a.b` to `a.b` puts
-   the value back where it was found, whichever of the two shapes that was.
-2. Otherwise the path is written through, creating the objects on the way:
-   `as: "sensor.id"` on a message with no `sensor` makes one.
-3. A path running through something that is **not** an object is an error, not
-   an overwrite. Replacing a scalar with an object to make room for a field
-   inside it loses data in a way nothing downstream can see.
+1. If the message already has the literal key, `map` writes to that key. Thus a
+   write goes back to the same place as the read.
+2. If not, `map` writes through the path and makes the objects on the way.
+   `as: "sensor.id"` on a message with no `sensor` makes a `sensor` object.
+3. If the path goes through a value that is not an object, the mapping fails.
+   kayak does not replace a value with an object, because that removes the old
+   value.

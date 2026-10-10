@@ -1,76 +1,122 @@
 # history
 
-A card's log and chart are fed by `/events`, which is a **live sample**: the
-server only produces it while a browser is attached, and it drops passes under
-load on purpose. That is right for watching a pipeline and useless for the
-question that actually gets asked — *it broke at 02:14 and I got here at 08:00,
-what happened?* Nobody was watching at 02:14, so there was no feed.
+The server keeps a record of what each pipeline did. The record is in memory.
+The server keeps it for every pipeline, also when no client is connected. Read
+it with one request:
 
-So the server also keeps a record, in memory, whether or not anyone is looking:
+```bash
+curl localhost:6767/api/pipelines/sensors/history
+curl 'localhost:6767/api/pipelines/sensors/history?resolution=fine'
+```
 
-- **throughput**, as counts per time bucket — messages in, messages out,
-  failures;
-- **failures**, aggregated to one entry per distinct message, with when it was
-  first seen, when it was last seen and how many times it has happened.
+## what it records
 
-A broker that was down for six hours is *one* line saying so with a tally,
-which is both cheaper to keep and easier to read at 08:00 than the six hours of
-log it replaces.
+The record has two parts:
 
-**No message payloads are kept.** History is counts and error texts and nothing
-else. That is a deliberate limit rather than a gap: payloads would tie the
-storage to the throughput, and a day of message bodies sitting beside the server
-is a data-retention decision, not a UI feature.
+- **counts per time bucket**: messages in, messages out and failures;
+- **failures**: one entry for each distinct failure, with the time it was first
+  seen, the time it was last seen and a count.
 
-## the knob
+A broker that is down for six hours gives one failure entry with a count. It
+does not give six hours of log lines.
 
-One duration, in the `--server-config` file:
+The counts are complete. The run loop increments three counters on every pass,
+and the server reads them every 5 s. The failure count includes the repeats
+that the log of the web UI does not show.
+
+The record contains no message payloads. It contains counts and error texts
+only. Thus its size does not change with the throughput.
+
+## the response
+
+`GET /api/pipelines/{id}/history` returns a `PipelineHistory`:
+
+```json
+{
+  "resolution": "coarse",
+  "bucket_secs": 60,
+  "buckets": [
+    { "start": 1786612800, "inbound": 6000, "outbound": 6000, "errors": 0 },
+    { "start": 1786612860, "inbound": 0, "outbound": 0, "errors": 59 }
+  ],
+  "errors": [
+    {
+      "stage": "output",
+      "component": 0,
+      "message": "connection refused",
+      "first_seen": 1786612861000,
+      "last_seen": 1786634461000,
+      "count": 21600
+    }
+  ],
+  "dropped_signatures": 0
+}
+```
+
+| field | meaning |
+| --- | --- |
+| `resolution` | the resolution of the buckets: `coarse` or `fine` |
+| `bucket_secs` | the width of one bucket, in seconds |
+| `buckets` | oldest first, with no gaps. An empty bucket has zeros. |
+| `buckets[].start` | the start of the bucket, in seconds since the epoch |
+| `buckets[].inbound` | messages that arrived at the inputs |
+| `buckets[].outbound` | messages that the transform chain gave to the outputs, counted one time per batch |
+| `buckets[].errors` | failures at any stage |
+| `errors` | distinct failures, most recently seen first, 64 at most |
+| `errors[].stage` | `input`, `transform` or `output` |
+| `errors[].component` | the index of the component in its list. `null` for an input failure. |
+| `errors[].first_seen`, `last_seen` | milliseconds since the epoch |
+| `errors[].count` | how many times the failure occurred |
+| `dropped_signatures` | distinct failures that the server removed to stay at 64 |
+
+A failure has the same identity when its stage, its component and its text are
+the same. A non-zero `dropped_signatures` usually means that the error text
+contains a message id or an offset.
+
+The query parameter `resolution` selects one of two rings:
+
+| resolution | bucket | covers |
+| --- | --- | --- |
+| `coarse` (the default) | 60 s | the configured retention |
+| `fine` | 5 s | the last 30 min |
+
+An unknown value of `resolution` gives the default. An unknown pipeline id gives
+an empty history with status `200`, not a `404`. A deleted pipeline keeps its
+record until the retention ends. A config revert rebuilds every pipeline and
+keeps their records.
+
+## configure the retention {#the-knob}
+
+Set the retention in the `--server-config` file:
 
 ```yaml
 history:
-  retention_secs: 86400   # a day. the default; `0` turns it off entirely
+  retention_secs: 86400   # one day, the default
 ```
 
-A day is what a server with no settings file runs, because the person this is
-for is the one who doesn't know to go looking for it. The buffers are **ring
-buffers whose size is derived from the retention** — fixed capacity, oldest
-bucket dropped off the end — so memory is flat in uptime *and* in throughput: a
-pipeline doing eight million messages a second costs the same as an idle one,
-because a bucket holds counts and never messages. Reckon on about 58 kB per
-pipeline for a day. `0` allocates nothing and records nothing.
+- The default is one day, also without a `--server-config` file.
+- The maximum is 604800 (seven days). The server does not start with a larger
+  value.
+- `0` turns history off. The server then allocates nothing and records nothing,
+  and the endpoint returns an empty history.
 
-There are two resolutions. A five-second one covering the last half hour, which
-is what a card's chart is backfilled from so it starts full instead of drawing
-itself over the following two minutes; and a one-minute one covering the whole
-retention, which is the overnight record. Only the second is configurable — the
-first is sized by what a card can display.
+The rings have a fixed size, which kayak calculates from the retention. When a
+ring is full, kayak removes the oldest bucket. A day of retention costs about
+58 kB per pipeline. This cost does not change with the throughput or the
+uptime. You cannot configure the fine ring.
 
-## reading it
+## in the web UI {#reading-it}
 
-Open a card's **stats** section: the chart arrives already filled, and anything
-the pipeline has failed at is listed underneath it with a time, how long ago and
-a count. Nothing is listed when there is nothing to list.
+The **stats** section of a card shows the history. The chart starts with the
+recorded buckets, so it is full when it opens. Below the chart, the card lists each
+failure with its time and its count. When there are no failures, the list is
+not shown.
 
-Or ask directly:
+## limits {#what-it-does-not-do}
 
-```bash
-curl localhost:6767/api/pipelines/my-pipeline/history
-curl 'localhost:6767/api/pipelines/my-pipeline/history?resolution=fine'
-```
-
-An unknown pipeline answers with an empty history rather than a 404 — the record
-deliberately outlives the pipeline, so that deleting one, or reverting a config
-(which rebuilds every pipeline in it), does not throw away the evidence of what
-went wrong.
-
-## what it does not do
-
-**It does not survive a restart.** This is a ring buffer in the process, so a
-deploy loses the record. That covers the case it was built for — the pipeline
-died, the server didn't — and not the one where the server itself was restarted.
-Making it durable means a database, which is tracked in the roadmap.
-
-**Two pipelines' histories are independent and nothing correlates them.** It is
-a per-pipeline readout, not a metrics system. At the point where you want a week
-of retention, alerting, or one dashboard across a fleet, the honest answer is a
-real metrics store rather than a bigger number in `retention_secs`.
+- **A restart loses the record.** The record is in the memory of the process.
+  It shows a pipeline that failed while the server continued to run. A durable
+  store is on the roadmap.
+- **The record is per pipeline.** It does not correlate two pipelines. For long
+  retention, alerts or a dashboard across many servers, use a metrics system.
+  Poll the history endpoint to feed it.

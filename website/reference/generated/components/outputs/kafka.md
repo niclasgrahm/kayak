@@ -2,9 +2,11 @@
 
 ## `kafka` {#output-kafka}
 
-Publishes every message in the batch to a kafka topic, one message per record. Records are sent without a key, so they round-robin across the topic's partitions.
+Publishes each message in the batch to a kafka topic, one record for each message.
+
+The records have no key, so kafka distributes them across the partitions of the topic.
 
 | field | type | | description |
 | --- | --- | --- | --- |
-| `connection` | `kafka` connection | <Badge type="warning" text="required" /> | name of the kafka connection to publish to — see "connections" in the readme. |
-| `topic` | `string` | <Badge type="warning" text="required" /> | the topic to publish to |
+| `connection` | `kafka` connection | <Badge type="warning" text="required" /> | The name of the kafka connection to publish to. Declare the connection in the connections file. |
+| `topic` | `string` | <Badge type="warning" text="required" /> | The topic to publish to. |

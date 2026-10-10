@@ -2,105 +2,105 @@
 
 ## `smooth` {#transform-smooth}
 
-Smooths a numeric field against the values before it in its series, writing the result onto the message — over the field itself, or under `as`.
+Smooths a numeric field against the earlier values of its series. The transform writes the result into the field, or under `as`.
 
-Every method but an `ewma` by `tau_seconds` is about *order*: the last few values, however far apart. So `time` is only accepted beside that one, and refused elsewhere rather than ignored.
+All methods except `ewma` with `tau_seconds` use the order of the values, and not their time. Thus, `time` is permitted only with `ewma` and `tau_seconds`. With other methods, `time` is an error when the pipeline builds.
 
 | field | type | | description |
 | --- | --- | --- | --- |
-| `field` | `string` | <Badge type="warning" text="required" /> | the numeric field to smooth |
-| `method` | `ewma \| median \| hampel \| savitzky_golay` | <Badge type="warning" text="required" /> | how |
-| `as` | `string` | <Badge type="info" text="optional" /> | the field the smoothed value is written under. Leave it out to replace the field itself |
-| `group_by` | `list of string` | <Badge type="info" text="optional" /> | the fields that identify a series, the reducer's way. Leave it out for one series |
-| `on_missing` | `error` \| `skip` | <Badge type="info" text="optional" /> | what to do about a message missing the field or a group field |
-| `reset_when` | `list of numeric \| string \| one_of \| none_of` | <Badge type="info" text="optional" /> | a message passing all of these clears its key's state first, so the series starts over. Checked before `when` |
-| `time` | `string` | <Badge type="info" text="optional" /> | for an `ewma` by `tau_seconds`: the field carrying each message's time — RFC 3339 or milliseconds since the epoch. Leave it out for arrival time |
-| `when` | `list of numeric \| string \| one_of \| none_of` | <Badge type="info" text="optional" /> | only messages passing all of these are applied; the rest pass through untouched. Leave it out for every message |
+| `field` | `string` | <Badge type="warning" text="required" /> | The numeric field to smooth. |
+| `method` | `ewma \| median \| hampel \| savitzky_golay` | <Badge type="warning" text="required" /> | The method to smooth the value with. |
+| `as` | `string` | <Badge type="info" text="optional" /> | The field to write the smoothed value to. Leave it out to replace the value of `field`. |
+| `group_by` | `list of string` | <Badge type="info" text="optional" /> | The fields that identify a series, as in `reduce`. Leave it out for one series. |
+| `on_missing` | `error` \| `skip` | <Badge type="info" text="optional" /> | What to do with a message that does not have the field or a group field. The default is `error`. |
+| `reset_when` | `list of numeric \| string \| one_of \| none_of` | <Badge type="info" text="optional" /> | The conditions that clear the state of the message's key. All of them must match. The series then starts again. The transform checks these before `when`. |
+| `time` | `string` | <Badge type="info" text="optional" /> | For `ewma` with `tau_seconds` only: the field that holds the time of each message, as an RFC 3339 string or as milliseconds since the epoch. Leave it out to use the arrival time. |
+| `when` | `list of numeric \| string \| one_of \| none_of` | <Badge type="info" text="optional" /> | The conditions that a message must match to be applied. All of them must match. Other messages pass through unchanged. Leave it out to apply every message. |
 
 **`method` — `type: "ewma"`**
 
 | field | type | | description |
 | --- | --- | --- | --- |
-| `alpha` | `number` | <Badge type="info" text="optional" /> | the weight of the newest value, 0 to 1 |
-| `half_life` | `number` | <Badge type="info" text="optional" /> | the number of messages after which a value's weight has halved — the spelling with an intuition behind it |
-| `tau_seconds` | `number` | <Badge type="info" text="optional" /> | the time constant in seconds: after this long, an old value's weight has fallen to about 37%. Reads the transform's `time` |
+| `alpha` | `number` | <Badge type="info" text="optional" /> | The weight of the newest value, from 0 to 1. |
+| `half_life` | `number` | <Badge type="info" text="optional" /> | The number of messages after which the weight of a value is half. |
+| `tau_seconds` | `number` | <Badge type="info" text="optional" /> | The time constant in seconds. After this time, the weight of an old value is about 37%. It reads the `time` field of the transform. |
 
 **`method` — `type: "median"`**
 
 | field | type | | description |
 | --- | --- | --- | --- |
-| `size` | `integer` | <Badge type="warning" text="required" /> | how many values the window holds |
+| `size` | `integer` | <Badge type="warning" text="required" /> | The number of values in the window. |
 
 **`method` — `type: "hampel"`**
 
 | field | type | | description |
 | --- | --- | --- | --- |
-| `size` | `integer` | <Badge type="warning" text="required" /> | how many values the window holds, this one included |
-| `threshold` | `number` | <Badge type="info" text="optional" /> | how many scaled MADs from the median count as an outlier. `3` when left out |
+| `size` | `integer` | <Badge type="warning" text="required" /> | The number of values in the window, with this value included. |
+| `threshold` | `number` | <Badge type="info" text="optional" /> | The number of scaled MADs from the median that makes an outlier. The default is `3`. |
 
 **`method` — `type: "savitzky_golay"`**
 
 | field | type | | description |
 | --- | --- | --- | --- |
-| `size` | `integer` | <Badge type="warning" text="required" /> | how many values the window holds, this one included |
-| `order` | `integer` | <Badge type="info" text="optional" /> | the degree of the polynomial, below `size`. `2` when left out |
+| `size` | `integer` | <Badge type="warning" text="required" /> | The number of values in the window, with this value included. |
+| `order` | `integer` | <Badge type="info" text="optional" /> | The degree of the polynomial. It must be less than `size`. The default is `2`. |
 
 **`reset_when` — each entry — `type: "numeric"`**
 
 | field | type | | description |
 | --- | --- | --- | --- |
-| `field` | `string` | <Badge type="warning" text="required" /> | the field to test — a dotted path, like anywhere else |
-| `operator` | `greater_than` \| `less_than` \| `equal_to` \| `not_equal_to` | <Badge type="warning" text="required" /> | how the field is compared |
-| `value` | `number` | <Badge type="warning" text="required" /> | the number it is compared to |
+| `field` | `string` | <Badge type="warning" text="required" /> | The field to test, as a dotted path. |
+| `operator` | `greater_than` \| `less_than` \| `equal_to` \| `not_equal_to` | <Badge type="warning" text="required" /> | How to compare the field. |
+| `value` | `number` | <Badge type="warning" text="required" /> | The number to compare to. |
 
 **`reset_when` — each entry — `type: "string"`**
 
 | field | type | | description |
 | --- | --- | --- | --- |
-| `field` | `string` | <Badge type="warning" text="required" /> | the field to test — a dotted path, like anywhere else |
-| `operator` | `equal_to` \| `not_equal_to` \| `contains` | <Badge type="warning" text="required" /> | how the field is compared |
-| `value` | `string` | <Badge type="warning" text="required" /> | the string it is compared to |
+| `field` | `string` | <Badge type="warning" text="required" /> | The field to test, as a dotted path. |
+| `operator` | `equal_to` \| `not_equal_to` \| `contains` | <Badge type="warning" text="required" /> | How to compare the field. |
+| `value` | `string` | <Badge type="warning" text="required" /> | The string to compare to. |
 
 **`reset_when` — each entry — `type: "one_of"`**
 
 | field | type | | description |
 | --- | --- | --- | --- |
-| `field` | `string` | <Badge type="warning" text="required" /> | the field to test — a dotted path, like anywhere else |
-| `values` | `list of string` | <Badge type="warning" text="required" /> | the strings that match |
+| `field` | `string` | <Badge type="warning" text="required" /> | The field to test, as a dotted path. |
+| `values` | `list of string` | <Badge type="warning" text="required" /> | The strings that match. |
 
 **`reset_when` — each entry — `type: "none_of"`**
 
 | field | type | | description |
 | --- | --- | --- | --- |
-| `field` | `string` | <Badge type="warning" text="required" /> | the field to test — a dotted path, like anywhere else |
-| `values` | `list of string` | <Badge type="warning" text="required" /> | the strings that do not match |
+| `field` | `string` | <Badge type="warning" text="required" /> | The field to test, as a dotted path. |
+| `values` | `list of string` | <Badge type="warning" text="required" /> | The strings that do not match. |
 
 **`when` — each entry — `type: "numeric"`**
 
 | field | type | | description |
 | --- | --- | --- | --- |
-| `field` | `string` | <Badge type="warning" text="required" /> | the field to test — a dotted path, like anywhere else |
-| `operator` | `greater_than` \| `less_than` \| `equal_to` \| `not_equal_to` | <Badge type="warning" text="required" /> | how the field is compared |
-| `value` | `number` | <Badge type="warning" text="required" /> | the number it is compared to |
+| `field` | `string` | <Badge type="warning" text="required" /> | The field to test, as a dotted path. |
+| `operator` | `greater_than` \| `less_than` \| `equal_to` \| `not_equal_to` | <Badge type="warning" text="required" /> | How to compare the field. |
+| `value` | `number` | <Badge type="warning" text="required" /> | The number to compare to. |
 
 **`when` — each entry — `type: "string"`**
 
 | field | type | | description |
 | --- | --- | --- | --- |
-| `field` | `string` | <Badge type="warning" text="required" /> | the field to test — a dotted path, like anywhere else |
-| `operator` | `equal_to` \| `not_equal_to` \| `contains` | <Badge type="warning" text="required" /> | how the field is compared |
-| `value` | `string` | <Badge type="warning" text="required" /> | the string it is compared to |
+| `field` | `string` | <Badge type="warning" text="required" /> | The field to test, as a dotted path. |
+| `operator` | `equal_to` \| `not_equal_to` \| `contains` | <Badge type="warning" text="required" /> | How to compare the field. |
+| `value` | `string` | <Badge type="warning" text="required" /> | The string to compare to. |
 
 **`when` — each entry — `type: "one_of"`**
 
 | field | type | | description |
 | --- | --- | --- | --- |
-| `field` | `string` | <Badge type="warning" text="required" /> | the field to test — a dotted path, like anywhere else |
-| `values` | `list of string` | <Badge type="warning" text="required" /> | the strings that match |
+| `field` | `string` | <Badge type="warning" text="required" /> | The field to test, as a dotted path. |
+| `values` | `list of string` | <Badge type="warning" text="required" /> | The strings that match. |
 
 **`when` — each entry — `type: "none_of"`**
 
 | field | type | | description |
 | --- | --- | --- | --- |
-| `field` | `string` | <Badge type="warning" text="required" /> | the field to test — a dotted path, like anywhere else |
-| `values` | `list of string` | <Badge type="warning" text="required" /> | the strings that do not match |
+| `field` | `string` | <Badge type="warning" text="required" /> | The field to test, as a dotted path. |
+| `values` | `list of string` | <Badge type="warning" text="required" /> | The strings that do not match. |

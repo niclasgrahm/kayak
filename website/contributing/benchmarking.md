@@ -1,125 +1,164 @@
 # benchmarking
 
-`just bench` sweeps the run loop and prints what it costs. It exists so that
-"is this slower than it was?" has an answer that isn't a memory, and so that
-"how much can one server take?" has a number beside it.
+`just bench` measures the run loop and prints the result. Use it to answer two
+questions with numbers: "is this change slower?" and "how much can one server
+do?"
 
 ```bash
 just bench                      # the suite, as a table
-just bench --compare            # ... and the deltas against this machine's baseline
+just bench --compare            # ... and the deltas against the baseline of this machine
 just bench --save               # ... and record this run as that baseline
-just bench --filter pipelines   # just the multi-pipeline rows
+just bench --filter pipelines   # only the multi-pipeline rows
 just bench --duration 20        # longer windows, less noise
 ```
 
-It is **not** part of `just ci`, deliberately: a minute-long sweep in the
-pre-push loop is a minute-long sweep people learn to skip. Run it when you have
-touched the run loop, the transforms or anything on the per-batch path — and
-before a release, so the baseline keeps up.
+`just bench` is not part of `just ci`. The sweep takes about a minute, and a
+slow pre-push check is a check that people skip. Run it when you change the run
+loop, the transforms or other code on the per-batch path. Also run it before a
+release, so that the baseline stays current.
 
-## what it measures, and what it doesn't
+## the numbers
 
-`kayak-bench` drives the runtime **in process**: no socket, no broker, no
-filesystem. It builds pipelines through the same seams the integration tests
-use (`PipelineRuntime::from_parts`, `BuildCtx`), feeds them with
-`testing::LoadInput` and discards through `testing::NullOutput`, so what a run
-measures is the run loop, the merge, the transform chain and the fan-out —
-and nothing that varies with what else is on the machine.
+These are the numbers of the committed baseline,
+`bench/baselines/apple-m1-max-10c-darwin-26-5-2.json` (Apple M1 Max, 10 cores,
+release build). They exclude all I/O. They show the cost of the runtime, not
+end-to-end throughput.
 
-Measurement is `Pipeline::counters` and nothing else. Those are three relaxed
-atomics the run loop adds to unconditionally, outside the event feed's
-`receiver_count()` gate, so reading them before and after a window is a
-*complete* count — no sampler, no history store, no subscriber, and therefore
-nothing that changes the number by being asked for it. This is why a bench
-needed no instrumentation added to the runtime.
+| scenario | pipelines | batch | transforms | msgs/s | passes/s | rss |
+| --- | --- | --- | --- | --- | --- | --- |
+| `batch1` | 1 | 1 | 0 | 7.10M | 7.10M | 9M |
+| `batch10` | 1 | 10 | 0 | 70.77M | 7.08M | 9M |
+| `batch100` | 1 | 100 | 0 | 677.38M | 6.77M | 9M |
+| `batch1000` | 1 | 1000 | 0 | 7.00G | 7.00M | 9M |
+| `filter1` | 1 | 100 | 1 | 31.38M | 313.8k | 10M |
+| `filter5` | 1 | 100 | 5 | 6.54M | 65.4k | 10M |
+| `map1` | 1 | 100 | 1 | 1.78M | 17.8k | 10M |
+| `pipelines10` | 10 | 100 | 0 | 1.74G | 17.43M | 11M |
+| `pipelines100` | 100 | 100 | 0 | 4.30G | 42.99M | 11M |
+| `pipelines1000` | 1000 | 100 | 0 | 5.61G | 56.12M | 15M |
+| `depth3` | 3 (one chain) | 100 | 0 | 175.67M ingested | 1.76M | 16M |
+| `watched` | 1 | 100 | 0 | 677.95M | 6.78M | 16M |
 
-What it does not cover is the whole server: axum, the JSON extractor, TLS, the
-inbox channel and per-request overhead are the `http` input's path and want an
-external driver (`oha`, `vegeta`, `k6`) posting to
-`POST /api/pipelines/{id}/messages` against a real binary — with server-side
-truth read back off `GET /api/pipelines/{id}/history`, which counts the same
-counters. The number to look for there is the rate at which `503`s start, since
-the ingest endpoint `try_send`s and reports backpressure rather than blocking.
-That layer isn't built yet.
+The `rss` column uses decimal megabytes, as the tool prints it. The baseline
+has no rows for `rolling1` and `rolling1000`. Those scenarios are newer than the
+baseline, so `--compare` shows them as `new`.
 
-## reading the table
+## what it measures {#what-it-measures-and-what-it-doesnt}
+
+`kayak-bench` runs the runtime **in the process**. There is no socket, no
+broker and no file system. It builds pipelines through the same seams as the
+integration tests (`PipelineRuntime::from_parts`, `BuildCtx`). `testing::LoadInput`
+feeds them and `testing::NullOutput` discards the output. Thus a run measures
+the run loop, the merge, the transform chain and the fan-out. It does not
+measure anything that changes with the other load on the machine.
+
+The only measurement is `Pipeline::counters`. These are three relaxed atomics.
+The run loop increments them on every pass, outside the gate of the event feed.
+Thus a read before and after a window gives a complete count. No sampler, no
+history store and no subscriber is involved, so the measurement does not change
+the result. The runtime needed no extra instrumentation for the bench.
+
+The bench does not measure the complete server. The path of the `http` input
+also includes axum, the JSON extractor, TLS, the inbox channel and the cost per
+request. To measure that path, use an external tool (`oha`, `vegeta`, `k6`) to
+post to `POST /api/pipelines/{id}/messages` on a real binary. Read the
+server-side counts from `GET /api/pipelines/{id}/history`, which uses the same
+counters. Look for the rate at which `503` responses start. The ingest endpoint
+uses `try_send` and reports backpressure. It does not block. kayak has no
+harness for this layer yet.
+
+## read the table {#reading-the-table}
+
+The tool prints a table like this one:
 
 ```
 scenario          pipes  batch   tf     msgs/s  passes/s   per pipe     rss errors
-batch100              1    100    0    714.17M     7.14M    714.17M      9M      0
+--------------------------------------------------------------------------------
+batch100              1    100    0    677.38M     6.77M    677.38M      9M      0
 map1                  1    100    1      1.78M     17.8k      1.78M     10M      0
-pipelines100        100    100    0    636.99M     6.37M      6.37M     11M      0
+pipelines100        100    100    0      4.30G    42.99M     42.99M     11M      0
 ```
 
-**Look at `passes/s` first on any row with no transforms.** With an empty chain
-and a discarding output, nothing in the run loop ever touches an individual
-message — the batch is an `Arc` that gets cloned rather than walked, and the
-counters take its length — so those rows measure the cost of *a pass* and
-nothing else. Their `msgs/s` is that times the batch size, which is why the
-`batch1 → batch1000` sweep is a clean factor of ten each step and why reading
-7 GB/s off `batch1000` as a data rate is just reading the batch size back out.
-The rows with a transform in them are the ones where `msgs/s` means messages.
+**On a row with no transforms, read `passes/s` first.** With an empty chain and
+a discarding output, the run loop never touches a single message. The batch is
+an `Arc` that kayak clones and does not walk, and the counters add its length.
+Thus these rows measure the cost of one pass. Their `msgs/s` is `passes/s`
+times the batch size. This is why each step of `batch1` to `batch1000` is a
+factor of ten. The 7.00G `msgs/s` of `batch1000` is the batch size, not a data
+rate. On the rows with a transform, `msgs/s` counts messages.
 
-`per pipe` is the column to read down the `pipelines*` rows: total throughput
-rising while this falls is what "scales, but not for free" looks like. `rss` is
-the whole process' resident set at the end of that row, so it includes what
-earlier rows left behind — read it as a high-water mark, not as the cost of one
-row.
+On the `pipelines*` rows, read the `per pipe` column. The total throughput goes
+up while the throughput per pipeline goes down. This shows that the runtime
+scales, at a cost.
 
-Any row with a non-zero `errors` measured a broken graph rather than a slow
-one. Those rows are left out of the ratios and the run says so.
+`rss` is the resident set of the complete process at the end of the row. It
+includes what earlier rows left behind. Read it as a high-water mark, not as
+the cost of one row.
 
-## baselines, and why they are per machine
+A row with a non-zero `errors` measured a broken graph, not a slow graph. The
+tool removes those rows from the ratios and says so.
 
-A throughput number on its own is not comparable to anything: the same commit
-on a laptop on battery, in a two-core container and on a workstation differs by
-more than most regressions anyone would care about. So every run carries a
-manifest — commit (with a `-dirty` marker), rustc version, profile, cpu, cores,
-OS — and baselines are filed under a machine id derived from the hardware, in
-`bench/baselines/<machine>.json`, committed.
+## baselines are per machine {#baselines-and-why-they-are-per-machine}
 
-`--save` refuses two things, both because the file would be compared against
-wrongly later: a **debug build** (it measures the optimiser's absence, and
-several of the hot paths inline away entirely under `--release`) and a
-**filtered run** (it would silently drop every scenario it didn't measure).
+An absolute number has no meaning on its own. The same commit gives very
+different numbers on a laptop on battery, in a container with two cores and on
+a workstation. The difference is larger than most regressions. Thus every run
+carries a manifest: the commit (with a `-dirty` marker), the rustc version, the
+profile, the cpu, the cores and the OS. kayak files each baseline under a
+machine id from the hardware, at `bench/baselines/<machine>.json`, and the
+file is committed.
 
-`--compare` prints deltas and stops there. There is deliberately no threshold
-and no non-zero exit: a gate needs to know how much run-to-run noise this suite
-actually has on this machine, which is a question a few weeks of recorded runs
-answer and a guess does not.
+`--save` refuses two kinds of run, because a later comparison against them is
+wrong:
 
-## ratios are the numbers that travel
+- **a debug build.** It measures the absence of the optimizer. Several hot
+  paths inline away completely under `--release`.
+- **a filtered run.** It removes every scenario that it did not measure.
 
-The absolute rows only mean something next to another row taken on the same
-box. The **ratios** divide two runs taken seconds apart on one machine, so the
-cpu, the compiler and the background load cancel — those are the ones worth
-quoting in a review, putting a threshold on later, or comparing against a
-number someone recorded on different hardware a year ago.
+`--compare` prints the deltas and does nothing more. It has no threshold and no
+non-zero exit status. A threshold needs a measurement of the run-to-run noise
+on the machine. Some weeks of recorded runs can give that measurement.
+
+## the ratios {#ratios-are-the-numbers-that-travel}
+
+The absolute rows have meaning only beside another row from the same machine. A
+**ratio** divides two runs from the same machine, taken seconds apart. The cpu,
+the compiler and the background load cancel. Quote ratios in a review, use them
+for a threshold later, or compare them with a number from different hardware.
+
+From the committed baseline:
 
 ```
 ratio                value   meaning
-watched              0.96x   throughput with a browser attached to /events, against nobody watching
+------------------------------------------------------------------------
+watched              1.00x   throughput with a browser attached to /events, against nobody watching
+filter1              0.05x   throughput with one filter, against an empty chain that touches no message
 map1                 0.00x   throughput with one map, against an empty chain that touches no message
-pipelines100         0.01x   per-pipeline throughput at a hundred, against one
+depth3               0.26x   throughput ingested three pipelines deep, against one
+pipelines10          0.26x   per-pipeline throughput at ten, against one
+pipelines100         0.06x   per-pipeline throughput at a hundred, against one
+pipelines1000        0.01x   per-pipeline throughput at a thousand, against one
 filter5/filter1      0.21x   throughput at five filters, against one
 ```
 
-`watched` is the one to keep an eye on: the run loop's reporting is gated on
-`receiver_count() > 0`, so a browser attaching changes what every pipeline on
-the box costs. That gate was worth 46% of throughput before the feed was
-throttled (see "the ui feed is a sample" in `CLAUDE.md`), and this row is what
-keeps the number honest rather than remembered.
+All ratios divide by `batch100`, except `filter5/filter1`. That ratio divides
+five filters by one, so it gives the cost of each extra filter.
 
-## adding a scenario
+Watch the `watched` ratio. A browser on `/events` changes the cost of every
+pipeline on the server. Before kayak throttled the feed, a browser cost 46% of
+the throughput. See "the ui feed is a sample" in `CLAUDE.md`. This row keeps
+that number measured.
 
-`kayak-bench/src/scenario.rs` is a fixed list, and that is the point: a
-baseline is only worth keeping if the run that produced it and the run six
-months later asked the same questions. **Adding** a scenario costs nothing — a
-baseline has no entry for it and the comparison reads it as `new`. **Changing**
-one is what breaks comparability, so change its name at the same time and let
-the old row age out.
+## add a scenario {#adding-a-scenario}
 
-The same applies to `LoadInput`'s generated message: its field set is part of
-what every number means, so widening it invalidates every baseline taken before
-the change. Treat it as part of the format rather than as a detail of the
-double.
+`kayak-bench/src/scenario.rs` is a fixed list. A baseline is useful only if the
+run that made it and a run six months later ask the same questions.
+
+- **To add** a scenario costs nothing. The baseline has no entry for it, and
+  the comparison shows it as `new`.
+- **To change** a scenario breaks the comparison. Change its name at the same
+  time, and let the old row go out of use.
+
+The same rule applies to the message that `LoadInput` generates. Its fields are
+part of what every number means. A wider message makes every earlier baseline
+invalid. Treat the message as part of the format.

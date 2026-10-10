@@ -2,54 +2,56 @@
 
 ## `detect` {#transform-detect}
 
-Flags anomalies in a numeric field against its own series — one component with a `method`, the way `smooth` is.
+Flags anomalies in a numeric field against its own series. `method` selects how the transform finds an anomaly.
 
-Writes a boolean under `as` (`anomaly` when left out), and beside it `<as>_score` — how far outside normal the value was, in the method's own units — so a downstream `filter` can be stricter than the threshold. Nothing is flagged during the warm-up of `min_samples` messages per key, because until then there is no idea of normal to be outside of.
+The transform writes a boolean under `as`. The default is `anomaly`. It also writes a score under `<as>_score`. The score is the distance from normal, in the units of the method. A `filter` after the transform can use a stricter limit on the score.
+
+The warm-up is `min_samples` messages for each key. The transform flags nothing during the warm-up.
 
 | field | type | | description |
 | --- | --- | --- | --- |
-| `field` | `string` | <Badge type="warning" text="required" /> | the numeric field to watch |
-| `method` | `zscore \| mad \| cusum \| ewma_chart \| western_electric \| flatline \| ewma` | <Badge type="warning" text="required" /> | how an anomaly is decided |
-| `as` | `string` | <Badge type="info" text="optional" /> | the field the flag is written under; the score goes under `<as>_score`. `anomaly` when left out |
-| `group_by` | `list of string` | <Badge type="info" text="optional" /> | the fields that identify a series, the reducer's way. Leave it out for one series |
-| `learn` | `all` \| `normal_only` | <Badge type="info" text="optional" /> | for `zscore`, `mad` and `ewma`, which keep learning: whether flagged readings are learned from too. `all` when left out |
-| `min_samples` | `integer` | <Badge type="info" text="optional" /> | how many messages per key to see before flagging anything. The method's window `size` when left out, or 30 for a method without one |
-| `mode` | `annotate` \| `only_anomalies` | <Badge type="info" text="optional" /> | whether everything comes out annotated or only the anomalies |
-| `on_missing` | `error` \| `skip` | <Badge type="info" text="optional" /> | what to do about a message missing the field or a group field |
-| `readapt_after_seconds` | `number` | <Badge type="info" text="optional" /> | with `learn: normal_only`: once readings have been flagged for this many seconds in a row, learn from them anyway, so a lasting change becomes the new normal |
-| `reset_when` | `list of numeric \| string \| one_of \| none_of` | <Badge type="info" text="optional" /> | a message passing all of these clears its key's state first, so the series starts over. Checked before `when` |
-| `time` | `string` | <Badge type="info" text="optional" /> | the field carrying each message's time — RFC 3339 or milliseconds since the epoch — for the `ewma` method and `readapt_after_seconds`. Leave it out for arrival time |
-| `when` | `list of numeric \| string \| one_of \| none_of` | <Badge type="info" text="optional" /> | only messages passing all of these are applied; the rest pass through untouched. Leave it out for every message |
-| `with_baseline` | `boolean` | <Badge type="info" text="optional" /> | also write the baseline the reading was judged against: what normal was under `<as>_expected`, and how far from it counts under `<as>_band`, both in the field's units. `null` where a method has none |
+| `field` | `string` | <Badge type="warning" text="required" /> | The numeric field to examine. |
+| `method` | `zscore \| mad \| cusum \| ewma_chart \| western_electric \| flatline \| ewma` | <Badge type="warning" text="required" /> | How the transform finds an anomaly. |
+| `as` | `string` | <Badge type="info" text="optional" /> | The field to write the flag to. The score goes to `<as>_score`. The default is `anomaly`. |
+| `group_by` | `list of string` | <Badge type="info" text="optional" /> | The fields that identify a series, as in `reduce`. Leave it out for one series. |
+| `learn` | `all` \| `normal_only` | <Badge type="info" text="optional" /> | For `zscore`, `mad` and `ewma`: the readings that the baseline learns from. The default is `all`. |
+| `min_samples` | `integer` | <Badge type="info" text="optional" /> | The number of messages for each key before the transform flags anything. The default is the `size` of the method, or 30 for a method with no `size`. |
+| `mode` | `annotate` \| `only_anomalies` | <Badge type="info" text="optional" /> | Which messages to send. The default is `annotate`. |
+| `on_missing` | `error` \| `skip` | <Badge type="info" text="optional" /> | What to do with a message that does not have the field or a group field. The default is `error`. |
+| `readapt_after_seconds` | `number` | <Badge type="info" text="optional" /> | With `learn: normal_only`: when readings are anomalies for this number of seconds without a break, the baseline learns from them. A change that continues then becomes the new normal. |
+| `reset_when` | `list of numeric \| string \| one_of \| none_of` | <Badge type="info" text="optional" /> | The conditions that clear the state of the message's key. All of them must match. The series then starts again. The transform checks these before `when`. |
+| `time` | `string` | <Badge type="info" text="optional" /> | The field that holds the time of each message, as an RFC 3339 string or as milliseconds since the epoch. The `ewma` method and `readapt_after_seconds` use it. Leave it out to use the arrival time. |
+| `when` | `list of numeric \| string \| one_of \| none_of` | <Badge type="info" text="optional" /> | The conditions that a message must match to be applied. All of them must match. Other messages pass through unchanged. Leave it out to apply every message. |
+| `with_baseline` | `boolean` | <Badge type="info" text="optional" /> | Also write the baseline of the reading, in the units of the field. The normal value goes to `<as>_expected`. The permitted distance from it goes to `<as>_band`. The value is `null` when the method has no baseline. |
 
 **`method` — `type: "zscore"`**
 
 | field | type | | description |
 | --- | --- | --- | --- |
-| `size` | `integer` | <Badge type="warning" text="required" /> | how many earlier values the baseline is drawn from |
-| `threshold` | `number` | <Badge type="info" text="optional" /> | how many standard deviations count. `3` when left out |
+| `size` | `integer` | <Badge type="warning" text="required" /> | The number of earlier values in the baseline. |
+| `threshold` | `number` | <Badge type="info" text="optional" /> | The number of standard deviations that makes an anomaly. The default is `3`. |
 
 **`method` — `type: "mad"`**
 
 | field | type | | description |
 | --- | --- | --- | --- |
-| `size` | `integer` | <Badge type="warning" text="required" /> | how many earlier values the baseline is drawn from |
-| `threshold` | `number` | <Badge type="info" text="optional" /> | how many scaled MADs count. `3.5` when left out |
+| `size` | `integer` | <Badge type="warning" text="required" /> | The number of earlier values in the baseline. |
+| `threshold` | `number` | <Badge type="info" text="optional" /> | The number of scaled MADs that makes an anomaly. The default is `3.5`. |
 
 **`method` — `type: "cusum"`**
 
 | field | type | | description |
 | --- | --- | --- | --- |
-| `drift` | `number` | <Badge type="warning" text="required" /> | the slack per message that is not counted as drift, in the field's units |
-| `threshold` | `number` | <Badge type="warning" text="required" /> | the accumulated drift that counts |
-| `target` | `number` | <Badge type="info" text="optional" /> | the value the series is expected to sit at. Left out, the mean of the warm-up is used |
+| `drift` | `number` | <Badge type="warning" text="required" /> | The change per message that does not count as drift, in the units of the field. |
+| `threshold` | `number` | <Badge type="warning" text="required" /> | The sum of drift that makes an anomaly. |
+| `target` | `number` | <Badge type="info" text="optional" /> | The expected value of the series. Leave it out to use the mean of the warm-up. |
 
 **`method` — `type: "ewma_chart"`**
 
 | field | type | | description |
 | --- | --- | --- | --- |
-| `alpha` | `number` | <Badge type="info" text="optional" /> | the weight of the newest value, 0 to 1. `0.2` when left out |
-| `threshold` | `number` | <Badge type="info" text="optional" /> | the width of the band, in standard deviations. `3` when left out |
+| `alpha` | `number` | <Badge type="info" text="optional" /> | The weight of the newest value, from 0 to 1. The default is `0.2`. |
+| `threshold` | `number` | <Badge type="info" text="optional" /> | The width of the band, in standard deviations. The default is `3`. |
 
 **`method` — `type: "western_electric"`**
 
@@ -59,73 +61,73 @@ This component takes no configuration.
 
 | field | type | | description |
 | --- | --- | --- | --- |
-| `size` | `integer` | <Badge type="warning" text="required" /> | how many identical values in a row count |
+| `size` | `integer` | <Badge type="warning" text="required" /> | The number of identical values in a sequence that makes an anomaly. |
 
 **`method` — `type: "ewma"`**
 
 | field | type | | description |
 | --- | --- | --- | --- |
-| `mean_tau_seconds` | `number` | <Badge type="warning" text="required" /> | the time constant of the mean, in seconds: how quickly normal follows the series |
-| `spread_tau_seconds` | `number` | <Badge type="warning" text="required" /> | the time constant of the spread, in seconds — usually longer than the mean's, so a burst of noise does not widen the band at once |
-| `min_spread` | `number` | <Badge type="info" text="optional" /> | the smallest deviation believed, in the field's own units — a signal that has been very quiet otherwise flags its first wobble. `0` when left out |
-| `threshold` | `number` | <Badge type="info" text="optional" /> | how many deviations count. `3` when left out |
+| `mean_tau_seconds` | `number` | <Badge type="warning" text="required" /> | The time constant of the mean, in seconds. A smaller value makes the mean follow the series more quickly. |
+| `spread_tau_seconds` | `number` | <Badge type="warning" text="required" /> | The time constant of the spread, in seconds. Make it longer than `mean_tau_seconds`, so that a short period of noise does not make the band wider immediately. |
+| `min_spread` | `number` | <Badge type="info" text="optional" /> | The minimum deviation, in the units of the field. Without it, a signal that was very quiet flags its first small change. The default is `0`. |
+| `threshold` | `number` | <Badge type="info" text="optional" /> | The number of deviations that makes an anomaly. The default is `3`. |
 
 **`reset_when` — each entry — `type: "numeric"`**
 
 | field | type | | description |
 | --- | --- | --- | --- |
-| `field` | `string` | <Badge type="warning" text="required" /> | the field to test — a dotted path, like anywhere else |
-| `operator` | `greater_than` \| `less_than` \| `equal_to` \| `not_equal_to` | <Badge type="warning" text="required" /> | how the field is compared |
-| `value` | `number` | <Badge type="warning" text="required" /> | the number it is compared to |
+| `field` | `string` | <Badge type="warning" text="required" /> | The field to test, as a dotted path. |
+| `operator` | `greater_than` \| `less_than` \| `equal_to` \| `not_equal_to` | <Badge type="warning" text="required" /> | How to compare the field. |
+| `value` | `number` | <Badge type="warning" text="required" /> | The number to compare to. |
 
 **`reset_when` — each entry — `type: "string"`**
 
 | field | type | | description |
 | --- | --- | --- | --- |
-| `field` | `string` | <Badge type="warning" text="required" /> | the field to test — a dotted path, like anywhere else |
-| `operator` | `equal_to` \| `not_equal_to` \| `contains` | <Badge type="warning" text="required" /> | how the field is compared |
-| `value` | `string` | <Badge type="warning" text="required" /> | the string it is compared to |
+| `field` | `string` | <Badge type="warning" text="required" /> | The field to test, as a dotted path. |
+| `operator` | `equal_to` \| `not_equal_to` \| `contains` | <Badge type="warning" text="required" /> | How to compare the field. |
+| `value` | `string` | <Badge type="warning" text="required" /> | The string to compare to. |
 
 **`reset_when` — each entry — `type: "one_of"`**
 
 | field | type | | description |
 | --- | --- | --- | --- |
-| `field` | `string` | <Badge type="warning" text="required" /> | the field to test — a dotted path, like anywhere else |
-| `values` | `list of string` | <Badge type="warning" text="required" /> | the strings that match |
+| `field` | `string` | <Badge type="warning" text="required" /> | The field to test, as a dotted path. |
+| `values` | `list of string` | <Badge type="warning" text="required" /> | The strings that match. |
 
 **`reset_when` — each entry — `type: "none_of"`**
 
 | field | type | | description |
 | --- | --- | --- | --- |
-| `field` | `string` | <Badge type="warning" text="required" /> | the field to test — a dotted path, like anywhere else |
-| `values` | `list of string` | <Badge type="warning" text="required" /> | the strings that do not match |
+| `field` | `string` | <Badge type="warning" text="required" /> | The field to test, as a dotted path. |
+| `values` | `list of string` | <Badge type="warning" text="required" /> | The strings that do not match. |
 
 **`when` — each entry — `type: "numeric"`**
 
 | field | type | | description |
 | --- | --- | --- | --- |
-| `field` | `string` | <Badge type="warning" text="required" /> | the field to test — a dotted path, like anywhere else |
-| `operator` | `greater_than` \| `less_than` \| `equal_to` \| `not_equal_to` | <Badge type="warning" text="required" /> | how the field is compared |
-| `value` | `number` | <Badge type="warning" text="required" /> | the number it is compared to |
+| `field` | `string` | <Badge type="warning" text="required" /> | The field to test, as a dotted path. |
+| `operator` | `greater_than` \| `less_than` \| `equal_to` \| `not_equal_to` | <Badge type="warning" text="required" /> | How to compare the field. |
+| `value` | `number` | <Badge type="warning" text="required" /> | The number to compare to. |
 
 **`when` — each entry — `type: "string"`**
 
 | field | type | | description |
 | --- | --- | --- | --- |
-| `field` | `string` | <Badge type="warning" text="required" /> | the field to test — a dotted path, like anywhere else |
-| `operator` | `equal_to` \| `not_equal_to` \| `contains` | <Badge type="warning" text="required" /> | how the field is compared |
-| `value` | `string` | <Badge type="warning" text="required" /> | the string it is compared to |
+| `field` | `string` | <Badge type="warning" text="required" /> | The field to test, as a dotted path. |
+| `operator` | `equal_to` \| `not_equal_to` \| `contains` | <Badge type="warning" text="required" /> | How to compare the field. |
+| `value` | `string` | <Badge type="warning" text="required" /> | The string to compare to. |
 
 **`when` — each entry — `type: "one_of"`**
 
 | field | type | | description |
 | --- | --- | --- | --- |
-| `field` | `string` | <Badge type="warning" text="required" /> | the field to test — a dotted path, like anywhere else |
-| `values` | `list of string` | <Badge type="warning" text="required" /> | the strings that match |
+| `field` | `string` | <Badge type="warning" text="required" /> | The field to test, as a dotted path. |
+| `values` | `list of string` | <Badge type="warning" text="required" /> | The strings that match. |
 
 **`when` — each entry — `type: "none_of"`**
 
 | field | type | | description |
 | --- | --- | --- | --- |
-| `field` | `string` | <Badge type="warning" text="required" /> | the field to test — a dotted path, like anywhere else |
-| `values` | `list of string` | <Badge type="warning" text="required" /> | the strings that do not match |
+| `field` | `string` | <Badge type="warning" text="required" /> | The field to test, as a dotted path. |
+| `values` | `list of string` | <Badge type="warning" text="required" /> | The strings that do not match. |

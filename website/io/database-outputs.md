@@ -1,9 +1,11 @@
 # database outputs and column mapping
 
-The postgres output writes one row per message. Without a `columns` list it
-writes the table it has always written — an `id`, a `received_at` and the whole
-message in a `jsonb` `payload` — and with one, each message field lands in a
-real column with a real type:
+The `postgres` and `clickhouse` outputs insert messages into a table. Both use
+the same `columns` list to map message fields to typed columns.
+
+## postgres
+
+The `postgres` output writes one row for each message.
 
 ```jsonc
 // config.json
@@ -18,56 +20,91 @@ real column with a real type:
   "indexes": [ { "columns": ["recorded_at"] } ] }
 ```
 
-`field` defaults to the column's name, so a message that already uses those
-names needs nothing but a name and a type. It is a [field path](/pipelines/message-metadata#field-paths)
-like every other field reference here, which is what makes `_meta.subject`
-reach whatever the input's envelope attached, and `message: true` is the audit
-column — the whole message, and the only source that can never be missing.
+Without `columns`, the table has three columns: an `id`, a `received_at` and a
+`jsonb` `payload` with the whole message.
 
-**The types are logical, not postgres'.** `float` rather than `double
-precision`, `timestamp` rather than `timestamptz`. The list —
-`text integer bigint float decimal boolean timestamp date uuid json` — lives in
-`kayak-core/src/columns.rs` with the rest of the mapping, and each database
-output renders it into its own DDL. That is the point of the split: the next
-database output reuses the mapping whole, and a config written against one does
-not have to be rewritten to point at another. Being a closed set, it also
-becomes a dropdown in the add-pipeline form for free.
+The `table` name can include a schema (`analytics.readings`). It can contain
+only letters, digits and underscores.
 
-**Values are checked, never coerced.** A string `"12.5"` in a `float` column
-fails the batch rather than arriving as a number, because a mapping that accepts
-anything guarantees nothing. What is lenient is how a value travels: every
-mapped column is bound as text and cast in the statement
-(`$2::text::NUMERIC`), which keeps a number's own digits — nothing routes a
-decimal through an f64 — and hands the parsing of a timestamp or a uuid to the
-server, whose error about a malformed one is better than anything reimplemented
-here. A `timestamp` takes a string the server parses, or a number read as
-**seconds** since the epoch.
+The output prepares one insert statement for each batch and runs it for each
+message. There is no transaction around the batch. If a row fails, the rows
+before it stay in the table, and the batch fails.
 
-**A missing field writes `NULL`** by default; `on_missing` takes `error` or
-`skip_row` (leave the whole message out) instead. A column declared
-`"nullable": false` defaults to `error`, since there is nothing else it could
-do, and telling one to write null is refused when the pipeline is built rather
-than discovered as a constraint violation an hour into a run. A field that is
-present but `null` counts as missing — the same reading the reducer takes.
-`on_extra_fields: "error"` is the opposite direction: for a stream whose shape
-is supposed to be fixed, a new field appearing is news rather than noise.
+## column mapping
 
-**Creating the table.** On by default, `IF NOT EXISTS`, and it never *alters*: a
-table whose shape has moved on fails the insert with the server's own error
-rather than being migrated from a config file, which is a far bigger promise
-than "create it if it isn't there". `create_table: false` is for a table someone
-else owns. Without a `primary_key` the created table gets an `id` and a
-`received_at` of its own; naming one says the data carries its own identity and
-drops both — and makes those columns not-null, because postgres would anyway.
-`indexes` are created with the table and are named after it and their columns.
-A `primary_key` or an `index` naming a column nothing maps fails the build.
+Each entry in `columns` maps one message field to one column:
+
+- **`name`**: the column name. Letters, digits and underscores only.
+- **`type`**: the logical type of the column. See below.
+- **`field`**: the [field path](/pipelines/message-metadata#field-paths) to
+  read. The default is the column name. A path such as `_meta.subject` reads
+  the metadata that the input envelope added.
+- **`message`**: set to `true` to store the whole message in this column. Only
+  a `json` column can do this, and not together with `field`. Use it for an
+  audit column.
+- **`nullable`**: the default is `true`. With `false`, the column is `NOT NULL`
+  and a missing field is an error.
+- **`on_missing`**: what to do when the message does not have the field. See
+  below.
+
+### types
+
+The types are logical. Each output converts them to the types of its server:
+
+`text`, `integer`, `bigint`, `float`, `decimal`, `boolean`, `timestamp`,
+`date`, `uuid`, `json`.
+
+Thus you can move a config from one database output to another without a
+change to the columns.
+
+### values are checked, not converted
+
+The output checks each value against the column type. It does not convert
+values. For example, the string `"12.5"` in a `float` column fails the batch.
+
+- `integer` is 32-bit. A number with a fraction, or a number out of range, is
+  an error.
+- `decimal` keeps the digits of the message. It does not go through a float.
+- `timestamp` takes a string that the server parses (RFC 3339), or a number of
+  **seconds** since the epoch.
+- `date` takes a string such as `2026-08-10`.
+
+The postgres output sends each value as text and casts it in the statement
+(`$2::text::NUMERIC`). The server parses timestamps and uuids, and it reports
+malformed values.
+
+### missing and extra fields
+
+- **`on_missing`** has three values. `null` writes `NULL` and is the default.
+  `error` fails the batch. `skip_row` leaves the whole message out.
+- A column with `"nullable": false` uses `error` as the default. If you set
+  `on_missing: null` on it, the pipeline fails at build time.
+- A field that is present with the value `null` counts as missing.
+- **`on_extra_fields`**: `ignore` (the default) writes the mapped columns and
+  ignores other fields. `error` fails the batch when a message has a field that
+  no column reads. Use `error` for a stream with a fixed shape.
+
+### creating the table
+
+- **`create_table`**: the default is `true`. The output runs `CREATE TABLE IF
+  NOT EXISTS` when it connects. Set it to `false` for a table that another
+  system owns.
+- The output never alters a table. If the table has a different shape, the
+  insert fails with the error from the server.
+- **`primary_key`**: the columns of the primary key. Without it, the created
+  table gets its own `id` and `received_at`. With it, the output drops those two
+  columns and makes the key columns `NOT NULL`.
+- **`indexes`**: indexes to create with the table. Each index lists mapped
+  columns in order and can set `"unique": true`. kayak names each index after
+  the table and its columns.
+
+A `primary_key` or an index that names a column that is not mapped fails the
+build. kayak refuses all such conflicts at build time.
 
 ## clickhouse
 
-The `clickhouse` output takes the same `columns` list, spelled exactly the same
-way — that is what the mapping being database-neutral is *for*, and a config
-pointed at one server moves to the other by changing the type and the
-connection:
+The `clickhouse` output uses the same `columns` list. To move a config from
+postgres to clickhouse, change the `type` and the `connection`:
 
 ```jsonc
 // config.json
@@ -81,37 +118,55 @@ connection:
   "order_by": ["recorded_at", "sensor"] }
 ```
 
-Three things differ, and each is ClickHouse being itself rather than a gap.
+Without `columns`, the table has a `received_at` column and a `payload` column
+with each message as JSON text.
 
-**`order_by` in place of `primary_key`.** ClickHouse has no auto-increment
-column and no unique constraint, so there is no surrogate key to fall back on
-and nothing here pretends otherwise: `order_by` names the MergeTree *sorting*
-key — how the table is laid out and indexed — and it does not deduplicate.
-Naming none gets you a `received_at` of its own, sorted by that, which is the
-honest analogue of postgres' `id`/`received_at` pair. Named columns are made
-not-null, because ClickHouse will not sort by a nullable one. There is no
-`indexes` field: the sorting key is the index.
+Differences from postgres:
 
-**A batch is one insert.** Postgres executes a statement per message; ClickHouse
-merges parts in the background and a row-at-a-time insert makes a part per row.
-So a batch becomes one request — which makes an input `buffer` worth more here
-than anywhere else, and `sensors_to_clickhouse` in the sample buffers 100
-messages or 5 seconds ahead of its insert.
+- **`order_by` replaces `primary_key`.** It sets the MergeTree sorting key,
+  which is also the index of the table. It does not remove duplicates. Without
+  `order_by`, the table gets a `received_at` column and sorts by it. kayak
+  makes the `order_by` columns `NOT NULL`, because ClickHouse cannot sort by a
+  nullable column. There is no `indexes` field.
+- **The table name** can include a database (`analytics.readings`). This
+  overrides the database of the connection.
+- **`json` columns** are `String` columns that hold the JSON text. Use
+  `JSONExtract` to read them.
+- **`date` columns** are `Date32`.
 
-**It speaks the HTTP interface**, which is the port every deployment exposes
-(and the only one ClickHouse Cloud has). The connection is a `url`, a
-`database`, a `user` and a `password`; the database has to exist already, since
-an output creates tables and never databases. A plaintext `http://` url needs
-`"allow_http": true` on the connection — the credentials go with every insert —
-which is exactly the rule the s3 connection follows, and what the local server
-in `docker-compose.yaml` asks for.
+### performance
 
-Rows travel as `JSONCompactEachRow` rather than as text with a cast, which is
-the same division of labour spelled the way this server spells it: a number's
-own digits go across untouched, and the server parses a timestamp or a uuid.
-`json` columns are created as `String` holding the JSON text — `JSONExtract`
-reads them — and `date` as `Date32`, since `Date` starts in 1970.
+**The output sends one insert for each batch.** ClickHouse makes a new part
+for each insert, so small inserts are slow. Put a `buffer` on the input:
 
-`docker compose up` brings up ClickHouse on `:8123` with the database `kayak`
-and the role `kayak` (password `hunter2`, which is what `${CLICKHOUSE_PASSWORD}`
-resolves to in `example_config/secrets.example.json`).
+```jsonc
+{ "type": "nats", "connection": "local-nats", "subject": "sensors",
+  "buffer": { "type": "batch", "size": 100, "window_seconds": 5 } }
+```
+
+`sensors_to_clickhouse` in the sample buffers 100 messages or 5 s before each
+insert.
+
+### the connection
+
+The output uses the HTTP interface of ClickHouse. This is the port that all
+deployments expose, including ClickHouse Cloud.
+
+- The connection has a `url`, a `database`, a `user` and a `password`.
+- The database must exist. The output creates tables. It does not create
+  databases.
+- kayak refuses a plain `http://` url, because the credentials go with every
+  insert. Set `"allow_http": true` on the connection to permit it. The local
+  server in `docker-compose.yaml` needs this.
+
+The output sends rows as `JSONCompactEachRow`. Numbers keep their digits, and
+the server parses timestamps and uuids.
+
+`create_table: false` still fails at startup if the server is not reachable.
+The output checks the connection when it starts.
+
+## trying it
+
+`docker compose up` starts ClickHouse on `:8123` with the database `kayak` and
+the role `kayak`. The password is `hunter2`. That is the value of
+`${CLICKHOUSE_PASSWORD}` in `example_config/secrets.example.json`.

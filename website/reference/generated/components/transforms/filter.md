@@ -2,41 +2,41 @@
 
 ## `filter` {#transform-filter}
 
-Keeps the messages that pass every one of `conditions` and drops the rest — or, with `invert`, drops the ones that pass and keeps the rest. A batch with nothing left in it is dropped whole.
+Keeps the messages that match all `conditions` and drops the other messages. With `invert`, it drops the messages that match and keeps the other messages.
 
-A message missing a field a condition tests, or carrying it as the wrong type, does not pass that condition. So `invert` keeps such a message: it drops only what the conditions positively match.
+The transform drops a batch that has no messages left. A message that does not have the field of a condition does not match that condition. A message with a field of the wrong type also does not match. Thus `invert` keeps these messages.
 
 | field | type | | description |
 | --- | --- | --- | --- |
-| `conditions` | `list of numeric \| string \| one_of \| none_of` | <Badge type="warning" text="required" /> | what a message has to pass — all of them, and at least one |
-| `invert` | `boolean` | <Badge type="info" text="optional" /> | drop the messages that pass instead of keeping them |
+| `conditions` | `list of numeric \| string \| one_of \| none_of` | <Badge type="warning" text="required" /> | The conditions that a message must match. At least one condition is required. |
+| `invert` | `boolean` | <Badge type="info" text="optional" /> | Drop the messages that match, and keep the other messages. The default is false. |
 
 **`conditions` — each entry — `type: "numeric"`**
 
 | field | type | | description |
 | --- | --- | --- | --- |
-| `field` | `string` | <Badge type="warning" text="required" /> | the field to test — a dotted path, like anywhere else |
-| `operator` | `greater_than` \| `less_than` \| `equal_to` \| `not_equal_to` | <Badge type="warning" text="required" /> | how the field is compared |
-| `value` | `number` | <Badge type="warning" text="required" /> | the number it is compared to |
+| `field` | `string` | <Badge type="warning" text="required" /> | The field to test, as a dotted path. |
+| `operator` | `greater_than` \| `less_than` \| `equal_to` \| `not_equal_to` | <Badge type="warning" text="required" /> | How to compare the field. |
+| `value` | `number` | <Badge type="warning" text="required" /> | The number to compare to. |
 
 **`conditions` — each entry — `type: "string"`**
 
 | field | type | | description |
 | --- | --- | --- | --- |
-| `field` | `string` | <Badge type="warning" text="required" /> | the field to test — a dotted path, like anywhere else |
-| `operator` | `equal_to` \| `not_equal_to` \| `contains` | <Badge type="warning" text="required" /> | how the field is compared |
-| `value` | `string` | <Badge type="warning" text="required" /> | the string it is compared to |
+| `field` | `string` | <Badge type="warning" text="required" /> | The field to test, as a dotted path. |
+| `operator` | `equal_to` \| `not_equal_to` \| `contains` | <Badge type="warning" text="required" /> | How to compare the field. |
+| `value` | `string` | <Badge type="warning" text="required" /> | The string to compare to. |
 
 **`conditions` — each entry — `type: "one_of"`**
 
 | field | type | | description |
 | --- | --- | --- | --- |
-| `field` | `string` | <Badge type="warning" text="required" /> | the field to test — a dotted path, like anywhere else |
-| `values` | `list of string` | <Badge type="warning" text="required" /> | the strings that match |
+| `field` | `string` | <Badge type="warning" text="required" /> | The field to test, as a dotted path. |
+| `values` | `list of string` | <Badge type="warning" text="required" /> | The strings that match. |
 
 **`conditions` — each entry — `type: "none_of"`**
 
 | field | type | | description |
 | --- | --- | --- | --- |
-| `field` | `string` | <Badge type="warning" text="required" /> | the field to test — a dotted path, like anywhere else |
-| `values` | `list of string` | <Badge type="warning" text="required" /> | the strings that do not match |
+| `field` | `string` | <Badge type="warning" text="required" /> | The field to test, as a dotted path. |
+| `values` | `list of string` | <Badge type="warning" text="required" /> | The strings that do not match. |

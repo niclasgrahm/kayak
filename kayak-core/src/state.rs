@@ -35,25 +35,23 @@ use serde_json::Value;
 /// for the first case and obviously wrong for the second is the useful default.
 pub const DEFAULT_MAX_KEYS: usize = 10_000;
 
-/// One named bucket, and the bounds on it.
+/// A named state bucket and its limits.
 ///
-/// Both bounds have defaults and neither can be turned off. A keyed store with
-/// no limit is not a feature, it is a memory leak that takes a week to show up
-/// — so the question is only ever *what* the limits are.
+/// Both limits have a default. You cannot remove a limit, so the memory that a
+/// bucket uses is always limited.
 #[derive(Clone, Debug, Default, Deserialize, Serialize, JsonSchema, PartialEq, Eq)]
 #[schemars(title = "state bucket")]
 pub struct StateBucketConfig {
-    /// most keys to hold at once. Past this the least recently written key is
-    /// dropped to make room, so a bucket is a cache of the *active* keys rather
-    /// than a record of every key ever seen. Defaults to 10000.
+    /// The maximum number of keys in the bucket. When the bucket is full, kayak
+    /// removes the key with the oldest write. The default is 10000. The value
+    /// must be more than zero.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_keys: Option<usize>,
-    /// forget a key this many seconds after it was last written. Without it a
-    /// machine that is decommissioned holds its slot until the bucket fills.
+    /// Remove a key when this number of seconds went by after its last write.
+    /// A read does not reset the time. The value must be more than zero.
     ///
-    /// Measured from the last write rather than the last read: a value nothing
-    /// has written for an hour is stale whether or not something is still
-    /// asking for it.
+    /// Without it, a key stays until the bucket is full. For example, a
+    /// machine that you remove from service keeps its key.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub idle_timeout_secs: Option<u64>,
 }
@@ -74,11 +72,8 @@ impl StateBucketConfig {
     }
 }
 
-/// The buckets a config declares, by name.
-///
-/// A `BTreeMap` newtype for the reason [`crate::connections::Connections`] is
-/// one: iteration order is the name order, so the file a save writes is
-/// deterministic and diffs cleanly.
+/// The state buckets of a config file, as an object from name to bucket.
+/// kayak writes the names in alphabetical order.
 #[derive(Clone, Debug, Default, Deserialize, Serialize, JsonSchema, PartialEq, Eq)]
 #[serde(transparent)]
 pub struct StateBuckets(BTreeMap<String, StateBucketConfig>);
@@ -133,28 +128,27 @@ impl FromIterator<(String, StateBucketConfig)> for StateBuckets {
     }
 }
 
-/// A pipeline's binding to a bucket: which one, and what its messages are keyed
-/// by.
+/// The state bucket of a pipeline, and the field that gives the key of each
+/// message.
 ///
-/// The key lives here rather than on the bucket because it is a property of
-/// *this stream* — the same machine id arrives as `_meta.machine_id` from a
-/// nats subscription and as `machine_id` after a reducer has flattened it, and
-/// both are correct. The cost is that two pipelines sharing a bucket can key it
-/// differently with nothing to catch them, which is the sharp edge of sharing
-/// and is documented rather than prevented.
+/// Each pipeline sets its own key, because the same value can have different
+/// field names in two streams. For example, one stream has
+/// `_meta.machine_id` and another stream has `machine_id`.
+///
+/// Make sure that all pipelines that share a bucket use keys with the same
+/// values. kayak does not check this.
 #[derive(Clone, Debug, Deserialize, Serialize, JsonSchema, PartialEq, Eq)]
 #[schemars(title = "pipeline state")]
 pub struct PipelineState {
-    /// name of the bucket this pipeline reads and writes — one of the ones
-    /// declared under `state` at the top of the config. A pipeline naming a
-    /// bucket that isn't declared fails to build.
+    /// The name of the bucket that this pipeline reads and writes. Declare the
+    /// bucket under `state` at the top of the config. If the bucket is not
+    /// declared, the pipeline does not build.
     pub bucket: String,
-    /// the field whose value identifies the thing being remembered, e.g.
-    /// `_meta.machine_id`. A dotted path like anywhere else.
+    /// The field that gives the key, as a dotted path. For example,
+    /// `_meta.machine_id`.
     ///
-    /// Leave it out for one bucket-wide value — which is the right answer for
-    /// something there is only ever one of, and the wrong one for anything
-    /// per-device.
+    /// Leave it out for one value for the full bucket. Use that only for an
+    /// item that has one value. For a value for each device, set `key`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub key: Option<String>,
 }
@@ -163,10 +157,8 @@ pub struct PipelineState {
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 pub struct BucketSummary {
     pub name: String,
-    /// How many keys it is holding right now, expired ones included — they are
-    /// dropped on the next write, and reporting a number that doesn't match
-    /// what is in memory would make the readout useless for the one thing it is
-    /// for.
+    /// The number of keys in the bucket now. The number includes expired keys.
+    /// kayak removes them on the next write.
     pub keys: usize,
     pub max_keys: usize,
     pub idle_timeout_secs: Option<u64>,
@@ -180,15 +172,14 @@ pub struct BucketEntry {
     pub updated_at: String,
 }
 
-/// What a bucket holds, for the UI's card.
+/// The contents of a bucket.
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 pub struct BucketContents {
     pub name: String,
     pub keys: usize,
     pub entries: Vec<BucketEntry>,
-    /// Whether `entries` is short of `keys` because of the cap. A bucket can
-    /// hold ten thousand keys and the card shows a page of them; saying so is
-    /// what stops the card reading as the whole truth.
+    /// True when `entries` has fewer entries than `keys`, because the response
+    /// has a limit.
     pub truncated: bool,
 }
 

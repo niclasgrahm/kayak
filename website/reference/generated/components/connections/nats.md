@@ -2,8 +2,8 @@
 
 ## `nats` {#connection-nats}
 
-A nats server, or a cluster of them.
+A nats server, or a cluster of nats servers.
 
 | field | type | | description |
 | --- | --- | --- | --- |
-| `urls` | `string` | <Badge type="warning" text="required" /> | connection url, e.g. `nats://localhost:4222`. May reference secrets as `${NAME}` — see "secrets" in the readme. |
+| `urls` | `string` | <Badge type="warning" text="required" /> | The url of the server, for example `nats://localhost:4222`. You can use `${NAME}` secret references. |

@@ -1,52 +1,58 @@
 # the http api reference
 
-The same idea one level up. `/docs` has a second tab, **http api**, listing
-every endpoint the server serves: what it takes, what it gives back, and which
-statuses it can fail with. Beside it, `GET /api/openapi.json` serves the whole
-thing as an [OpenAPI 3.1](https://spec.openapis.org/oas/v3.1.0) document, and
-`GET /api/reference` renders that document as a full reference page with a
-request panel you can fire calls from.
+`/docs` has a second tab, **http api**. It lists every endpoint of the server:
+what it takes, what it returns, and the statuses with which it can fail. Two
+more endpoints serve the same content:
 
-The reason all three agree is that they come from one table:
-`kayak_core::api_docs::endpoints()`. That table isn't a *description* of the
-routes — **it is the routes**. `api_router` is a fold over it (`src/endpoints.rs`),
-so an endpoint that isn't in the table is never registered, and `handler_for`
-matches on an `Operation` enum, so a table entry with no handler doesn't
-compile. The method comes from the table too, by way of `route_of`, so an entry
-documented as a `PUT` and wired to `post(...)` isn't expressible either.
+- `GET /api/openapi.json` serves an [OpenAPI 3.1](https://spec.openapis.org/oas/v3.1.0)
+  document.
+- `GET /api/reference` renders that document as a reference page, with a panel
+  that sends requests.
 
-Unlike the component reference this table is written rather than reflected, and
-it has to be: a Rust doc comment on an axum handler isn't readable at runtime,
-so there is nothing to reflect over. **The prose therefore lives in the table**
-and each handler carries a one-line `///` pointing at it — the opposite of the
-convention for config structs, and worth knowing before you write an endpoint's
-docs in the wrong place. The bodies are the exception: they name a schema, and
-`api_docs::schemas()` generates those with the same `schema_for!` reflection the
-component reference uses, so the request and response shapes can't drift from
-the Rust types.
+The three agree because they come from one table:
+`kayak_core::api_docs::endpoints()`. **The table is the routes.** `api_router`
+is a fold over it (`src/endpoints.rs`). Thus an endpoint that is not in the
+table is never registered. `handler_for` matches on an `Operation` enum, so a
+table entry with no handler does not compile. `route_of` takes the method from
+the table. Thus you cannot document an endpoint as `PUT` and wire it to
+`post(...)`.
 
-`src/openapi.rs` renders the table as the spec. The only real work there is the
-schemas: `schemars` 1.x emits JSON Schema 2020-12, which OpenAPI 3.1 embeds
-unchanged, but each generated schema is a *root* carrying its shared definitions
-in its own `$defs` — so those are hoisted into one `components/schemas` and the
-`$ref`s rewritten. Everything else is a `json!` literal.
+You write this table by hand. It is not reflected. A Rust doc comment on an
+axum handler is not available at runtime, so there is nothing to reflect over.
+**Thus the prose is in the table.** Each handler has a one-line `///` that
+points to its entry. This is the opposite of the rule for config structs. Write
+the description of an endpoint in its `ApiDoc` entry, not on the handler.
 
-Three things worth preserving:
+The bodies are an exception. Each body names a schema. `api_docs::schemas()`
+generates the schemas with `schema_for!`, the same reflection as the component
+reference. Thus the request and response shapes cannot drift from the Rust
+types.
 
-- **The error body is a Rust type.** `api_docs::ApiError` exists so the spec's
-  error schema is generated rather than written, and
+`src/openapi.rs` renders the table as the document. The schemas are the only
+complex part. `schemars` 1.x emits JSON Schema 2020-12, which OpenAPI 3.1 embeds
+without change. Each generated schema is a root with its shared definitions in
+its own `$defs`. `src/openapi.rs` moves these definitions into one
+`components/schemas` and rewrites the `$ref`s. The rest is `json!` literals.
+
+Keep these three properties:
+
+- **The error body is a Rust type.** `api_docs::ApiError` exists so that the
+  error schema in the document is generated.
   `an_error_body_matches_the_documented_shape` in `tests/api.rs` deserializes a
-  real failure into it — nothing else connects `AppError` to what the spec
-  claims.
-- **`/events` is described honestly and no further.** OpenAPI can say a response
-  is `text/event-stream` but has no way to describe the *events* in it; that is
-  AsyncAPI's job. `Body::EventStream` therefore renders as a string body with
-  prose, rather than as a JSON body clients would try to parse in one piece.
-- **The renderer is vendored.** `assets/scalar.js` is committed and the page
-  loads it from this server, because `just dev` has to work with no network. It
-  is 3.5 MB, which is the price of that.
+  real failure into it. No other test connects `AppError` to the document.
+- **`/events` has a limited description.** OpenAPI can say that a response is
+  `text/event-stream`. It cannot describe the events in the stream. That is the
+  job of AsyncAPI. Thus `Body::EventStream` renders as a string body with
+  prose. With a JSON body, clients try to parse the stream as one document.
+- **The renderer is in the repository.** `assets/scalar.js` is committed, and
+  the page loads it from the server. Thus `just dev` works without a network.
+  The file is 3.5 MB.
 
-Adding an endpoint touches three places: an `Operation` variant and an `ApiDoc`
-entry in `kayak-core/src/api_docs.rs`, and the handler arm in `src/endpoints.rs`.
-The compiler names two of them for you. The spec, the `/docs` tab and the
-rendered reference all follow with nothing further.
+To add an endpoint, change three places:
+
+1. Add an `Operation` variant in `kayak-core/src/api_docs.rs`.
+2. Add an `ApiDoc` entry in the same file.
+3. Add the handler arm in `src/endpoints.rs`.
+
+The compiler names two of them. The document, the `/docs` tab and the rendered
+reference follow without more changes.

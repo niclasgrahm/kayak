@@ -2,30 +2,30 @@
 
 ## `clickhouse` {#output-clickhouse}
 
-Inserts every batch into a ClickHouse table, one insert per batch.
+Inserts each batch into a `ClickHouse` table, one insert for each batch.
 
-`columns` is spelled exactly as the postgres output's is — each entry names a column, its type and the field to read, and `field` defaults to the column's name. Without them the table gets a single column holding each message as JSON text.
+`columns` has the same format as on the `postgres` output. Each entry names a column, its type and the field to read. The default `field` is the name of the column. Without `columns`, the table has a `payload` column that contains each message as JSON text.
 
-Where it differs from postgres is what a created table is *sorted* by. ClickHouse has no auto-increment column and no unique constraint, so there is no surrogate `id` to fall back on: `order_by` names the MergeTree sorting key, and a table that names none is sorted by the `received_at` timestamp it gets for free. A sorting key does not deduplicate — naming one says how the table is laid out and indexed, not that its rows are unique.
+`ClickHouse` has no auto-increment column and no unique constraint. `order_by` names the sorting key of the `MergeTree` table. If you do not set it, the table gets a `received_at` timestamp and is sorted by it. A sorting key does not remove duplicate rows.
 
-The table is created if it isn't there; set `create_table` to false for a table someone else owns. Creation never *alters* an existing table.
+The output creates the table if it does not exist. Set `create_table` to false for a table that another system owns. The output does not change an existing table.
 
 | field | type | | description |
 | --- | --- | --- | --- |
-| `connection` | `clickhouse` connection | <Badge type="warning" text="required" /> | name of the clickhouse connection to insert through — see "connections" in the readme. The url, database and user live there; the table below is this output's own. |
-| `table` | `string` | <Badge type="warning" text="required" /> | the table to insert into, created if it does not exist. Optionally database-qualified (`analytics.readings`), which overrides the connection's database; letters, digits and underscores only, since it cannot be sent as a query parameter. |
-| `columns` | `list of column` | <Badge type="info" text="optional" /> | which message field goes in which column. Leave it out to store each message whole, as JSON text, in a `payload` column. |
-| `create_table` | `boolean` | <Badge type="info" text="optional" /> | create the table on start if it does not exist. Defaults to true. |
-| `on_extra_fields` | `ignore` \| `error` | <Badge type="info" text="optional" /> | what to do about a message carrying fields no column reads |
-| `order_by` | `list of string` | <Badge type="info" text="optional" /> | the columns the created table is sorted by — MergeTree's sorting key, and its index. With none, the table gets a `received_at` timestamp of its own and is sorted by that. Named columns are made `NOT NULL`, since a nullable key is not something ClickHouse sorts by. |
+| `connection` | `clickhouse` connection | <Badge type="warning" text="required" /> | The name of the clickhouse connection to insert through. Declare the connection in the connections file. The connection gives the url, the database and the user. |
+| `table` | `string` | <Badge type="warning" text="required" /> | The table to insert into. The output creates it if it does not exist. You can add a database (`analytics.readings`). This database replaces the database of the connection. Use only letters, digits and underscores. |
+| `columns` | `list of column` | <Badge type="info" text="optional" /> | The column for each message field. If you do not set it, the output keeps each full message as JSON text in a `payload` column. |
+| `create_table` | `boolean` | <Badge type="info" text="optional" /> | Create the table on start if it does not exist. The default is true. |
+| `on_extra_fields` | `ignore` \| `error` | <Badge type="info" text="optional" /> | What to do with a message that has fields that no column reads. |
+| `order_by` | `list of string` | <Badge type="info" text="optional" /> | The columns that sort the created table. This is the sorting key of the `MergeTree` table and its index. If you do not set it, the table gets a `received_at` timestamp and is sorted by it. The output makes these columns `NOT NULL`, because `ClickHouse` cannot sort by a nullable key. |
 
 **`columns` — each entry**
 
 | field | type | | description |
 | --- | --- | --- | --- |
-| `name` | `string` | <Badge type="warning" text="required" /> | the column's name in the table. Letters, digits and underscores only, since it cannot be sent as a query parameter. |
-| `type` | `text` \| `integer` \| `bigint` \| `float` \| `decimal` \| `boolean` \| `timestamp` \| `date` \| `uuid` \| `json` | <Badge type="warning" text="required" /> | what the column holds. Values are checked against it rather than coerced into it. |
-| `field` | `string` | <Badge type="info" text="optional" /> | the field to read, as a dotted path. Defaults to the column's name. |
-| `message` | `boolean` | <Badge type="info" text="optional" /> | store the whole message in this column instead of one of its fields. Only for a `json` column, and not together with `field`. |
-| `nullable` | `boolean` | <Badge type="info" text="optional" /> | whether the column accepts `NULL`. Defaults to true; `false` makes the created column `NOT NULL` and makes a missing field an error. |
-| `on_missing` | `null` \| `error` \| `skip_row` | <Badge type="info" text="optional" /> | what to do about a message that doesn't carry the field. Defaults to `null`, or to `error` for a column that is not nullable. |
+| `name` | `string` | <Badge type="warning" text="required" /> | The name of the column in the table. Use only letters, digits and underscores. |
+| `type` | `text` \| `integer` \| `bigint` \| `float` \| `decimal` \| `boolean` \| `timestamp` \| `date` \| `uuid` \| `json` | <Badge type="warning" text="required" /> | The type of the column. The output checks each value against it. |
+| `field` | `string` | <Badge type="info" text="optional" /> | The field to read, as a dotted path. The default is the name of the column. |
+| `message` | `boolean` | <Badge type="info" text="optional" /> | Write the full message to this column. Use it only with a `json` column. Do not use it with `field`. |
+| `nullable` | `boolean` | <Badge type="info" text="optional" /> | Whether the column accepts `NULL`. The default is true. With `false`, the output makes the column `NOT NULL`, and a missing field is an error. |
+| `on_missing` | `null` \| `error` \| `skip_row` | <Badge type="info" text="optional" /> | What to do with a message that does not have the field. The default is `null`, or `error` for a column that is not nullable. |

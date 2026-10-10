@@ -2,8 +2,8 @@
 
 ## `kafka` {#connection-kafka}
 
-A kafka cluster: the brokers, and eventually whatever it takes to authenticate against them.
+A kafka cluster.
 
 | field | type | | description |
 | --- | --- | --- | --- |
-| `brokers` | `string` | <Badge type="warning" text="required" /> | comma-separated broker list, e.g. `localhost:9092`. May reference secrets as `${NAME}` — see "secrets" in the readme. |
+| `brokers` | `string` | <Badge type="warning" text="required" /> | The brokers, as a list with commas, for example `localhost:9092`. You can use `${NAME}` secret references. |

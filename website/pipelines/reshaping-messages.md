@@ -1,7 +1,8 @@
 # reshaping messages
 
-`map` is the transform that changes what a message *looks like*: renames,
-promotions, constants, casts, defaults and projections, applied in order.
+The `map` transform changes the shape of a message. It can rename fields, move
+them out of nested objects, add constants, cast values, set defaults and select
+fields. The mappings run in order.
 
 ```json
 { "type": "map", "mappings": [
@@ -12,27 +13,27 @@ promotions, constants, casts, defaults and projections, applied in order.
 ]}
 ```
 
-One message in, **one message out, always** — `map` never drops a message and
-never makes two. That's what keeps it out of the territory `filter`, `splitter`
-and `reduce` already own, and it's why `on_missing` has no "drop the message"
-arm: that is a `filter`, one link along the chain.
+`map` always sends one message for each message it gets. It never drops a
+message and never makes two. To drop messages, use `filter`. To split a
+message, use `splitter`. To combine messages, use `reduce`.
 
-The eight mappings:
+There are eight mappings:
 
 | | |
 |---|---|
-| `copy` | rename, or promote something out of a nested object |
-| `constant` | write a fixed value — the site, the environment, the feed's name |
-| `coalesce` | the first of several fields the message actually carries |
-| `cast` | convert a value to another JSON shape |
+| `copy` | rename a field, or move it out of a nested object |
+| `constant` | write a fixed value, for example the site or the environment |
+| `coalesce` | write the first field from a list that the message contains |
+| `cast` | convert a value to a different JSON type |
 | `concat` | join fields and literal text into one string |
-| `arithmetic` | one operation on two numbers, each a field or a literal |
-| `time_bucket` | the start of the hour, day or shift a time falls in |
-| `drop` | take fields off |
+| `arithmetic` | do one operation on two numbers, each a field or a literal |
+| `time_bucket` | write the start of the hour, day or shift that a time is in |
+| `drop` | remove fields |
 
-**`mappings` is an ordered list and the order is the semantics.** Each mapping
-reads whatever the ones before it wrote, which is how an intermediate field
-works, and therefore how a two-step calculation is expressed:
+## order and arithmetic
+
+`mappings` is an ordered list. Each mapping reads the fields that the mappings
+before it wrote. Use an intermediate field for a calculation with two steps:
 
 ```yaml
 - type: map
@@ -44,16 +45,13 @@ works, and therefore how a two-step calculation is expressed:
   - { type: drop, from: [_offset] }
 ```
 
-That is also the deliberate limit. **`map` reshapes; it does not compute.** One
-arithmetic operation per mapping, no nested expressions, no per-field
-conditionals — because the version that has those is an expression language with
-a syntax to design, and the honest answer at that point is an embedded scripting
-language rather than an expression tree spelled in YAML. Two steps read fine and
-four don't, and that unpleasantness is information about which tool you want.
+Each `arithmetic` mapping does one operation. There are no nested expressions
+and no conditions. For a longer calculation or a condition, use a
+[script](/pipelines/scripting).
 
-`arithmetic`'s operators are `add`, `subtract`, `multiply`, `divide`, `min` and
-`max`. The last two are what a clamp is made of — `min` against a literal is a
-ceiling and `max` a floor, so keeping a percentage in 0–100 is two mappings:
+The operators are `add`, `subtract`, `multiply`, `divide`, `min` and `max`. Use
+`min` with a literal as an upper limit and `max` with a literal as a lower
+limit. This example keeps a percentage between 0 and 100:
 
 ```yaml
   - { type: arithmetic, as: _capped, operator: min,
@@ -62,24 +60,21 @@ ceiling and `max` a floor, so keeping a percentage in 0–100 is two mappings:
       left: { type: field, field: _capped }, right: { type: value, value: 0 } }
 ```
 
-A divisor that is a literal zero is refused when the pipeline is built. A
-divisor *field* that turns out to hold zero fails the batch, unless the
-mapping's `on_zero` says what it means instead: `{ type: null }` writes `null`
-— right for a chart, which should show nothing there — and
-`{ type: value, value: 1 }` writes a number, right for a ratio over an empty
-period that a sum downstream has to be able to add up.
+Division by zero:
 
-It's a list rather than an object keyed by target name for the same reason: a
-JSON object's key order is not something a config file should have to rely on,
-and here order decides the answer.
+- A literal zero divisor is an error when kayak builds the pipeline.
+- A divisor field that contains zero fails the batch.
+- Set `on_zero` on the mapping to write a value for a zero divisor.
+  `{ type: null }` writes `null`, which a chart shows as a gap.
+  `{ type: value, value: 1 }` writes a number, which a sum downstream can add.
 
 ## time buckets
 
-`time_bucket` writes the start of the calendar period a time falls in. Its
-reason to exist is `group_by`: a stateful transform grouped by the bucket
-keeps one series per period, so "per shift", "per hour" and "since midnight"
-need no window of their own — and the [state bucket](/pipelines/state)'s idle
-timeout forgets the periods that are over.
+`time_bucket` writes the start of the calendar period that a time is in. Use it
+as a `group_by` field. A stateful transform that groups by the bucket keeps one
+series for each period. Thus "per shift", "per hour" and "since midnight" need
+no special window. The idle timeout of the [state bucket](/pipelines/state)
+removes the periods that are over.
 
 ```yaml
 - type: map
@@ -92,80 +87,89 @@ timeout forgets the periods that are over.
     as: shift
 - type: derive
   derive: [{ function: counter, field: good_parts, as: good }]
-  group_by: [machine, shift]       # the count starts over every shift
+  group_by: [machine, shift]       # the count starts again every shift
 ```
 
-Periods are counted on the time zone's **wall clock**, which is the point of
-naming one: the morning shift starts at 06:00 in July and in December, two
-different UTC hours, and the night the clocks go back holds a nine-hour night
-shift. Without `timezone` the clock is UTC. Buckets line up with local
-midnight on 1 January 1970 and `offset_seconds` moves them on — which makes
-days start at midnight, and weeks on a Thursday (an offset of four days
-starts them on a Monday). A start that falls in the hour skipped in spring is
-the first instant after the gap; one in the hour that happens twice in autumn
-is the first of the two.
+kayak counts periods on the **wall clock** of the time zone. A shift that starts
+at 06:00 starts at 06:00 in July and in December. On the night that the clocks
+go back, the night shift is nine hours long. Without `timezone`, the clock is
+UTC.
 
-`format: millis` writes the start as epoch milliseconds instead of an RFC 3339
-string, for an output that wants a number.
+Buckets align with local midnight on 1 January 1970. `offset_seconds` moves
+them. Thus days start at midnight, and weeks start on a Thursday. An offset of
+four days starts weeks on a Monday.
+
+At a clock change:
+
+- If a period starts in the hour that the spring change skips, the period starts
+  at the first instant after the gap.
+- If a period starts in the hour that occurs twice in autumn, the period starts
+  at the first of the two.
+
+`format: millis` writes the start as epoch milliseconds. The default is an
+RFC 3339 string.
 
 ## keep
 
-`keep: all` (the default) passes the message through with the mappings laid over
-it. `keep: mapped` emits **only** the fields the mappings wrote — a projection,
-which is what prepares a message for an output with a shape of its own, and what
-sweeps up the intermediates a chained arithmetic leaves behind. A `drop` beside
-`keep: mapped` is refused at build time: it's either a no-op or a
-misunderstanding of what `mapped` does.
+- `keep: all` is the default. It sends the message with the mappings applied to
+  it.
+- `keep: mapped` sends **only** the fields that the mappings wrote. Use it to
+  prepare a message for an output with a fixed shape. It also removes the
+  intermediate fields of a calculation.
+
+kayak refuses a `drop` together with `keep: mapped`.
 
 ## missing fields
 
-`on_missing` is `error` by default, on the reducer's argument — a mapping that
-silently produced nothing is wrong in a way nothing downstream can see. `omit`
-leaves the target unwritten, `null` writes it as `null`.
+`on_missing` sets what happens when a field is absent:
 
-The better tool for a stream that is genuinely sparse is a **`default` on the
-one mapping that expects it**, which answers before `on_missing` does and says
-which field is the sparse one rather than loosening the rule for all of them.
+- `error` is the default. It fails the batch.
+- `omit` does not write the target field.
+- `null` writes the target field as `null`.
 
-**Absent and `null` are the same fact**, the reading `reduce` and the column
-mapping already make.
+For a field that is often absent, set `default` on that one mapping. The default
+applies before `on_missing`, and it applies to that field only.
+
+kayak reads `null` and an absent field as the same thing.
 
 ## casting
 
-`cast` is the one place in kayak that coerces rather than checks, and that's the
-division of labour with a `postgres` column mapping, which never converts: a
-stream that needs converting says so once, here, instead of at each of three
-outputs.
+`cast` converts a value. It is the only place in kayak that converts a value.
+The column mapping of the database outputs only checks values. Cast a value one
+time in `map`, and every output gets the converted value.
 
-`text`, `integer`, `float`, `boolean`, `timestamp`, `date`, `uuid`, `json`.
-Deliberately a smaller set than the column mapping's types even though they
-overlap — `integer` and `bigint` are one thing in JSON, and `decimal` is absent
-because a JSON number can't hold one distinctly from a float, so a cast claiming
-to would be a lie. `json` means something different again: it parses a **string
-containing JSON**, for the common case of a payload that arrived double-encoded.
+The types are `text`, `integer`, `float`, `boolean`, `timestamp`, `date`, `uuid`
+and `json`.
 
-It stays conservative about the conversions that could go two ways. `12.5` to
-`integer` is an error, not a rounding — which way to round is not something the
-config said. A timestamp is an RFC 3339 string or a number read as **seconds**
-since the epoch, the same reading the column mapping makes — and the one place
-seconds are assumed. Everywhere a time is *read* rather than converted (the
-reducer's `time`, a script's `parse_time`) a number is milliseconds; see
+- There is no `bigint`. JSON has one type for integers.
+- There is no `decimal`. A JSON number cannot keep a decimal apart from a float.
+- `json` parses a **string that contains JSON**. Use it for a payload that
+  arrived encoded two times.
+
+`cast` does not guess:
+
+- `12.5` to `integer` is an error. kayak does not round.
+- A `timestamp` cast reads an RFC 3339 string, or a number as **seconds** since
+  the epoch. This is the same rule as the column mapping.
+
+Everywhere else, kayak reads a number as a time in milliseconds. See
 [time and numbers](/pipelines/time-and-numbers).
 
-**A value that is present and won't convert is an error whatever `on_missing`
-says.** `on_missing` is about a stream that is sparser than the config expected;
-a `"twelve"` in a field cast to `float` is a stream that isn't what the config
-says it is, and treating that as absent would hide the difference forever.
+**A value that is present and does not convert is an error.** `on_missing` does
+not change this. For example, `"twelve"` in a field cast to `float` fails the
+batch.
 
 ## what is refused at build time
 
-The reducer's rule, applied here: anything that would otherwise be a
-strange-looking message once per batch forever fails when the pipeline is
-created. No mappings; a blank `as` or `from`; two mappings writing the same
-field; a `coalesce` over fewer than two fields; a `concat` with no parts; a
-`drop` with no fields, or one under `keep: mapped`; division by a literal zero.
+kayak refuses to build a pipeline with these errors in a `map`:
 
-There is deliberately **no** check that a mapping doesn't read a field a later
-mapping writes. It looks like a bug and often isn't — the message may already
-carry that field and be having it replaced afterwards — so the check would
-refuse working configs, and a false refusal is worse than the warning it saves.
+- no mappings;
+- an empty `as` or `from`;
+- two mappings that write the same field;
+- a `coalesce` with fewer than two fields;
+- a `concat` with no parts;
+- a `drop` with no fields, or a `drop` with `keep: mapped`;
+- division by a literal zero.
+
+kayak does not check if a mapping reads a field that a later mapping writes.
+The message can already contain that field.

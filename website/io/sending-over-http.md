@@ -1,56 +1,54 @@
 # sending over http
 
-The other direction: the `http` **output** is a pipeline pushing its results at
-a webhook or an ingest API.
+The `http` output sends the results of a pipeline to a webhook or to an ingest
+API.
 
 ```json
 { "type": "http", "url": "https://example.com/hooks/readings" }
 ```
 
-That is the whole of the required config — POST, the batch as one JSON array,
-no credential. Four optional fields shape it:
+`url` is the only required field. With the defaults, the output sends a `POST`
+with the batch as one JSON array and no credential.
 
-- **`verb`** — `POST` by default, `PUT` and `PATCH` accepted. `GET` and
-  `DELETE` are refused at build time: a request with no body would send none of
-  the messages, so a pipeline configured that way would make a round trip per
-  batch and deliver nothing.
-- **`body`** — `batch` (the default) sends the whole batch as one JSON array in
-  one request; `message` sends one request per message. Which one is the
-  receiving API's business, not a tuning knob. Under `message` the requests go
-  out in order and the first failure fails the batch, so the messages after it
-  are not sent — the same all-or-nothing a broker publish loop has.
-- **`auth`** — the same block the `http` input takes, read the other way round:
-  the input compares what arrived against it, the output presents it. A
-  `bearer` token or a header of your choosing, and the value is a `${NAME}`
-  reference like every other credential. The input's rule about `envelope`
-  headers doesn't apply here, since an output reads no headers at all.
-- **`timeout_seconds`** — 30 by default, and it is also the longest a slow
-  endpoint can hold the pipeline up, since a batch whose request times out is a
-  failed batch.
+## fields
 
-Three things worth knowing:
+- **`verb`**: `POST` is the default. `PUT` and `PATCH` are also accepted.
+  `GET` and `DELETE` fail at build time, because a request without a body
+  cannot carry the messages.
+- **`body`**: `batch` is the default. It sends the whole batch as one JSON
+  array in one request. `message` sends one request for each message. Choose
+  the value that the receiving API expects.
+- **`auth`**: the same block as on the [`http` input](/io/posting-into-a-pipeline#protecting-the-endpoint).
+  Use a `bearer` token or a header that you name. Write the value as a
+  `${NAME}` reference.
+- **`timeout_seconds`**: the longest time for one request. The default is 30.
+  A request that times out fails the batch. Thus this value is also the longest
+  time that a slow endpoint can stop the pipeline.
 
-- **There is no connection behind it**, unlike every other output that talks to
-  a server. A connection holds *what a system is* against what one pipeline
-  wants from it, and for a webhook the url is the whole of the first half —
-  there is nothing left to name once and share.
-- **Anything but a 2xx fails the batch**, and the endpoint's own response body
-  is quoted in the error (cut at 300 characters). That is what makes a webhook
-  that is *rejecting* the data show up on the card rather than being written off
-  as delivered. The reply is otherwise discarded — a service that answers with
-  something the pipeline should carry on with is the
-  [`http` **transform**](/pipelines/model-round-trip), not
-  this.
-- **A failing endpoint is not retried per batch.** The same backoff gate the
-  nats, redis and clickhouse outputs use: after a failure the next batches fail
-  immediately without touching the network until the delay has passed, so a
-  webhook that is down gets one attempt every few seconds rather than one per
-  message. Nothing is connected at startup, either — there is no request to
-  make that would not be a delivery, so a url that is wrong is caught at build
-  time and one that is unreachable is heard about on the first batch.
+With `body: message`, the output sends the requests in order. The first failure
+fails the batch, and the output does not send the messages after it.
 
-`heartbeat_to_webhook` in `example_config/` is the sample, and it points at the
-server's own `ingest` endpoint on `127.0.0.1:6767` — so it is the one http
-output that works under `just dev` with nothing else running, the same trick
-`heartbeat_to_disk` uses. Change the port the server binds and change that url
-with it.
+For performance, use `body: batch` when the receiver accepts an array. The
+output then makes one request for each batch, however many messages the batch
+holds.
+
+## errors and retries
+
+- **A status that is not 2xx fails the batch.** The error quotes the first
+  300 bytes of the response body.
+- **The output ignores the response body of a 2xx reply.** To use the reply in
+  the pipeline, use the [`http` transform](/pipelines/model-round-trip).
+- **After a failure, the output waits before the next request.** During the
+  backoff, the next batches fail at once, and the output sends nothing. A
+  webhook that is down gets one attempt every few seconds.
+- **The output does not connect at startup.** kayak checks the url and its
+  scheme at build time. An endpoint that is not reachable fails the first batch.
+
+There is no connection for this output. The `url` and the `auth` are on the
+component.
+
+## the sample
+
+`heartbeat_to_webhook` in `example_config/` sends to the ingest endpoint of the
+same server, on `127.0.0.1:6767`. It works under `just dev` without other
+services. If you change the port of the server, change this url too.

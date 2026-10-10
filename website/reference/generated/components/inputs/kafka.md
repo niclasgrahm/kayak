@@ -2,63 +2,63 @@
 
 ## `kafka` {#input-kafka}
 
-Consumes JSON messages from a kafka topic, each emitted as a batch of one.
+Consumes JSON messages from a kafka topic.
 
-A payload that isn't JSON is skipped with a warning rather than taking the pipeline down, same as the nats input. The consumer connects on the first read and joins a consumer group, so kafka remembers where this pipeline got to between restarts.
+The input skips a payload that is not JSON and writes a warning to the log. The consumer connects on the first read and joins a consumer group. Kafka keeps the read position of the group between restarts.
 
 | field | type | | description |
 | --- | --- | --- | --- |
-| `connection` | `kafka` connection | <Badge type="warning" text="required" /> | name of the kafka connection to consume from — see "connections" in the readme. The brokers are declared once, in the connections file, rather than repeated in every pipeline reading from the same cluster. |
-| `topic` | `string` | <Badge type="warning" text="required" /> | the topic to consume from |
-| `group` | `string` | <Badge type="warning" text="required" /> | consumer group id. Kafka tracks the read position per group, so two pipelines sharing a group split the topic between them, and two with different groups each get every message. |
-| `max_batch` | `integer` | <Badge type="info" text="optional" /> | most messages to put in one batch. Defaults to 1 — one message per batch, which is what this input has always done. Raising it only ever coalesces records that had *already arrived*: the input still returns as soon as it has one, so an idle topic is no slower than it was. It is worth raising when a consumer is catching up on a backlog, where one-message batches make the run loop, the transforms and every downstream pipeline do their per-batch work a hundred times over. |
-| `start_at` | `earliest` \| `latest` | <Badge type="info" text="optional" /> | where to start when the group has no committed position yet: `earliest` replays the topic from the beginning, `latest` only sees new messages. Defaults to `latest`. |
-| `ack` | `on_receipt` \| `on_delivery` | <Badge type="info" text="optional" /> | when this input tells its broker a message is done with. Available on every input kind in the schema, but only honoured by ones with a broker-side notion of "received" vs "delivered" of their own (`kafka`, for now) — an input with nothing to acknowledge refuses to build rather than silently treating this as `on_receipt`. Defaults to `on_receipt`, which is what every input has always done. See "acknowledgement modes" in the guide. |
-| `buffer` | `static \| tumbling \| batch` | <Badge type="info" text="optional" /> | batch messages from this input before the transforms see them — by count (`static`), by time (`tumbling`) or by whichever comes first (`batch`). Never emits an empty batch. Available on every input kind. Not to be confused with the `buffer` transform. |
-| `envelope` | `merge \| wrap` | <Badge type="info" text="optional" /> | attach metadata about where each message came from — the subject, topic, partition and so on listed under "metadata" below. Available on every input kind. Omit it and messages are passed on exactly as they arrive. |
+| `connection` | `kafka` connection | <Badge type="warning" text="required" /> | The name of the kafka connection to consume from. Declare the connection in the connections file. |
+| `topic` | `string` | <Badge type="warning" text="required" /> | The topic to consume from. |
+| `group` | `string` | <Badge type="warning" text="required" /> | The consumer group id. Kafka keeps one read position for each group. Two pipelines in the same group divide the topic between them. Two pipelines in different groups each get all messages. |
+| `max_batch` | `integer` | <Badge type="info" text="optional" /> | The maximum number of messages in one batch. The default is 1. The input puts only records that are already received into a batch. It does not wait for more records, so a high value does not add latency on a quiet topic. Increase it when the consumer reads a backlog. Each batch has a fixed cost in the pipeline and in each downstream pipeline. |
+| `start_at` | `earliest` \| `latest` | <Badge type="info" text="optional" /> | The start position when the group has no committed position. `earliest` reads the topic from the start. `latest` reads only new messages. The default is `latest`. |
+| `ack` | `on_receipt` \| `on_delivery` | <Badge type="info" text="optional" /> | When the input acknowledges a message to its broker. The default is `on_receipt`. Only the `kafka` and `mqtt` inputs support `on_delivery`. The `mqtt` input requires a `qos` of `at_least_once` or higher for it. On all other inputs, `on_delivery` fails to build. |
+| `buffer` | `static \| tumbling \| batch` | <Badge type="info" text="optional" /> | Collect messages from this input into batches before the transforms. Use a count (`static`), a time (`tumbling`) or the first of the two (`batch`). The buffer never sends an empty batch. Available on all input types. This is not the `buffer` transform. |
+| `envelope` | `merge \| wrap` | <Badge type="info" text="optional" /> | Add metadata about the source of each message, for example the subject, the topic or the partition. The "metadata" section lists the fields. Available on all input types. If you do not set it, the input sends each message without changes. |
 
 **`buffer` — `type: "static"`**
 
 | field | type | | description |
 | --- | --- | --- | --- |
-| `size` | `integer` | <Badge type="warning" text="required" /> | how many messages to gather before the batch is handed on |
+| `size` | `integer` | <Badge type="warning" text="required" /> | The number of messages in a batch. |
 
 **`buffer` — `type: "tumbling"`**
 
 | field | type | | description |
 | --- | --- | --- | --- |
-| `window_seconds` | `integer` | <Badge type="warning" text="required" /> | how long to gather messages for, measured from the first one |
+| `window_seconds` | `integer` | <Badge type="warning" text="required" /> | The time to collect messages, in s, from the first message. |
 
 **`buffer` — `type: "batch"`**
 
 | field | type | | description |
 | --- | --- | --- | --- |
-| `size` | `integer` | <Badge type="warning" text="required" /> | how many messages end the batch immediately |
-| `window_seconds` | `integer` | <Badge type="warning" text="required" /> | how long to wait for them, measured from the first message in the batch |
+| `size` | `integer` | <Badge type="warning" text="required" /> | The number of messages that closes the batch immediately. |
+| `window_seconds` | `integer` | <Badge type="warning" text="required" /> | The maximum time to wait, in s, from the first message in the batch. |
 
 **`envelope` — `type: "merge"`**
 
 | field | type | | description |
 | --- | --- | --- | --- |
-| `meta` | `string` | <Badge type="info" text="optional" /> | the field the metadata object is written to. Defaults to `_meta`. |
+| `meta` | `string` | <Badge type="info" text="optional" /> | The field for the metadata object. The default is `_meta`. |
 
 **`envelope` — `type: "wrap"`**
 
 | field | type | | description |
 | --- | --- | --- | --- |
-| `meta` | `string` | <Badge type="info" text="optional" /> | the field the metadata object is written to. Defaults to `_meta`. |
-| `payload` | `string` | <Badge type="info" text="optional" /> | the field the original payload is written to. Defaults to `value`. |
+| `meta` | `string` | <Badge type="info" text="optional" /> | The field for the metadata object. The default is `_meta`. |
+| `payload` | `string` | <Badge type="info" text="optional" /> | The field for the original payload. The default is `value`. |
 
 **metadata** — what this input attaches to a message when its `envelope` is set.
 
 | field | holds |
 | --- | --- |
-| `pipeline` | id of the pipeline that read the message |
-| `input` | kind of input it was read by, e.g. `nats` |
-| `received_at` | when kayak read it, RFC 3339. This is an arrival time and not an event time: it says when the message reached this pipeline, not when whatever it describes happened. |
-| `connection` | name of the connection it was consumed through |
-| `topic` | topic the record came from |
-| `partition` | partition within that topic |
-| `offset` | the record's offset in the partition. Together with `topic` and `partition` this identifies the record exactly. |
-| `key` | the record's key as a string, or `null` when it was sent without one |
-| `timestamp` | the record's own timestamp, RFC 3339, when kafka reports one |
+| `pipeline` | The id of the pipeline that read the message. |
+| `input` | The type of the input that read the message, for example `nats`. |
+| `received_at` | The time when kayak read the message, as RFC 3339. This is the arrival time at this pipeline. It is not the time of the event in the message. |
+| `connection` | The name of the connection that the input consumed from. |
+| `topic` | The topic of the record. |
+| `partition` | The partition of the record in the topic. |
+| `offset` | The offset of the record in the partition. With `topic` and `partition`, it identifies the record. |
+| `key` | The key of the record as a string, or `null` when the record has no key. |
+| `timestamp` | The timestamp of the record, as RFC 3339, when kafka gives one. |

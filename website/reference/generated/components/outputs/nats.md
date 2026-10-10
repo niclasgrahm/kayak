@@ -2,9 +2,9 @@
 
 ## `nats` {#output-nats}
 
-Publishes every message in the batch to a nats subject, one message per publish.
+Publishes each message in the batch to a nats subject, one message for each publish.
 
 | field | type | | description |
 | --- | --- | --- | --- |
-| `connection` | `nats` connection | <Badge type="warning" text="required" /> | name of the nats connection to publish on — see "connections" in the readme. |
-| `subject` | `string` | <Badge type="warning" text="required" /> | the subject to publish to |
+| `connection` | `nats` connection | <Badge type="warning" text="required" /> | The name of the nats connection to publish on. Declare the connection in the connections file. |
+| `subject` | `string` | <Badge type="warning" text="required" /> | The subject to publish to. |

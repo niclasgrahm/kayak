@@ -4,24 +4,26 @@
 
 `state.<name>`
 
-One named bucket, and the bounds on it.
+A named state bucket and its limits.
 
-Both bounds have defaults and neither can be turned off. A keyed store with no limit is not a feature, it is a memory leak that takes a week to show up — so the question is only ever *what* the limits are.
+Both limits have a default. You cannot remove a limit, so the memory that a bucket uses is always limited.
 
 | field | type | | description |
 | --- | --- | --- | --- |
-| `idle_timeout_secs` | `integer` | <Badge type="info" text="optional" /> | forget a key this many seconds after it was last written. Without it a machine that is decommissioned holds its slot until the bucket fills. Measured from the last write rather than the last read: a value nothing has written for an hour is stale whether or not something is still asking for it. |
-| `max_keys` | `integer` | <Badge type="info" text="optional" /> | most keys to hold at once. Past this the least recently written key is dropped to make room, so a bucket is a cache of the *active* keys rather than a record of every key ever seen. Defaults to 10000. |
+| `idle_timeout_secs` | `integer` | <Badge type="info" text="optional" /> | Remove a key when this number of seconds went by after its last write. A read does not reset the time. The value must be more than zero. Without it, a key stays until the bucket is full. For example, a machine that you remove from service keeps its key. |
+| `max_keys` | `integer` | <Badge type="info" text="optional" /> | The maximum number of keys in the bucket. When the bucket is full, kayak removes the key with the oldest write. The default is 10000. The value must be more than zero. |
 
 ## pipeline state {#pipelines-state}
 
 `pipelines[].state`
 
-A pipeline's binding to a bucket: which one, and what its messages are keyed by.
+The state bucket of a pipeline, and the field that gives the key of each message.
 
-The key lives here rather than on the bucket because it is a property of *this stream* — the same machine id arrives as `_meta.machine_id` from a nats subscription and as `machine_id` after a reducer has flattened it, and both are correct. The cost is that two pipelines sharing a bucket can key it differently with nothing to catch them, which is the sharp edge of sharing and is documented rather than prevented.
+Each pipeline sets its own key, because the same value can have different field names in two streams. For example, one stream has `_meta.machine_id` and another stream has `machine_id`.
+
+Make sure that all pipelines that share a bucket use keys with the same values. kayak does not check this.
 
 | field | type | | description |
 | --- | --- | --- | --- |
-| `bucket` | `string` | <Badge type="warning" text="required" /> | name of the bucket this pipeline reads and writes — one of the ones declared under `state` at the top of the config. A pipeline naming a bucket that isn't declared fails to build. |
-| `key` | `string` | <Badge type="info" text="optional" /> | the field whose value identifies the thing being remembered, e.g. `_meta.machine_id`. A dotted path like anywhere else. Leave it out for one bucket-wide value — which is the right answer for something there is only ever one of, and the wrong one for anything per-device. |
+| `bucket` | `string` | <Badge type="warning" text="required" /> | The name of the bucket that this pipeline reads and writes. Declare the bucket under `state` at the top of the config. If the bucket is not declared, the pipeline does not build. |
+| `key` | `string` | <Badge type="info" text="optional" /> | The field that gives the key, as a dotted path. For example, `_meta.machine_id`. Leave it out for one value for the full bucket. Use that only for an item that has one value. For a value for each device, set `key`. |

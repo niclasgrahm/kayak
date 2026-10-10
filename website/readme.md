@@ -1,44 +1,43 @@
 # website/
 
-kayak's documentation site — [VitePress](https://vitepress.dev), prose written
-by hand, every reference table generated.
+The documentation site of kayak. It uses [VitePress](https://vitepress.dev).
+People write the prose. kayak generates every reference table.
 
 ```bash
-just docs-dev     # :5173, hot reload (npm install in here once, first)
-just docs         # regenerate the reference from the Rust source
+just docs-dev     # :5173, hot reload (run npm install in this directory first, one time)
+just docs         # generate the reference from the Rust source again
 just docs-build   # production build into .vitepress/dist
 ```
 
-## the split
+## the files
 
 | | |
 | --- | --- |
-| `index.md`, `.vitepress/theme/Landing.vue` | the landing page. `index.md` is one line mounting the component; the copy, the pipeline-card replica and the scroll-pinned tour are all in the `.vue` file. Written from `landing/`. |
-| `getting-started.md`, `canvas/`, `pipelines/`, `io/`, `operating/`, `contributing/` | the prose. This is the guide that used to be `docs/guide.md`, one page per section. |
-| `reference/*.md` | prose *about* a family of components, ending in an `<!--@include: -->` of the generated tables. |
-| `reference/generated/`, `public/openapi.json`, `.vitepress/generated/sidebar.json` | **generated — do not edit.** Written by `cargo run -p kayak-docsgen`. |
+| `index.md`, `.vitepress/theme/Landing.vue` | the landing page. `index.md` is one line that mounts the component. The copy, the replica of a pipeline card and the tour are in the `.vue` file. The source is `landing/`. |
+| `getting-started.md`, `canvas/`, `pipelines/`, `io/`, `operating/`, `contributing/` | the prose: one page per section of the guide. It replaces `docs/guide.md`. |
+| `reference/*.md` | prose about a family of components. Each page ends with an `<!--@include: -->` of the generated tables. |
+| `reference/generated/`, `public/openapi.json`, `.vitepress/generated/sidebar.json` | **generated. Do not edit.** `cargo run -p kayak-docsgen` writes them. |
 
-The generated files are committed so the site builds on a machine with no Rust
-toolchain, and `docsgen/tests/site.rs` fails when they no longer match the
-schemas — a stale reference is a red `just ci`, not something noticed later.
+The generated files are committed, so the site builds on a machine without a
+Rust toolchain. `docsgen/tests/site.rs` fails when they do not match the
+schemas. Thus a reference that is out of date makes `just ci` red.
 
 ## where a change goes
 
 | you changed | what to do |
 | --- | --- |
-| a component's fields or doc comments | `just docs`. The tables, the sidebar and `/api/docs` all follow. |
-| an endpoint, in `kayak-core/src/api_docs.rs` | `just docs`. So do the OpenAPI spec and the `/docs` tab. |
-| what a *family* of components is for, or how to think about one | edit the prose at the top of `reference/<family>.md` |
-| anything narrative | edit the page under `canvas/`, `pipelines/`, `io/`, `operating/` or `contributing/` |
-| the navigation | `.vitepress/config.mts` — except the per-component and per-tag entries, which are generated |
+| the fields or doc comments of a component | run `just docs`. The tables, the sidebar and `/api/docs` follow. |
+| an endpoint, in `kayak-core/src/api_docs.rs` | run `just docs`. The OpenAPI document and the `/docs` tab also follow. |
+| the purpose of a family of components | edit the prose at the top of `reference/<family>.md` |
+| any other text | edit the page under `canvas/`, `pipelines/`, `io/`, `operating/` or `contributing/` |
+| the navigation | edit `.vitepress/config.mts`. The entries for each component and each tag are generated. |
 
-A component added to the config enums appears here with no edit in this
-directory at all: `just docs` writes its partial, adds it to its family's page
-(they include the family whole) and puts it in the sidebar.
+A new component in the config enums appears on the site with no edit in this
+directory. `just docs` writes its partial, adds it to the page of its family
+(the page includes the family as a whole) and adds it to the sidebar.
 
-Interleaving prose with a *particular* component is what the per-component
-partials are for — include them one at a time instead of the family, and write
-between them:
+To put prose between components, include the partials of single components
+instead of the family:
 
 ```md
 <!--@include: ./generated/components/inputs/nats.md-->
@@ -48,12 +47,12 @@ Some prose about nats specifically.
 <!--@include: ./generated/components/inputs/kafka.md-->
 ```
 
-The cost of doing that is that a new input then has to be added to the page by
-hand, which is why the family pages don't do it by default.
+Then you must add each new input to the page by hand. For this reason, the
+family pages include the family as a whole.
 
 ## design
 
-Colours, type and geometry come from `landing/visual-language.md` — kayak's own
-palette, borders darker than the surfaces they separate, square corners, small
-type, everything lowercase. It's in `.vitepress/theme/kayak.css`, and the site
-is dark-only for the reason the product is.
+The colors, the type and the geometry come from `landing/visual-language.md`:
+the palette of kayak, borders darker than the surfaces they separate, square
+corners, small type, all text lowercase. The styles are in
+`.vitepress/theme/kayak.css`. The site is dark only, like the product.

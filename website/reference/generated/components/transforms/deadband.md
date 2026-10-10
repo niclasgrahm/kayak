@@ -2,79 +2,83 @@
 
 ## `deadband` {#transform-deadband}
 
-Drops a message unless its field has moved far enough from the last one that passed — the single most used transform in any historian pipeline, and a *stateful* filter, which is why `filter` cannot be it.
+Drops a message when its field did not change sufficiently since the last message that passed. This is a filter that keeps state per key.
 
-The first message per key always passes. After that a message passes when `field` differs from the last passed value by more than `delta`, or when `max_seconds` have gone by since anything passed, so a steady reading is still confirmed now and then. `flatline_seconds` is the sensor-health half: when the value has not moved in that long the next message passes with `stuck: true` on it, once per flat stretch, so a stuck instrument is distinguishable from a quiet one downstream.
+The first message for each key always passes. After that, a message passes in two cases:
+
+- `field` differs from the last value that passed by more than `delta`. - `max_seconds` went by since the last message passed.
+
+With `flatline_seconds`, the transform also finds a stuck sensor. When the value does not change for that time, the next message passes with `stuck: true`. This occurs one time for each flat period.
 
 | field | type | | description |
 | --- | --- | --- | --- |
-| `field` | `string` | <Badge type="warning" text="required" /> | the numeric field the band is on |
-| `delta` | `number` | <Badge type="warning" text="required" /> | how far the value has to move to pass, in the field's units or as a percentage, by `mode` |
-| `flatline_seconds` | `number` | <Badge type="info" text="optional" /> | after this many seconds with no movement, let the next message through carrying `stuck: true` — once per flat stretch |
-| `group_by` | `list of string` | <Badge type="info" text="optional" /> | the fields that identify a series, the reducer's way. Leave it out for one series |
-| `max_seconds` | `number` | <Badge type="info" text="optional" /> | pass a message anyway once this many seconds have gone by since the last one that passed, so a steady value is still reported now and then |
-| `mode` | `absolute` \| `percent` | <Badge type="info" text="optional" /> | what `delta` is measured in |
-| `on_missing` | `error` \| `skip` | <Badge type="info" text="optional" /> | what to do about a message missing the field or a group field |
-| `reset_when` | `list of numeric \| string \| one_of \| none_of` | <Badge type="info" text="optional" /> | a message passing all of these clears its key's state first, so the series starts over. Checked before `when` |
-| `time` | `string` | <Badge type="info" text="optional" /> | the field carrying each message's time — RFC 3339 or milliseconds since the epoch. Leave it out for arrival time |
-| `when` | `list of numeric \| string \| one_of \| none_of` | <Badge type="info" text="optional" /> | only messages passing all of these are applied; the rest pass through untouched. Leave it out for every message |
+| `field` | `string` | <Badge type="warning" text="required" /> | The numeric field to compare. |
+| `delta` | `number` | <Badge type="warning" text="required" /> | The change that a message needs to pass. The unit is set by `mode`. |
+| `flatline_seconds` | `number` | <Badge type="info" text="optional" /> | After this number of seconds with no change, pass the next message with `stuck: true`. This occurs one time for each flat period. |
+| `group_by` | `list of string` | <Badge type="info" text="optional" /> | The fields that identify a series, as in `reduce`. Leave it out for one series. |
+| `max_seconds` | `number` | <Badge type="info" text="optional" /> | Pass a message when this number of seconds went by since the last message passed, also if the value did not change. |
+| `mode` | `absolute` \| `percent` | <Badge type="info" text="optional" /> | The unit of `delta`. The default is `absolute`. |
+| `on_missing` | `error` \| `skip` | <Badge type="info" text="optional" /> | What to do with a message that does not have the field or a group field. The default is `error`. |
+| `reset_when` | `list of numeric \| string \| one_of \| none_of` | <Badge type="info" text="optional" /> | The conditions that clear the state of the message's key. All of them must match. The series then starts again. The transform checks these before `when`. |
+| `time` | `string` | <Badge type="info" text="optional" /> | The field that holds the time of each message, as an RFC 3339 string or as milliseconds since the epoch. Leave it out to use the arrival time. |
+| `when` | `list of numeric \| string \| one_of \| none_of` | <Badge type="info" text="optional" /> | The conditions that a message must match to be applied. All of them must match. Other messages pass through unchanged. Leave it out to apply every message. |
 
 **`reset_when` — each entry — `type: "numeric"`**
 
 | field | type | | description |
 | --- | --- | --- | --- |
-| `field` | `string` | <Badge type="warning" text="required" /> | the field to test — a dotted path, like anywhere else |
-| `operator` | `greater_than` \| `less_than` \| `equal_to` \| `not_equal_to` | <Badge type="warning" text="required" /> | how the field is compared |
-| `value` | `number` | <Badge type="warning" text="required" /> | the number it is compared to |
+| `field` | `string` | <Badge type="warning" text="required" /> | The field to test, as a dotted path. |
+| `operator` | `greater_than` \| `less_than` \| `equal_to` \| `not_equal_to` | <Badge type="warning" text="required" /> | How to compare the field. |
+| `value` | `number` | <Badge type="warning" text="required" /> | The number to compare to. |
 
 **`reset_when` — each entry — `type: "string"`**
 
 | field | type | | description |
 | --- | --- | --- | --- |
-| `field` | `string` | <Badge type="warning" text="required" /> | the field to test — a dotted path, like anywhere else |
-| `operator` | `equal_to` \| `not_equal_to` \| `contains` | <Badge type="warning" text="required" /> | how the field is compared |
-| `value` | `string` | <Badge type="warning" text="required" /> | the string it is compared to |
+| `field` | `string` | <Badge type="warning" text="required" /> | The field to test, as a dotted path. |
+| `operator` | `equal_to` \| `not_equal_to` \| `contains` | <Badge type="warning" text="required" /> | How to compare the field. |
+| `value` | `string` | <Badge type="warning" text="required" /> | The string to compare to. |
 
 **`reset_when` — each entry — `type: "one_of"`**
 
 | field | type | | description |
 | --- | --- | --- | --- |
-| `field` | `string` | <Badge type="warning" text="required" /> | the field to test — a dotted path, like anywhere else |
-| `values` | `list of string` | <Badge type="warning" text="required" /> | the strings that match |
+| `field` | `string` | <Badge type="warning" text="required" /> | The field to test, as a dotted path. |
+| `values` | `list of string` | <Badge type="warning" text="required" /> | The strings that match. |
 
 **`reset_when` — each entry — `type: "none_of"`**
 
 | field | type | | description |
 | --- | --- | --- | --- |
-| `field` | `string` | <Badge type="warning" text="required" /> | the field to test — a dotted path, like anywhere else |
-| `values` | `list of string` | <Badge type="warning" text="required" /> | the strings that do not match |
+| `field` | `string` | <Badge type="warning" text="required" /> | The field to test, as a dotted path. |
+| `values` | `list of string` | <Badge type="warning" text="required" /> | The strings that do not match. |
 
 **`when` — each entry — `type: "numeric"`**
 
 | field | type | | description |
 | --- | --- | --- | --- |
-| `field` | `string` | <Badge type="warning" text="required" /> | the field to test — a dotted path, like anywhere else |
-| `operator` | `greater_than` \| `less_than` \| `equal_to` \| `not_equal_to` | <Badge type="warning" text="required" /> | how the field is compared |
-| `value` | `number` | <Badge type="warning" text="required" /> | the number it is compared to |
+| `field` | `string` | <Badge type="warning" text="required" /> | The field to test, as a dotted path. |
+| `operator` | `greater_than` \| `less_than` \| `equal_to` \| `not_equal_to` | <Badge type="warning" text="required" /> | How to compare the field. |
+| `value` | `number` | <Badge type="warning" text="required" /> | The number to compare to. |
 
 **`when` — each entry — `type: "string"`**
 
 | field | type | | description |
 | --- | --- | --- | --- |
-| `field` | `string` | <Badge type="warning" text="required" /> | the field to test — a dotted path, like anywhere else |
-| `operator` | `equal_to` \| `not_equal_to` \| `contains` | <Badge type="warning" text="required" /> | how the field is compared |
-| `value` | `string` | <Badge type="warning" text="required" /> | the string it is compared to |
+| `field` | `string` | <Badge type="warning" text="required" /> | The field to test, as a dotted path. |
+| `operator` | `equal_to` \| `not_equal_to` \| `contains` | <Badge type="warning" text="required" /> | How to compare the field. |
+| `value` | `string` | <Badge type="warning" text="required" /> | The string to compare to. |
 
 **`when` — each entry — `type: "one_of"`**
 
 | field | type | | description |
 | --- | --- | --- | --- |
-| `field` | `string` | <Badge type="warning" text="required" /> | the field to test — a dotted path, like anywhere else |
-| `values` | `list of string` | <Badge type="warning" text="required" /> | the strings that match |
+| `field` | `string` | <Badge type="warning" text="required" /> | The field to test, as a dotted path. |
+| `values` | `list of string` | <Badge type="warning" text="required" /> | The strings that match. |
 
 **`when` — each entry — `type: "none_of"`**
 
 | field | type | | description |
 | --- | --- | --- | --- |
-| `field` | `string` | <Badge type="warning" text="required" /> | the field to test — a dotted path, like anywhere else |
-| `values` | `list of string` | <Badge type="warning" text="required" /> | the strings that do not match |
+| `field` | `string` | <Badge type="warning" text="required" /> | The field to test, as a dotted path. |
+| `values` | `list of string` | <Badge type="warning" text="required" /> | The strings that do not match. |

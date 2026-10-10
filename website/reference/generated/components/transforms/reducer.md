@@ -2,23 +2,23 @@
 
 ## `reducer` {#transform-reducer}
 
-Reduces a batch to one message per group, carrying whatever was asked for about it. Pair it with a buffer, or it will only ever see one message at a time.
+Reduces a batch to one message for each group. Put a buffer before it, or it gets only one message at a time.
 
-With no `group_by` the whole batch is one group and one message comes out; with one, a message comes out per distinct combination of those fields, in the order the groups were first seen. The emitted message carries the grouping fields under their own names alongside the aggregations.
+Without `group_by`, the full batch is one group and the reducer sends one message. With `group_by`, it sends one message for each different combination of those fields. The messages are in the sequence in which the groups first occur. Each message contains the `group_by` fields and the results of the aggregations.
 
-Each aggregation is a `function`, the `field` to apply it to and the `as` name the answer is written under — `{"function": "avg", "field": "value", "as": "mean"}`. `count` is the one function that needs no `field`: without one it counts the messages in the group, with one it counts the messages that carried it.
+Each aggregation has a `function`, the `field` to use and the name `as` for the result, for example `{"function": "avg", "field": "value", "as": "mean"}`.
 
 | field | type | | description |
 | --- | --- | --- | --- |
-| `aggregations` | `list of aggregation` | <Badge type="warning" text="required" /> | what to compute. At least one, and each needs a distinct `as`. |
-| `group_by` | `list of string` | <Badge type="info" text="optional" /> | the fields whose combination defines a group. Omit it to reduce the whole batch at once. |
-| `on_missing` | `error` \| `skip` | <Badge type="info" text="optional" /> | what to do about a message missing one of the fields above |
-| `time` | `string` | <Badge type="info" text="optional" /> | the field carrying each message's time — an RFC 3339 string or milliseconds since the epoch. Needed by `slope`; a message missing it fails the batch. Leave it out and each message's time is when it arrived. |
+| `aggregations` | `list of aggregation` | <Badge type="warning" text="required" /> | The values to calculate. At least one aggregation is required. Each one must have a different `as`. |
+| `group_by` | `list of string` | <Badge type="info" text="optional" /> | The fields whose combination defines a group. If you do not set it, the full batch is one group. |
+| `on_missing` | `error` \| `skip` | <Badge type="info" text="optional" /> | What to do with a message that does not have one of the fields. The default is `error`. |
+| `time` | `string` | <Badge type="info" text="optional" /> | The field that contains the time of each message, as an RFC 3339 string or as ms since the epoch. `slope` requires it. A message without this field fails the batch. If you do not set it, the time of each message is its arrival time. |
 
 **`aggregations` — each entry**
 
 | field | type | | description |
 | --- | --- | --- | --- |
-| `function` | `sum` \| `avg` \| `min` \| `max` \| `count` \| `count_distinct` \| `first` \| `last` \| `collect` \| `median` \| `stddev` \| `slope` | <Badge type="warning" text="required" /> | how to combine the values |
-| `as` | `string` | <Badge type="warning" text="required" /> | the field the emitted message carries this answer under. Two aggregations may not share one, and none may collide with a `group_by` field. |
-| `field` | `string` | <Badge type="info" text="optional" /> | the field to aggregate. Required by every function except `count`, which counts messages when it is left out. |
+| `function` | `sum` \| `avg` \| `min` \| `max` \| `count` \| `count_distinct` \| `first` \| `last` \| `collect` \| `median` \| `stddev` \| `slope` | <Badge type="warning" text="required" /> | How to combine the values. |
+| `as` | `string` | <Badge type="warning" text="required" /> | The field that contains the result in the sent message. Each aggregation must have a different `as`. It must not be the same as a `group_by` field. |
+| `field` | `string` | <Badge type="info" text="optional" /> | The field to aggregate. Required for all functions except `count`. Without a `field`, `count` counts the messages. |

@@ -5385,13 +5385,13 @@ fn ApiIntro() -> impl IntoView {
     view! {
         <section class="api-intro">
             <p class="doc-description">
-                "Everything below is generated from the same table the server builds its \
-                 routes from, so it describes the server you are talking to. The full \
-                 reference, with schemas and a request panel, is at "
+                "kayak generates this page from the same table that registers the routes \
+                 of the server. Thus, it describes this server. The full reference, with \
+                 schemas and a request panel, is at "
                 <a href="/api/reference">"/api/reference"</a>
-                "; the machine-readable spec is at "
+                ". The OpenAPI document is at "
                 <a href="/api/openapi.json">"/api/openapi.json"</a>
-                " \u{2014} point a client generator or a contract test at that one."
+                ". Use it with a client generator or a contract test."
             </p>
         </section>
     }
@@ -5660,40 +5660,37 @@ fn StateReference(
             <p class="doc-description">
                 "A "
                 <strong>"state bucket"</strong>
-                " is what a pipeline can remember between batches: a keyed store of values \
-                 taken off messages that have gone past, readable by messages that come \
-                 later. Buckets are declared once at the top of the config file, under "
+                " keeps values between batches. It is a store of values by key. A message \
+                 writes values, and later messages read them. You declare each bucket one \
+                 time at the top of the config file, under "
                 <code>"state"</code>
-                ", and the pipelines that use one name it \u{2014} deliberately the shape \
-                 connections already have."
+                ". Each pipeline that uses a bucket names it."
             </p>
             <p class="doc-description">
-                "Global rather than per-pipeline because of the case that makes state worth \
-                 having at all: one pipeline remembers the recipe currently running on each \
-                 machine, and six unrelated pipelines stamp it onto their output. \
-                 Per-pipeline state can only answer that with six copies of the same work."
+                "Buckets are global, so many pipelines can use one bucket. For example, one \
+                 pipeline keeps the current recipe of each machine. Six other pipelines \
+                 write that recipe onto their output."
             </p>
             <p class="doc-description doc-warning">
-                "The rule that is not enforced is the one to know. Two pipelines sharing a \
-                 bucket are two run loops with no ordering between them, so a reader can see \
-                 the value from before or after a given write depending on nothing it can \
-                 observe. Ordering-sensitive correlation belongs in "
+                "Do not share a bucket between pipelines for data that must stay in order. \
+                 Two pipelines that share a bucket are two run loops with no order between \
+                 them. A reader can get the value from before or after a write. Put \
+                 correlation that needs order in "
                 <em>"one"</em>
-                " pipeline; sharing is only for state whose value does not change on the \
-                 timescale of a message. A recipe that updates hourly is safe to share. A \
-                 unit id that changes every cycle is not."
+                " pipeline. Share only values that change slowly in comparison to the \
+                 messages. For example, you can share a recipe that changes each hour. Do \
+                 not share a unit id that changes each cycle."
             </p>
             <p class="doc-description">
-                "Buckets live in memory. Their contents survive a revert \u{2014} unless that \
-                 bucket's declaration changed, since what it holds may not satisfy the new \
-                 limits \u{2014} and they do not survive a restart. Every bucket is bounded \
-                 and there is no spelling of \u{201c}unbounded\u{201d}: past "
+                "Buckets are in memory, and a restart clears them. A revert keeps the \
+                 contents of a bucket, unless the declaration of that bucket changed. Each \
+                 bucket has limits. When a bucket has "
                 <code>"max_keys"</code>
-                " the least recently written key is dropped, and "
+                " keys, kayak removes the key with the oldest write. With "
                 <code>"idle_timeout_secs"</code>
-                " forgets a key that has not been written for a while. Expiry is applied when \
-                 a bucket is next touched rather than by a sweeper, so an idle bucket keeps \
-                 its keys until something writes to it again."
+                ", kayak removes a key when it had no write for that time. kayak removes \
+                 expired keys only when a pipeline uses the bucket. Thus, an idle bucket \
+                 keeps its keys until the next write."
             </p>
             <pre class="doc-example">
                 {r#"{
@@ -5712,10 +5709,11 @@ fn StateReference(
 }"#}
             </pre>
             <p class="doc-description">
-                "A config file that declares no buckets stays the bare array of pipelines it \
-                 always was; the two-key document above is only needed once there is \
-                 something to put under "
+                "A config file with no buckets can be an array of pipelines. When you \
+                 declare buckets, use the document above, with "
                 <code>"state"</code>
+                " and "
+                <code>"pipelines"</code>
                 "."
             </p>
         </section>
@@ -5729,57 +5727,56 @@ fn StateReference(
         <section class="docs-family" id=docs::STATE_TRANSFORMS>
             <h2>"remember and recall"</h2>
             <p class="doc-description">
-                "Nothing reads or writes a bucket except two transforms, and there are two \
-                 rather than one because "
-                <em>"chain order is the semantics"</em>
-                ": "
+                "Two transforms read and write a bucket. "
                 <code>"remember"</code>
-                " puts what a message carries into the bucket, "
+                " writes values from a message into the bucket. "
                 <code>"recall"</code>
-                " puts what the bucket holds onto a message, and which of them comes first \
-                 decides whether a message sees its own value."
+                " writes values from the bucket onto a message. "
+                <em>"The order in the chain is important"</em>
+                ". When "
+                <code>"remember"</code>
+                " comes first, a message gets its own value."
             </p>
             <p class="doc-description">
                 <code>"remember"</code>
-                " is a tap \u{2014} it passes its batch on unchanged. "
+                " passes its batch on with no change. "
                 <code>"recall"</code>
-                " writes to the top level, so a "
-                <code>"reducer"</code>
-                " downstream can group by a recalled name without knowing where it came from, \
-                 and it defaults "
+                " writes to the top level of the message, so a "
+                <code>"reduce"</code>
+                " after it can group by a recalled field. The default of "
                 <code>"on_missing"</code>
-                " to "
+                " for "
+                <code>"recall"</code>
+                " is "
                 <code>"skip"</code>
-                ": every stateful pipeline has a warm-up in which nothing has been remembered \
-                 yet, and failing on that would fail them all at startup."
+                ". At startup, the bucket is empty, and "
+                <code>"skip"</code>
+                " passes the messages on."
             </p>
             <p class="doc-description">
-                "Both need a "
+                "Both transforms need "
                 <code>"state"</code>
-                " on their pipeline and fail to build without one. Their settings are in the \
-                 components tab, under transforms."
+                " on their pipeline. Without it, the pipeline does not build. Their settings \
+                 are in the components tab, under transforms."
             </p>
         </section>
         <section class="docs-family" id=docs::STATE_INSPECTING>
             <h2>"inspecting a bucket"</h2>
             <p class="doc-description">
-                "The canvas sidebar's "
-                <strong>"state"</strong>
-                " tab lists every declared bucket with the number of keys it is holding, and \
-                 a click opens a card of the keys themselves. It is a window rather than an \
-                 editor, and has no "
-                <code>"+"</code>
-                " or delete: a bucket is part of the graph's logic, so it is declared in the \
-                 config file like the pipelines that use it."
+                <code>"GET /api/state"</code>
+                " lists the declared buckets, with the number of keys in each bucket. "
+                <code>"GET /api/state/{bucket}"</code>
+                " returns the contents of one bucket, one page of keys at a time. Both \
+                 endpoints are in the http api tab. They are read-only. You declare buckets \
+                 in the config file."
             </p>
             <p class="doc-description">
-                "It polls "
+                "In the web UI, the "
+                <strong>"state"</strong>
+                " tab of the sidebar shows the same data. It reads "
                 <code>"GET /api/state"</code>
-                " once a second while it is open \u{2014} a bucket changes with every message, \
-                 so pushing it would be a firehose for a readout nobody watches per-message. "
-                <code>"GET /api/state/{bucket}"</code>
-                " is one bucket's contents, a page of keys at a time. Both are in the http \
-                 api tab."
+                " one time each second while the tab is open. Click a bucket to see its \
+                 keys."
             </p>
         </section>
     }

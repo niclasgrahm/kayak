@@ -31,50 +31,36 @@ pub use layout::{EdgeEnd, LayoutFile, PipelineLayout, PortLayout, Side};
 pub use schema::{InferredField, InferredType, MessageSchema, TextFormat};
 pub use state::{PipelineState, StateBucketConfig, StateBuckets};
 
-/// One pipeline as the API reports it: the id it is running under, the config
-/// it was built from, and whether its run loop is still alive.
-///
-/// The same wire shape the run loop's `PipelineView` serializes to — this is
-/// the owned spelling of it, and the one the schema is generated from.
+/// One pipeline as the API reports it: the id that it runs under, the config
+/// that kayak built it from, and the status of its run loop.
 #[derive(Serialize, Deserialize, Clone, JsonSchema)]
 pub struct PipelineDto {
     pub id: String,
     pub config: Config,
-    /// Where the run loop has got to. `#[serde(default)]` for the reason
-    /// `UiEvent::ts` has one: a body from a server that predates the field
-    /// reads as [`RunStatus::Running`], which is what every reader assumed
-    /// before there was anything else it could be.
+    /// The status of the run loop. When it is absent, read it as `running`.
     #[serde(default)]
     pub status: RunStatus,
 }
 
-/// Where a pipeline's run loop has got to.
-///
-/// A pipeline is a spawned task, and until this existed nothing could say
-/// whether that task was still alive: a run loop that had ended left its
-/// handle in the map looking exactly like a running one — same card, same
-/// config, same everything, and no messages ever again. That is the zombie
-/// this names.
-///
-/// Deliberately four states and not a `bool`. "Not running" has three causes
-/// that want different reactions: one is waiting for a database to come back
-/// and needs nothing done, one is a graph being torn down, and one is a
-/// pipeline that is over.
+/// The status of the run loop of a pipeline.
 #[derive(Serialize, Deserialize, Clone, Copy, Debug, Default, PartialEq, Eq, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum RunStatus {
-    /// Spawned, with an output still being initialised. A pipeline whose
-    /// database is not up yet sits here — retrying on a backoff — rather than
-    /// dying, and leaves on its own the moment the far end answers.
+    /// The run loop started, and an output is not initialized yet. For
+    /// example, the database of an output is not available. The pipeline tries
+    /// again with a backoff. When the output initializes, the status changes
+    /// to `running`.
     Starting,
-    /// Initialised and in the loop. The only state in which messages move.
+    /// All outputs are initialized, and the loop runs. Messages move only in
+    /// this status.
     #[default]
     Running,
-    /// The loop ended because it was cancelled: a delete, a revert or a
-    /// shutdown. Rarely seen, because the handle is normally dropped with it.
+    /// The loop stopped because it was cancelled, by a delete, a revert or a
+    /// shutdown. This status is rare in a response, because kayak usually
+    /// removes the pipeline at the same time.
     Stopped,
-    /// The loop ended on its own — the last input died. Nothing will come out
-    /// of this pipeline again until something rebuilds it.
+    /// The loop stopped because the last input failed. The pipeline sends
+    /// nothing more until kayak builds it again.
     Failed,
 }
 
@@ -106,20 +92,14 @@ impl std::fmt::Display for RunStatus {
     }
 }
 
-/// What `POST /api/pipelines/{id}/messages` takes: one message, or an array of
-/// them.
-///
-/// Untagged, and the array arm comes first on purpose — a JSON array would
-/// otherwise deserialize as [`IngestRequest::One`] holding an array, and posting
-/// ten messages would put one message into the pipeline. There is no envelope
-/// around the messages because there is nothing to put in one: the pipeline is
-/// named by the path, and kayak has no schema to declare.
+/// The body of `POST /api/pipelines/{pipeline_id}/messages`: one message, or an
+/// array of messages. An array is always many messages, not one message.
 #[derive(Serialize, Deserialize, Clone, Debug, JsonSchema)]
 #[serde(untagged)]
 pub enum IngestRequest {
-    /// Several messages, delivered as one batch.
+    /// Many messages, sent as one batch.
     Many(Vec<serde_json::Value>),
-    /// A single message, delivered as a batch of one.
+    /// One message, sent as a batch of one.
     One(serde_json::Value),
 }
 
@@ -134,60 +114,45 @@ impl IngestRequest {
     }
 }
 
-/// What came back from a post: how many messages were handed to the pipeline.
+/// The response to a post: the number of messages that the pipeline accepted.
 ///
-/// It says *accepted*, not *processed* — the batch is queued for the run loop
-/// and the response doesn't wait for it, so a 202 means the pipeline has the
-/// messages, not that the outputs have written them.
+/// Accepted means that the batch is in the queue of the run loop. It does not
+/// mean that the outputs wrote the messages.
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq, JsonSchema)]
 pub struct IngestResponse {
     pub accepted: usize,
 }
 
-/// How the server was started, and whether what it is running still matches
-/// the file it started from.
+/// How the server started, and whether the running graph is the same as the
+/// config file.
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq, JsonSchema)]
 pub struct SettingsDto {
-    /// Name of the config file the server is working against — the `--config`
-    /// one, or the one a save has since created. Its absence doesn't mean edits
-    /// can't be saved: it means there is no file *yet*, so the UI offers to
-    /// create one rather than to overwrite one.
+    /// The name of the config file of the server: the `--config` file, or the
+    /// file that a save made. When it is absent, there is no file yet. A save
+    /// makes one.
     pub config_file: Option<String>,
-    /// The directory a save writes into. Shown so "create a config file" can
-    /// say where the file will appear, which is the one thing the file name on
-    /// its own doesn't tell you.
-    ///
-    /// Defaults to empty when a client is talking to an older server, which
-    /// reads the same as "unknown" — the UI just leaves the location out.
+    /// The directory that a save writes to. An empty value means that the
+    /// directory is not known.
     #[serde(default)]
     pub save_directory: String,
-    /// The running graph has diverged from what was last loaded or saved.
-    /// Edits apply to the runtime immediately and the file is left alone, so
-    /// without this the divergence would be invisible until a restart lost it.
+    /// True when the running graph is different from the last load or save.
+    /// A change has an immediate effect on the server, but does not change the
+    /// file. A restart discards the unsaved changes.
     pub unsaved_changes: bool,
 }
 
-/// What `POST /api/config/save` takes: a bare file name, saved beside the
-/// config the server was started from. Not a path — see `persist::save_path`.
+/// The body of `POST /api/config/save`. `name` is a file name with no path.
+/// kayak writes the file to the save directory of the server.
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq, JsonSchema)]
 pub struct SaveConfigRequest {
     pub name: String,
-    /// JSON or YAML. Omitted means "whatever `name` says it is", which is what
-    /// keeps a client that predates the choice — and a hand-written `curl` —
-    /// writing the format the file is named for.
+    /// JSON or YAML. When it is absent, the extension of `name` sets the
+    /// format.
     #[serde(default)]
     pub format: Option<ConfigFormat>,
-    /// Whether an existing file under this name may be replaced. `false` turns
-    /// the save into a *create*: a name that already exists is refused with a
-    /// 409 and nothing is written. The project creator sends `false`, because
-    /// its user has typed a suggested default into a directory they have never
-    /// seen — one Enter keypress away from replacing a config nobody meant to
-    /// touch.
-    ///
-    /// Defaults to `true`, because omitted has to stay byte-for-byte the old
-    /// behaviour — "save as" over the loaded file's own name is how a save has
-    /// always overwritten it, and a client that predates this field must keep
-    /// working.
+    /// Whether the save can replace an existing file. The default is `true`.
+    /// With `false`, the save only makes new files. If a file with the name
+    /// exists, the response is a 409 and kayak writes nothing.
     #[serde(default = "overwrite_default")]
     pub overwrite: bool,
 }
@@ -196,55 +161,43 @@ fn overwrite_default() -> bool {
     true
 }
 
-/// Where a save actually landed, so the UI can name it rather than guess.
+/// The path of the file that the save wrote.
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq, JsonSchema)]
 pub struct SaveConfigResponse {
     pub path: String,
 }
 
-/// What `POST /api/auth/login` takes.
+/// The body of `POST /api/auth/login`.
 ///
-/// The password is a plain `String` and not a
-/// [`Secret`](crate::config::Secret), which is the opposite of every other
-/// password field in kayak and deliberately so: a `Secret` holds a `${NAME}`
-/// *reference* to a credential, and this is the credential itself, typed into a
-/// login box a moment ago. It exists for the length of one request and is never
-/// stored, serialized back or logged.
+/// The password is the real password, not a `${NAME}` reference. kayak does
+/// not store it, send it back or write it to the log.
 #[derive(Serialize, Deserialize, Clone, Debug, JsonSchema)]
 pub struct LoginRequest {
     pub username: String,
     pub password: String,
 }
 
-/// What `POST /api/auth/token` takes.
+/// The body of `POST /api/auth/token`.
 ///
-/// The token is the host application's — minted by its identity provider,
-/// carried here from the embedding page's URL. Like [`LoginRequest`]'s
-/// password it is a live credential rather than a `${NAME}` reference: it
-/// exists for the length of one request, is exchanged for a session cookie,
-/// and is never stored, serialized back or logged.
+/// The token comes from the identity provider of the host application. kayak
+/// changes it into a session cookie. kayak does not store it, send it back or
+/// write it to the log.
 #[derive(Serialize, Deserialize, Clone, Debug, JsonSchema)]
 pub struct TokenLoginRequest {
     pub token: String,
 }
 
-/// Who the caller is, and whether this server cares.
-///
-/// The frontend asks for this before it draws anything: it decides between the
-/// login page and the canvas, and between a canvas that can be edited and one
-/// that can only be read.
+/// The caller, and whether the server checks credentials.
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq, JsonSchema)]
 pub struct AuthDto {
-    /// Whether this server checks credentials at all. `false` is a server
-    /// started without a `--server-config`, or with one that sets
-    /// `auth: {type: none}` — see [`crate::server_config`] for why that is the
-    /// default.
+    /// Whether the server checks credentials. It is `false` on a server
+    /// started without `--server-config`, or with `auth: {type: none}`.
     pub authentication_required: bool,
-    /// The signed-in user, or `None` for a caller who presented nothing.
+    /// The signed-in user, or `null` for a caller with no credentials.
     pub username: Option<String>,
-    /// What the caller may do. `None` means signed out — which is a different
-    /// thing from [`Role::Read`], and worth keeping different: a reader may see
-    /// the graph, and a signed-out caller may not.
+    /// The role of the caller. `null` means signed out. This is different
+    /// from `read`: a `read` user can see the graph, and a signed-out caller
+    /// cannot.
     pub role: Option<crate::server_config::Role>,
 }
 
@@ -282,13 +235,7 @@ impl AuthDto {
 pub type PipelineId = String;
 pub type MessageBatch = Vec<Arc<serde_json::Value>>;
 
-/// The stage of a run loop an event came from. Also what the frontend matches
-/// on to decide whether an edge lights up and which badge a log line gets, so
-/// it is a type rather than a string: both ends match on it exhaustively, and a
-/// fourth stage would fail to compile at every site that has to handle it.
-///
-/// The serialized spellings are wire format — `/events` carries them and the
-/// frontend's filter chips are named after them. `stage_round_trips` pins them.
+/// The stage of the run loop that an event comes from.
 #[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq, Hash, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum Stage {
@@ -326,32 +273,24 @@ pub const MESSAGES_PER_BATCH: usize = 100;
 /// payload, far short of what a card can render.
 pub const MAX_MESSAGE_BYTES: usize = 2048;
 
-/// A batch as the UI feed carries it: a few of its messages, already rendered
-/// and cut to size, plus the counts that say what was left out.
+/// A batch in the event feed: some of its messages as JSON text, and the
+/// counts of the messages that the feed does not carry.
 ///
-/// **The truncation happens on the server**, which is the whole point of the
-/// type. An earlier version sent `Arc<MessageBatch>` — the entire batch — and
-/// left the browser to throw all but a hundred of them away, so a wide batch
-/// was serialized whole, pushed across the wire whole and parsed whole before
-/// anything decided it wasn't wanted. At a kafka-shaped 50k messages a second
-/// that measured 22 MB/s of JSON nobody ever read.
+/// The feed carries a maximum of 100 messages for each batch. It cuts each
+/// message to 2048 bytes.
 #[derive(Clone, Serialize, Deserialize, PartialEq, Eq, Debug, JsonSchema)]
 pub struct BatchPreview {
-    /// Compact JSON, at most [`MESSAGES_PER_BATCH`] of them, each cut to
-    /// [`MAX_MESSAGE_BYTES`]. Compact rather than pretty because this is what a
-    /// collapsed row shows; expanding one re-parses it.
+    /// The messages as compact JSON text. There are a maximum of 100. kayak
+    /// cuts each one to 2048 bytes and adds `…` at the end of a cut message.
     pub messages: Vec<String>,
-    /// How many messages the batch actually held. Larger than `messages` is
-    /// long whenever the batch was wider than the cap.
+    /// The number of messages in the batch. It is larger than the length of
+    /// `messages` when the batch has more than 100 messages.
     pub total: usize,
-    /// Messages that passed this stage in passes the feed **did not report**,
-    /// counted since the last one it did — see `kayak::pipeline::UiThrottle`.
+    /// The number of messages that passed this stage in passes that the feed
+    /// **did not report**, since the last reported event.
     ///
-    /// It exists so the throughput readout stays honest. The feed is sampled
-    /// under load, so counting only the batches that arrive would report a
-    /// fraction of what the pipeline is really doing, and a card reading `40/s`
-    /// under a pipeline running at 40,000 says the wrong thing more loudly than
-    /// no number at all would.
+    /// The feed is a sample. To calculate the throughput, add this number to
+    /// `total`.
     #[serde(default)]
     pub skipped_messages: u64,
 }
@@ -401,50 +340,40 @@ pub fn truncate(text: &str) -> String {
     format!("{}…", &text[..end])
 }
 
-/// What a run loop is reporting: a batch that passed through, or something that
-/// went wrong while handling one.
+/// The contents of an event: a batch that passed, or an error.
 #[derive(Clone, Serialize, Deserialize, PartialEq, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum EventPayload {
     Batch(BatchPreview),
-    /// A failure at this stage. The batch that caused it is not carried: a
-    /// transform that failed has no output to show, and the input that did
-    /// arrive was already reported by its own event.
+    /// A failure at this stage, as text. The event does not carry the batch.
     Error(String),
 }
 
+/// One event in the `/events` stream.
 #[derive(Clone, Serialize, Deserialize, PartialEq, JsonSchema)]
 pub struct UiEvent {
     pub pipeline_id: PipelineId,
     pub stage: Stage,
-    /// When the run loop reported this, in milliseconds since the epoch.
-    ///
-    /// The *server's* clock, stamped where the event is published rather than
-    /// where it is built: this type compiles for wasm, where `SystemTime::now`
-    /// panics. Zero means "no time" — an event from a server that predates the
-    /// field, which the log renders as blank rather than as 1970.
+    /// The time of the event on the server clock, in milliseconds since the
+    /// epoch. Zero means that the time is not known.
     #[serde(default)]
     pub ts: u64,
-    /// Which pass through the run loop this belongs to — one batch in, its
-    /// transforms, and everything that left. Counted per pipeline from one.
+    /// The number of the pass through the run loop. A pass is one batch in, its
+    /// transforms, and its outputs. The count is per pipeline and starts at 1.
     ///
-    /// `None` for anything that happened outside a pass: an output that failed
-    /// to initialise before the loop started, or an input source dying in its
-    /// own task while the loop waits. Those are real events with no pass to
-    /// belong to, not a missing number.
+    /// It is `null` for an event outside a pass. For example, an output that
+    /// failed to initialize before the loop started, or an input that failed
+    /// while the loop waited.
     ///
-    /// The frontend groups the log by this, and a *gap* in it is information
-    /// too: the UI feed is a broadcast channel that drops rather than blocks,
-    /// so a jump from 8 to 12 is three passes the browser never saw and should
-    /// say so instead of drawing the survivors as if they were consecutive.
+    /// A gap shows missed passes. For example, a change from 8 to 12 means
+    /// that the client did not get three passes.
     #[serde(default)]
     pub seq: Option<u64>,
-    /// Which component of the stage, indexed into that stage's array in the
-    /// config — the second of two outputs is `Some(1)`.
+    /// The index of the component in the array of its stage in the config,
+    /// from zero. For example, the second of two outputs is `1`.
     ///
-    /// `None` where it isn't known rather than where there is only one: input
-    /// batches carry no index because several inputs are merged before the run
-    /// loop sees them, and by then which one produced the batch is gone.
+    /// It is `null` when the index is not known. Input events have no index,
+    /// because kayak merges the inputs before the run loop gets a batch.
     #[serde(default)]
     pub component: Option<usize>,
     pub payload: EventPayload,

@@ -37,226 +37,183 @@ use std::collections::BTreeMap;
 /// component's `connection` field holds.
 pub type ConnectionId = String;
 
-/// A kafka cluster: the brokers, and eventually whatever it takes to
-/// authenticate against them.
+/// A kafka cluster.
 #[derive(Clone, Debug, Deserialize, Serialize, JsonSchema, PartialEq, Eq)]
 #[schemars(title = "kafka")]
 pub struct KafkaConnection {
-    /// comma-separated broker list, e.g. `localhost:9092`. May reference
-    /// secrets as `${NAME}` — see "secrets" in the readme.
+    /// The brokers, as a list with commas, for example `localhost:9092`. You
+    /// can use `${NAME}` secret references.
     pub brokers: Secret,
 }
 
-/// A nats server, or a cluster of them.
+/// A nats server, or a cluster of nats servers.
 #[derive(Clone, Debug, Deserialize, Serialize, JsonSchema, PartialEq, Eq)]
 #[schemars(title = "nats")]
 pub struct NatsConnection {
-    /// connection url, e.g. `nats://localhost:4222`. May reference secrets as
-    /// `${NAME}` — see "secrets" in the readme.
+    /// The url of the server, for example `nats://localhost:4222`. You can use
+    /// `${NAME}` secret references.
     pub urls: Secret,
 }
 
-/// A redis server, or a cluster front-end that speaks the same protocol.
+/// A redis server, or a server that uses the same protocol.
 ///
-/// Used through its pub/sub commands (`SUBSCRIBE`/`PUBLISH`), the same shape
-/// [`NatsConnection`] is — one url, which may already carry a password —
-/// rather than the key-value store: there is no queue to consume from here,
-/// so a redis input has exactly the delivery guarantees a nats one does (see
-/// `RedisConfig`'s doc comment).
+/// kayak uses the pub/sub commands `SUBSCRIBE` and `PUBLISH`. It does not use
+/// the key-value store. Thus, a redis input has the same delivery guarantees
+/// as a nats input.
 #[derive(Clone, Debug, Deserialize, Serialize, JsonSchema, PartialEq, Eq)]
 #[schemars(title = "redis")]
 pub struct RedisConnection {
-    /// connection url, e.g. `redis://localhost:6379` or
-    /// `redis://:${REDIS_PASSWORD}@localhost:6379/0`. May reference secrets as
-    /// `${NAME}` — see "secrets" in the readme.
+    /// The url of the server, for example `redis://localhost:6379` or
+    /// `redis://:${REDIS_PASSWORD}@localhost:6379/0`. You can use `${NAME}`
+    /// secret references.
     pub url: Secret,
 }
 
 /// An mqtt broker.
 ///
-/// Plaintext TCP only for now — there is no TLS field here yet, and that is a
-/// deliberate gap (see `docs/roadmap.md`) rather than an oversight: a CA
-/// certificate needs somewhere to live (a `Secret`? a file path resolved
-/// against `--data-dir`?) and that question deserves its own pass rather than
-/// a field bolted on to get this connection working.
+/// The connection uses plain TCP. TLS is not available.
 #[derive(Clone, Debug, Deserialize, Serialize, JsonSchema, PartialEq, Eq)]
 #[schemars(title = "mqtt")]
 pub struct MqttConnection {
-    /// broker hostname, e.g. `localhost`
+    /// The hostname of the broker, for example `localhost`.
     pub host: String,
-    /// broker port. Defaults to 1883, mqtt's conventional plaintext port.
+    /// The port of the broker. The default is 1883.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub port: Option<u16>,
-    /// username to connect with, if the broker requires one. Must be set
-    /// together with `password` or not at all.
+    /// The username, if the broker requires one. Set `username` and
+    /// `password` together, or set neither.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub username: Option<Secret>,
-    /// that username's password. May reference secrets as `${NAME}` — see
-    /// "secrets" in the readme, and prefer a reference to a literal here.
+    /// The password of the user. Use a `${NAME}` secret reference for this
+    /// value.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub password: Option<Secret>,
 }
 
-/// An OPC UA server, as one client session connects to it.
+/// An OPC UA server. The connection holds the endpoint. The `opcua` input
+/// selects the nodes to read.
 ///
-/// The endpoint is the whole of "what the system is" here — an OPC UA server
-/// exposes one address space at one url, and *which nodes* a pipeline reads out
-/// of it is the component's business, exactly as a topic is on a kafka
-/// connection.
+/// **The session is not signed and not encrypted.** kayak connects with the
+/// security policy `None`, as an anonymous user or with a username and
+/// password. The credentials go over the network as plain text. Use this
+/// connection only on a network that you trust.
 ///
-/// **Plaintext and anonymous or username/password only.** There is no security
-/// policy field and no certificate: an OPC UA session can be signed and
-/// encrypted, and that is worth having, but it needs a client certificate,
-/// somewhere for it to live and a server trust list — the same question
-/// [`MqttConnection`]'s missing TLS raises, one size larger. It gets its own
-/// pass (see `docs/roadmap.md`) rather than a field bolted on here, and until
-/// then this refuses to pretend: the session is `SecurityPolicy::None`, so
-/// credentials cross the wire in the clear and belong on a network you trust.
-///
-/// One consequence is visible in the log and is not a fault: the OPC UA client
-/// prints two errors about a missing *application instance certificate* when a
-/// session is opened. kayak has none by design, and an unencrypted session
-/// needs none — a pipeline that logs those and then reports readings is
-/// working.
+/// When a session opens, the OPC UA client writes two errors about a missing
+/// application instance certificate to the log. This is not a fault. A session
+/// with no encryption needs no certificate.
 #[derive(Clone, Debug, Deserialize, Serialize, JsonSchema, PartialEq, Eq)]
 #[schemars(title = "opcua")]
 pub struct OpcuaConnection {
-    /// endpoint url, e.g. `opc.tcp://localhost:50000`. May reference secrets as
-    /// `${NAME}` — see "secrets" in the readme.
+    /// The url of the endpoint, for example `opc.tcp://localhost:50000`. You
+    /// can use `${NAME}` secret references.
     ///
-    /// This is connected to *directly*: kayak does not ask the server for its
-    /// endpoint list first. Discovery is the usual way, and it is the usual way
-    /// to fail — a server behind docker, NAT or a load balancer advertises the
-    /// hostname it knows itself by, which is regularly not one the client can
-    /// resolve. What is written here is what is dialled.
+    /// kayak connects directly to this url. It does not ask the server for its
+    /// list of endpoints first. Thus, a server behind docker, NAT or a load
+    /// balancer works when this url is correct.
     pub endpoint: Secret,
-    /// username to sign in with, if the server requires one. Must be set
-    /// together with `password` or not at all; without either, the session is
+    /// The username, if the server requires one. Set `username` and
+    /// `password` together, or set neither. Without them, the session is
     /// anonymous.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub username: Option<Secret>,
-    /// that username's password. May reference secrets as `${NAME}` — see
-    /// "secrets" in the readme, and prefer a reference to a literal here.
+    /// The password of the user. Use a `${NAME}` secret reference for this
+    /// value.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub password: Option<Secret>,
 }
 
-/// A postgres database, as one role connects to it.
-///
-/// The database and the role are part of the connection; the *table* is not —
-/// that is what a particular output writes into, so it stays on the output.
+/// A postgres database and the role that kayak connects as. The output or
+/// the input sets the table.
 #[derive(Clone, Debug, Deserialize, Serialize, JsonSchema, PartialEq, Eq)]
 #[schemars(title = "postgres")]
 pub struct PostgresConnection {
-    /// server hostname, e.g. `localhost`
+    /// The hostname of the server, for example `localhost`.
     pub host: String,
-    /// the database to connect to
+    /// The database to connect to.
     pub database: String,
-    /// the role to connect as
+    /// The role to connect as.
     pub user: String,
-    /// that role's password. May reference secrets as `${NAME}` — see
-    /// "secrets" in the readme, and prefer a reference to a literal here.
+    /// The password of the role. Use a `${NAME}` secret reference for this
+    /// value.
     pub password: Secret,
-    /// server port. Defaults to 5432.
+    /// The port of the server. The default is 5432.
     // omitted rather than written as `null` when absent, so a connection saved
     // back out is the file someone hand-wrote — same rule as an input's buffer
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub port: Option<u16>,
 }
 
-/// A directory on the server's filesystem that file outputs write under.
+/// A directory on the filesystem of the server. A `file` output writes under
+/// it, to a `path` relative to this directory.
 ///
-/// The odd one out among the kinds: there is no host, no credentials, nothing
-/// to authenticate against. It earns its place as a connection anyway because
-/// it holds the same thing the others do — *what the system is*, as against
-/// what one pipeline wants from it. A file output names a `path` relative to
-/// this root exactly as a kafka output names a topic on those brokers, and the
-/// object-store connection that replaces it later swaps the root for a bucket
-/// without any component changing.
-///
-/// The root is **not** a boundary on its own. It arrives from `POST
-/// /api/connections` like any other connection, so a browser could name `/`
-/// here; what actually confines writes is the server's `--data-dir`, which this
-/// root has to resolve under. See `Root::resolve` in the root crate.
+/// The directory must be inside the `--data-dir` of the server. kayak checks
+/// this when it builds the output. A server started without `--data-dir` has
+/// no file output.
 #[derive(Clone, Debug, Deserialize, Serialize, JsonSchema, PartialEq, Eq)]
 #[schemars(title = "file")]
 pub struct FileConnection {
-    /// directory that file outputs write under, e.g. `./out/events`. Created if
-    /// it does not exist, and it must resolve inside the server's `--data-dir`
-    /// — a server started without that flag has file output turned off.
+    /// The directory that file outputs write under, for example
+    /// `./out/events`. It must be inside the `--data-dir` of the server. If the
+    /// directory does not exist, kayak makes it.
     pub root: String,
 }
 
-/// A bucket on an S3-compatible object store, and the credentials that reach
-/// it.
+/// A bucket on an S3-compatible object store, and its credentials. An `s3`
+/// output writes under a prefix in the bucket.
 ///
-/// The `bucket` is where [`FileConnection`]'s `root` is: the thing the *system*
-/// gives you, against which an output names a prefix of its own. What is not
-/// here is any equivalent of `--data-dir`. There cannot be one — the server has
-/// no view of a remote namespace to confine writes within, so the boundary is
-/// the credentials, and giving a deployment a key that can only write one bucket
-/// is the thing that does what the sandbox does locally.
+/// There is no limit like `--data-dir` for a bucket. The credentials set what
+/// kayak can write. Give kayak a key that can write only to this bucket.
 ///
-/// `endpoint` is what makes this work against rustfs, minio or any other
-/// S3-compatible server; left out, it is real AWS S3 in `region`.
+/// Set `endpoint` for rustfs, minio or another S3-compatible server. Without
+/// `endpoint`, kayak uses AWS S3 in `region`.
 #[derive(Clone, Debug, Deserialize, Serialize, JsonSchema, PartialEq, Eq)]
 #[schemars(title = "s3")]
 pub struct S3Connection {
-    /// the bucket to write into. It has to exist already — an output creates
-    /// objects, never buckets.
+    /// The bucket to write to. The bucket must exist. The output makes
+    /// objects. It does not make buckets.
     pub bucket: String,
-    /// access key id. May reference secrets as `${NAME}` — see "secrets" in the
-    /// readme, and prefer a reference to a literal here.
+    /// The access key id. Use a `${NAME}` secret reference for this value.
     pub access_key_id: Secret,
-    /// secret access key. May reference secrets as `${NAME}` — see "secrets" in
-    /// the readme, and prefer a reference to a literal here.
+    /// The secret access key. Use a `${NAME}` secret reference for this value.
     pub secret_access_key: Secret,
-    /// url of an S3-compatible server, e.g. `http://localhost:9000` for the
-    /// rustfs in `docker-compose.yaml`. Leave it out for real AWS S3, which is
-    /// then addressed through `region`.
+    /// The url of an S3-compatible server, for example `http://localhost:9000`
+    /// for the rustfs in `docker-compose.yaml`. Leave it out to use AWS S3 in
+    /// `region`.
     // omitted rather than written as `null` when absent, so a connection saved
     // back out is the file someone hand-wrote — same rule as a postgres port
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub endpoint: Option<String>,
-    /// the bucket's region. Defaults to `us-east-1`, which is also what an
-    /// S3-compatible server that does not care about regions will accept.
+    /// The region of the bucket. The default is `us-east-1`. S3-compatible
+    /// servers with no regions accept this value.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub region: Option<String>,
-    /// allow a plaintext `http://` endpoint. Defaults to false: credentials
-    /// over http is a mistake worth having to write down, and the local rustfs
-    /// is the case that legitimately wants it.
+    /// Permit an `http://` endpoint with no TLS. The default is false. The
+    /// credentials then go over the network as plain text. Use it only for a
+    /// local server, for example the rustfs in `docker-compose.yaml`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub allow_http: Option<bool>,
 }
 
-/// A ClickHouse server, as one user connects to it over its HTTP interface.
-///
-/// The same split [`PostgresConnection`] makes: the server, the database and
-/// the user are the connection's; the *table* belongs to the output that writes
-/// it.
-///
-/// The HTTP interface rather than the native protocol because it is what every
-/// ClickHouse deployment exposes — including ClickHouse Cloud, where 8443 is the
-/// only port there is — and because it takes an insert as a body in a named
-/// format, which is exactly the shape a batch of messages already has.
+/// A ClickHouse server and the user that kayak connects as. kayak uses the
+/// HTTP interface of the server. The output or the input sets the table.
 #[derive(Clone, Debug, Deserialize, Serialize, JsonSchema, PartialEq, Eq)]
 #[schemars(title = "clickhouse")]
 pub struct ClickhouseConnection {
-    /// url of the HTTP interface, e.g. `http://localhost:8123` for the server in
-    /// `docker-compose.yaml`, or `https://<host>:8443` for ClickHouse Cloud.
+    /// The url of the HTTP interface, for example `http://localhost:8123` for
+    /// the server in `docker-compose.yaml`, or `https://<host>:8443` for
+    /// ClickHouse Cloud.
     pub url: String,
-    /// the database to write into. It has to exist already — an output creates
-    /// tables, never databases.
+    /// The database to use. The database must exist. The output makes tables.
+    /// It does not make databases.
     pub database: String,
-    /// the user to connect as
+    /// The user to connect as.
     pub user: String,
-    /// that user's password. May reference secrets as `${NAME}` — see "secrets"
-    /// in the readme, and prefer a reference to a literal here.
+    /// The password of the user. Use a `${NAME}` secret reference for this
+    /// value.
     pub password: Secret,
-    /// allow a plaintext `http://` url. Defaults to false: the credentials
-    /// above go with every insert, so sending them in the clear is a decision
-    /// worth writing down. The local server in `docker-compose.yaml` is the
-    /// case that legitimately wants it.
+    /// Permit an `http://` url with no TLS. The default is false. The
+    /// credentials go with every request, as plain text. Use it only for a
+    /// local server, for example the server in `docker-compose.yaml`.
     // omitted rather than written as `null` when absent, so a connection saved
     // back out is the file someone hand-wrote — same rule as a postgres port
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -271,24 +228,22 @@ impl ClickhouseConnection {
     }
 }
 
-/// A Tidepool server: where it listens, and the ingest token it wants.
-///
-/// The same split every connection makes: the server and its credential are
-/// the connection's, the *table* belongs to the output that writes it. Tables
-/// are declared in Tidepool's own project, never created from here.
+/// A Tidepool server and its ingest token. The `tidepool` output sets the
+/// table. You declare the tables in the Tidepool project. kayak does not make
+/// them.
 #[derive(Clone, Debug, Deserialize, Serialize, JsonSchema, PartialEq, Eq)]
 #[schemars(title = "tidepool")]
 pub struct TidepoolConnection {
-    /// the server's url, e.g. `http://localhost:7070`.
+    /// The url of the server, for example `http://localhost:7070`.
     pub url: String,
-    /// the ingest token (the server's `TIDEPOOL_INGEST_TOKEN`, or its admin
-    /// token) as a `${NAME}` reference — see "secrets". Leave it out for a
-    /// server whose ingest is open.
+    /// The ingest token, as a `${NAME}` secret reference. Use the
+    /// `TIDEPOOL_INGEST_TOKEN` of the server, or its admin token. Leave it out
+    /// for a server with open ingest.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub token: Option<Secret>,
-    /// allow a plaintext `http://` url while a `token` is set. Defaults to
-    /// false, for the clickhouse connection's reason: the token goes with
-    /// every batch. Without a token there is nothing to send in the clear.
+    /// Permit an `http://` url with no TLS when `token` is set. The default is
+    /// false. The token goes with every batch, as plain text. Without a token,
+    /// an `http://` url is always permitted.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub allow_http: Option<bool>,
 }
@@ -301,26 +256,25 @@ impl TidepoolConnection {
     }
 }
 
-/// An Indu Cloud deployment: where its API and ingest endpoints are, and the
-/// API key this kayak speaks to it with.
+/// An Indu Cloud deployment: the API and ingest endpoints, and the API key.
 ///
-/// One connection serves both directions: the `indu` output writes streams
-/// through `/ingest/v1/streams`, and the `indu` input reads sensors and
-/// streams through `/api/v1`. The key is minted on the Indu side (its `/keys`
-/// page, or `indud apps register --kind kayak`), bound to a role there, and
-/// arrives here as a `${NAME}` reference like every other credential.
+/// The `indu` output and the `indu` input use the same connection. The output
+/// writes streams through `/ingest/v1/streams`. The input reads sensors and
+/// streams through `/api/v1`. Make the key in Indu, on the `/keys` page or with
+/// `indud apps register --kind kayak`. Give the key a role in Indu.
 #[derive(Clone, Debug, Deserialize, Serialize, JsonSchema, PartialEq, Eq)]
 #[schemars(title = "indu")]
 pub struct InduConnection {
-    /// the deployment's origin, e.g. `https://app.acme.indu.cloud`. The ingest
-    /// endpoint is reached under it as `/ingest/v1/…`; a deployment that serves
-    /// ingest on a separate host names it in `ingest_url`.
+    /// The origin of the deployment, for example `https://app.acme.indu.cloud`.
+    /// The ingest endpoint is `/ingest/v1/…` under this url, unless you set
+    /// `ingest_url`.
     pub url: String,
-    /// where `/ingest/v1/…` lives when it is not under `url` — the single-server
-    /// install serves ingest on its own host, e.g. `https://ingest.acme.indu.cloud`.
+    /// The origin of `/ingest/v1/…` when it is not under `url`, for example
+    /// `https://ingest.acme.indu.cloud`. A single-server installation serves
+    /// ingest on its own host.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ingest_url: Option<String>,
-    /// the API key, `indu.ak.…`, as a `${NAME}` reference — see "secrets".
+    /// The API key (`indu.ak.…`), as a `${NAME}` secret reference.
     pub api_key: Secret,
 }
 
@@ -332,12 +286,12 @@ impl InduConnection {
     }
 }
 
-/// Every kind of system a connection can describe.
+/// The types of system that a connection can describe. The `type` field
+/// selects the type.
 ///
-/// Tagged the same way the component enums are, so a connection reads like the
-/// components that use it. One kind serves both directions: a `kafka`
-/// connection is what a kafka input consumes from *and* what a kafka output
-/// publishes to.
+/// Inputs and outputs use the same connection types. For example, a kafka
+/// input consumes from a `kafka` connection, and a kafka output publishes to
+/// it.
 #[derive(Clone, Debug, Deserialize, Serialize, JsonSchema, PartialEq, Eq)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ConnectionKind {
@@ -387,12 +341,9 @@ pub const OPCUA: &str = "opcua";
 pub const INDU: &str = "indu";
 pub const TIDEPOOL: &str = "tidepool";
 
-/// What `POST /api/connections` takes: a name, and the connection itself
-/// flattened alongside it.
-///
-/// The name is a field here rather than a path segment because it is part of
-/// what is being created, and because the body then reads exactly like one
-/// entry of the file it will be written to.
+/// The body of `POST /api/connections`: the name in `id`, and the fields of
+/// the connection beside it. The body has the same shape as one entry in the
+/// connections file.
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq, JsonSchema)]
 pub struct CreateConnectionRequest {
     pub id: ConnectionId,
@@ -400,12 +351,8 @@ pub struct CreateConnectionRequest {
     pub connection: ConnectionKind,
 }
 
-/// Everything in the connections file, by name.
-///
-/// A `BTreeMap` rather than a list of `{id, ...}` objects: the name is the
-/// identity, duplicates are impossible to express, and iteration is in name
-/// order — which is what makes the file deterministic to write, the same
-/// property the config file depends on.
+/// All connections in the connections file, as an object from name to
+/// connection. kayak writes the names in alphabetical order.
 #[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq, Eq, JsonSchema)]
 #[serde(transparent)]
 pub struct Connections(BTreeMap<ConnectionId, ConnectionKind>);

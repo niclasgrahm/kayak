@@ -2,57 +2,59 @@
 
 ## `redis` {#input-redis}
 
-Subscribes to a redis channel. Each message is parsed as JSON and emitted as a batch of one; a payload that isn't JSON is skipped with a warning rather than taking the pipeline down. The connection is opened on the first read.
+Subscribes to a redis channel and parses each message as JSON.
 
-Plain `SUBSCRIBE`, not `PSUBSCRIBE` — a channel name is exact, the same choice the nats input makes for a subject with no wildcard. Redis pub/sub has no broker-side redelivery of any kind: an unsubscribed client simply misses whatever was published while it was gone, and there is nothing an ack could hold open — the same limitation `NatsConfig` has, for the same reason.
+The input skips a payload that is not JSON and writes a warning to the log. The input opens the connection on the first read.
+
+The input uses `SUBSCRIBE`, so the channel name must be exact. Patterns are not supported. Redis pub/sub does not send a message again. When the input is not connected, it does not receive the messages that are published.
 
 | field | type | | description |
 | --- | --- | --- | --- |
-| `connection` | `redis` connection | <Badge type="warning" text="required" /> | name of the redis connection to subscribe on — see "connections" in the readme. The server it points at is declared once, in the connections file, rather than repeated in every pipeline that uses it. |
-| `channel` | `string` | <Badge type="warning" text="required" /> | the channel to subscribe to |
-| `max_batch` | `integer` | <Badge type="info" text="optional" /> | most messages to put in one batch. Defaults to 1 — one message per batch, which is what this input has always done. Raising it only ever coalesces messages that had *already arrived*: the input still returns as soon as it has one, so a quiet channel is no slower than it was. |
-| `ack` | `on_receipt` \| `on_delivery` | <Badge type="info" text="optional" /> | when this input tells its broker a message is done with. Available on every input kind in the schema, but only honoured by ones with a broker-side notion of "received" vs "delivered" of their own (`kafka`, for now) — an input with nothing to acknowledge refuses to build rather than silently treating this as `on_receipt`. Defaults to `on_receipt`, which is what every input has always done. See "acknowledgement modes" in the guide. |
-| `buffer` | `static \| tumbling \| batch` | <Badge type="info" text="optional" /> | batch messages from this input before the transforms see them — by count (`static`), by time (`tumbling`) or by whichever comes first (`batch`). Never emits an empty batch. Available on every input kind. Not to be confused with the `buffer` transform. |
-| `envelope` | `merge \| wrap` | <Badge type="info" text="optional" /> | attach metadata about where each message came from — the subject, topic, partition and so on listed under "metadata" below. Available on every input kind. Omit it and messages are passed on exactly as they arrive. |
+| `connection` | `redis` connection | <Badge type="warning" text="required" /> | The name of the redis connection to subscribe on. Declare the connection in the connections file. |
+| `channel` | `string` | <Badge type="warning" text="required" /> | The channel to subscribe to. |
+| `max_batch` | `integer` | <Badge type="info" text="optional" /> | The maximum number of messages in one batch. The default is 1. The input puts only messages that are already received into a batch. It does not wait for more messages, so a high value does not add latency on a quiet channel. |
+| `ack` | `on_receipt` \| `on_delivery` | <Badge type="info" text="optional" /> | When the input acknowledges a message to its broker. The default is `on_receipt`. Only the `kafka` and `mqtt` inputs support `on_delivery`. The `mqtt` input requires a `qos` of `at_least_once` or higher for it. On all other inputs, `on_delivery` fails to build. |
+| `buffer` | `static \| tumbling \| batch` | <Badge type="info" text="optional" /> | Collect messages from this input into batches before the transforms. Use a count (`static`), a time (`tumbling`) or the first of the two (`batch`). The buffer never sends an empty batch. Available on all input types. This is not the `buffer` transform. |
+| `envelope` | `merge \| wrap` | <Badge type="info" text="optional" /> | Add metadata about the source of each message, for example the subject, the topic or the partition. The "metadata" section lists the fields. Available on all input types. If you do not set it, the input sends each message without changes. |
 
 **`buffer` — `type: "static"`**
 
 | field | type | | description |
 | --- | --- | --- | --- |
-| `size` | `integer` | <Badge type="warning" text="required" /> | how many messages to gather before the batch is handed on |
+| `size` | `integer` | <Badge type="warning" text="required" /> | The number of messages in a batch. |
 
 **`buffer` — `type: "tumbling"`**
 
 | field | type | | description |
 | --- | --- | --- | --- |
-| `window_seconds` | `integer` | <Badge type="warning" text="required" /> | how long to gather messages for, measured from the first one |
+| `window_seconds` | `integer` | <Badge type="warning" text="required" /> | The time to collect messages, in s, from the first message. |
 
 **`buffer` — `type: "batch"`**
 
 | field | type | | description |
 | --- | --- | --- | --- |
-| `size` | `integer` | <Badge type="warning" text="required" /> | how many messages end the batch immediately |
-| `window_seconds` | `integer` | <Badge type="warning" text="required" /> | how long to wait for them, measured from the first message in the batch |
+| `size` | `integer` | <Badge type="warning" text="required" /> | The number of messages that closes the batch immediately. |
+| `window_seconds` | `integer` | <Badge type="warning" text="required" /> | The maximum time to wait, in s, from the first message in the batch. |
 
 **`envelope` — `type: "merge"`**
 
 | field | type | | description |
 | --- | --- | --- | --- |
-| `meta` | `string` | <Badge type="info" text="optional" /> | the field the metadata object is written to. Defaults to `_meta`. |
+| `meta` | `string` | <Badge type="info" text="optional" /> | The field for the metadata object. The default is `_meta`. |
 
 **`envelope` — `type: "wrap"`**
 
 | field | type | | description |
 | --- | --- | --- | --- |
-| `meta` | `string` | <Badge type="info" text="optional" /> | the field the metadata object is written to. Defaults to `_meta`. |
-| `payload` | `string` | <Badge type="info" text="optional" /> | the field the original payload is written to. Defaults to `value`. |
+| `meta` | `string` | <Badge type="info" text="optional" /> | The field for the metadata object. The default is `_meta`. |
+| `payload` | `string` | <Badge type="info" text="optional" /> | The field for the original payload. The default is `value`. |
 
 **metadata** — what this input attaches to a message when its `envelope` is set.
 
 | field | holds |
 | --- | --- |
-| `pipeline` | id of the pipeline that read the message |
-| `input` | kind of input it was read by, e.g. `nats` |
-| `received_at` | when kayak read it, RFC 3339. This is an arrival time and not an event time: it says when the message reached this pipeline, not when whatever it describes happened. |
-| `connection` | name of the connection it was received on |
-| `channel` | the channel this message was published to |
+| `pipeline` | The id of the pipeline that read the message. |
+| `input` | The type of the input that read the message, for example `nats`. |
+| `received_at` | The time when kayak read the message, as RFC 3339. This is the arrival time at this pipeline. It is not the time of the event in the message. |
+| `connection` | The name of the connection that received the message. |
+| `channel` | The channel that the message was published to. |

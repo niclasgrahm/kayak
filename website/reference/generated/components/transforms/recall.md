@@ -2,13 +2,13 @@
 
 ## `recall` {#transform-recall}
 
-Writes values from the pipeline's state bucket onto every message, under the names they were remembered by.
+Writes values from the state bucket of the pipeline onto each message, with the names from `remember`.
 
-This is how a slow-moving fact — the unit being produced, the recipe in force — reaches the fast stream that has to be attributed to it. The values land as top-level fields, so a `reducer` downstream can group by them without knowing where they came from.
+Use it to add a slow fact to a fast stream, for example the current recipe of a machine. The values become top-level fields, so a `reducer` after it can group by them.
 
-Needs a `state` on the pipeline; it fails to build without one.
+The pipeline must have a `state`, or the transform fails to build.
 
 | field | type | | description |
 | --- | --- | --- | --- |
-| `recall` | `list of string` | <Badge type="warning" text="required" /> | the names to read out of the bucket, as `remember` wrote them. Each one is written onto the message under the same name. |
-| `on_missing` | `skip` \| `null` \| `error` | <Badge type="info" text="optional" /> | what to do about a message whose key has nothing remembered under it yet |
+| `recall` | `list of string` | <Badge type="warning" text="required" /> | The names to read from the bucket, as `remember` wrote them. The transform writes each value onto the message with the same name. |
+| `on_missing` | `skip` \| `null` \| `error` | <Badge type="info" text="optional" /> | What to do with a message when the bucket has no value for its key. The default is `skip`. |

@@ -2,79 +2,81 @@
 
 ## `pivot` {#transform-pivot}
 
-Turns a stream of one-reading-per-message into rows: remembers the latest value of each of `names` per key, and writes all of them onto every message.
+Changes a stream with one reading per message into rows. The transform keeps the latest value of each name in `names` for each key. It writes all of these values onto every message.
 
-The usual shape of industrial and IoT data is one message per reading — `{"sensor": "state", "value": "RUNNING"}`, then `{"sensor": "fault", "value": "NONE"}` — and most logic downstream wants the machine as one row: `{"state": "RUNNING", "fault": "NONE", ...}`. A message whose `name` field holds one of `names` updates that one first, so it always carries its own reading; then every value remembered for its key is written onto it, at the top level or under `into`. A name not seen yet for a key is left out rather than written as `null`. One message in, one message out.
+For example, the input is `{"sensor": "state", "value": "RUNNING"}` and then `{"sensor": "fault", "value": "NONE"}`. The output row is `{"state": "RUNNING", "fault": "NONE", ...}`.
 
-`names` is required, and is what bounds the state: a stream naming a new thing in every message would otherwise grow one key's row without end. A message naming something else contributes nothing, and still gets the row.
+When the `name` field of a message holds one of `names`, the transform first records that reading. Then it writes every value that it keeps for the key onto the message. It writes them at the top level, or under `into`. A name with no reading yet for the key is not written. One message goes in and one message comes out.
+
+`names` is required because it limits the state. A message with a name that is not in `names` adds nothing, but it gets the row.
 
 | field | type | | description |
 | --- | --- | --- | --- |
-| `name` | `string` | <Badge type="warning" text="required" /> | the field whose value says which of `names` a message is a reading of |
-| `value` | `string` | <Badge type="warning" text="required" /> | the field holding the reading — any JSON, a string state as much as a number |
-| `names` | `list of string` | <Badge type="warning" text="required" /> | the names to remember and write, each as a field of its own. At least one |
-| `group_by` | `list of string` | <Badge type="info" text="optional" /> | the fields that identify a row, the reducer's way. Leave it out for one row |
-| `into` | `string` | <Badge type="info" text="optional" /> | an object field to write them under. Leave it out to write them at the top level |
-| `on_missing` | `error` \| `skip` | <Badge type="info" text="optional" /> | what to do about a message missing a group field, or naming one of `names` without carrying a `value` |
-| `reset_when` | `list of numeric \| string \| one_of \| none_of` | <Badge type="info" text="optional" /> | a message passing all of these clears its key's state first, so the series starts over. Checked before `when` |
-| `when` | `list of numeric \| string \| one_of \| none_of` | <Badge type="info" text="optional" /> | only messages passing all of these are applied; the rest pass through untouched. Leave it out for every message |
+| `name` | `string` | <Badge type="warning" text="required" /> | The field that holds the name of the reading. kayak compares its value with `names`. |
+| `value` | `string` | <Badge type="warning" text="required" /> | The field that holds the reading. The value can be any JSON value, for example a string or a number. |
+| `names` | `list of string` | <Badge type="warning" text="required" /> | The names to keep and write. Each name becomes a field. Give one name or more. |
+| `group_by` | `list of string` | <Badge type="info" text="optional" /> | The fields that identify a row, as in `reduce`. Leave it out for one row. |
+| `into` | `string` | <Badge type="info" text="optional" /> | An object field to write the values under. Leave it out to write them at the top level. |
+| `on_missing` | `error` \| `skip` | <Badge type="info" text="optional" /> | What to do with a message that does not have a group field, or that has a name from `names` and no `value`. The default is `error`. |
+| `reset_when` | `list of numeric \| string \| one_of \| none_of` | <Badge type="info" text="optional" /> | The conditions that clear the state of the message's key. All of them must match. The series then starts again. The transform checks these before `when`. |
+| `when` | `list of numeric \| string \| one_of \| none_of` | <Badge type="info" text="optional" /> | The conditions that a message must match to be applied. All of them must match. Other messages pass through unchanged. Leave it out to apply every message. |
 
 **`reset_when` — each entry — `type: "numeric"`**
 
 | field | type | | description |
 | --- | --- | --- | --- |
-| `field` | `string` | <Badge type="warning" text="required" /> | the field to test — a dotted path, like anywhere else |
-| `operator` | `greater_than` \| `less_than` \| `equal_to` \| `not_equal_to` | <Badge type="warning" text="required" /> | how the field is compared |
-| `value` | `number` | <Badge type="warning" text="required" /> | the number it is compared to |
+| `field` | `string` | <Badge type="warning" text="required" /> | The field to test, as a dotted path. |
+| `operator` | `greater_than` \| `less_than` \| `equal_to` \| `not_equal_to` | <Badge type="warning" text="required" /> | How to compare the field. |
+| `value` | `number` | <Badge type="warning" text="required" /> | The number to compare to. |
 
 **`reset_when` — each entry — `type: "string"`**
 
 | field | type | | description |
 | --- | --- | --- | --- |
-| `field` | `string` | <Badge type="warning" text="required" /> | the field to test — a dotted path, like anywhere else |
-| `operator` | `equal_to` \| `not_equal_to` \| `contains` | <Badge type="warning" text="required" /> | how the field is compared |
-| `value` | `string` | <Badge type="warning" text="required" /> | the string it is compared to |
+| `field` | `string` | <Badge type="warning" text="required" /> | The field to test, as a dotted path. |
+| `operator` | `equal_to` \| `not_equal_to` \| `contains` | <Badge type="warning" text="required" /> | How to compare the field. |
+| `value` | `string` | <Badge type="warning" text="required" /> | The string to compare to. |
 
 **`reset_when` — each entry — `type: "one_of"`**
 
 | field | type | | description |
 | --- | --- | --- | --- |
-| `field` | `string` | <Badge type="warning" text="required" /> | the field to test — a dotted path, like anywhere else |
-| `values` | `list of string` | <Badge type="warning" text="required" /> | the strings that match |
+| `field` | `string` | <Badge type="warning" text="required" /> | The field to test, as a dotted path. |
+| `values` | `list of string` | <Badge type="warning" text="required" /> | The strings that match. |
 
 **`reset_when` — each entry — `type: "none_of"`**
 
 | field | type | | description |
 | --- | --- | --- | --- |
-| `field` | `string` | <Badge type="warning" text="required" /> | the field to test — a dotted path, like anywhere else |
-| `values` | `list of string` | <Badge type="warning" text="required" /> | the strings that do not match |
+| `field` | `string` | <Badge type="warning" text="required" /> | The field to test, as a dotted path. |
+| `values` | `list of string` | <Badge type="warning" text="required" /> | The strings that do not match. |
 
 **`when` — each entry — `type: "numeric"`**
 
 | field | type | | description |
 | --- | --- | --- | --- |
-| `field` | `string` | <Badge type="warning" text="required" /> | the field to test — a dotted path, like anywhere else |
-| `operator` | `greater_than` \| `less_than` \| `equal_to` \| `not_equal_to` | <Badge type="warning" text="required" /> | how the field is compared |
-| `value` | `number` | <Badge type="warning" text="required" /> | the number it is compared to |
+| `field` | `string` | <Badge type="warning" text="required" /> | The field to test, as a dotted path. |
+| `operator` | `greater_than` \| `less_than` \| `equal_to` \| `not_equal_to` | <Badge type="warning" text="required" /> | How to compare the field. |
+| `value` | `number` | <Badge type="warning" text="required" /> | The number to compare to. |
 
 **`when` — each entry — `type: "string"`**
 
 | field | type | | description |
 | --- | --- | --- | --- |
-| `field` | `string` | <Badge type="warning" text="required" /> | the field to test — a dotted path, like anywhere else |
-| `operator` | `equal_to` \| `not_equal_to` \| `contains` | <Badge type="warning" text="required" /> | how the field is compared |
-| `value` | `string` | <Badge type="warning" text="required" /> | the string it is compared to |
+| `field` | `string` | <Badge type="warning" text="required" /> | The field to test, as a dotted path. |
+| `operator` | `equal_to` \| `not_equal_to` \| `contains` | <Badge type="warning" text="required" /> | How to compare the field. |
+| `value` | `string` | <Badge type="warning" text="required" /> | The string to compare to. |
 
 **`when` — each entry — `type: "one_of"`**
 
 | field | type | | description |
 | --- | --- | --- | --- |
-| `field` | `string` | <Badge type="warning" text="required" /> | the field to test — a dotted path, like anywhere else |
-| `values` | `list of string` | <Badge type="warning" text="required" /> | the strings that match |
+| `field` | `string` | <Badge type="warning" text="required" /> | The field to test, as a dotted path. |
+| `values` | `list of string` | <Badge type="warning" text="required" /> | The strings that match. |
 
 **`when` — each entry — `type: "none_of"`**
 
 | field | type | | description |
 | --- | --- | --- | --- |
-| `field` | `string` | <Badge type="warning" text="required" /> | the field to test — a dotted path, like anywhere else |
-| `values` | `list of string` | <Badge type="warning" text="required" /> | the strings that do not match |
+| `field` | `string` | <Badge type="warning" text="required" /> | The field to test, as a dotted path. |
+| `values` | `list of string` | <Badge type="warning" text="required" /> | The strings that do not match. |

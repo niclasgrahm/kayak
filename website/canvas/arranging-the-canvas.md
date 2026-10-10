@@ -1,16 +1,38 @@
 # arranging the canvas
 
-Where the cards sit is **not configuration**, and it is deliberately kept out of
-the config file. A config file with pixel coordinates in it stops being
-reviewable, and nothing about a position changes what the server runs. So it
-lives in its own file beside the config: `config.json` is arranged by
-`config.layout.json`, `pipelines.yaml` by `pipelines.layout.json`. Derived from
-the config path rather than configured, so the pair travels together.
+In edit mode, you can move cards, resize them and adjust the lines between
+them. The positions do not change what the server runs.
 
-It is generated and maintained by the program, and meant to be committed —
-which is why it is written deterministically (ids in one order, no `null`s for
-things nobody set) and atomically, the same as the config file. It holds only
-the cards someone has actually moved:
+## gestures (edit mode)
+
+| gesture | what it does |
+| --- | --- |
+| drag the title bar of a card | move the card and all other selected cards |
+| drag the bottom-right corner of a card | resize the card |
+| double-click the title bar of a card | give the card back to the automatic layout |
+| shift-click a card or a sidebar row | add the pipeline to the selection, or remove it |
+| `⋯` on a sidebar row, then `select children` | add the pipeline and all pipelines downstream of it to the selection |
+| click the empty canvas | clear the selection |
+| drag the middle of a line | move the middle segment nearer to one card or the other |
+| drag an end of a line | move the point where the line connects, along the face of the card |
+| double-click the middle or an end of a line | give that part back to the automatic routing |
+
+Cards snap to the 20 px grid. A moved card keeps its slot in the automatic
+layout, so the other cards do not move. Cards can overlap.
+
+A plain click on a card that is not selected selects only that card. A press on
+a selected card keeps the selection, so you can drag a group by any card in it.
+`select children` adds to the selection. A resize applies to one card only.
+
+The face that a line uses is always automatic. kayak ignores a stored end
+position when the line moves to a different face. A straight line or an L-shaped
+line has no middle handle.
+
+## the layout file
+
+kayak writes the positions to a layout file beside the config. The name comes
+from the config: `config.json` has `config.layout.json`, and `pipelines.yaml`
+has `pipelines.layout.json`. The layout file is always JSON.
 
 ```json
 {
@@ -29,35 +51,19 @@ the cards someone has actually moved:
 }
 ```
 
-An absent id is the normal case, not a gap: that card is laid out
-automatically. `height` is absent unless the card was resized, because the two
-are different things — normally a card is as tall as its content, and only an
-explicit resize pins it. `edges` is absent entirely unless a line
-has been adjusted, each of the three adjustments is absent unless it was made,
-and an entry disappears once *all* of them are back to automatic — an undone
-adjustment shouldn't leave a no-op behind in a committed file. An entry naming a
-pipeline that no longer exists is kept rather than pruned; it costs nothing and
-it is still there if the pipeline comes back.
+- `pipelines` contains only the cards that you moved. The other cards use the
+  automatic layout.
+- `height` is present only when you resized the card.
+- `edges` contains only the lines that you adjusted. An entry goes away when
+  all its adjustments are back to automatic.
+- An entry for a deleted pipeline stays in the file.
 
-Here the write-through rule is the *opposite* of the config file's, and for the
-same reason: moving a card changes nothing the server runs, so `PUT
-/api/layout` writes immediately (on release, not per frame) and arranging the
-canvas never counts as an unsaved change. There is no save step because there is
-nothing worth reviewing before it lands. It is a full replacement rather than a
-patch, which is what makes "put everything back to automatic" an ordinary send
-of a smaller map. Without a config file there is nowhere to put it, so the
-arrangement lives in memory — until a save creates one, which writes it out on
-the spot rather than losing the tidying that came before it.
+The UI sends `PUT /api/layout` when you release the mouse button. The server
+writes the file immediately. A layout change is never an unsaved change. The
+request replaces the complete layout.
 
-**The grid is the unit.** `GRID` in `frontend/src/graph.rs` is 20px, the card
-width is 18 cells, positions and sizes snap to it, ports sit on its lines, and
-edge channels run along them — the background grid you can see is the same one
-things land on. A route only reads as "along the grid" if the things it connects
-are on the grid too, which is also why measured card heights are rounded *up* to
-the next line (up, so content still fits; and idempotent, so the measure → lay
-out → render loop doesn't oscillate between two heights).
+Without a config file, the layout stays in memory. When you save a new config
+file, kayak also writes the layout file.
 
-Pinning a card does *not* take it out of the automatic flow: the row it came
-from keeps its slot, so dragging one card doesn't rearrange every other card on
-the canvas. Two cards can then be dragged on top of each other, which is the
-user's business in the same way it is in any other editor with a canvas.
+kayak writes the file in a fixed sequence and replaces it atomically. Thus you
+can commit it beside the config.
