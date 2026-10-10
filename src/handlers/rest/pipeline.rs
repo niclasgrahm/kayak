@@ -109,6 +109,8 @@ pub async fn ingest_messages(
     // AppError maps the failures apart: nothing to post to is a 404, a
     // credential that didn't satisfy the input is a 401, a pipeline that is
     // behind is a 503
-    let accepted = state.ingest(&pipeline_id, payload.into_messages(), meta, &credentials)?;
+    let accepted = state
+        .ingest_durably(&pipeline_id, payload.into_messages(), meta, &credentials)
+        .await?;
     Ok((StatusCode::ACCEPTED, Json(IngestResponse { accepted })))
 }

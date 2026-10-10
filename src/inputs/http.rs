@@ -243,7 +243,7 @@ fn strip_scheme<'a>(value: &'a str, scheme: &str) -> Option<&'a str> {
 /// because by the time the run loop sees the messages the request is long gone.
 /// It is built whether or not the input has an `envelope` — one small struct per
 /// post is not worth a second code path.
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug, Default, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct PostMeta {
     pub method: String,
     pub remote_addr: Option<String>,
@@ -300,6 +300,30 @@ impl PostMeta {
 struct Posted {
     batch: Arc<MessageBatch>,
     meta: PostMeta,
+    /// Its offset in the write-ahead log, once it has been logged — see
+    /// [`crate::inputs::wal`]. `None` without checkpointing.
+    offset: Option<u64>,
+    /// Told whether the post was made durable, for a caller that waits on
+    /// it before answering. `None` once logged, and without checkpointing.
+    done: Option<tokio::sync::oneshot::Sender<bool>>,
+}
+
+/// A post the inbox took. Under checkpointing, it is only *durable* once the
+/// write-ahead log has fsynced it, and [`Accepted::durable`] waits for that;
+/// without checkpointing it is durable the moment it is queued, which is to
+/// say not at all, as it always was.
+pub struct Accepted(Option<tokio::sync::oneshot::Receiver<bool>>);
+
+impl Accepted {
+    /// Wait until the post is as durable as this server makes posts, and say
+    /// whether it got there. `false` means the log could not be written: the
+    /// post must not be acknowledged to its client.
+    pub async fn durable(self) -> bool {
+        match self.0 {
+            None => true,
+            Some(rx) => rx.await.unwrap_or(false),
+        }
+    }
 }
 
 struct Inbox {
@@ -308,6 +332,9 @@ struct Inbox {
     /// the one that has since taken its id.
     token: u64,
     tx: mpsc::Sender<Posted>,
+    /// Whether `tx` leads to a write-ahead log rather than straight to the
+    /// input — whether a poster has anything to wait for.
+    logged: bool,
     /// What a post must present, if the input asked for anything.
     ///
     /// It lives on the registration rather than on the input for the same
@@ -361,6 +388,7 @@ impl Inboxes {
     /// Fails if the id is already claimed: two http inputs on one pipeline
     /// would share an endpoint, and which of them a request reached would be
     /// arbitrary.
+    #[cfg(test)]
     fn register(
         self: &Arc<Self>,
         pipeline_id: PipelineId,
@@ -368,19 +396,68 @@ impl Inboxes {
         envelope: Envelope,
         auth: Option<Requirement>,
     ) -> Result<HttpInput> {
+        self.register_logged(pipeline_id, capacity, envelope, auth, None)
+    }
+
+    /// As [`Inboxes::register`], writing every post to `log` before it is
+    /// acknowledged — and replaying the records it already holds from
+    /// `replay_from` on, ahead of anything posted from now.
+    fn register_logged(
+        self: &Arc<Self>,
+        pipeline_id: PipelineId,
+        capacity: usize,
+        envelope: Envelope,
+        auth: Option<Requirement>,
+        log: Option<(&std::path::Path, u64)>,
+    ) -> Result<HttpInput> {
         let mut inboxes = self.lock();
         anyhow::ensure!(
             !inboxes.contains_key(&pipeline_id),
             "pipeline '{pipeline_id}' already has an http input; one pipeline is one endpoint"
         );
-        let token = self.next_token.fetch_add(1, Ordering::Relaxed);
         let (tx, rx) = mpsc::channel(capacity);
-        inboxes.insert(pipeline_id.clone(), Inbox { token, tx, auth });
+        let (entry, wal, replay) = match log {
+            None => (tx, None, std::collections::VecDeque::new()),
+            Some((dir, from)) => {
+                let (wal, writer, records) = crate::inputs::wal::open(dir)?;
+                let replay: std::collections::VecDeque<Posted> = records
+                    .into_iter()
+                    .filter(|record| record.offset >= from)
+                    .map(|record| Posted {
+                        batch: Arc::new(record.messages.into_iter().map(Arc::new).collect()),
+                        meta: record.meta,
+                        offset: Some(record.offset),
+                        done: None,
+                    })
+                    .collect();
+                if !replay.is_empty() {
+                    tracing::info!(
+                        "[{pipeline_id}]\t replaying {} logged posts the last checkpoint did not cover",
+                        replay.len()
+                    );
+                }
+                let (entry, posts) = mpsc::channel(capacity);
+                tokio::spawn(write_log(writer, posts, tx));
+                (entry, Some(wal), replay)
+            }
+        };
+        let token = self.next_token.fetch_add(1, Ordering::Relaxed);
+        inboxes.insert(
+            pipeline_id.clone(),
+            Inbox {
+                token,
+                tx: entry,
+                logged: wal.is_some(),
+                auth,
+            },
+        );
         drop(inboxes);
         Ok(HttpInput {
             pipeline_id,
             token,
             rx,
+            replay,
+            wal,
             envelope,
             inboxes: Arc::clone(self),
         })
@@ -397,18 +474,30 @@ impl Inboxes {
         batch: Arc<MessageBatch>,
         meta: PostMeta,
         credentials: &Credentials,
-    ) -> Result<(), IngestError> {
-        let sender = {
+    ) -> Result<Accepted, IngestError> {
+        let (sender, logged) = {
             let inboxes = self.lock();
             let Some(inbox) = inboxes.get(pipeline_id) else {
                 return Err(IngestError::NoInbox(pipeline_id.to_string()));
             };
             inbox.permits(pipeline_id, credentials)?;
-            inbox.tx.clone()
+            (inbox.tx.clone(), inbox.logged)
+        };
+        let (done, durable) = if logged {
+            let (done, durable) = tokio::sync::oneshot::channel();
+            (Some(done), Some(durable))
+        } else {
+            (None, None)
         };
         sender
-            .try_send(Posted { batch, meta })
-            .map_err(|_| IngestError::Full(pipeline_id.to_string()))
+            .try_send(Posted {
+                batch,
+                meta,
+                offset: None,
+                done,
+            })
+            .map_err(|_| IngestError::Full(pipeline_id.to_string()))?;
+        Ok(Accepted(durable))
     }
 
     /// Whether a pipeline is accepting posts, without sending anything. What an
@@ -480,12 +569,85 @@ impl BuildInput for HttpInputConfig {
             .map(|config| Requirement::build(config, ctx))
             .transpose()?;
         let envelope = ctx.envelope("http", None);
-        Ok(Box::new(ctx.inboxes.register(
+        // Under checkpointing every post is logged before it is acknowledged,
+        // and the log is what a restart replays — see `inputs::wal`.
+        let log = ctx.checkpoints.as_ref().map(|checkpoints| {
+            (
+                crate::inputs::wal::dir_for(checkpoints.dir(), &ctx.pipeline_id),
+                crate::inputs::wal::replay_from(ctx.restored_position.as_ref()),
+            )
+        });
+        Ok(Box::new(ctx.inboxes.register_logged(
             ctx.pipeline_id.clone(),
             capacity,
             envelope,
             auth,
+            log.as_ref().map(|(dir, from)| (dir.as_path(), *from)),
         )?))
+    }
+}
+
+/// The write-ahead log's writer: takes every post waiting, appends them with
+/// one fsync, hands them on to the input and tells each poster whether it is
+/// durable. Ends when the inbox is gone (nothing more can be posted) or the
+/// input is (nothing more can be read).
+///
+/// A post the log could not write is answered `false` and not handed on: its
+/// client gets a 503 and sends it again, which is the only honest answer to a
+/// post that would not survive a crash.
+async fn write_log(
+    writer: crate::inputs::wal::Writer,
+    mut posts: mpsc::Receiver<Posted>,
+    input: mpsc::Sender<Posted>,
+) {
+    let mut writer = Some(writer);
+    while let Some(first) = posts.recv().await {
+        let mut batch = vec![first];
+        while let Ok(more) = posts.try_recv() {
+            batch.push(more);
+        }
+        let Some(mut held) = writer.take() else { return };
+        let (held, batch, written) = match tokio::task::spawn_blocking(move || {
+            let entries: Vec<(&[Arc<Value>], &PostMeta)> = batch
+                .iter()
+                .map(|post| (post.batch.as_slice(), &post.meta))
+                .collect();
+            let written = held.append(&entries);
+            (held, batch, written)
+        })
+        .await
+        {
+            Ok(done) => done,
+            Err(e) => {
+                tracing::error!("the http log writer panicked: {e}");
+                return;
+            }
+        };
+        writer = Some(held);
+        match written {
+            Ok(offsets) => {
+                for (mut post, offset) in batch.into_iter().zip(offsets) {
+                    post.offset = Some(offset);
+                    let done = post.done.take();
+                    // after the fsync and before the reply, so a post that has
+                    // been acknowledged is always either queued or logged
+                    if input.send(post).await.is_err() {
+                        return;
+                    }
+                    if let Some(done) = done {
+                        let _ = done.send(true);
+                    }
+                }
+            }
+            Err(e) => {
+                tracing::error!("an http post could not be logged, refusing it: {e:#}");
+                for post in batch {
+                    if let Some(done) = post.done {
+                        let _ = done.send(false);
+                    }
+                }
+            }
+        }
     }
 }
 
@@ -493,6 +655,10 @@ pub struct HttpInput {
     pipeline_id: PipelineId,
     token: u64,
     rx: mpsc::Receiver<Posted>,
+    /// Logged posts no checkpoint covered, read ahead of `rx`.
+    replay: std::collections::VecDeque<Posted>,
+    /// The write-ahead log, under checkpointing.
+    wal: Option<Arc<crate::inputs::wal::Wal>>,
     /// What this input attaches to each message, if the config asked for any.
     envelope: Envelope,
     inboxes: Arc<Inboxes>,
@@ -511,12 +677,27 @@ impl InputSource for HttpInput {
         // through its `Drop` — so `None` means we have been dropped, which
         // can't be observed from inside `next`. Reported rather than
         // unreachable!(), since a future refactor could make it possible.
-        let posted = self.rx.recv().await.ok_or_else(|| {
-            anyhow::anyhow!("the http input of pipeline '{}' is gone", self.pipeline_id)
-        })?;
+        let posted = match self.replay.pop_front() {
+            Some(posted) => posted,
+            None => self.rx.recv().await.ok_or_else(|| {
+                anyhow::anyhow!("the http input of pipeline '{}' is gone", self.pipeline_id)
+            })?,
+        };
+        // a logged post's offset is its position: the checkpoint holding it
+        // makes it safe to truncate the log behind it
+        let delivery = |batch: Arc<MessageBatch>| match (&self.wal, posted.offset) {
+            (Some(wal), Some(offset)) => Delivery::with_ack(
+                batch,
+                Box::new(crate::inputs::wal::WalAck {
+                    wal: Arc::clone(wal),
+                    next: offset + 1,
+                }),
+            ),
+            _ => Delivery::new(batch),
+        };
 
         if !self.envelope.is_enabled() {
-            return Ok(Delivery::new(posted.batch));
+            return Ok(delivery(posted.batch));
         }
         // one request is one batch, so every message in it shares its metadata
         let meta = posted.meta.as_meta();
@@ -535,7 +716,7 @@ impl InputSource for HttpInput {
                 out.map(Arc::new)
             })
             .collect();
-        Ok(Delivery::new(Arc::new(enveloped)))
+        Ok(delivery(Arc::new(enveloped)))
     }
 }
 

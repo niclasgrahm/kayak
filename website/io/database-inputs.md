@@ -75,10 +75,13 @@ Rules for the watermark:
 
 - **It is in memory.** After a restart, the input starts again from
   `start_from`. Thus an incremental input is *at least once* across a restart.
+  If the server [checkpoints](/operating/durability), the watermark is part of
+  each checkpoint, and a restart continues exactly after it.
 - **It moves when the input sends the rows.** It does not wait for the
   outputs. The run loop acknowledges a batch whether or not its outputs
   succeed (see [acknowledging an input](/pipelines/pipelines#acknowledging-an-input)).
-  Thus `ack: on_delivery` fails at build time.
+  Thus `ack: on_delivery` fails at build time. Under checkpointing, the
+  watermark waits for the checkpoint, not for the acknowledgement.
 - **The input handles ties at a page boundary.** Many rows can have the same
   timestamp. The input cuts a full page before its last distinct value. It
   reads those rows again, complete, on the next page. If all rows on a page have

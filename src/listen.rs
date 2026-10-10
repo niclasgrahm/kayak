@@ -155,6 +155,7 @@ mod tests {
         );
         ServerConfig {
             history: kayak_core::server_config::HistoryConfig::default(),
+            checkpoint: kayak_core::server_config::CheckpointConfig::default(),
             auth: AuthConfig::Basic { users },
         }
     }

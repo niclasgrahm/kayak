@@ -112,3 +112,8 @@ Only two inputs accept `on_delivery`:
 
 mqtt at qos `at_most_once` has no redelivery, so it refuses `on_delivery`.
 Every other input also refuses to build with `on_delivery`.
+
+A server started with `--state-dir` [checkpoints](/operating/durability). This
+changes two things. A kafka input stores its offsets only when a checkpoint
+that covers them is durable, whatever `ack` says. A failed output holds its
+pipeline and does not let the batch go.

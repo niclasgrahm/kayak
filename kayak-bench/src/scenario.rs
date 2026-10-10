@@ -85,6 +85,13 @@ pub struct Scenario {
     /// That gate was worth 46% of throughput before the feed was throttled, and
     /// this is the row that keeps the number honest instead of remembered.
     pub watched: bool,
+    /// Whether the server checkpoints (see `docs/durability.md`): roots hand
+    /// every batch a deferred, positioned ack the run loop has to hold and
+    /// coalesce, barriers go through every edge, and a checkpoint is taken
+    /// every [`CHECKPOINT_INTERVAL`](crate::harness::CHECKPOINT_INTERVAL) into
+    /// a scratch directory. The rows with it beside the rows without it are
+    /// what keeps the cost of checkpointing a number rather than a claim.
+    pub checkpointed: bool,
 }
 
 impl Scenario {
@@ -98,7 +105,13 @@ impl Scenario {
             depth: 1,
             keys: 1,
             watched: false,
+            checkpointed: false,
         }
+    }
+
+    const fn checkpointed(mut self) -> Self {
+        self.checkpointed = true;
+        self
     }
 
     const fn keys(mut self, n: usize) -> Self {
@@ -167,6 +180,13 @@ pub fn suite() -> Vec<Scenario> {
         Scenario::new("pipelines1000", "a thousand pipelines at once").pipelines(1000),
         Scenario::new("depth3", "three pipelines deep — two `pipeline`-input hops").depth(3),
         Scenario::new("watched", "the reference, with a browser attached to /events").watched(),
+        Scenario::new("checkpointed1", "one message per batch, checkpointed — the per-pass cost")
+            .batch(1)
+            .checkpointed(),
+        Scenario::new("checkpointed", "the reference, checkpointed").checkpointed(),
+        Scenario::new("checkpointed_depth3", "three deep, checkpointed — barriers through edges")
+            .depth(3)
+            .checkpointed(),
     ]
 }
 

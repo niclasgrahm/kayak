@@ -84,6 +84,9 @@ pub struct ServerConfig {
     /// How long the server keeps the counters and failure records of each
     /// pipeline.
     pub history: HistoryConfig,
+    /// How often the pipelines are checkpointed. Only read when the server is
+    /// started with `--state-dir`, which is what turns checkpointing on.
+    pub checkpoint: CheckpointConfig,
 }
 
 impl ServerConfig {
@@ -102,6 +105,7 @@ impl ServerConfig {
     /// request costs whoever is locked out working out why.
     pub fn validate(&self) -> Result<(), ServerConfigError> {
         self.history.validate()?;
+        self.checkpoint.validate()?;
         match &self.auth {
             AuthConfig::None => Ok(()),
             AuthConfig::Basic { users } => {
@@ -309,6 +313,10 @@ pub enum ServerConfigError {
     /// the store is in memory, so this is an allocation, and silently keeping
     /// a tenth of what a config asked for is worse than saying no.
     RetentionTooLong(u64),
+    /// A checkpoint interval of zero, or a timeout shorter than the interval:
+    /// one would checkpoint continuously, the other abandon every epoch
+    /// before the next one is even triggered.
+    CheckpointTiming { interval_secs: u64, timeout_secs: u64 },
 }
 
 impl std::fmt::Display for ServerConfigError {
@@ -337,6 +345,15 @@ impl std::fmt::Display for ServerConfigError {
                  second maximum; history is kept in memory, so this is an allocation rather \
                  than a disk budget"
             ),
+            Self::CheckpointTiming {
+                interval_secs,
+                timeout_secs,
+            } => write!(
+                f,
+                "checkpoint.interval_secs is {interval_secs} and checkpoint.timeout_secs is \
+                 {timeout_secs}; the interval has to be at least 1 and the timeout at least the \
+                 interval"
+            ),
         }
     }
 }
@@ -349,6 +366,30 @@ mod tests {
 
     /// The property the whole file rests on: no file at all is a server that
     /// runs, and runs the way it did before this existed.
+    /// Checkpointing has defaults that work, and the two contradictions —
+    /// checkpointing continuously, or abandoning every epoch before the next
+    /// one — are refused at startup.
+    #[test]
+    fn checkpoint_timing_is_checked() {
+        assert!(ServerConfig::default().validate().is_ok());
+        let config = |interval_secs, timeout_secs| ServerConfig {
+            checkpoint: CheckpointConfig {
+                interval_secs,
+                timeout_secs,
+            },
+            ..ServerConfig::default()
+        };
+        assert!(config(5, 5).validate().is_ok());
+        assert!(matches!(
+            config(0, 60).validate(),
+            Err(ServerConfigError::CheckpointTiming { .. })
+        ));
+        assert!(matches!(
+            config(30, 10).validate(),
+            Err(ServerConfigError::CheckpointTiming { .. })
+        ));
+    }
+
     #[test]
     fn the_default_server_asks_nobody_for_anything() {
         let config = ServerConfig::default();
@@ -532,6 +573,46 @@ mod tests {
             .is_err()
         );
         assert!(serde_json::from_str::<ServerConfig>(r#"{"users": {}}"#).is_err());
+    }
+}
+
+/// How often the server checkpoints, when `--state-dir` turns checkpointing on
+/// — see `docs/durability.md` in the repository.
+///
+/// The interval is the trade every checkpointing system offers: shorter means
+/// less replayed after a crash and acks committed sooner, longer means fewer
+/// flushes and copies. Ten seconds is Flink's usual neighbourhood, and the
+/// cost of a checkpoint is a copy of the state that *changed*, so a short
+/// interval on a graph whose state rarely moves costs almost nothing.
+#[derive(Clone, Debug, Deserialize, Serialize, JsonSchema, PartialEq, Eq)]
+#[serde(default, deny_unknown_fields)]
+pub struct CheckpointConfig {
+    /// Seconds between two checkpoints. 10 by default.
+    pub interval_secs: u64,
+    /// Seconds a checkpoint may take before it is abandoned (its
+    /// acknowledgements then wait for the next one). 60 by default; at least
+    /// the interval.
+    pub timeout_secs: u64,
+}
+
+impl Default for CheckpointConfig {
+    fn default() -> Self {
+        Self {
+            interval_secs: 10,
+            timeout_secs: 60,
+        }
+    }
+}
+
+impl CheckpointConfig {
+    fn validate(&self) -> Result<(), ServerConfigError> {
+        if self.interval_secs == 0 || self.timeout_secs < self.interval_secs {
+            return Err(ServerConfigError::CheckpointTiming {
+                interval_secs: self.interval_secs,
+                timeout_secs: self.timeout_secs,
+            });
+        }
+        Ok(())
     }
 }
 

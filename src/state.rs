@@ -5,6 +5,7 @@ use tokio::sync::broadcast;
 use crate::BuildCtx;
 use crate::auth::Auth;
 use crate::buckets::Buckets;
+use crate::checkpoint::Checkpoints;
 use crate::history::History;
 use crate::inputs::http::{Credentials, Inboxes, IngestError, PostMeta};
 use crate::pipeline::Pipeline;
@@ -140,6 +141,11 @@ impl From<serde_json::Error> for PipelineError {
 /// else notices its cancellation on the next loop iteration.
 const TEARDOWN_GRACE: std::time::Duration = std::time::Duration::from_secs(5);
 
+/// How long a shutdown or a revert waits for the graph to stop at a savepoint
+/// before cancelling whatever has not. Longer than [`TEARDOWN_GRACE`] because
+/// it includes the outputs' final flush and the commit's fsyncs.
+const SAVEPOINT_GRACE: std::time::Duration = std::time::Duration::from_secs(10);
+
 pub struct AppState {
     pipelines: Mutex<HashMap<PipelineId, PipelineHandle>>,
     events: broadcast::Sender<UiEvent>,
@@ -274,6 +280,15 @@ pub struct AppState {
     /// [`History::disabled`] by default, which is a server that keeps nothing;
     /// [`AppState::with_history`] is how a `--server-config` turns it on.
     history: Arc<History>,
+    /// The checkpoint coordinator, when the server was started with
+    /// `--state-dir`. `None` keeps nothing across a restart — the default, and
+    /// what every server did before checkpoints. See `docs/durability.md`.
+    ///
+    /// Fixed at startup like the history store, and for the same reason it is
+    /// a constructor argument rather than only a builder: loading a config
+    /// *starts* its pipelines, and each one restores from — and joins — the
+    /// coordinator as it is built.
+    checkpoints: Option<Arc<Checkpoints>>,
 }
 
 impl Default for AppState {
@@ -329,7 +344,26 @@ impl AppState {
             auth: Arc::new(Auth::disabled()),
             shutdown: tokio_util::sync::CancellationToken::new(),
             history: Arc::new(History::disabled()),
+            checkpoints: None,
         }
+    }
+
+    /// Checkpoint the pipelines this state starts, into `checkpoints`. For a
+    /// state with no pipelines yet; [`AppState::from_config_with_checkpoints`]
+    /// is the one that loads a config.
+    #[must_use]
+    pub fn with_checkpoints(mut self, checkpoints: Option<Arc<Checkpoints>>) -> Self {
+        if let Some(checkpoints) = &checkpoints {
+            checkpoints.restore_buckets(&self.buckets());
+        }
+        self.checkpoints = checkpoints;
+        self
+    }
+
+    /// The checkpoint coordinator, if the server checkpoints.
+    #[must_use]
+    pub fn checkpoints(&self) -> Option<&Arc<Checkpoints>> {
+        self.checkpoints.as_ref()
     }
 
     /// Keep a record of what the pipelines do, per the settings file's
@@ -517,6 +551,20 @@ impl AppState {
         data_dir: Option<PathBuf>,
         history: Arc<History>,
     ) -> anyhow::Result<Self> {
+        Self::from_config_with_checkpoints(path, secrets, connections_file, data_dir, history, None)
+    }
+
+    /// As [`AppState::from_config_with`], checkpointing into `checkpoints`:
+    /// every pipeline in the file — and every bucket — starts from the last
+    /// committed checkpoint where it has one. See `docs/durability.md`.
+    pub fn from_config_with_checkpoints(
+        path: &Path,
+        secrets: Arc<dyn SecretStore>,
+        connections_file: Option<&Path>,
+        data_dir: Option<PathBuf>,
+        history: Arc<History>,
+        checkpoints: Option<Arc<Checkpoints>>,
+    ) -> anyhow::Result<Self> {
         // a bare `config.json` names a file in the working directory, and
         // `parent()` of that is the empty path rather than "."
         let dir = match path.parent() {
@@ -525,6 +573,7 @@ impl AppState {
         };
         let mut new_state = AppState::with_secrets_in(dir, secrets);
         new_state.history = history;
+        new_state.checkpoints = checkpoints;
         new_state.data_dir = Self::resolve_data_dir(data_dir)?;
         new_state.connections_file = connections_file.map(Path::to_path_buf);
         *new_state.lock_config_path() = Some(path.to_path_buf());
@@ -792,6 +841,43 @@ impl AppState {
         .is_ok()
     }
 
+    /// Under checkpointing, stop the graph at a consistent cut before it is
+    /// torn down — see [`Checkpoints::savepoint`]. A pipeline that does not
+    /// get there in time is cancelled afterwards like any other, and replays
+    /// from its last completed checkpoint when it next starts.
+    async fn savepoint(&self, why: &str) {
+        let Some(checkpoints) = &self.checkpoints else {
+            return;
+        };
+        if checkpoints.savepoint(SAVEPOINT_GRACE).await {
+            tracing::info!("{why}: every pipeline stopped at a savepoint");
+        } else {
+            tracing::warn!(
+                "{why}: not every pipeline reached its savepoint within {}s; those replay from \
+                 their last completed checkpoint",
+                SAVEPOINT_GRACE.as_secs()
+            );
+        }
+    }
+
+    /// Stop every run loop **the way a crash would**: no savepoint, no
+    /// output `finish`, no final anything — the tasks are aborted where they
+    /// stand. What the checkpoint tests (and `kayak-bench`) use to simulate a
+    /// process dying; nothing in the server calls it.
+    pub async fn abort_pipelines(&self) {
+        let handles: Vec<tokio::task::JoinHandle<()>> = {
+            let mut app = self.lock_pipelines();
+            app.drain().map(|(_, handle)| handle.join_handle).collect()
+        };
+        for handle in &handles {
+            handle.abort();
+        }
+        for handle in handles {
+            let _ = handle.await;
+        }
+        self.inboxes.clear();
+    }
+
     /// Begin shutting down: end the long-lived responses, but leave the graph
     /// running.
     ///
@@ -819,6 +905,7 @@ impl AppState {
     /// [`finish`]: crate::outputs::OutputDestination::finish
     pub async fn shutdown(&self) {
         self.begin_shutdown();
+        self.savepoint("shutting down").await;
         if self.stop_pipelines().await {
             tracing::info!("all pipelines stopped");
         } else {
@@ -858,11 +945,15 @@ impl AppState {
             let _ = crate::connections::read(&connections)?;
         }
 
+        self.savepoint("reverting").await;
         if !self.stop_pipelines().await {
             tracing::warn!(
                 "some pipelines were still shutting down after {}s; reloading anyway",
                 TEARDOWN_GRACE.as_secs()
             );
+        }
+        if let Some(checkpoints) = &self.checkpoints {
+            checkpoints.resume();
         }
         // The graph is gone, so no endpoint belongs to anything any more. A
         // straggler still holding one would fail the rebuild of the pipeline
@@ -907,9 +998,17 @@ impl AppState {
     /// pipeline in the graph, so emptying the buckets would make an edit to an
     /// unrelated pipeline cost an hour of accumulated state.
     fn adopt_buckets(&self, declared: StateBuckets) {
-        let rebuilt = {
-            let current = self.lock_buckets();
-            current.rebuilt(&declared)
+        // Under checkpointing the buckets come from the last committed
+        // checkpoint instead of carrying the live contents over: the pipelines
+        // about to be rebuilt rewind their inputs to that checkpoint, and live
+        // contents would then count what they replay twice.
+        let rebuilt = match &self.checkpoints {
+            Some(checkpoints) => {
+                let fresh = Buckets::from_config(&declared);
+                checkpoints.restore_buckets(&fresh);
+                fresh
+            }
+            None => self.lock_buckets().rebuilt(&declared),
         };
         *self.lock_buckets() = Arc::new(rebuilt);
         *self.lock_declared_buckets() = declared;
@@ -937,6 +1036,15 @@ impl AppState {
             tracing::warn!("pipelines lock was poisoned; recovering");
             poisoned.into_inner()
         })
+    }
+
+    /// The running pipelines themselves — what a caller subscribes to.
+    #[must_use]
+    pub fn pipeline_handles(&self) -> Vec<Arc<Pipeline>> {
+        self.lock_pipelines()
+            .values()
+            .map(|handle| Arc::clone(&handle.shared))
+            .collect()
     }
 
     pub fn get_pipeline_ids(&self) -> Vec<PipelineId> {
@@ -1350,7 +1458,8 @@ impl AppState {
         // path is not fixed: a server started without one adopts the file it is
         // first saved as, and from that save on a file-sourced script resolves
         // beside it.
-        .with_script_dir(self.script_directory().map(Arc::new));
+        .with_script_dir(self.script_directory().map(Arc::new))
+        .with_checkpoints(self.checkpoints.clone());
         // building the runtime only fails on things the config got wrong
         // (unknown upstream, unbuildable component)
         let join_handle = pipeline.start(ctx).map_err(|e| {
@@ -1451,6 +1560,15 @@ impl AppState {
         };
         // signal cancellation here; the run loop drops out on its own
         handle.shared.cancellation_token.cancel();
+        // and its checkpoint goes with it, so a pipeline created later under
+        // the same id starts fresh rather than from a stranger's state
+        if let Some(checkpoints) = &self.checkpoints {
+            checkpoints.forget(id);
+            // and so do the posts it logged — done here, under the pipelines
+            // lock, so no pipeline can have been re-created under the id and
+            // opened a log of its own yet
+            crate::inputs::wal::remove(checkpoints.dir(), id);
+        }
         // ...but the endpoint goes now rather than whenever that task gets
         // round to dropping the input, so a post that arrives after the delete
         // returns 404 instead of disappearing into a pipeline on its way out.
@@ -1489,17 +1607,51 @@ impl AppState {
         meta: PostMeta,
         credentials: &Credentials,
     ) -> Result<usize, PipelineError> {
+        self.ingest_accepted(id, messages, meta, credentials)
+            .map(|(accepted, _)| accepted)
+    }
+
+    /// As [`AppState::ingest`], answering only once the post is as durable as
+    /// this server makes posts — under checkpointing, fsynced into the http
+    /// input's write-ahead log. What the HTTP handler calls: a `202` is a
+    /// promise, and under checkpointing it is one that survives a crash.
+    ///
+    /// A post the log could not write is a 503, like a full queue, and for the
+    /// same reason — the client should send it again.
+    pub async fn ingest_durably(
+        &self,
+        id: &str,
+        messages: Vec<serde_json::Value>,
+        meta: PostMeta,
+        credentials: &Credentials,
+    ) -> Result<usize, PipelineError> {
+        let (accepted, durable) = self.ingest_accepted(id, messages, meta, credentials)?;
+        if let Some(durable) = durable
+            && !durable.durable().await
+        {
+            return Err(PipelineError::Backpressure(id.to_string()));
+        }
+        Ok(accepted)
+    }
+
+    fn ingest_accepted(
+        &self,
+        id: &str,
+        messages: Vec<serde_json::Value>,
+        meta: PostMeta,
+        credentials: &Credentials,
+    ) -> Result<(usize, Option<crate::inputs::http::Accepted>), PipelineError> {
         let accepted = messages.len();
         // the inbox lock is taken and released inside these, so classifying the
         // failure below can take the pipelines lock without holding it
         let sent = if accepted == 0 {
-            self.inboxes.check(id, credentials)
+            self.inboxes.check(id, credentials).map(|()| None)
         } else {
             let batch = Arc::new(messages.into_iter().map(Arc::new).collect());
-            self.inboxes.send(id, batch, meta, credentials)
+            self.inboxes.send(id, batch, meta, credentials).map(Some)
         };
         match sent {
-            Ok(()) => Ok(accepted),
+            Ok(durable) => Ok((accepted, durable)),
             Err(IngestError::Full(_)) => Err(PipelineError::Backpressure(id.to_string())),
             Err(IngestError::Unauthorized(_)) => Err(PipelineError::Unauthorized(id.to_string())),
             Err(IngestError::NoInbox(_)) => {

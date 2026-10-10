@@ -22,6 +22,7 @@ pub mod pipeline;
 pub mod poll;
 pub mod postgres;
 pub mod redis;
+pub mod wal;
 
 pub use ack::{Ack, Delivery};
 
@@ -53,6 +54,14 @@ pub use kayak_core::MessageBatch;
 #[async_trait::async_trait]
 pub trait InputSource: Send + 'static {
     async fn next(&mut self) -> anyhow::Result<Delivery>;
+
+    /// Whether checkpoint barriers can arrive through this input — true of a
+    /// `pipeline` input and of anything wrapping one. A run loop none of whose
+    /// inputs carry barriers is a *root*, and takes its barriers from the
+    /// coordinator instead. See `docs/durability.md`.
+    fn carries_barriers(&self) -> bool {
+        false
+    }
 }
 
 /// Reads from several inputs at once, handing on whichever produces first.
@@ -63,10 +72,24 @@ pub trait InputSource: Send + 'static {
 /// dummy ticker restarts its sleep, so a fast sibling would starve it forever.
 /// A pump per input means every `next()` runs to completion.
 ///
-/// The channel holds one batch per input, so a slow consumer still pushes back
-/// on every input — the merge adds no unbounded buffering.
+/// Each pump has a channel of its own holding one batch, so a slow consumer
+/// still pushes back on every input — the merge adds no unbounded buffering.
+/// One channel *per* input rather than one shared is what makes **barrier
+/// alignment** possible: once a checkpoint barrier has come through one
+/// `pipeline` input, that input is not read again until the same barrier has
+/// come through every other one, so nothing it sends after the barrier can
+/// reach the run loop ahead of the snapshot. See `docs/durability.md`.
 pub struct Merged {
-    rx: tokio::sync::mpsc::Receiver<anyhow::Result<Delivery>>,
+    /// One per input, `None` once that input has stopped.
+    rxs: Vec<Option<tokio::sync::mpsc::Receiver<anyhow::Result<Delivery>>>>,
+    /// Which inputs barriers come through — the ones alignment waits on.
+    carries: Vec<bool>,
+    /// The barrier being aligned, and which inputs have delivered it.
+    aligning: Option<ack::Barrier>,
+    blocked: Vec<bool>,
+    /// Where the next poll starts, so a busy input early in the list cannot
+    /// starve the ones after it.
+    next_start: usize,
     /// Inputs that haven't reported a failure yet. Each one reports exactly
     /// once, so this reaches zero exactly when the last input is gone.
     alive: usize,
@@ -84,11 +107,13 @@ impl Merged {
         events: broadcast::Sender<UiEvent>,
     ) -> Self {
         let alive = inputs.len();
-        let (tx, rx) = tokio::sync::mpsc::channel(alive.max(1));
+        let carries = inputs.iter().map(|input| input.carries_barriers()).collect();
+        let mut rxs = Vec::with_capacity(alive);
         let pumps = inputs
             .into_iter()
             .map(|mut input| {
-                let tx = tx.clone();
+                let (tx, rx) = tokio::sync::mpsc::channel(1);
+                rxs.push(Some(rx));
                 tokio::spawn(async move {
                     loop {
                         let res = input.next().await;
@@ -103,12 +128,76 @@ impl Merged {
             })
             .collect();
         Self {
-            rx,
+            rxs,
+            carries,
+            aligning: None,
+            blocked: vec![false; alive],
+            next_start: 0,
             alive,
             pumps,
             pipeline_id,
             events,
         }
+    }
+
+    /// The next thing any unblocked input has, and which input it came from.
+    /// `None` as the second half is a pump whose channel closed without a
+    /// last word, which only an aborted pump does.
+    fn poll_any(
+        &mut self,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<(usize, Option<anyhow::Result<Delivery>>)> {
+        let count = self.rxs.len();
+        for step in 0..count {
+            let index = (self.next_start + step) % count;
+            if self.blocked[index] {
+                continue;
+            }
+            let Some(rx) = self.rxs[index].as_mut() else {
+                continue;
+            };
+            if let std::task::Poll::Ready(res) = rx.poll_recv(cx) {
+                self.next_start = (index + 1) % count;
+                return std::task::Poll::Ready((index, res));
+            }
+        }
+        std::task::Poll::Pending
+    }
+
+    /// Note that `barrier` came through input `index`, and hand back the
+    /// barrier once every live input that carries barriers has delivered it.
+    ///
+    /// A barrier with a *later* epoch than the one being aligned abandons the
+    /// earlier one and unblocks everything: an input that skipped an epoch is
+    /// never going to deliver it, and staying blocked on it would deadlock.
+    /// An earlier epoch than the one being aligned is stale and dropped.
+    fn align(&mut self, index: usize, barrier: ack::Barrier) -> Option<ack::Barrier> {
+        match self.aligning {
+            Some(current) if barrier.epoch < current.epoch => return None,
+            Some(current) if barrier.epoch == current.epoch => {
+                self.aligning = Some(ack::Barrier {
+                    epoch: current.epoch,
+                    stop: current.stop || barrier.stop,
+                });
+            }
+            _ => {
+                self.blocked.iter_mut().for_each(|b| *b = false);
+                self.aligning = Some(barrier);
+            }
+        }
+        self.blocked[index] = true;
+        self.aligned()
+    }
+
+    /// The barrier being aligned, if no live carrier is still owing it.
+    fn aligned(&mut self) -> Option<ack::Barrier> {
+        let owing = (0..self.rxs.len())
+            .any(|i| self.carries[i] && self.rxs[i].is_some() && !self.blocked[i]);
+        if owing {
+            return None;
+        }
+        self.blocked.iter_mut().for_each(|b| *b = false);
+        self.aligning.take()
     }
 }
 
@@ -124,14 +213,33 @@ impl Drop for Merged {
 impl InputSource for Merged {
     async fn next(&mut self) -> Result<Delivery> {
         loop {
-            // None means every pump has stopped without us noticing, which the
-            // counting below should have caught first
-            let Some(res) = self.rx.recv().await else {
-                return Err(anyhow::anyhow!("every input of this pipeline has stopped"));
+            // cancel-safe: `poll_recv` loses nothing when the future is
+            // dropped, and the alignment state lives on `self`
+            let (index, res) = std::future::poll_fn(|cx| self.poll_any(cx)).await;
+            let e = match res {
+                Some(Ok(mut delivery)) => {
+                    let Some(barrier) = delivery.barrier() else {
+                        // which input a position came from matters only to
+                        // a checkpoint, so only an ack that waits for one is
+                        // told
+                        if delivery.ack.defers_to_checkpoint() {
+                            let inner = std::mem::replace(&mut delivery.ack, Box::new(ack::NoAck));
+                            delivery.ack = Box::new(ack::FromInput {
+                                input: index,
+                                inner: Some(inner),
+                            });
+                        }
+                        return Ok(delivery);
+                    };
+                    match self.align(index, barrier) {
+                        Some(barrier) => return Ok(Delivery::of_barrier(barrier)),
+                        None => continue,
+                    }
+                }
+                Some(Err(e)) => e,
+                None => anyhow::anyhow!("input {index} of this pipeline stopped"),
             };
-            let Err(e) = res else {
-                return res;
-            };
+            self.rxs[index] = None;
 
             // One input failing is not the pipeline failing: the others are
             // still feeding it, and returning here would stop the run loop and
@@ -150,7 +258,18 @@ impl InputSource for Merged {
             publish(&self.events, || {
                 UiEvent::error(self.pipeline_id.clone(), Stage::Input, &e)
             });
+            // an input that has gone owes no barrier, so the one being
+            // aligned may now be complete
+            if self.aligning.is_some()
+                && let Some(barrier) = self.aligned()
+            {
+                return Ok(Delivery::of_barrier(barrier));
+            }
         }
+    }
+
+    fn carries_barriers(&self) -> bool {
+        self.carries.iter().any(|c| *c)
     }
 }
 
@@ -229,11 +348,29 @@ impl From<kayak_core::config::BufferConfig> for BufferKind {
 pub struct Buffered {
     rx: tokio::sync::mpsc::Receiver<anyhow::Result<Delivery>>,
     kind: BufferKind,
+    /// Whether the wrapped input carries barriers — asked once, before it
+    /// moved into the pump task.
+    carries: bool,
+    // The batch being gathered. On `self` rather than in `next`'s locals so
+    // that `next` is **cancel-safe**: the run loop drops this future whenever
+    // something else wins its `select!` (a transform's wakeup, a checkpoint
+    // trigger), and messages held in a dropped future's locals were simply
+    // gone.
+    out: MessageBatch,
+    acks: Vec<Box<dyn Ack>>,
+    /// Only exists once the batch has something in it, so it also *is* the
+    /// "have we started" flag.
+    window_closed: Option<std::pin::Pin<Box<tokio::time::Sleep>>>,
+    /// What to hand on once the gathered batch has gone: a barrier that
+    /// arrived while messages were held (it may not overtake them), or the
+    /// pump's stop.
+    pending: Option<anyhow::Result<Delivery>>,
 }
 
 impl Buffered {
     #[must_use]
     pub fn new(inner: Box<dyn InputSource>, kind: BufferKind) -> Self {
+        let carries = inner.carries_barriers();
         let (tx, rx) = tokio::sync::mpsc::channel(1);
         tokio::spawn(async move {
             let mut inner = inner;
@@ -245,7 +382,34 @@ impl Buffered {
                 }
             }
         });
-        Self { rx, kind }
+        Self {
+            rx,
+            kind,
+            carries,
+            out: Vec::new(),
+            acks: Vec::new(),
+            window_closed: None,
+            pending: None,
+        }
+    }
+
+    /// Hand on what has been gathered, and start again.
+    fn take_batch(&mut self) -> Delivery {
+        self.window_closed = None;
+        Delivery::with_ack(
+            Arc::new(std::mem::take(&mut self.out)),
+            Box::new(ack::CombinedAck(std::mem::take(&mut self.acks))),
+        )
+    }
+
+    /// Hand on what has been gathered and keep `next` for the call after —
+    /// or hand `next` on now, when nothing is held.
+    fn then(&mut self, next: anyhow::Result<Delivery>) -> anyhow::Result<Delivery> {
+        if self.out.is_empty() {
+            return next;
+        }
+        self.pending = Some(next);
+        Ok(self.take_batch())
     }
 }
 
@@ -265,66 +429,77 @@ impl InputSource for Buffered {
     /// ack is a [`ack::CombinedAck`] of everything folded into it — the run loop
     /// only ever sees the one outer `Ack`, and acknowledging it acknowledges
     /// every inner delivery this batch was gathered from.
+    ///
+    /// A checkpoint barrier ends the batch early: what is held goes first and
+    /// the barrier after, because the upstream counted those messages as
+    /// delivered when it sent them and they must be inside the snapshot the
+    /// barrier asks for.
     async fn next(&mut self) -> Result<Delivery> {
+        if let Some(next) = self.pending.take() {
+            return next;
+        }
         let (size, window) = self.kind.limits();
-        let mut out: MessageBatch = Vec::new();
-        let mut acks: Vec<Box<dyn Ack>> = Vec::new();
-        // only exists once the batch has something in it, so it also *is* the
-        // "have we started" flag
-        let mut window_closed: Option<std::pin::Pin<Box<tokio::time::Sleep>>> = None;
 
         loop {
-            if size.is_some_and(|size| out.len() >= size) {
-                return Ok(Delivery::with_ack(
-                    Arc::new(out),
-                    Box::new(ack::CombinedAck(acks)),
-                ));
+            if size.is_some_and(|size| self.out.len() >= size) {
+                return Ok(self.take_batch());
             }
 
-            let received = match &mut window_closed {
+            let received = match &mut self.window_closed {
                 // an unbiased `select!` on purpose: with no size limit and a
                 // saturated input, preferring the receive would starve the timer
                 Some(closed) => tokio::select! {
                     maybe = self.rx.recv() => maybe,
-                    () = closed.as_mut() => return Ok(Delivery::with_ack(
-                        Arc::new(out),
-                        Box::new(ack::CombinedAck(acks)),
-                    )),
+                    () = closed.as_mut() => return Ok(self.take_batch()),
                 },
                 None => self.rx.recv().await,
             };
 
             match received {
-                // an empty batch upstream neither fills this one nor starts its
-                // clock — it is not a message. Its own ack is not folded into
-                // the eventual outer one: nothing of it will ever reach an
-                // output, so there is nothing left to wait for.
-                Some(Ok(delivery)) if delivery.batch.is_empty() => {
-                    delivery.ack.ack();
+                Some(Ok(delivery)) if delivery.barrier().is_some() => {
+                    return self.then(Ok(delivery));
                 }
-                Some(Ok(delivery)) => {
-                    out.extend(delivery.batch.iter().cloned());
-                    acks.push(delivery.ack);
-                    if window_closed.is_none() {
-                        window_closed = window.map(|w| Box::pin(tokio::time::sleep(w)));
+                // an empty batch upstream neither fills this one nor starts its
+                // clock — it is not a message. Its ack fires now unless it is a
+                // position a checkpoint has to see, which rides with the batch.
+                Some(Ok(delivery)) if delivery.batch.is_empty() => {
+                    if delivery.ack.defers_to_checkpoint() {
+                        self.acks.push(delivery.ack);
+                    } else {
+                        delivery.ack.ack();
                     }
                 }
-                Some(Err(e)) => return Err(e),
+                Some(Ok(delivery)) => {
+                    self.out.extend(delivery.batch.iter().cloned());
+                    self.acks.push(delivery.ack);
+                    if self.window_closed.is_none() {
+                        self.window_closed = window.map(|w| Box::pin(tokio::time::sleep(w)));
+                    }
+                }
+                // reported at once rather than after what is held: the run
+                // loop needs to hear the input is gone, and a partial batch
+                // says nothing about it. Under checkpointing nothing is lost
+                // by it — the held messages' positions were never recorded,
+                // so a restart reads them again.
+                Some(Err(e)) => {
+                    self.out.clear();
+                    self.acks.clear();
+                    self.window_closed = None;
+                    return Err(e);
+                }
                 // the pump stopped: hand on what we have, and say so on the
                 // call after that. Reporting the stop with a batch in hand
                 // would throw those messages away, and reporting it as an empty
                 // batch would spin the run loop forever.
-                None if out.is_empty() => {
-                    return Err(anyhow::anyhow!("the buffered input has stopped"));
-                }
                 None => {
-                    return Ok(Delivery::with_ack(
-                        Arc::new(out),
-                        Box::new(ack::CombinedAck(acks)),
-                    ));
+                    return self.then(Err(anyhow::anyhow!("the buffered input has stopped")));
                 }
             }
         }
+    }
+
+    fn carries_barriers(&self) -> bool {
+        self.carries
     }
 }
 

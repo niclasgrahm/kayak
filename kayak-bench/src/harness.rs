@@ -38,6 +38,27 @@ use tokio::sync::broadcast;
 use tokio::task::JoinSet;
 
 use crate::scenario::{Chain, Scenario};
+use kayak::checkpoint::{Checkpoints, Settings};
+
+/// How often a checkpointed scenario checkpoints — the server's default, so
+/// the row measures what a deployment that turned checkpointing on would pay.
+pub const CHECKPOINT_INTERVAL: Duration = Duration::from_secs(10);
+
+/// A coordinator in a scratch directory of its own.
+fn scratch_checkpoints(name: &str) -> Result<(Arc<Checkpoints>, std::path::PathBuf)> {
+    let dir = std::env::temp_dir().join(format!(
+        "kayak-bench-{name}-{}-{}",
+        std::process::id(),
+        Instant::now().elapsed().as_nanos()
+    ));
+    let checkpoints = Checkpoints::open(Settings {
+        dir: dir.clone(),
+        interval: Some(CHECKPOINT_INTERVAL),
+        timeout: Duration::from_secs(60),
+    })
+    .context("opening the bench's state directory")?;
+    Ok((checkpoints, dir))
+}
 
 /// How large the `/events` broadcast channel is. The same order as the server's
 /// so a watched run backs up — or doesn't — the way a real one would.
@@ -76,6 +97,9 @@ struct Graph {
     /// the feed's gate, and a watched run that dropped it would measure an
     /// unwatched one.
     watcher: Option<tokio::task::JoinHandle<()>>,
+    /// The coordinator of a checkpointed scenario, and its scratch directory,
+    /// removed once the coordinator has let go of it.
+    checkpoints: Option<(Arc<Checkpoints>, std::path::PathBuf)>,
 }
 
 impl Graph {
@@ -118,6 +142,12 @@ impl Graph {
         // measured as a watched one.
         drop(self.watching.take());
         while self.tasks.join_next().await.is_some() {}
+        if let Some((checkpoints, dir)) = self.checkpoints.take() {
+            drop(checkpoints);
+            // the writer may still hold the coordinator for a commit in
+            // flight; what is left behind is a scratch directory in /tmp
+            let _ = std::fs::remove_dir_all(dir);
+        }
     }
 }
 
@@ -208,19 +238,37 @@ fn build(
     // the building of the hop below, which is why the handles are kept here
     // rather than dropped as each pipeline is spawned.
     let mut handles: HashMap<String, PipelineHandle> = HashMap::new();
+    let checkpoints = scenario
+        .checkpointed
+        .then(|| scratch_checkpoints(scenario.name))
+        .transpose()?;
+    let buckets = Arc::new(kayak::buckets::Buckets::new());
 
     for root in 0..scenario.pipelines {
         let mut upstream: Option<String> = None;
         for hop in 0..scenario.depth {
             let id = format!("bench-{root}-{hop}");
-            let shared = Arc::new(
-                Pipeline::new(stub_config(&id)).with_context(|| format!("building '{id}'"))?,
-            );
+            // a hop's config names its upstream, which is what makes it take
+            // its barriers down the edge rather than from the coordinator
+            let config = match &upstream {
+                None => stub_config(&id),
+                Some(up) => serde_json::from_value(serde_json::json!({
+                    "id": id,
+                    "inputs": [{ "type": "pipeline", "upstream": up }],
+                    "outputs": [{ "type": "stdout" }]
+                }))
+                .context("building a hop's config")?,
+            };
+            let shared =
+                Arc::new(Pipeline::new(config).with_context(|| format!("building '{id}'"))?);
             // The root generates; every hop below it reads what the one above
             // sent. Two different inputs, which is the whole point of `depth`.
             let input: Box<dyn InputSource> = match &upstream {
                 None if scenario.keys > 1 => {
                     Box::new(LoadInput::keyed(scenario.batch_size, scenario.keys))
+                }
+                None if scenario.checkpointed => {
+                    Box::new(LoadInput::new(scenario.batch_size).positioned())
                 }
                 None => Box::new(LoadInput::new(scenario.batch_size)),
                 Some(up) => {
@@ -254,6 +302,12 @@ fn build(
             // difference between the two, so it has to go down the path
             // production goes down.
             .with_watchers(watchers.clone());
+            let runtime = match &checkpoints {
+                Some((checkpoints, _)) => {
+                    runtime.with_checkpoints(checkpoints, Arc::clone(&buckets), Vec::new())
+                }
+                None => runtime,
+            };
             let join = tokio::spawn(async move {
                 // A bench run that fails is reported through the error
                 // counters, which the report already refuses to publish a
@@ -288,6 +342,7 @@ fn build(
         all,
         tasks,
         watcher: None,
+        checkpoints,
     })
 }
 

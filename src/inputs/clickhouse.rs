@@ -81,7 +81,8 @@ impl BuildInput for ClickhouseInputConfig {
             envelope,
             ctx.pipeline_id.clone(),
             ctx.events.clone(),
-        )))
+        )
+        .resuming_from(ctx.restored_position.as_ref())))
     }
 }
 

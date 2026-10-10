@@ -16,13 +16,10 @@ re-derive. See the [docs site](../website/) for how the finished parts behave, a
       mirror of `columns.rs`. See "the sql inputs" in `CLAUDE.md` and
       [the page](../website/io/database-inputs.md). `just test-live` runs them
       against the compose stack.)
-- [ ] **a durable watermark for the sql inputs.** In memory today, so a
-      restart replays from `start_from` — at least once, said plainly. A
-      checkpoint file is the fix, and it has the same shape as the history
-      store's would: a third directory boundary, a schema that outlives an
-      upgrade, a degrade path when the disk is full. It is also the point at
-      which `ack: on_delivery` would start to mean something on these inputs,
-      since the watermark could then wait for the acknowledgement.
+- [x] **a durable watermark for the sql inputs** (done 2026-10-10, as part of
+      checkpoints: the watermark is each checkpoint's position for the input,
+      held back at a tie split by `max_batch`, and a restart resumes after it
+      rather than from `start_from`. See `docs/durability.md`.)
 - [ ] **mysql input and output.** Both are a `Reader` and a `ColumnPlan`
       renderer respectively and nothing else; the connection kind is the
       larger part.
@@ -347,15 +344,36 @@ readme's "why" for the short version. The ideas hold up; the gaps below are
 what stand between "well-built prototype" and "something worth someone else
 picking up."
 
-- [ ] **no durability or scaling story.** State lives in one process' memory
-      (see "state" in the guide) and there is no checkpointing of input
-      positions, so kayak is honestly a single-node tool today. That's a
-      legitimate niche — Benthos proved "stream processing without Flink's
-      operational weight" is a real market — but it needs to be a *stated*
-      scope rather than a gap people discover by hitting it. Either write that
-      boundary down explicitly (readme + guide), or decide it's worth chasing
-      and scope what a distributed mode would need, starting at the input as
-      the durability argument under "state" already says.
+- [x] **durability** (done 2026-10-10: checkpoints, `--state-dir` — Flink's
+      aligned barrier snapshots at a single server's scale. Exactly-once state
+      and at-least-once output across a crash, positions checkpointed for kafka,
+      the sql inputs and `http` (through a write-ahead log), buckets and
+      stateful components restored, a savepoint on shutdown and revert so a
+      graceful restart replays nothing. `docs/durability.md` is the design,
+      `website/operating/durability.md` the operator's page.) What is left of
+      the original bullet is the **scaling** half — kayak is still one node,
+      and the coordinator's writer is the seam a replicated store would plug
+      into.
+- [ ] **transactional outputs** — two-phase commit tied to a checkpoint's
+      completion (kafka transactions; file and s3 parts renamed or completed
+      into place on commit), which is what turns at-least-once output into
+      exactly-once for the outputs that are not idempotent. The hook exists:
+      `OutputDestination::checkpoint` runs at the barrier, and the coordinator
+      knows when the epoch commits.
+- [ ] **deterministic idempotency keys** for `tidepool`/`indu`. The key carries
+      a random run id, so a replay after a crash is not deduplicated. Needs
+      batch boundaries that are stable across a replay, which `max_batch` (it
+      drains whatever has *already* arrived) does not give.
+- [ ] **a JetStream input** — nats core has no replay, so it is not
+      rewindable under checkpointing. A JetStream consumer is, and its ack is
+      the existing deferred-ack shape.
+- [ ] **mqtt output durability at a checkpoint.** rumqttc queues a publish and
+      gives no way to wait for the queue to drain, so the mqtt output's
+      `checkpoint` is a no-op and a crash can lose what was queued in the last
+      instant. nats has `flush`; mqtt would need the outgoing PUBACKs tracked.
+- [ ] **unaligned checkpoints** — under heavy backpressure an aligned barrier
+      waits behind full edges; Flink's answer is to snapshot the in-flight
+      batches instead. Not needed at kayak's scale yet.
 - [x] **an `indu` connection and output** (done 2026-09-02: the kayak half of
       Indu Cloud's `docs/streams.md` — a pipeline's results land on the
       platform as streams, one reading per `series` entry per message, with

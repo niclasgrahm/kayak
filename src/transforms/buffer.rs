@@ -309,6 +309,36 @@ impl Transform for BufferTransform {
         }
         Ok(vec![])
     }
+
+    /// What is held, and how long the window has left to run. The window's
+    /// remainder rather than its deadline, since an `Instant` means nothing
+    /// in the next process: restored, the window closes that long after the
+    /// restore, so a held message waits at most one window plus the downtime.
+    fn snapshot(&self) -> Option<serde_json::Value> {
+        if self.held.is_empty() {
+            return None;
+        }
+        let remaining_ms = self.deadline.map(|deadline| {
+            u64::try_from(deadline.saturating_duration_since(Instant::now()).as_millis())
+                .unwrap_or(u64::MAX)
+        });
+        Some(serde_json::json!({
+            "held": self.held.iter().map(|m| (**m).clone()).collect::<Vec<_>>(),
+            "remaining_ms": remaining_ms,
+        }))
+    }
+
+    fn restore(&mut self, state: serde_json::Value) -> anyhow::Result<()> {
+        let Some(held) = state.get("held").and_then(serde_json::Value::as_array) else {
+            anyhow::bail!("a buffer's checkpoint holds no `held` list");
+        };
+        self.held = held.iter().cloned().map(Arc::new).collect();
+        self.deadline = match state.get("remaining_ms").and_then(serde_json::Value::as_u64) {
+            Some(ms) => Some(Instant::now() + Duration::from_millis(ms)),
+            None => self.window.map(|window| Instant::now() + window),
+        };
+        Ok(())
+    }
 }
 
 #[cfg(test)]
@@ -707,6 +737,55 @@ mod tests {
             .await?;
         assert_eq!(out.len(), 1, "max_messages should have released them");
         assert_eq!(out[0].len(), 1000);
+        Ok(())
+    }
+
+    /// What a buffer holds survives a checkpoint: restored into a fresh
+    /// transform, the held messages come out with the next batch that fills
+    /// it, in order.
+    #[tokio::test]
+    async fn held_messages_survive_a_snapshot_and_restore() -> Result<()> {
+        let mut before = transform(3);
+        let held = feed(&mut before, 2).await;
+        assert_eq!(held.len(), 0, "two of three should be held: {held:?}");
+        let Some(state) = before.snapshot() else {
+            panic!("a buffer holding two messages had nothing to snapshot");
+        };
+
+        let mut after = transform(3);
+        after.restore(state)?;
+        let out = after.apply(batch(vec![json!({"i": 2})])).await?;
+        assert_eq!(out.len(), 1);
+        assert_eq!(
+            out[0].iter().map(|m| (**m).clone()).collect::<Vec<_>>(),
+            vec![json!({"i": 0}), json!({"i": 1}), json!({"i": 2})]
+        );
+        Ok(())
+    }
+
+    /// An empty buffer has nothing to put in a checkpoint at all.
+    #[test]
+    fn an_empty_buffer_snapshots_nothing() {
+        assert!(transform(3).snapshot().is_none());
+    }
+
+    /// The window's remainder is what is restored: a window that had a second
+    /// left closes about a second after the restore, not a whole window later.
+    #[tokio::test(start_paused = true)]
+    async fn a_restored_window_closes_when_its_remainder_runs_out() -> Result<()> {
+        let mut t = BufferTransform {
+            size: None,
+            window: Some(Duration::from_secs(10)),
+            gate: None,
+            max_messages: 100,
+            held: MessageBatch::new(),
+            deadline: None,
+            warned_about_overflow: false,
+        };
+        t.restore(json!({"held": [{"i": 1}], "remaining_ms": 1000}))?;
+        tokio::time::advance(Duration::from_millis(1001)).await;
+        let out = t.flush().await?;
+        assert_eq!(out.len(), 1, "the restored window should have closed");
         Ok(())
     }
 }

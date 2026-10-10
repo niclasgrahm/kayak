@@ -461,3 +461,34 @@ async fn the_same_config_without_a_data_dir_does_not_start() -> anyhow::Result<(
     );
     Ok(())
 }
+
+/// A checkpoint makes everything written so far durable — the open part and
+/// every part closed since the last one — and changes nothing about what is
+/// in them: a part keeps filling afterwards, and a rotated part is untouched.
+/// What fsync guarantees cannot be observed from inside one process; what is
+/// observable is that it succeeds across a rotation and that the files read
+/// back whole.
+#[tokio::test]
+async fn a_checkpoint_syncs_the_parts_without_changing_them() -> anyhow::Result<()> {
+    let fixture = fixture()?;
+    let mut output = build(
+        &fixture,
+        ndjson(json!({ "path": "orders", "rotate": { "max_rows": 2 } })),
+        Some(&fixture.data_dir),
+    )?;
+    output.init().await?;
+    output.emit(batch(vec![json!({"n": 1}), json!({"n": 2})])).await?;
+    output.emit(batch(vec![json!({"n": 3})])).await?;
+    output.checkpoint().await?;
+    output.emit(batch(vec![json!({"n": 4})])).await?;
+    output.checkpoint().await?;
+
+    let written = parts(&fixture.data_dir.join("events").join("orders"))?;
+    let contents: Vec<&str> = written.iter().map(|(_, text)| text.as_str()).collect();
+    assert_eq!(
+        contents,
+        vec!["{\"n\":1}\n{\"n\":2}\n", "{\"n\":3}\n{\"n\":4}\n"],
+        "a checkpoint must not close or alter a part"
+    );
+    Ok(())
+}

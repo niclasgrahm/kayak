@@ -1,5 +1,6 @@
 use crate::BuildCtx;
 use crate::backoff::Backoff;
+use crate::checkpoint::{Checkpoints, ComponentState, Participant, PipelineSnapshot};
 use crate::config::BuildInputConfig;
 use crate::events::{Watchers, publish};
 use crate::history::History;
@@ -7,7 +8,7 @@ use crate::config::BuildOutputConfig;
 use crate::config::BuildTransformConfig;
 use crate::inputs::InputSource;
 use crate::inputs::MessageBatch;
-use crate::inputs::ack::Delivery;
+use crate::inputs::ack::{Barrier, Delivery};
 use crate::outputs::OutputDestination;
 use crate::state::PipelineId;
 use crate::state::UiEvent;
@@ -34,7 +35,7 @@ pub struct Pipeline {
     #[serde(skip)]
     pub cancellation_token: tokio_util::sync::CancellationToken,
     #[serde(skip)]
-    downstream_senders: Mutex<Vec<mpsc::Sender<Arc<MessageBatch>>>>,
+    downstream_senders: Mutex<Vec<Downstream>>,
     /// What this pipeline has done since it started, for
     /// [`crate::history`]. Three atomics the run loop adds to unconditionally
     /// — deliberately *not* behind the `receiver_count()` gate the UI feed
@@ -62,14 +63,48 @@ pub struct Pipeline {
     scripts: std::sync::OnceLock<Vec<Option<Arc<kayak_core::script::LoadedScript>>>>,
 }
 
-// impl Pipeline {
-//     pub fn to_dto(&self) -> anyhow::Result<PipelineDto> {
-//             Ok(PipelineDto {
-//                 id: self.id.clone(),
-//                 config: self.config.clone(),
-//             })
-//         }
-//     }
+/// What travels along an edge between two pipelines: batches, and — when
+/// checkpointing is on — the barriers between them. See `docs/durability.md`.
+#[derive(Clone, Debug)]
+pub enum Edge {
+    Batch(Arc<MessageBatch>),
+    Barrier(Barrier),
+}
+
+/// Someone this pipeline hands its output to.
+///
+/// Two kinds because only one of them understands barriers: a downstream
+/// pipeline's input does, while a plain subscriber — a sample of a `pipeline`
+/// input, a test — only ever wanted the batches, and is never sent a barrier.
+#[derive(Clone)]
+enum Downstream {
+    Batches(mpsc::Sender<Arc<MessageBatch>>),
+    Edges(mpsc::Sender<Edge>),
+}
+
+impl Downstream {
+    /// `false` when the receiver has gone.
+    async fn send_batch(&self, batch: &Arc<MessageBatch>) -> bool {
+        match self {
+            Self::Batches(tx) => tx.send(Arc::clone(batch)).await.is_ok(),
+            Self::Edges(tx) => tx.send(Edge::Batch(Arc::clone(batch))).await.is_ok(),
+        }
+    }
+
+    async fn send_barrier(&self, barrier: Barrier) -> bool {
+        match self {
+            Self::Batches(_) => true,
+            Self::Edges(tx) => tx.send(Edge::Barrier(barrier)).await.is_ok(),
+        }
+    }
+
+    fn is_closed(&self) -> bool {
+        match self {
+            Self::Batches(tx) => tx.is_closed(),
+            Self::Edges(tx) => tx.is_closed(),
+        }
+    }
+}
 
 /// The borrowed spelling of [`kayak_core::PipelineDto`] — what
 /// `GET /api/pipelines` serializes. The two shapes are the same on the wire
@@ -119,12 +154,68 @@ async fn next_wakeup(transforms: &mut [Box<dyn Transform>]) -> usize {
     }
 }
 
+/// The next barrier the coordinator triggers, for a root pipeline — never, for
+/// everything else. A free function for [`next_wakeup`]'s reason: it sits in
+/// the run loop's `select!` beside borrows of other fields. A poll rather than
+/// an `async fn`, for the size of the future — see
+/// [`Participant::poll_trigger`].
+fn poll_trigger(
+    checkpoint: &mut Option<Participant>,
+    cx: &mut std::task::Context<'_>,
+) -> std::task::Poll<Barrier> {
+    match checkpoint {
+        Some(participant) => participant.poll_trigger(cx),
+        None => std::task::Poll::Pending,
+    }
+}
+
+/// Sleep for `delay`, or less if `token` is cancelled first; `false` if it
+/// was.
+async fn wait_unless_cancelled(
+    token: &tokio_util::sync::CancellationToken,
+    delay: Duration,
+) -> bool {
+    select! {
+        biased;
+        () = token.cancelled() => false,
+        () = tokio::time::sleep(delay) => true,
+    }
+}
+
 /// What woke the run loop.
 enum Woken {
     /// The input produced a batch — the ordinary pass.
     Delivered(Delivery),
     /// The transform at this index asked to be looked at.
     Flush(usize),
+    /// A checkpoint barrier: from the coordinator for a root, down an edge
+    /// for everything else. See `docs/durability.md`.
+    Barrier(Barrier),
+}
+
+/// Each component's config as JSON, by position — what a snapshot is keyed
+/// by, so state is only ever restored into the component it came from.
+#[derive(Default)]
+struct ComponentConfigs {
+    inputs: Vec<serde_json::Value>,
+    transforms: Vec<serde_json::Value>,
+    outputs: Vec<serde_json::Value>,
+}
+
+impl ComponentConfigs {
+    fn of(config: &Config) -> Self {
+        fn render<T: Serialize>(items: &[T]) -> Vec<serde_json::Value> {
+            items
+                .iter()
+                .map(|item| serde_json::to_value(item).unwrap_or(serde_json::Value::Null))
+                .collect()
+        }
+        Self {
+            inputs: render(&config.inputs),
+            transforms: render(&config.transforms),
+            outputs: render(&config.outputs),
+        }
+    }
 }
 
 /// Record a failure in the history store, as `count` occurrences of it.
@@ -367,6 +458,16 @@ pub struct PipelineRuntime {
     /// is a mutex on a channel every pipeline in the process shares — see
     /// [`Watchers`] for what that cost.
     watchers: Watchers,
+    /// This run loop's part in checkpointing, when the server checkpoints.
+    /// `None` is the default and changes nothing: acks fire at the end of
+    /// their pass, an output failure drops its batch. See
+    /// `docs/durability.md`.
+    checkpoint: Option<Participant>,
+    /// What a snapshot is keyed by. Empty unless checkpointing.
+    components: ComponentConfigs,
+    /// How many outputs have initialised — a checkpoint taken while the rest
+    /// are still being waited on only flushes these.
+    initialised: usize,
 }
 
 impl PipelineRuntime {
@@ -396,7 +497,154 @@ impl PipelineRuntime {
             // general rule. A caller that wants the headless path — the bench
             // does — says so with [`PipelineRuntime::with_watchers`].
             watchers: Watchers::attached(),
+            checkpoint: None,
+            components: ComponentConfigs::default(),
+            initialised: 0,
         })
+    }
+
+    /// Take part in `checkpoints`: this run loop takes barriers, defers its
+    /// acks to the checkpoints that cover them, and retries a failing output
+    /// rather than dropping the batch. `positions` are the inputs' restored
+    /// positions, carried into every snapshot until they move.
+    #[must_use]
+    pub fn with_checkpoints(
+        self,
+        checkpoints: &Arc<Checkpoints>,
+        buckets: Arc<crate::buckets::Buckets>,
+        positions: Vec<Option<serde_json::Value>>,
+    ) -> Self {
+        let participant = join(&self.shared, checkpoints, buckets, positions);
+        self.with_participant(participant)
+    }
+
+    /// Take part in checkpoints through a participant already joined — see
+    /// [`Pipeline::create_runtime`] for why joining comes first.
+    #[must_use]
+    pub fn with_participant(mut self, participant: Participant) -> Self {
+        self.components = ComponentConfigs::of(&self.shared.config);
+        self.checkpoint = Some(participant);
+        self
+    }
+
+    /// Put a checkpoint's state back into the components built for it: each
+    /// transform's and output's, where its config is unchanged. Inputs take
+    /// their positions at build time instead — see `BuildCtx::restored_position`.
+    pub fn restore(&mut self, snapshot: &PipelineSnapshot) {
+        // a component the config does not describe (a test driving the run
+        // loop through `from_parts`) is keyed by null — what `snapshot` writes
+        // for it too
+        let configs = ComponentConfigs::of(&self.shared.config);
+        let null = serde_json::Value::Null;
+        for (index, transform) in self.transforms.iter_mut().enumerate() {
+            let config = configs.transforms.get(index).unwrap_or(&null);
+            if let Some(state) = snapshot.transform(index, config)
+                && let Err(e) = transform.restore(state)
+            {
+                error!(
+                    "[{}]\t transform {index} could not take back its checkpoint, starting empty: {e:#}",
+                    self.shared.id
+                );
+            }
+        }
+        for (index, output) in self.outputs.iter_mut().enumerate() {
+            let config = configs.outputs.get(index).unwrap_or(&null);
+            if let Some(state) = snapshot.output(index, config)
+                && let Err(e) = output.restore(state)
+            {
+                error!(
+                    "[{}]\t output {index} could not take back its checkpoint, starting empty: {e:#}",
+                    self.shared.id
+                );
+            }
+        }
+    }
+
+    /// What every component holds right now, for a checkpoint.
+    fn snapshot(&self, positions: &[Option<serde_json::Value>]) -> PipelineSnapshot {
+        let config = |configs: &[serde_json::Value], index: usize| {
+            configs.get(index).cloned().unwrap_or(serde_json::Value::Null)
+        };
+        let inputs = (0..self.components.inputs.len().max(positions.len()))
+            .map(|index| ComponentState {
+                config: config(&self.components.inputs, index),
+                state: positions.get(index).cloned().flatten(),
+            })
+            .collect();
+        PipelineSnapshot {
+            inputs,
+            transforms: self
+                .transforms
+                .iter()
+                .enumerate()
+                .map(|(index, t)| ComponentState {
+                    config: config(&self.components.transforms, index),
+                    state: t.snapshot(),
+                })
+                .collect(),
+            outputs: self
+                .outputs
+                .iter()
+                .enumerate()
+                .map(|(index, o)| ComponentState {
+                    config: config(&self.components.outputs, index),
+                    state: o.snapshot(),
+                })
+                .collect(),
+        }
+    }
+
+    /// Take the checkpoint `barrier` asks for, and say whether the run loop
+    /// should then stop (a savepoint).
+    ///
+    /// The order is the design: outputs durable first (or finished, at a
+    /// savepoint — so a part is uploaded rather than snapshotted *and*
+    /// uploaded), then the snapshot and the held acks to the coordinator,
+    /// then the barrier on to every downstream, and only then the wait for
+    /// the other writers of this pipeline's bucket. Forwarding before waiting
+    /// is what keeps a writer downstream of another writer from deadlocking
+    /// on it. The disk write itself happens on the coordinator's writer task;
+    /// the run loop does not wait for it.
+    async fn take_checkpoint(&mut self, barrier: Barrier) -> bool {
+        let Some(mut participant) = self.checkpoint.take() else {
+            return barrier.stop;
+        };
+        let mut durable = true;
+        for index in 0..self.initialised.min(self.outputs.len()) {
+            let result = if barrier.stop {
+                self.outputs[index].finish().await
+            } else {
+                self.outputs[index].checkpoint().await
+            };
+            if let Err(e) = result {
+                durable = false;
+                error!(
+                    "[{}]\t output {index} could not be made durable for checkpoint {}: {e:?}",
+                    self.shared.id, barrier.epoch
+                );
+                self.shared.counters.add_error();
+                remember_failure(&self.history, &self.shared.id, Stage::Output, Some(index), &e, 1);
+                publish(&self.events, || {
+                    UiEvent::error(self.shared.id.clone(), Stage::Output, &e).component(index)
+                });
+            }
+        }
+        let snapshot = durable.then(|| self.snapshot(&participant.positions()));
+        participant.submit(barrier, snapshot);
+
+        let mut gone = false;
+        for tx in &self.shared.downstream_senders() {
+            gone |= !tx.send_barrier(barrier).await;
+        }
+        if gone {
+            self.shared.prune_downstream();
+        }
+        let bucket = self.shared.config.state.as_ref().map(|s| s.bucket.clone());
+        participant
+            .bucket_barrier(bucket.as_deref(), barrier.epoch, &self.shared.cancellation_token)
+            .await;
+        self.checkpoint = Some(participant);
+        barrier.stop
     }
 
     /// Ask this shared count whether anyone is watching, rather than assuming
@@ -467,6 +715,7 @@ impl PipelineRuntime {
         // second connection and leak the first.
         let mut index = 0;
         while index < self.outputs.len() {
+            self.initialised = index;
             match self.outputs[index].init().await {
                 Ok(()) => {
                     if backoff.is_failing() {
@@ -505,11 +754,25 @@ impl PipelineRuntime {
             // every 250ms climbing to one every 30s. Cancellable, because
             // waiting out a database that is never coming back must not hold
             // up a delete or a shutdown for thirty seconds.
-            select! {
-                () = self.shared.cancellation_token.cancelled() => return false,
-                () = tokio::time::sleep(backoff.failed()) => {}
+            //
+            // A root still takes its checkpoints meanwhile: it has read
+            // nothing, so its snapshot is what it was restored with, and
+            // answering keeps its region's checkpoints moving — and a
+            // savepoint from waiting out the whole grace period on it.
+            let delay = backoff.failed();
+            let deadline = tokio::time::Instant::now() + delay;
+            loop {
+                let barrier = select! {
+                    () = self.shared.cancellation_token.cancelled() => return false,
+                    () = tokio::time::sleep_until(deadline) => break,
+                    barrier = std::future::poll_fn(|cx| poll_trigger(&mut self.checkpoint, cx)) => barrier,
+                };
+                if Box::pin(self.take_checkpoint(barrier)).await {
+                    return false;
+                }
             }
         }
+        self.initialised = self.outputs.len();
         true
     }
 
@@ -616,6 +879,9 @@ impl PipelineRuntime {
     /// batch that arrived and a transform that flushed — end here, and because
     /// what is left in `run` is then the shape of the loop rather than the
     /// shape of the loop plus the shape of a delivery.
+    ///
+    /// Returns `false` when the pipeline was cancelled while an output was
+    /// being retried — the pass did not finish, and must not be acknowledged.
     async fn deliver(
         &mut self,
         batches: &[Arc<MessageBatch>],
@@ -623,7 +889,11 @@ impl PipelineRuntime {
         reported: bool,
         watching: bool,
         throttle: &mut UiThrottle,
-    ) {
+    ) -> bool {
+        // Under checkpointing a failed emit is retried rather than dropped:
+        // dropping it and then completing a checkpoint past it is exactly the
+        // loss checkpoints exist to prevent. See `docs/durability.md`.
+        let retry = self.checkpoint.is_some();
         // What the transforms produced, reported before the outputs are
         // given it: the log is a record of what passed through this
         // pipeline, which is true whether or not an output then took it.
@@ -644,7 +914,8 @@ impl PipelineRuntime {
             // the pipeline down — its siblings and the downstream pipelines
             // are still fed, same as we do for transform errors
             for (index, output) in self.outputs.iter_mut().enumerate() {
-                if let Err(e) = output.emit(b.clone()).await {
+                let mut backoff: Option<Backoff> = None;
+                while let Err(e) = output.emit(b.clone()).await {
                     // Logged only when the throttle also lets it through
                     // the UI. An output whose broker is down now fails
                     // fast on its own backoff gate (see `outputs::*`),
@@ -674,15 +945,28 @@ impl PipelineRuntime {
                     } else {
                         debug!("[{}]\t output error (suppressed): {:?}", self.shared.id, e);
                     }
+                    if !retry {
+                        break;
+                    }
+                    // only this output is retried: its siblings already have
+                    // the batch, and giving it to them twice is a duplicate
+                    // nothing made necessary
+                    let delay = backoff.get_or_insert_with(Backoff::new).failed();
+                    // boxed so the wait's timer is not part of every pass's
+                    // state: this is the failure path, and the pass is the
+                    // hot one
+                    if !Box::pin(wait_unless_cancelled(&self.shared.cancellation_token, delay)).await {
+                        return false;
+                    }
                 }
             }
             let senders = self.shared.downstream_senders();
             let mut gone = false;
             for tx in &senders {
-                if let Err(e) = tx.send(Arc::clone(b)).await {
+                if !tx.send_batch(b).await {
                     debug!(
-                        "[{}]\t dropping batch for a downstream that went away: {}",
-                        self.shared.id, e
+                        "[{}]\t dropping batch for a downstream that went away",
+                        self.shared.id
                     );
                     gone = true;
                 }
@@ -703,7 +987,77 @@ impl PipelineRuntime {
         // acknowledgement, because "delivered" here means "this pipeline
         // finished handling the batch", not "every sink has it". See the
         // `ack` module docs for the reasoning and the current scope.
-        //
+        true
+    }
+
+    /// A barrier the coordinator triggered since the last pass, for a root —
+    /// taken between two passes, so the snapshot is exactly "everything
+    /// delivered so far". Asked as an atomic load rather than as the first arm
+    /// of the run loop's `select!`: there, polling it would register and drop
+    /// a waiter on every pass, which measured at a quarter of a busy
+    /// pipeline's throughput.
+    fn due_barrier(&mut self) -> Option<Barrier> {
+        self.checkpoint.as_mut().and_then(Participant::trigger_ready)
+    }
+
+    /// Count an arriving batch and, if this pass is reported, put it on the
+    /// feed. Returns whether the pass is reported — decided once, here, and
+    /// used for every batch event the pass produces: reporting the input of a
+    /// pass whose output was dropped would draw a pass that never finished.
+    /// See [`UiThrottle`].
+    ///
+    /// A plain function for the run loop's length, and deliberately not an
+    /// `async` one — this is the hot path, and only a sync helper is inlined
+    /// for free.
+    fn report_inbound(
+        &self,
+        delivery: &Delivery,
+        pass: u64,
+        watching: bool,
+        throttle: &mut UiThrottle,
+    ) -> bool {
+        let reported = watching && throttle.report_pass();
+        // Counted before the `watching` gate and deliberately outside it: the
+        // feed is a sample of what is happening now and costs nothing when
+        // nobody is attached, while this is the record of what happened,
+        // which is worth exactly as much at 3am. Three relaxed atomic adds a
+        // pass is what that costs.
+        self.shared.counters.add_inbound(delivery.len());
+        // The batch as it arrived, before any transform has touched it — one
+        // half of what a card's log shows, the other being what leaves at the
+        // outputs.
+        if reported {
+            let skipped = throttle.take_skipped(Stage::Input);
+            publish(&self.events, || {
+                UiEvent::batch(self.shared.id.clone(), Stage::Input, delivery, skipped).seq(pass)
+            });
+        } else if watching {
+            throttle.skip(Stage::Input, delivery.len());
+        }
+        reported
+    }
+
+    /// The last input has died: say so everywhere a failure is said.
+    fn input_failed(&self, e: &anyhow::Error) {
+        error!(
+            "[{}]\t input error, stopping pipeline: {:?}",
+            self.shared.id, e
+        );
+        self.shared.counters.add_error();
+        remember_failure(&self.history, &self.shared.id, Stage::Input, None, e, 1);
+        publish(&self.events, || {
+            UiEvent::error(self.shared.id.clone(), Stage::Input, e)
+        });
+    }
+
+    /// A pass is done with its delivery: acknowledge it — or, under
+    /// checkpointing, hold an ack that stands for a position until the
+    /// coordinator fires it, once a checkpoint covering it is durable.
+    fn settle(&mut self, ack: Box<dyn crate::inputs::Ack>) {
+        match self.checkpoint.as_mut() {
+            Some(participant) => participant.defer(ack),
+            None => ack.ack(),
+        }
     }
 
     /// Run until the input errors or the pipeline is cancelled.
@@ -722,26 +1076,50 @@ impl PipelineRuntime {
         // happened to arrive together.
         let mut pass = 0u64;
         let mut throttle = UiThrottle::new(self.pass_interval);
+        // A savepoint's barrier already finished the outputs before it took
+        // the snapshot; finishing them again after the loop would be a second
+        // `finish` the trait promises never happens.
+        let mut stopped_at_savepoint = false;
         loop {
-            let woken = match select! {
-                // `biased` so cancellation always wins a tie. Tearing the graph
-                // down cancels every pipeline and *then* drops the upstreams,
-                // so a downstream is woken with both its cancellation and an
-                // "upstream is gone" ready at once — and a random pick would
-                // report our own shutdown as a pipeline failure half the time.
-                biased;
-                () = self.shared.cancellation_token.cancelled() => break,
-                msg = next_input_message(&mut self.input) => msg.map(Woken::Delivered),
-                // The other source of work, and the only one that isn't a
-                // message: a transform that holds messages back — a `buffer`
-                // waiting on a window or on a state bucket — asking to be
-                // looked at. Unbiased against the input on purpose: a pipeline
-                // whose input never goes quiet must still get its windows
-                // closed, and `FuturesUnordered` parks immediately when every
-                // transform in the chain is one that can never wake, which is
-                // the overwhelmingly common case.
-                index = next_wakeup(&mut self.transforms) => Ok(Woken::Flush(index)),
-            } {
+            // A root's barrier that is due is taken before anything else,
+            // between two passes — see `due_barrier`.
+            let next = if let Some(barrier) = self.due_barrier() {
+                Ok(Woken::Barrier(barrier))
+            } else {
+                // Inline rather than behind a helper `async fn`: the extra
+                // state-machine layer measured at a few percent of the
+                // per-pass floor.
+                select! {
+                    // `biased` so cancellation always wins a tie. Tearing the
+                    // graph down cancels every pipeline and *then* drops the
+                    // upstreams, so a downstream is woken with both its
+                    // cancellation and an "upstream is gone" ready at once —
+                    // and a random pick would report our own shutdown as a
+                    // pipeline failure half the time.
+                    biased;
+                    () = self.shared.cancellation_token.cancelled() => break,
+                    msg = next_input_message(&mut self.input) => msg.map(|delivery| {
+                        match delivery.barrier() {
+                            Some(barrier) => Woken::Barrier(barrier),
+                            None => Woken::Delivered(delivery),
+                        }
+                    }),
+                    // The other source of work, and the only one that isn't a
+                    // message: a transform that holds messages back — a
+                    // `buffer` waiting on a window or on a state bucket —
+                    // asking to be looked at. `FuturesUnordered` parks
+                    // immediately when every transform in the chain is one
+                    // that can never wake, which is the overwhelmingly common
+                    // case.
+                    index = next_wakeup(&mut self.transforms) => Ok(Woken::Flush(index)),
+                    // A root's barrier, awaited only once its input has gone
+                    // quiet; a busy root takes them from `due_barrier` above.
+                    barrier = std::future::poll_fn(|cx| poll_trigger(&mut self.checkpoint, cx)) => {
+                        Ok(Woken::Barrier(barrier))
+                    }
+                }
+            };
+            let woken = match next {
                 Ok(woken) => woken,
                 Err(e) => {
                     // Same reasoning one step later: the error may have been
@@ -757,15 +1135,7 @@ impl PipelineRuntime {
                         );
                         break;
                     }
-                    error!(
-                        "[{}]\t input error, stopping pipeline: {:?}",
-                        self.shared.id, e
-                    );
-                    self.shared.counters.add_error();
-                    remember_failure(&self.history, &self.shared.id, Stage::Input, None, &e, 1);
-                    publish(&self.events, || {
-                        UiEvent::error(self.shared.id.clone(), Stage::Input, &e)
-                    });
+                    self.input_failed(&e);
                     break;
                 }
             };
@@ -800,6 +1170,13 @@ impl PipelineRuntime {
             // place, and `pass` itself is left alone so the sequence numbers
             // keep meaning what the UI draws them as.
             let (batches, ack, reported) = match woken {
+                Woken::Barrier(barrier) => {
+                    if Box::pin(self.take_checkpoint(barrier)).await {
+                        stopped_at_savepoint = true;
+                        break;
+                    }
+                    continue;
+                }
                 Woken::Flush(index) => {
                     let batches = self.flush_transform(index, pass + 1, &mut throttle).await;
                     if batches.is_empty() {
@@ -810,35 +1187,7 @@ impl PipelineRuntime {
                 }
                 Woken::Delivered(delivery) => {
                     pass += 1;
-                    // Decided once, here, and used for every batch event this
-                    // pass produces: reporting the input of a pass whose output
-                    // was dropped would draw a pass that never finished. See
-                    // `UiThrottle`.
-                    let reported = watching && throttle.report_pass();
-                    // Counted before the `watching` gate above and deliberately
-                    // outside it: the feed is a sample of what is happening now
-                    // and costs nothing when nobody is attached, while this is
-                    // the record of what happened, which is worth exactly as
-                    // much at 3am. Three relaxed atomic adds a pass is what
-                    // that costs.
-                    self.shared.counters.add_inbound(delivery.len());
-                    // The batch as it arrived, before any transform has touched
-                    // it — one half of what a card's log shows, the other being
-                    // what leaves at the outputs below.
-                    if reported {
-                        let skipped = throttle.take_skipped(Stage::Input);
-                        publish(&self.events, || {
-                            UiEvent::batch(
-                                self.shared.id.clone(),
-                                Stage::Input,
-                                &delivery,
-                                skipped,
-                            )
-                            .seq(pass)
-                        });
-                    } else if watching {
-                        throttle.skip(Stage::Input, delivery.len());
-                    }
+                    let reported = self.report_inbound(&delivery, pass, watching, &mut throttle);
                     // Taken apart here rather than carried whole: the transforms
                     // and outputs below only ever want the messages, and holding
                     // onto `ack` by name is what lets it be acknowledged once,
@@ -854,8 +1203,12 @@ impl PipelineRuntime {
                 }
             };
 
-            self.deliver(&batches, pass, reported, watching, &mut throttle)
-                .await;
+            if !self
+                .deliver(&batches, pass, reported, watching, &mut throttle)
+                .await
+            {
+                break;
+            }
 
             // Firing whatever the pass produced (a filtered-out message
             // produces zero `batches`, so the loop above never ran) is
@@ -871,7 +1224,7 @@ impl PipelineRuntime {
             // the wait triggers introduced, and it is on the roadmap with the
             // rest of the ack story.
             if let Some(ack) = ack {
-                ack.ack();
+                self.settle(ack);
             }
         }
         // Which of the two ways out this was, decided by the same question
@@ -879,17 +1232,41 @@ impl PipelineRuntime {
         // any other way ended because its last input died, and that is the
         // state worth being able to see from outside: the pipeline is over,
         // and nothing in the process will restart it.
-        let ended = if self.shared.cancellation_token.is_cancelled() {
+        let ended = if stopped_at_savepoint || self.shared.cancellation_token.is_cancelled() {
             RunStatus::Stopped
         } else {
             RunStatus::Failed
         };
-        self.finish_outputs().await;
+        if !stopped_at_savepoint {
+            self.finish_outputs().await;
+        }
         // After `finish_outputs`, so the status changes when the run loop is
         // actually done rather than while an output is still landing a part.
         self.shared.set_status(ended);
         Ok(())
     }
+}
+
+/// Join `checkpoints` as `shared`'s run loop. Whether it is a root — takes its
+/// barriers from the coordinator rather than down an edge — is read off the
+/// config: a pipeline with no `pipeline` input has nowhere else to get them.
+fn join(
+    shared: &Arc<Pipeline>,
+    checkpoints: &Arc<Checkpoints>,
+    buckets: Arc<crate::buckets::Buckets>,
+    positions: Vec<Option<serde_json::Value>>,
+) -> Participant {
+    let config = &shared.config;
+    let upstreams: Vec<PipelineId> = config.upstreams().into_iter().cloned().collect();
+    let root = upstreams.is_empty();
+    checkpoints.join(
+        shared.id.clone(),
+        upstreams,
+        config.state.as_ref().map(|state| state.bucket.clone()),
+        root,
+        buckets,
+        positions,
+    )
 }
 
 impl Pipeline {
@@ -944,6 +1321,13 @@ impl Pipeline {
     }
 
     fn create_runtime(self: &Arc<Self>, mut ctx: BuildCtx) -> Result<PipelineRuntime> {
+        // what the last committed checkpoint holds for this pipeline, if the
+        // server checkpoints and it has one
+        let restored = ctx
+            .checkpoints
+            .as_ref()
+            .and_then(|checkpoints| checkpoints.restored(&self.id));
+        let configs = ComponentConfigs::of(&self.config);
         let mut transforms = Vec::with_capacity(self.config.transforms.len());
         for t in self.config.transforms.iter().cloned() {
             transforms.push(t.build(&mut ctx)?);
@@ -957,9 +1341,33 @@ impl Pipeline {
         // it builds, and an output that fails to build shouldn't leave half a
         // subscription behind — building it last keeps that window as small as
         // the old single-input code had it
+        // a position is the one piece of state an input takes at build time
+        // rather than afterwards: an input `buffer` moves the input into a
+        // task of its own the moment it is built
+        let positions: Vec<Option<serde_json::Value>> = (0..self.config.inputs.len())
+            .map(|index| {
+                restored.as_ref().and_then(|snapshot| {
+                    snapshot.input(index, configs.inputs.get(index).unwrap_or(&serde_json::Value::Null))
+                })
+            })
+            .collect();
+        // Joined *before* the inputs are built, because building a `pipeline`
+        // input subscribes it to its upstream, which is running: from that
+        // moment the upstream may hand it batches and then a barrier. Were
+        // this pipeline not yet a member, the upstream would find itself
+        // alone in its region, commit, and fire its acks for batches nothing
+        // here has snapshotted — a loss window every time a pipeline is
+        // created under a running one. Dropped (leaving again) if the build
+        // fails.
+        let participant = ctx.checkpoints.as_ref().map(|checkpoints| {
+            join(self, checkpoints, Arc::clone(&ctx.buckets), positions.clone())
+        });
         let mut inputs = Vec::with_capacity(self.config.inputs.len());
-        for i in self.config.inputs.iter().cloned() {
-            inputs.push(i.build(&mut ctx)?);
+        for (index, i) in self.config.inputs.iter().cloned().enumerate() {
+            ctx.restored_position = positions.get(index).cloned().flatten();
+            let built = i.build(&mut ctx);
+            ctx.restored_position = None;
+            inputs.push(built?);
         }
         let mut outputs = Vec::with_capacity(self.config.outputs.len());
         for o in self.config.outputs.iter().cloned() {
@@ -967,7 +1375,7 @@ impl Pipeline {
         }
         let history = Arc::clone(&ctx.history);
         let watchers = ctx.watchers.clone();
-        Ok(PipelineRuntime::from_parts(
+        let mut runtime = PipelineRuntime::from_parts(
             inputs,
             transforms,
             outputs,
@@ -975,7 +1383,15 @@ impl Pipeline {
             ctx.events.clone(),
         )?
         .with_history(history)
-        .with_watchers(watchers))
+        .with_watchers(watchers);
+        if let Some(participant) = participant {
+            if let Some(snapshot) = &restored {
+                runtime.restore(snapshot);
+                tracing::info!("[{}]\t restored from its checkpoint", self.id);
+            }
+            runtime = runtime.with_participant(participant);
+        }
+        Ok(runtime)
     }
     pub fn start(self: &Arc<Self>, ctx: BuildCtx) -> anyhow::Result<tokio::task::JoinHandle<()>> {
         let runtime = self.create_runtime(ctx)?;
@@ -990,7 +1406,7 @@ impl Pipeline {
     /// A poisoned lock only means some other task panicked while pushing or
     /// cloning this vec; the vec itself can't be left inconsistent, so we
     /// recover rather than propagate a panic into every downstream send.
-    fn lock_senders(&self) -> std::sync::MutexGuard<'_, Vec<mpsc::Sender<Arc<MessageBatch>>>> {
+    fn lock_senders(&self) -> std::sync::MutexGuard<'_, Vec<Downstream>> {
         self.downstream_senders.lock().unwrap_or_else(|poisoned| {
             tracing::warn!(
                 "[{}]\t downstream senders lock was poisoned; recovering",
@@ -1000,12 +1416,21 @@ impl Pipeline {
         })
     }
 
-    fn downstream_senders(&self) -> Vec<mpsc::Sender<Arc<MessageBatch>>> {
+    fn downstream_senders(&self) -> Vec<Downstream> {
         self.lock_senders().clone()
     }
 
+    /// Hand every batch this pipeline produces to `tx` as well. Barriers are
+    /// not sent here — see [`Pipeline::subscribe_edges`] for the subscriber
+    /// that wants them.
     pub fn subscribe(&self, tx: mpsc::Sender<Arc<MessageBatch>>) {
-        self.lock_senders().push(tx);
+        self.lock_senders().push(Downstream::Batches(tx));
+    }
+
+    /// The same, for a downstream pipeline: batches *and* the checkpoint
+    /// barriers between them, in the order they were produced.
+    pub fn subscribe_edges(&self, tx: mpsc::Sender<Edge>) {
+        self.lock_senders().push(Downstream::Edges(tx));
     }
 
     /// How many downstreams this pipeline is currently handing batches to.

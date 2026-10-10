@@ -38,6 +38,7 @@ use std::sync::Arc;
 
 use crate::BuildCtx;
 use crate::inputs::MessageBatch;
+use base64::Engine as _;
 use crate::outputs::rotate::{Encoder, Rotation, part_name};
 use crate::outputs::{BuildOutput, OutputDestination};
 
@@ -265,6 +266,54 @@ impl OutputDestination for S3Output {
         self.buffered.encoder.reset();
         Ok(())
     }
+
+    /// The part being accumulated, for a checkpoint: it exists nowhere but in
+    /// this process's memory, so without this a crash loses every row in it
+    /// while the inputs' positions say they were delivered. Restored, the
+    /// part carries on under the same key, and the rows replayed since the
+    /// checkpoint are appended to it — the object that is finally uploaded
+    /// holds each row once.
+    fn snapshot(&self) -> Option<serde_json::Value> {
+        let part = self.buffered.open.as_ref()?;
+        Some(serde_json::json!({
+            "bytes": base64::engine::general_purpose::STANDARD.encode(&part.bytes),
+            "key": part.key.as_ref(),
+            "opened_at": part.opened_at.to_rfc3339(),
+            "rows": part.rows,
+            "started": self.buffered.encoder.started(),
+            "sequence": self.sequence,
+        }))
+    }
+
+    fn restore(&mut self, state: serde_json::Value) -> Result<()> {
+        let text = |field: &str| {
+            state
+                .get(field)
+                .and_then(serde_json::Value::as_str)
+                .ok_or_else(|| anyhow::anyhow!("an s3 part's checkpoint has no `{field}`"))
+        };
+        let bytes = base64::engine::general_purpose::STANDARD
+            .decode(text("bytes")?)
+            .context("an s3 part's checkpointed bytes are not base64")?;
+        let opened_at = DateTime::parse_from_rfc3339(text("opened_at")?)
+            .context("an s3 part's checkpointed opening time is not a time")?
+            .with_timezone(&Utc);
+        let number = |field: &str| state.get(field).and_then(serde_json::Value::as_u64).unwrap_or(0);
+        self.buffered.open = Some(OpenPart {
+            bytes,
+            key: ObjectPath::from(text("key")?),
+            opened_at,
+            rows: usize::try_from(number("rows")).unwrap_or(usize::MAX),
+        });
+        self.buffered.encoder.resume(
+            state
+                .get("started")
+                .and_then(serde_json::Value::as_bool)
+                .unwrap_or(false),
+        );
+        self.sequence = self.sequence.max(number("sequence"));
+        Ok(())
+    }
 }
 
 #[cfg(test)]
@@ -401,6 +450,46 @@ mod tests {
     fn surrounding_slashes_are_ignored() -> Result<()> {
         let prefix = parse_prefix("/orders/")?.context("expected a prefix")?;
         assert_eq!(prefix.to_string(), "orders");
+        Ok(())
+    }
+
+    /// The unuploaded part survives a checkpoint whole: snapshotted from one
+    /// output and restored into a fresh one, it carries on under the same key
+    /// with the same bytes, and the next rows are appended to it — for an
+    /// array, with a comma rather than a second `[`.
+    #[tokio::test]
+    async fn the_part_in_memory_survives_a_snapshot_and_restore() -> Result<()> {
+        let mut config = config();
+        config.format = Some(kayak_core::config::FileFormat::JsonArray);
+        let mut before = build(connection(), config.clone())?;
+        before
+            .emit(Arc::new(vec![Arc::new(serde_json::json!({"n": 1}))]))
+            .await?;
+        let Some(state) = before.snapshot() else {
+            panic!("an s3 output with an open part had nothing to snapshot");
+        };
+
+        let mut after = build(connection(), config)?;
+        after.restore(state.clone())?;
+        assert_eq!(after.snapshot(), Some(state.clone()));
+        after
+            .emit(Arc::new(vec![Arc::new(serde_json::json!({"n": 2}))]))
+            .await?;
+        let Some(grown) = after.snapshot() else {
+            panic!("the restored part vanished");
+        };
+        assert_eq!(grown["key"], state["key"], "the restored part kept its key");
+        assert_eq!(grown["rows"], serde_json::json!(2));
+        let bytes = base64::engine::general_purpose::STANDARD
+            .decode(grown["bytes"].as_str().unwrap_or_default())?;
+        assert_eq!(String::from_utf8(bytes)?, r#"[{"n":1},{"n":2}"#);
+        Ok(())
+    }
+
+    /// Nothing open is nothing to checkpoint.
+    #[test]
+    fn an_output_with_no_part_snapshots_nothing() -> Result<()> {
+        assert!(build(connection(), config())?.snapshot().is_none());
         Ok(())
     }
 }
