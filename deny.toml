@@ -80,6 +80,12 @@ ignore = [
   { id = "RUSTSEC-2026-0173", reason = "proc-macro-error2, transitive" },
   { id = "RUSTSEC-2025-0134", reason = "rustls-pemfile, transitive through the rustls stack" },
   { id = "RUSTSEC-2026-0249", reason = "smartstring, transitive through rhai" },
+  # unsafe-libyaml arrives through async-opcua-core's dependency on the
+  # deprecated serde_yaml, and async-opcua 0.19.0 is the latest release.
+  # kayak's own YAML goes through serde_norway and never touches it; the opcua
+  # crate uses it for its config files, which kayak does not load. Revisit
+  # when async-opcua moves off serde_yaml. assessed 2026-10-12
+  { id = "RUSTSEC-2024-0449", reason = "unsafe-libyaml via async-opcua's serde_yaml; no async-opcua release drops it" },
 ]
 
 [bans]
