@@ -107,4 +107,18 @@ impl OutputDestination for NatsOutput {
         self.client = Some(self.connect().await?);
         Ok(())
     }
+
+    /// `publish` only queues; this waits for the queue to reach the server.
+    /// Core nats keeps nothing for an absent subscriber, so this is as
+    /// durable as the protocol gets — but it does mean a checkpoint never
+    /// acknowledges input whose output was still sitting in a client buffer.
+    async fn checkpoint(&mut self) -> anyhow::Result<()> {
+        if let Some(client) = &self.client {
+            client
+                .flush()
+                .await
+                .with_context(|| format!("failed to flush nats publishes to '{}'", self.subject))?;
+        }
+        Ok(())
+    }
 }

@@ -14,6 +14,8 @@ use kayak_core::config::PipelineConfig;
 use serde_json::Value;
 use tokio::sync::mpsc;
 
+use crate::pipeline::Edge;
+
 impl BuildInput for PipelineConfig {
     fn build(self, ctx: &mut BuildCtx) -> Result<Box<dyn InputSource>> {
         // the upstream pipeline already decided this batch was "delivered" the
@@ -26,7 +28,7 @@ impl BuildInput for PipelineConfig {
             .get(&self.upstream)
             .ok_or_else(|| anyhow!("upstream pipeline '{}' not found", self.upstream))?;
         let (tx, rx) = mpsc::channel(100);
-        upstream_handle.shared.subscribe(tx);
+        upstream_handle.shared.subscribe_edges(tx);
         Ok(Box::new(PipelineInput {
             envelope: ctx.envelope("pipeline", None),
             upstream: self.upstream,
@@ -44,7 +46,9 @@ pub struct PipelineInput {
     /// here says something about *this* hop rather than replacing that, and a
     /// `wrap` would nest the upstream's message inside a new one.
     pub envelope: Envelope,
-    pub rx: tokio::sync::mpsc::Receiver<Arc<MessageBatch>>,
+    /// Batches, and the checkpoint barriers between them — see
+    /// [`crate::pipeline::Edge`].
+    pub rx: tokio::sync::mpsc::Receiver<Edge>,
 }
 
 #[async_trait::async_trait]
@@ -52,11 +56,15 @@ impl InputSource for PipelineInput {
     async fn next(&mut self) -> Result<Delivery> {
         // recv() only returns None once every sender is gone, i.e. the upstream
         // pipeline was deleted or died. Nothing more will ever arrive.
-        let batch = self
+        let edge = self
             .rx
             .recv()
             .await
             .ok_or_else(|| anyhow!("upstream pipeline '{}' is gone", self.upstream))?;
+        let batch: Arc<MessageBatch> = match edge {
+            Edge::Batch(batch) => batch,
+            Edge::Barrier(barrier) => return Ok(Delivery::of_barrier(barrier)),
+        };
 
         if !self.envelope.is_enabled() {
             return Ok(Delivery::new(batch));
@@ -79,6 +87,10 @@ impl InputSource for PipelineInput {
             })
             .collect();
         Ok(Delivery::new(Arc::new(enveloped)))
+    }
+
+    fn carries_barriers(&self) -> bool {
+        true
     }
 }
 

@@ -107,6 +107,7 @@ export default defineConfig({
         items: [
           { text: 'authentication', link: '/operating/authentication' },
           { text: 'history', link: '/operating/history' },
+          { text: 'durability', link: '/operating/durability' },
           { text: 'deployment', link: '/operating/deployment' },
         ],
       },

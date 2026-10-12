@@ -45,12 +45,36 @@ impl BuildInput for KafkaConfig {
             max_batch: crate::inputs::batch_cap(self.max_batch),
             envelope: ctx.envelope("kafka", Some(&self.connection)),
             ack_mode: ctx.ack_mode(),
+            checkpointed: ctx.checkpoints.is_some(),
+            resume: ctx.restored_position.as_ref().and_then(offsets_of),
             consumer: None,
             pipeline_id: ctx.pipeline_id.clone(),
             events: ctx.events.clone(),
             backoff: Backoff::new(),
         }))
     }
+}
+
+/// A checkpointed position back into `(partition, next offset)` pairs. The
+/// position is `{"<partition>": <next offset>}`, the shape
+/// [`KafkaAck::position`] writes; anything else is ignored with a warning.
+fn offsets_of(position: &Value) -> Option<Vec<(i32, i64)>> {
+    let Some(object) = position.as_object() else {
+        tracing::warn!("ignoring a checkpointed kafka position that is not an object: {position}");
+        return None;
+    };
+    let mut offsets = Vec::with_capacity(object.len());
+    for (partition, offset) in object {
+        if let (Ok(partition), Some(offset)) = (partition.parse::<i32>(), offset.as_i64()) {
+            offsets.push((partition, offset));
+        } else {
+            tracing::warn!(
+                "ignoring a checkpointed kafka offset that is not a partition and a number: \
+                 {partition}: {offset}"
+            );
+        }
+    }
+    Some(offsets)
 }
 
 pub struct KafkaInput {
@@ -68,6 +92,15 @@ pub struct KafkaInput {
     /// config `connect` builds and what `next` hands back as an [`Ack`]. See
     /// the `ack` module docs for what the two modes mean and their scope.
     ack_mode: AckMode,
+    /// Whether the server checkpoints. If so every delivery's offsets are a
+    /// position the checkpoint records, and they are stored for commit only
+    /// once a checkpoint covering them is durable — whatever `ack_mode` says,
+    /// since committing on receipt would let the broker run ahead of the
+    /// state. See `docs/durability.md`.
+    checkpointed: bool,
+    /// The offsets of the checkpoint this input was restored from, committed
+    /// for the group on the first connect and then forgotten.
+    resume: Option<Vec<(i32, i64)>>,
     /// Built on the first read, like the nats input: `build()` must not block
     /// on a broker that isn't up yet. Shared with any [`KafkaAck`] this input
     /// hands out, since acknowledging one has to reach back into the same
@@ -103,17 +136,50 @@ impl KafkaInput {
             // `KafkaAck::ack` once the batch has cleared this pipeline — see
             // the `ack` module docs.
             .set("enable.auto.commit", "true");
-        if self.ack_mode == AckMode::OnDelivery {
+        if self.ack_mode == AckMode::OnDelivery || self.checkpointed {
             config.set("enable.auto.offset.store", "false");
         }
         config
     }
 
-    fn connect(&self) -> Result<StreamConsumer> {
+    fn connect(&mut self) -> Result<StreamConsumer> {
         let consumer: StreamConsumer = self
             .client_config()
             .create()
             .with_context(|| format!("failed to create a kafka consumer for {}", self.brokers))?;
+        // Before subscribing, so the group's committed offsets are the
+        // checkpoint's by the time a partition is assigned. They can only be
+        // *behind* it (offsets are stored after the manifest naming them is
+        // durable, and committed on a timer after that), and a consumer that
+        // started from behind would replay into state that already counts
+        // what it replays. A failure here costs exactly that — duplicates in
+        // the state, never a loss — so it is a warning, not a failed start.
+        if let Some(offsets) = self.resume.take() {
+            let mut list = rdkafka::TopicPartitionList::new();
+            for &(partition, offset) in &offsets {
+                if let Err(e) = list.add_partition_offset(
+                    &self.topic,
+                    partition,
+                    rdkafka::Offset::Offset(offset),
+                ) {
+                    tracing::warn!("could not restore the kafka offset for partition {partition}: {e}");
+                }
+            }
+            match consumer.commit(&list, rdkafka::consumer::CommitMode::Sync) {
+                Ok(()) => tracing::info!(
+                    "[{}]\t kafka group '{}' on '{}' resumes at its checkpointed offsets {offsets:?}",
+                    self.pipeline_id,
+                    self.group,
+                    self.topic
+                ),
+                Err(e) => tracing::warn!(
+                    "[{}]\t could not commit the checkpointed offsets for group '{}' ({e}); it \
+                     resumes from the broker's, and anything between the two is counted twice",
+                    self.pipeline_id,
+                    self.group
+                ),
+            }
+        }
         consumer
             .subscribe(&[self.topic.as_str()])
             .with_context(|| format!("failed to subscribe to kafka topic '{}'", self.topic))?;
@@ -245,9 +311,54 @@ struct KafkaAck {
     /// (partition, next offset to read) pairs — one past the record actually
     /// read, which is the convention `store_offset`/`commit` both expect.
     offsets: Vec<(i32, i64)>,
+    /// Whether this waits for a checkpoint — see `KafkaInput::checkpointed`.
+    deferred: bool,
+}
+
+impl KafkaAck {
+    /// Keep the highest offset per partition — what a later store would win
+    /// anyway, so nothing is lost by folding.
+    fn fold(&mut self, partition: i32, offset: i64) {
+        match self.offsets.iter_mut().find(|(p, _)| *p == partition) {
+            Some((_, held)) => *held = (*held).max(offset),
+            None => self.offsets.push((partition, offset)),
+        }
+    }
 }
 
 impl Ack for KafkaAck {
+    fn defers_to_checkpoint(&self) -> bool {
+        self.deferred
+    }
+
+    fn position(&self) -> Option<Value> {
+        let mut position = serde_json::Map::new();
+        for &(partition, offset) in &self.offsets {
+            let held = position
+                .get(&partition.to_string())
+                .and_then(Value::as_i64)
+                .unwrap_or(i64::MIN);
+            position.insert(partition.to_string(), Value::from(held.max(offset)));
+        }
+        Some(Value::Object(position))
+    }
+
+    /// Two acks fold when they are for the same topic on the **same
+    /// consumer**: a consumer rebuilt after a reconnect is a different
+    /// client, and an offset stored on the old one goes nowhere.
+    fn absorb(&mut self, later: &dyn Ack) -> bool {
+        let Some(later) = (later as &dyn std::any::Any).downcast_ref::<KafkaAck>() else {
+            return false;
+        };
+        if !Arc::ptr_eq(&self.consumer, &later.consumer) || self.topic != later.topic {
+            return false;
+        }
+        for &(partition, offset) in &later.offsets {
+            self.fold(partition, offset);
+        }
+        true
+    }
+
     fn ack(&self) {
         for &(partition, offset) in &self.offsets {
             if let Err(e) = self.consumer.store_offset(&self.topic, partition, offset) {
@@ -357,14 +468,15 @@ impl InputSource for KafkaInput {
             }
 
             let batch = Arc::new(batch);
-            return Ok(match self.ack_mode {
-                AckMode::OnReceipt => Delivery::new(batch),
-                AckMode::OnDelivery => Delivery::with_ack(
+            return Ok(match (self.ack_mode, self.checkpointed) {
+                (AckMode::OnReceipt, false) => Delivery::new(batch),
+                (_, deferred) => Delivery::with_ack(
                     batch,
                     Box::new(KafkaAck {
                         consumer,
                         topic: self.topic.clone(),
                         offsets,
+                        deferred,
                     }) as Box<dyn Ack>,
                 ),
             });
@@ -392,6 +504,8 @@ mod tests {
             max_batch: 1,
             envelope: Envelope::none(),
             ack_mode,
+            checkpointed: false,
+            resume: None,
             consumer: None,
             pipeline_id: "test".to_string(),
             events: broadcast::channel(4).0,
@@ -417,5 +531,60 @@ mod tests {
         let config = input(AckMode::OnDelivery).client_config();
         assert_eq!(config.get("enable.auto.commit"), Some("true"));
         assert_eq!(config.get("enable.auto.offset.store"), Some("false"));
+    }
+
+    /// Under checkpointing the client stores nothing on its own, whatever the
+    /// ack mode: the broker must never run ahead of the committed state.
+    #[test]
+    fn checkpointing_turns_off_automatic_offset_storing_even_on_receipt() {
+        let mut input = input(AckMode::OnReceipt);
+        input.checkpointed = true;
+        assert_eq!(input.client_config().get("enable.auto.offset.store"), Some("false"));
+    }
+
+    fn consumer() -> Arc<StreamConsumer> {
+        // building a consumer reaches no broker, so this works offline
+        match input(AckMode::OnDelivery).client_config().create::<StreamConsumer>() {
+            Ok(consumer) => Arc::new(consumer),
+            Err(e) => panic!("creating an unconnected consumer failed: {e}"),
+        }
+    }
+
+    fn ack(consumer: &Arc<StreamConsumer>, offsets: Vec<(i32, i64)>) -> KafkaAck {
+        KafkaAck {
+            consumer: Arc::clone(consumer),
+            topic: "test.events".to_string(),
+            offsets,
+            deferred: true,
+        }
+    }
+
+    /// Acks held between checkpoints fold into one per consumer, keeping the
+    /// highest offset per partition — the memory bound, and the position.
+    #[tokio::test]
+    async fn acks_from_one_consumer_fold_to_the_highest_offset_per_partition() {
+        let consumer = consumer();
+        let mut held = ack(&consumer, vec![(0, 5), (1, 9)]);
+        assert!(held.absorb(&ack(&consumer, vec![(0, 7)])));
+        assert!(held.absorb(&ack(&consumer, vec![(0, 6), (2, 1)])));
+        assert_eq!(held.position(), Some(serde_json::json!({"0": 7, "1": 9, "2": 1})));
+    }
+
+    /// A rebuilt consumer is a different client: its acks are held apart,
+    /// since storing an offset on the old one goes nowhere.
+    #[tokio::test]
+    async fn acks_from_different_consumers_do_not_fold() {
+        let mut held = ack(&consumer(), vec![(0, 5)]);
+        assert!(!held.absorb(&ack(&consumer(), vec![(0, 7)])));
+        assert_eq!(held.position(), Some(serde_json::json!({"0": 5})));
+    }
+
+    /// The position round-trips into the offsets a restore commits.
+    #[test]
+    fn a_position_reads_back_as_offsets() {
+        let mut offsets = offsets_of(&serde_json::json!({"0": 7, "3": 12})).unwrap_or_default();
+        offsets.sort_unstable();
+        assert_eq!(offsets, vec![(0, 7), (3, 12)]);
+        assert_eq!(offsets_of(&serde_json::json!([1, 2])), None);
     }
 }

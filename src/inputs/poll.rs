@@ -34,7 +34,7 @@ use tokio::time::Instant;
 use crate::backoff::Backoff;
 use crate::events::publish;
 use crate::inputs::{
-    Delivery, InputSource, MessageBatch, batch_cap,
+    Delivery, InputSource, MessageBatch, ack::PositionAck, batch_cap,
     envelope::{Envelope, Meta},
 };
 use crate::outputs::columns::{Identifier, Table};
@@ -282,8 +282,15 @@ pub struct Poller {
     pipeline_id: PipelineId,
     events: broadcast::Sender<UiEvent>,
     backoff: Backoff,
-    /// Rows read and not yet handed on, already enveloped.
-    pending: VecDeque<Value>,
+    /// Rows read and not yet handed on, already enveloped, each with the
+    /// cursor value it was read at.
+    pending: VecDeque<(Value, Option<String>)>,
+    /// The position a checkpoint may record: the highest cursor value whose
+    /// rows have *all* been handed on. Behind `watermark` (which moves when a
+    /// page is read) and, at a tie split by `max_batch`, behind the last row
+    /// handed on as well — restoring to a value half of whose rows were
+    /// delivered would lose the other half.
+    delivered: Option<String>,
     /// The highest cursor value handed on so far. Meaningless for a snapshot.
     watermark: Option<String>,
     /// Whether `start_from` has been applied — `newest` needs one query
@@ -318,6 +325,7 @@ impl Poller {
             events,
             backoff: Backoff::new(),
             pending: VecDeque::new(),
+            delivered: None,
             watermark: None,
             started: false,
             next_due: None,
@@ -326,23 +334,65 @@ impl Poller {
         }
     }
 
+    /// Start from a checkpoint's position rather than from `start_from` — see
+    /// `docs/durability.md`. A position that is not one this input wrote is
+    /// ignored with a warning, and the input starts as configured.
+    #[must_use]
+    pub fn resuming_from(mut self, position: Option<&Value>) -> Self {
+        let Some(position) = position else {
+            return self;
+        };
+        match position.get("watermark") {
+            Some(Value::String(watermark)) => {
+                self.watermark = Some(watermark.clone());
+                self.delivered = Some(watermark.clone());
+                self.started = true;
+                tracing::info!(
+                    "incremental read of {} resumes after '{watermark}' from its checkpoint",
+                    self.schedule.source
+                );
+            }
+            Some(Value::Null) => self.started = true,
+            _ => tracing::warn!(
+                "ignoring a checkpointed position for {} that is not a watermark: {position}",
+                self.schedule.source
+            ),
+        }
+        self
+    }
+
     /// The watermark as it stands — what a test asks after a read.
     #[must_use]
     pub fn watermark(&self) -> Option<&str> {
         self.watermark.as_deref()
     }
 
-    /// Up to `max_batch` rows already read, or `None` when there are none.
-    fn take_batch(&mut self) -> Option<Arc<MessageBatch>> {
+    /// Up to `max_batch` rows already read, or `None` when there are none,
+    /// with the position a checkpoint may record once they are handed on.
+    fn take_batch(&mut self) -> Option<(Arc<MessageBatch>, Option<String>)> {
         if self.pending.is_empty() {
             return None;
         }
         let count = self.pending.len().min(self.schedule.max_batch);
-        let batch: MessageBatch = self.pending.drain(..count).map(Arc::new).collect();
-        Some(Arc::new(batch))
+        let rows: Vec<(Value, Option<String>)> = self.pending.drain(..count).collect();
+        // a cursor value is safe once the row after it carries a different
+        // one; the last row of what has been read is safe too, since a page
+        // boundary never splits a value (`cut_at_last_value`)
+        for (i, (_, cursor)) in rows.iter().enumerate() {
+            let Some(cursor) = cursor else { continue };
+            let next = rows
+                .get(i + 1)
+                .map(|(_, c)| c)
+                .or_else(|| self.pending.front().map(|(_, c)| c));
+            if next.is_none_or(|next| next.as_ref() != Some(cursor)) {
+                self.delivered = Some(cursor.clone());
+            }
+        }
+        let batch: MessageBatch = rows.into_iter().map(|(row, _)| Arc::new(row)).collect();
+        Some((Arc::new(batch), self.delivered.clone()))
     }
 
-    fn enqueue(&mut self, row: Value) {
+    fn enqueue(&mut self, row: Value, cursor: Option<String>) {
         let own = if self.envelope.is_enabled() {
             let mut own = self.origin.clone();
             own.push(("polled_at", Value::String(self.polled_at.clone())));
@@ -353,7 +403,7 @@ impl Poller {
         // a row is always an object, so the `merge` shape always has
         // somewhere to attach to; said rather than unwrapped
         if let Some(message) = self.envelope.apply(row, own) {
-            self.pending.push_back(message);
+            self.pending.push_back((message, cursor));
         } else {
             tracing::warn!("skipping a row that could not be enveloped");
         }
@@ -371,7 +421,7 @@ impl Poller {
             let rows = self.reader.snapshot().await?;
             let count = rows.len();
             for row in rows {
-                self.enqueue(row);
+                self.enqueue(row, None);
             }
             tracing::debug!("snapshot of {} returned {count} rows", self.schedule.source);
             self.next_due = Some(Instant::now() + self.schedule.interval);
@@ -411,9 +461,9 @@ impl Poller {
         }
         for row in rows {
             if row.cursor.is_some() {
-                self.watermark = row.cursor;
+                self.watermark.clone_from(&row.cursor);
             }
-            self.enqueue(row.row);
+            self.enqueue(row.row, row.cursor);
         }
         if fetched < self.schedule.page_size {
             self.next_due = Some(Instant::now() + self.schedule.interval);
@@ -426,8 +476,17 @@ impl Poller {
 impl InputSource for Poller {
     async fn next(&mut self) -> Result<Delivery> {
         loop {
-            if let Some(batch) = self.take_batch() {
-                return Ok(Delivery::new(batch));
+            if let Some((batch, position)) = self.take_batch() {
+                // an incremental read's position rides on the ack, for a
+                // checkpoint to record; a snapshot has none — the next poll
+                // after a restart *is* its replay
+                return Ok(match (self.schedule.start_from, position) {
+                    (Some(_), Some(watermark)) => Delivery::with_ack(
+                        batch,
+                        Box::new(PositionAck(serde_json::json!({ "watermark": watermark }))),
+                    ),
+                    _ => Delivery::new(batch),
+                });
             }
             if let Some(due) = self.next_due {
                 tokio::time::sleep_until(due).await;
@@ -856,6 +915,121 @@ mod tests {
         assert_eq!(meta["input"], json!("postgres"));
         assert!(meta["polled_at"].is_string());
         assert_eq!(delivery[0]["id"], json!(1));
+        Ok(())
+    }
+
+    // ---- checkpoint positions ----
+
+    fn position_of(delivery: &Delivery) -> Option<Value> {
+        delivery.ack.position()
+    }
+
+    fn tied(id: i64, cursor: &str) -> Fetched {
+        Fetched {
+            row: json!({"id": id}),
+            cursor: Some(cursor.to_string()),
+        }
+    }
+
+    /// An incremental read's position rides on each delivery's ack, and it is
+    /// where the next read after a restart has to start.
+    #[tokio::test]
+    async fn each_delivery_carries_the_position_after_it() -> Result<()> {
+        let mut config = config(incremental());
+        config.max_batch = Some(10);
+        let plan = Plan::build(&config, "schema")?;
+        let reader = Scripted::default();
+        reader
+            .pages
+            .lock()
+            .map_err(|_| anyhow::anyhow!("poisoned"))?
+            .push_back(Ok(vec![fetched(1), fetched(2)]));
+        let mut poller = poller(&plan, reader);
+        let delivery = poller.next().await?;
+        assert_eq!(ids(&delivery), vec![1, 2]);
+        assert!(delivery.ack.defers_to_checkpoint());
+        assert_eq!(position_of(&delivery), Some(json!({"watermark": "2"})));
+        Ok(())
+    }
+
+    /// The case that makes the position more than "the last row": `max_batch`
+    /// splits two rows sharing a cursor value across deliveries. Recording
+    /// that value after the first would restore to `> 5` and lose the second
+    /// row with 5, so the position stays at the last value whose rows have
+    /// *all* been handed on.
+    #[tokio::test]
+    async fn a_tie_split_across_deliveries_holds_the_position_back() -> Result<()> {
+        let mut config = config(incremental());
+        config.page_size = Some(10);
+        config.max_batch = Some(2);
+        let plan = Plan::build(&config, "schema")?;
+        let reader = Scripted::default();
+        reader
+            .pages
+            .lock()
+            .map_err(|_| anyhow::anyhow!("poisoned"))?
+            .push_back(Ok(vec![tied(1, "4"), tied(2, "5"), tied(3, "5")]));
+        let mut poller = poller(&plan, reader);
+
+        let first = poller.next().await?;
+        assert_eq!(ids(&first), vec![1, 2]);
+        assert_eq!(position_of(&first), Some(json!({"watermark": "4"})));
+        let second = poller.next().await?;
+        assert_eq!(ids(&second), vec![3]);
+        assert_eq!(position_of(&second), Some(json!({"watermark": "5"})));
+        Ok(())
+    }
+
+    /// Restored from a checkpoint, the first read asks for rows after the
+    /// checkpointed watermark — and `start_from: newest` is not asked at all,
+    /// since that would skip whatever arrived while the server was down.
+    #[tokio::test]
+    async fn a_restored_position_is_where_the_first_read_starts() -> Result<()> {
+        let mut config = config(PollMode::Incremental {
+            field: "id".to_string(),
+            start_from: Some(StartFrom::Newest),
+            lag_secs: None,
+        });
+        config.page_size = Some(10);
+        let plan = Plan::build(&config, "schema")?;
+        let reader = Scripted {
+            newest: Some("100".to_string()),
+            ..Scripted::default()
+        };
+        reader
+            .pages
+            .lock()
+            .map_err(|_| anyhow::anyhow!("poisoned"))?
+            .push_back(Ok(vec![fetched(43)]));
+        let asked = Arc::clone(&reader.asked);
+        let newest_asked = Arc::clone(&reader.newest_asked);
+        let mut poller = poller(&plan, reader).resuming_from(Some(&json!({"watermark": "42"})));
+
+        let delivery = poller.next().await?;
+        assert_eq!(ids(&delivery), vec![43]);
+        assert_eq!(
+            asked.lock().map_err(|_| anyhow::anyhow!("poisoned"))?.first().cloned(),
+            Some(Some("42".to_string()))
+        );
+        assert_eq!(*newest_asked.lock().map_err(|_| anyhow::anyhow!("poisoned"))?, 0);
+        Ok(())
+    }
+
+    /// A snapshot has no position: the next poll after a restart is its
+    /// replay, so its deliveries carry nothing for a checkpoint to hold.
+    #[tokio::test]
+    async fn a_snapshot_delivery_carries_no_position() -> Result<()> {
+        let plan = Plan::build(&config(PollMode::Snapshot), "schema")?;
+        let reader = Scripted::default();
+        reader
+            .snapshots
+            .lock()
+            .map_err(|_| anyhow::anyhow!("poisoned"))?
+            .push_back(vec![json!({"id": 1})]);
+        let mut poller = poller(&plan, reader);
+        let delivery = poller.next().await?;
+        assert!(!delivery.ack.defers_to_checkpoint());
+        assert_eq!(position_of(&delivery), None);
         Ok(())
     }
 }

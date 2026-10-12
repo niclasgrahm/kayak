@@ -84,7 +84,15 @@ Every bucket has limits. You cannot make a bucket with no limit.
 
 ## lifetime
 
-A bucket is in memory. **It does not survive a restart of the server.**
+A bucket is in memory. **By default it does not survive a restart of the
+server.**
+
+If the server starts with `--state-dir`, buckets are part of its
+[checkpoints](/operating/durability). A checkpoint copies each bucket together
+with the positions of the inputs, at one consistent cut. The next start
+restores them, so a restart counts each message once. The store stays in
+memory, and the per-message path does not change. A checkpoint copies a bucket
+only if a pipeline wrote to it since the last checkpoint.
 
 A bucket survives a `revert`. A revert rebuilds every pipeline, but it keeps
 the contents of the buckets. If the declaration of a bucket changed, the bucket

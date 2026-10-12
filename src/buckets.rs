@@ -7,8 +7,14 @@
 //! durability without checkpointed input positions would be worse than none,
 //! because restoring a half-finished piece of work whose remaining messages were
 //! never replayed produces an answer that is wrong in a way nothing downstream
-//! can see. See "state" in the readme for the whole argument. A durable backend
-//! is a later swap behind this same shape, not a different design.
+//! can see. See "state" in the readme for the whole argument.
+//!
+//! Durability is therefore not this store's job: under checkpointing
+//! (`--state-dir`, see `docs/durability.md`) a bucket is *copied* at a
+//! consistent cut together with the inputs' positions — [`Buckets::snapshot`]
+//! and [`Buckets::restore`] — and the store itself stays exactly as it is, with
+//! nothing added to the per-message path. The write version a [`Slot`] already
+//! carries is what lets a checkpoint skip a bucket nothing has touched.
 //!
 //! Two properties are load-bearing:
 //!
@@ -166,14 +172,47 @@ impl Slot {
     }
 }
 
+/// One bucket's contents as a checkpoint holds them — see
+/// `docs/durability.md`.
+///
+/// Entries carry the **wall clock** they were last written at, because that is
+/// the one clock that means anything after a restart: an `Instant` is
+/// monotonic only within one process. Restoring measures each entry's age
+/// against it, so downtime counts toward the idle timeout.
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct BucketSnapshot {
+    /// The declaration the contents were held under. A bucket whose
+    /// declaration has changed since is restored empty, the rule
+    /// [`Buckets::rebuilt`] applies on a revert.
+    pub config: StateBucketConfig,
+    pub entries: Vec<SnapshotEntry>,
+}
+
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct SnapshotEntry {
+    pub key: String,
+    pub values: BTreeMap<String, Value>,
+    pub updated_at: chrono::DateTime<chrono::Utc>,
+}
+
+/// Tells one [`Buckets`] from another, so a write version read off one is
+/// never compared with a version read off its replacement after a revert.
+static INSTANCES: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+
 /// The live buckets, by name.
 ///
 /// The *set* of buckets is fixed at construction — they are declared in the
 /// config, not created by running pipelines — which is what lets each one carry
 /// its own lock with no map-wide one above it.
-#[derive(Default)]
 pub struct Buckets {
     inner: HashMap<String, Slot>,
+    instance: u64,
+}
+
+impl Default for Buckets {
+    fn default() -> Self {
+        Self::with_slots(HashMap::new())
+    }
 }
 
 impl Buckets {
@@ -182,15 +221,111 @@ impl Buckets {
         Self::default()
     }
 
+    fn with_slots(inner: HashMap<String, Slot>) -> Self {
+        Self {
+            inner,
+            instance: INSTANCES.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
+        }
+    }
+
     /// The buckets a config declares, empty.
     #[must_use]
     pub fn from_config(config: &StateBuckets) -> Self {
-        Self {
-            inner: config
+        Self::with_slots(
+            config
                 .iter()
                 .map(|(name, bucket)| (name.clone(), Slot::new(Bucket::new(bucket.clone()))))
                 .collect(),
+        )
+    }
+
+    /// Which set of buckets this is — see [`INSTANCES`].
+    #[must_use]
+    pub fn instance(&self) -> u64 {
+        self.instance
+    }
+
+    /// The bucket's contents for a checkpoint, and the write version they are
+    /// as of. `None` for an undeclared bucket.
+    ///
+    /// Copied under the bucket's lock, which is held for as long as the copy
+    /// takes — the one cost a checkpoint puts on a bucket's writers. The
+    /// version is read under the same lock and a write bumps it only *after*
+    /// releasing it, so the copy is never older than the version says: at
+    /// worst the next checkpoint copies a bucket that had not in fact moved.
+    #[must_use]
+    pub fn snapshot(&self, name: &str) -> Option<(u64, BucketSnapshot)> {
+        let slot = self.inner.get(name)?;
+        let mut bucket = Self::lock(slot, name);
+        bucket.expire(Instant::now());
+        let version = *slot.changed.borrow();
+        let entries = bucket
+            .entries
+            .iter()
+            .map(|(key, entry)| SnapshotEntry {
+                key: key.clone(),
+                values: entry.values.clone(),
+                updated_at: entry.updated_at,
+            })
+            .collect();
+        Some((
+            version,
+            BucketSnapshot {
+                config: bucket.config.clone(),
+                entries,
+            },
+        ))
+    }
+
+    /// The bucket's write version, without copying anything — what decides
+    /// whether a checkpoint copies it at all.
+    #[must_use]
+    pub fn version(&self, name: &str) -> Option<u64> {
+        Some(*self.inner.get(name)?.changed.borrow())
+    }
+
+    /// Put a checkpoint's contents back. Returns whether anything was
+    /// restored: `false` for an undeclared bucket, or one whose declaration
+    /// has changed since the snapshot (its contents may not satisfy the new
+    /// bounds — the same rule as [`Buckets::rebuilt`]).
+    ///
+    /// Each entry's age is measured from the wall clock it was written at, so
+    /// one idle past the bucket's timeout — downtime included — is not
+    /// restored at all, and the rest expire on the schedule they would have.
+    #[must_use]
+    pub fn restore(&self, name: &str, snapshot: BucketSnapshot) -> bool {
+        let Some(slot) = self.inner.get(name) else {
+            return false;
+        };
+        {
+            let mut bucket = Self::lock(slot, name);
+            if bucket.config != snapshot.config {
+                return false;
+            }
+            let now = Instant::now();
+            let wall = chrono::Utc::now();
+            let timeout = bucket.config.idle_timeout();
+            bucket.entries.clear();
+            for entry in snapshot.entries {
+                let age = (wall - entry.updated_at).to_std().unwrap_or_default();
+                if timeout.is_some_and(|timeout| age >= timeout) {
+                    continue;
+                }
+                if bucket.entries.len() >= bucket.config.max_keys() {
+                    break;
+                }
+                bucket.entries.insert(
+                    entry.key,
+                    Entry {
+                        values: entry.values,
+                        updated: now.checked_sub(age).unwrap_or(now),
+                        updated_at: entry.updated_at,
+                    },
+                );
+            }
         }
+        slot.changed.send_modify(|version| *version = version.wrapping_add(1));
+        true
     }
 
     /// The buckets a config declares, keeping what the previous set already
@@ -221,7 +356,7 @@ impl Buckets {
                 }),
             );
         }
-        Self { inner }
+        Self::with_slots(inner)
     }
 
     /// A poisoned lock means a thread panicked while holding it. Nothing under
@@ -425,7 +560,7 @@ impl Buckets {
 
 #[cfg(test)]
 mod tests {
-    use super::Buckets;
+    use super::{BucketSnapshot, Buckets, SnapshotEntry};
     use kayak_core::state::{StateBucketConfig, StateBuckets};
     use serde_json::{Value, json};
 
@@ -683,5 +818,97 @@ mod tests {
         // and the next write is what actually reclaims it
         buckets.remember("b", "other", pairs("n", json!(2)));
         assert_eq!(buckets.summaries()[0].keys, 1);
+    }
+
+    /// The checkpoint round trip: what one set of buckets held is what a fresh
+    /// set holds after restoring the snapshot.
+    #[test]
+    fn a_snapshot_restores_into_a_fresh_bucket() {
+        let config = StateBucketConfig {
+            max_keys: Some(10),
+            idle_timeout_secs: Some(3600),
+        };
+        let before = buckets(config.clone());
+        before.remember("b", "m1", pairs("recipe", json!("r-42")));
+        before.remember("b", "m2", pairs("recipe", json!("r-7")));
+        let Some((_, snapshot)) = before.snapshot("b") else {
+            panic!("a declared bucket had no snapshot");
+        };
+
+        let after = buckets(config);
+        assert!(after.restore("b", snapshot));
+        assert_eq!(
+            after.recall("b", "m1", &["recipe".to_string()]),
+            vec![Some(json!("r-42"))]
+        );
+        assert_eq!(
+            after.recall("b", "m2", &["recipe".to_string()]),
+            vec![Some(json!("r-7"))]
+        );
+    }
+
+    /// Downtime counts toward the idle timeout: an entry last written longer
+    /// ago than the timeout is not restored, however recently the process was
+    /// running. This is what keeps a `derive` from computing across a gap of
+    /// hours after a restart.
+    #[test]
+    fn an_entry_idle_past_its_timeout_is_not_restored() {
+        let config = StateBucketConfig {
+            max_keys: None,
+            idle_timeout_secs: Some(60),
+        };
+        let now = chrono::Utc::now();
+        let snapshot = BucketSnapshot {
+            config: config.clone(),
+            entries: vec![
+                SnapshotEntry {
+                    key: "stale".into(),
+                    values: [("v".to_string(), json!(1))].into_iter().collect(),
+                    updated_at: now - chrono::Duration::seconds(120),
+                },
+                SnapshotEntry {
+                    key: "fresh".into(),
+                    values: [("v".to_string(), json!(2))].into_iter().collect(),
+                    updated_at: now - chrono::Duration::seconds(5),
+                },
+            ],
+        };
+        let restored = buckets(config);
+        assert!(restored.restore("b", snapshot));
+        assert_eq!(restored.recall("b", "stale", &["v".to_string()]), vec![None]);
+        assert_eq!(
+            restored.recall("b", "fresh", &["v".to_string()]),
+            vec![Some(json!(2))]
+        );
+    }
+
+    /// A bucket whose declaration changed is restored empty — the revert rule.
+    #[test]
+    fn a_changed_declaration_is_not_restored() {
+        let before = buckets(StateBucketConfig::default());
+        before.remember("b", "m1", pairs("v", json!(1)));
+        let Some((_, snapshot)) = before.snapshot("b") else {
+            panic!("a declared bucket had no snapshot");
+        };
+        let after = buckets(StateBucketConfig {
+            max_keys: Some(5),
+            idle_timeout_secs: None,
+        });
+        assert!(!after.restore("b", snapshot));
+        assert_eq!(after.recall("b", "m1", &["v".to_string()]), vec![None]);
+    }
+
+    /// The version a snapshot reports moves with every write and not
+    /// otherwise — what lets a checkpoint skip a bucket nothing touched.
+    #[test]
+    fn the_snapshot_version_moves_only_with_writes() {
+        let buckets = buckets(StateBucketConfig::default());
+        let v0 = buckets.version("b");
+        let _ = buckets.snapshot("b");
+        assert_eq!(buckets.version("b"), v0, "taking a snapshot is not a write");
+        buckets.remember("b", "k", pairs("v", json!(1)));
+        assert_ne!(buckets.version("b"), v0);
+        let after_write = buckets.version("b");
+        assert_eq!(buckets.snapshot("b").map(|(v, _)| v), after_write);
     }
 }

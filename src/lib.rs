@@ -12,6 +12,7 @@ pub mod auth;
 pub mod backoff;
 pub mod banner;
 pub mod buckets;
+pub mod checkpoint;
 pub mod config;
 pub mod connections;
 pub mod endpoints;
@@ -150,6 +151,19 @@ pub struct BuildCtx<'a> {
     /// *third* directory boundary distinct from both `data_dir` and
     /// [`AppState`]'s `save_dir`.
     pub script_dir: Option<Arc<PathBuf>>,
+    /// The server's checkpoint coordinator, when it checkpoints (`--state-dir`).
+    ///
+    /// `None` — the default — is a server that keeps nothing across a restart,
+    /// which is every server before checkpoints existed and every test that is
+    /// not about them. An input that changes how it acknowledges under
+    /// checkpointing (kafka stores no offset until a checkpoint is durable)
+    /// asks whether this is set. See `docs/durability.md`.
+    pub checkpoints: Option<Arc<crate::checkpoint::Checkpoints>>,
+    /// The position the input currently being built should start from, out of
+    /// the last committed checkpoint — set around each input's build the way
+    /// `envelope` is, and only ever `Some` for an input whose config is
+    /// unchanged since the checkpoint.
+    pub restored_position: Option<Value>,
 }
 
 impl<'a> BuildCtx<'a> {
@@ -186,7 +200,19 @@ impl<'a> BuildCtx<'a> {
             history: Arc::new(History::disabled()),
             watchers: crate::events::Watchers::attached(),
             script_dir: None,
+            checkpoints: None,
+            restored_position: None,
         }
+    }
+
+    /// The same, with the server's checkpoint coordinator.
+    #[must_use]
+    pub fn with_checkpoints(
+        mut self,
+        checkpoints: Option<Arc<crate::checkpoint::Checkpoints>>,
+    ) -> Self {
+        self.checkpoints = checkpoints;
+        self
     }
 
     /// The same, with the server's history store rather than a disabled one.

@@ -136,6 +136,19 @@ impl Encoder {
         self.started = false;
     }
 
+    /// Whether anything has been written to the current part — what a
+    /// checkpoint of a part in progress has to carry, so a restored array
+    /// carries on with a comma rather than opening a second `[`.
+    #[must_use]
+    pub fn started(&self) -> bool {
+        self.started
+    }
+
+    /// Carry on a part a checkpoint restored.
+    pub fn resume(&mut self, started: bool) {
+        self.started = started;
+    }
+
     /// The bytes for `messages`, to be appended to the current part.
     ///
     /// Serializing every message separately rather than the batch as a whole is

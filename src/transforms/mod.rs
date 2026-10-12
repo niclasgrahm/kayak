@@ -69,4 +69,23 @@ pub trait Transform: Send + 'static {
     fn loaded_script(&self) -> Option<Arc<kayak_core::script::LoadedScript>> {
         None
     }
+
+    /// What this transform is holding, for a checkpoint — see
+    /// `docs/durability.md`. `None` (the default) for one that holds nothing
+    /// between batches, which is nearly all of them: keyed state lives in the
+    /// pipeline's bucket and is checkpointed there.
+    ///
+    /// Called between two passes, so whatever this returns is exactly the
+    /// effect of every batch the run loop has handed it so far.
+    fn snapshot(&self) -> Option<serde_json::Value> {
+        None
+    }
+
+    /// Take back what [`Transform::snapshot`] returned, before the first
+    /// batch. Only called with a snapshot taken from a transform with the same
+    /// config at the same position. An error is logged and the transform
+    /// starts empty — refusing to start over a checkpoint would be worse.
+    fn restore(&mut self, _state: serde_json::Value) -> anyhow::Result<()> {
+        Ok(())
+    }
 }

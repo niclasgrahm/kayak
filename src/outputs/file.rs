@@ -45,6 +45,7 @@ impl BuildOutput for FileOutputConfig {
             encoder: Encoder::new(format),
             open: None,
             sequence: 0,
+            unsynced: Vec::new(),
         }))
     }
 }
@@ -138,6 +139,12 @@ impl Root {
         self.directory.join(name)
     }
 
+    /// The directory itself.
+    #[must_use]
+    pub fn path(&self) -> &Path {
+        &self.directory
+    }
+
     /// `path` as a relative path of ordinary names, or an error saying why it
     /// isn't one.
     ///
@@ -211,6 +218,10 @@ pub struct FileOutput {
     /// Which part the next one is. Never reset, so two parts opened in the same
     /// second are still distinct names.
     sequence: u64,
+    /// Parts closed since the last checkpoint, not yet fsynced. A close only
+    /// flushes to the page cache, which a power cut loses; a checkpoint is the
+    /// point at which that stops being acceptable.
+    unsynced: Vec<PathBuf>,
 }
 
 impl FileOutput {
@@ -257,6 +268,7 @@ impl FileOutput {
             .await
             .with_context(|| format!("failed to flush {}", part.path.display()))?;
         tracing::debug!(path = %part.path.display(), rows = part.rows, "closed file part");
+        self.unsynced.push(part.path);
         Ok(())
     }
 }
@@ -309,7 +321,34 @@ impl OutputDestination for FileOutput {
     /// but that is exactly the case where not doing it leaves an unparseable
     /// file behind, with no `]` and no rotation coming to add one.
     async fn finish(&mut self) -> Result<()> {
-        self.close().await
+        self.close().await?;
+        self.checkpoint().await
+    }
+
+    /// Everything written so far onto the disk itself, not just the page
+    /// cache: the open part, and every part closed since the last checkpoint.
+    /// Each batch is already *flushed* (readable by anyone tailing the file);
+    /// this is the fsync that makes it survive a power cut, paid once per
+    /// checkpoint rather than once per batch.
+    async fn checkpoint(&mut self) -> Result<()> {
+        if let Some(part) = &self.open {
+            part.file
+                .sync_data()
+                .await
+                .with_context(|| format!("failed to sync {}", part.path.display()))?;
+        }
+        for path in std::mem::take(&mut self.unsynced) {
+            let file = File::open(&path)
+                .await
+                .with_context(|| format!("failed to reopen {} to sync it", path.display()))?;
+            file.sync_all()
+                .await
+                .with_context(|| format!("failed to sync {}", path.display()))?;
+        }
+        // the parts' directory entries too — a new file whose entry is not
+        // durable is a file that may not exist after a power cut
+        crate::checkpoint::store::sync_dir(self.directory.path())?;
+        Ok(())
     }
 }
 

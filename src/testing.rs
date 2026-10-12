@@ -247,6 +247,14 @@ pub struct CollectingOutput {
     /// an output that never initialises — a database that is simply not
     /// running, which is the case the run loop's retry exists for.
     fail_init: usize,
+    /// How many more `emit` calls fail before one succeeds — a destination
+    /// that drops out for a while, which under checkpointing must hold the
+    /// pipeline rather than lose the batch.
+    fail_emits: usize,
+    /// How many times `checkpoint` was called, and how many more of those
+    /// calls fail.
+    checkpoints: Arc<Mutex<usize>>,
+    fail_checkpoints: Arc<Mutex<usize>>,
 }
 
 impl CollectingOutput {
@@ -258,7 +266,34 @@ impl CollectingOutput {
             finish_calls: Arc::new(Mutex::new(0)),
             fail_emit: false,
             fail_init: 0,
+            fail_emits: 0,
+            checkpoints: Arc::new(Mutex::new(0)),
+            fail_checkpoints: Arc::new(Mutex::new(0)),
         }
+    }
+
+    /// An output whose first `attempts` `emit` calls fail and whose later ones
+    /// succeed.
+    #[must_use]
+    pub fn failing_emits(attempts: usize) -> Self {
+        Self {
+            fail_emits: attempts,
+            ..Self::new()
+        }
+    }
+
+    /// How many times the run loop has asked this output to make itself
+    /// durable for a checkpoint.
+    #[must_use]
+    pub fn checkpoint_calls(&self) -> Arc<Mutex<usize>> {
+        Arc::clone(&self.checkpoints)
+    }
+
+    /// Set to make the next that many `checkpoint` calls fail — an output that
+    /// cannot flush, which must keep its region's checkpoint from completing.
+    #[must_use]
+    pub fn failing_checkpoints(&self) -> Arc<Mutex<usize>> {
+        Arc::clone(&self.fail_checkpoints)
     }
 
     #[must_use]
@@ -313,7 +348,21 @@ impl OutputDestination for CollectingOutput {
         if self.fail_emit {
             return Err(anyhow!("collecting output was told to fail"));
         }
+        if self.fail_emits > 0 {
+            self.fail_emits -= 1;
+            return Err(anyhow!("collecting output is down for a while"));
+        }
         lock(&self.emitted.0).push(message_batch);
+        Ok(())
+    }
+
+    async fn checkpoint(&mut self) -> Result<()> {
+        *lock(&self.checkpoints) += 1;
+        let mut failing = lock(&self.fail_checkpoints);
+        if *failing > 0 {
+            *failing -= 1;
+            return Err(anyhow!("collecting output could not flush"));
+        }
         Ok(())
     }
 
@@ -334,6 +383,132 @@ impl OutputDestination for CollectingOutput {
 
     async fn finish(&mut self) -> Result<()> {
         *lock(&self.finish_calls) += 1;
+        Ok(())
+    }
+}
+
+/// A log of messages with offsets, standing in for a kafka topic: what was
+/// pushed stays, and an input can be started from any offset in it — which is
+/// what makes it *rewindable*, the property checkpoints rely on. Shared
+/// between the test (which pushes) and however many inputs read it, including
+/// the one a restart builds.
+#[derive(Clone, Default)]
+pub struct ReplayLog(Arc<(Mutex<Vec<Value>>, tokio::sync::Notify)>);
+
+impl ReplayLog {
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Append a message, waking any input waiting for one.
+    pub fn push(&self, message: Value) {
+        lock(&self.0.0).push(message);
+        self.0.1.notify_waiters();
+    }
+
+    #[must_use]
+    pub fn len(&self) -> usize {
+        lock(&self.0.0).len()
+    }
+
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+
+    /// An input reading up to `batch` messages at a time, from the offset a
+    /// checkpointed `position` names (`{"offset": n}`) or from the start.
+    #[must_use]
+    pub fn input(&self, batch: usize, position: Option<&Value>) -> ReplayInput {
+        ReplayInput {
+            log: self.clone(),
+            next: position
+                .and_then(|p| p.get("offset"))
+                .and_then(Value::as_u64)
+                .and_then(|n| usize::try_from(n).ok())
+                .unwrap_or(0),
+            batch: batch.max(1),
+        }
+    }
+}
+
+/// An input over a [`ReplayLog`]. Each delivery's ack carries the offset after
+/// it as a position, and waits for a checkpoint — a kafka input under
+/// checkpointing, without a broker.
+pub struct ReplayInput {
+    log: ReplayLog,
+    next: usize,
+    batch: usize,
+}
+
+#[async_trait::async_trait]
+impl InputSource for ReplayInput {
+    async fn next(&mut self) -> Result<Delivery> {
+        loop {
+            let notified = self.log.0.1.notified();
+            {
+                let log = lock(&self.log.0.0);
+                if self.next < log.len() {
+                    let end = (self.next + self.batch).min(log.len());
+                    let batch: MessageBatch =
+                        log[self.next..end].iter().cloned().map(Arc::new).collect();
+                    self.next = end;
+                    return Ok(Delivery::with_ack(
+                        Arc::new(batch),
+                        Box::new(crate::inputs::ack::PositionAck(
+                            serde_json::json!({ "offset": end }),
+                        )),
+                    ));
+                }
+            }
+            notified.await;
+        }
+    }
+}
+
+/// A transform with state of its own: it numbers every message it sees,
+/// writing the running count under `seq`, and checkpoints the count. A count
+/// that is right after a crash and a replay is exactly-once state; one that
+/// has skipped or doubled is the bug checkpoints exist to prevent.
+#[derive(Default)]
+pub struct Counting {
+    count: u64,
+}
+
+impl Counting {
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+}
+
+#[async_trait::async_trait]
+impl Transform for Counting {
+    async fn apply(&mut self, message_batch: Arc<MessageBatch>) -> Result<Vec<Arc<MessageBatch>>> {
+        let numbered = message_batch
+            .iter()
+            .map(|message| {
+                self.count += 1;
+                let mut message = (**message).clone();
+                if let Some(object) = message.as_object_mut() {
+                    object.insert("seq".to_string(), Value::from(self.count));
+                }
+                Arc::new(message)
+            })
+            .collect();
+        Ok(vec![Arc::new(numbered)])
+    }
+
+    fn snapshot(&self) -> Option<Value> {
+        Some(serde_json::json!({ "count": self.count }))
+    }
+
+    fn restore(&mut self, state: Value) -> Result<()> {
+        self.count = state
+            .get("count")
+            .and_then(Value::as_u64)
+            .ok_or_else(|| anyhow!("a counting checkpoint has no count"))?;
         Ok(())
     }
 }
@@ -432,6 +607,9 @@ pub fn stub_config(id: &str) -> Config {
 ///   baseline format rather than as a detail of the double.
 pub struct LoadInput {
     batch: Arc<MessageBatch>,
+    /// Hand every batch a position, the way a rewindable input does under
+    /// checkpointing — see [`LoadInput::positioned`]. `None` hands none.
+    offset: Option<u64>,
 }
 
 impl LoadInput {
@@ -458,7 +636,19 @@ impl LoadInput {
         }));
         Self {
             batch: Arc::new(std::iter::repeat_n(message, batch_size).collect()),
+            offset: None,
         }
+    }
+
+    /// Give every batch an ack carrying a position that waits for a
+    /// checkpoint — a kafka input's shape under checkpointing, without the
+    /// broker. What the bench's checkpointed rows measure: the run loop holding
+    /// and coalescing one deferred ack per pass. An allocation per batch, as a
+    /// real input's ack is.
+    #[must_use]
+    pub fn positioned(mut self) -> Self {
+        self.offset = Some(0);
+        self
     }
 
     /// The same message with `sensor_id` rotating over `keys` distinct ids
@@ -483,6 +673,7 @@ impl LoadInput {
             .collect();
         Self {
             batch: Arc::new(batch),
+            offset: None,
         }
     }
 
@@ -490,7 +681,10 @@ impl LoadInput {
     /// particular shape — a payload a `map` mapping actually reads, say.
     #[must_use]
     pub fn with_batch(batch: Arc<MessageBatch>) -> Self {
-        Self { batch }
+        Self {
+            batch,
+            offset: None,
+        }
     }
 }
 
@@ -501,7 +695,36 @@ impl InputSource for LoadInput {
         // worker outright, and it is where a real input would be spending the
         // same budget on a socket
         tokio::task::consume_budget().await;
-        Ok(Delivery::new(Arc::clone(&self.batch)))
+        let Some(offset) = self.offset.as_mut() else {
+            return Ok(Delivery::new(Arc::clone(&self.batch)));
+        };
+        *offset += 1;
+        Ok(Delivery::with_ack(Arc::clone(&self.batch), Box::new(LoadAck(*offset))))
+    }
+}
+
+/// [`LoadInput`]'s position: an offset held as a number and only rendered as
+/// JSON when a checkpoint asks — the shape kafka's and the http log's acks
+/// have, which is what the bench's checkpointed rows are standing in for.
+struct LoadAck(u64);
+
+impl crate::inputs::Ack for LoadAck {
+    fn ack(&self) {}
+
+    fn defers_to_checkpoint(&self) -> bool {
+        true
+    }
+
+    fn position(&self) -> Option<Value> {
+        Some(serde_json::json!({ "offset": self.0 }))
+    }
+
+    fn absorb(&mut self, later: &dyn crate::inputs::Ack) -> bool {
+        let Some(later) = (later as &dyn std::any::Any).downcast_ref::<LoadAck>() else {
+            return false;
+        };
+        self.0 = self.0.max(later.0);
+        true
     }
 }
 

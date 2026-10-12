@@ -20,7 +20,9 @@ use kayak::banner;
 use kayak::listen;
 use kayak::secrets::{ChainStore, EnvStore, FileStore, SecretStore};
 use kayak::state::AppState;
+use kayak::checkpoint::{Checkpoints, Settings};
 use kayak::history::History;
+use std::time::Duration;
 use kayak_core::server_config::ServerConfig;
 use std::net::SocketAddr;
 
@@ -80,6 +82,16 @@ struct Args {
     /// server means anyone who can reach the port can rewrite the config.
     #[arg(long)]
     listen: Option<SocketAddr>,
+    /// Where checkpoints are kept, created if it is not there. **This flag is
+    /// what turns checkpointing on**: every pipeline's state, every bucket and
+    /// every rewindable input's position is committed here periodically (see
+    /// `checkpoint` in the server config), restored on the next start, and a
+    /// shutdown stops the graph at a savepoint so a restart replays nothing.
+    /// Without it nothing survives a restart, as before. See
+    /// `docs/durability.md`. A fourth directory, distinct from where configs
+    /// are saved and from `--data-dir`.
+    #[arg(long)]
+    state_dir: Option<PathBuf>,
 }
 
 /// The environment ahead of the secrets file, so an env var wins on a name
@@ -91,6 +103,58 @@ fn secret_store(path: Option<&PathBuf>) -> anyhow::Result<Arc<dyn SecretStore>> 
         stores.push(Box::new(FileStore::from_path(path)?));
     }
     Ok(Arc::new(ChainStore::new(stores)))
+}
+
+/// The server, from the config file if there is one and empty otherwise.
+fn build_state(
+    args: &Args,
+    secrets: Arc<dyn SecretStore>,
+    history: Arc<History>,
+    checkpoints: Option<Arc<Checkpoints>>,
+) -> anyhow::Result<AppState> {
+    let connections = args.connections.as_deref();
+    let data_dir = args.data_dir.clone();
+    Ok(match &args.config {
+        Some(path) => AppState::from_config_with_checkpoints(
+            path,
+            secrets,
+            connections,
+            data_dir,
+            history,
+            checkpoints,
+        )
+        .context("failed to initialize app state from config")?,
+        None => AppState::with_secrets_and_connections(secrets, connections)
+            .context("failed to load connections")?
+            .with_data_dir(data_dir)
+            .context("failed to prepare the data directory")?
+            .with_history(history)
+            .with_checkpoints(checkpoints),
+    })
+}
+
+/// The checkpoint coordinator `--state-dir` asks for, if it does — see
+/// `docs/durability.md`. Opened before the config is loaded, because loading
+/// starts the pipelines and each one restores from it as it is built.
+fn open_checkpoints(
+    dir: Option<&PathBuf>,
+    server_config: &ServerConfig,
+) -> anyhow::Result<Option<Arc<Checkpoints>>> {
+    let Some(dir) = dir else {
+        return Ok(None);
+    };
+    tracing::info!(
+        "Checkpointing into {} every {}s",
+        dir.display(),
+        server_config.checkpoint.interval_secs
+    );
+    Checkpoints::open(Settings {
+        dir: dir.clone(),
+        interval: Some(Duration::from_secs(server_config.checkpoint.interval_secs)),
+        timeout: Duration::from_secs(server_config.checkpoint.timeout_secs),
+    })
+    .context("failed to open the state directory")
+    .map(Some)
 }
 
 /// Say so, once, when an unauthenticated server is reachable from off the
@@ -154,23 +218,12 @@ async fn main() -> anyhow::Result<()> {
         }
         None => ServerConfig::default(),
     };
-    let connections = args.connections.as_deref();
-    let data_dir = args.data_dir.clone();
     // Built before the state because loading a config *starts* its pipelines,
     // and each one captures the store as it builds — see
     // `AppState::from_config_with`.
     let history = Arc::new(History::new(server_config.history.clone()));
-    let state = match &args.config {
-        Some(path) => {
-            AppState::from_config_with(path, secrets, connections, data_dir, Arc::clone(&history))
-                .context("failed to initialize app state from config")?
-        }
-        None => AppState::with_secrets_and_connections(secrets, connections)
-            .context("failed to load connections")?
-            .with_data_dir(data_dir)
-            .context("failed to prepare the data directory")?
-            .with_history(Arc::clone(&history)),
-    };
+    let checkpoints = open_checkpoints(args.state_dir.as_ref(), &server_config)?;
+    let state = build_state(&args, secrets, Arc::clone(&history), checkpoints)?;
 
     let auth = Arc::new(
         Auth::from_config(&server_config, secrets_for_auth.as_ref())

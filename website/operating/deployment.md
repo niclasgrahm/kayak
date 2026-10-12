@@ -364,8 +364,10 @@ After a limit, the server writes a log line and continues to stop. A second
 signal stops the process immediately.
 
 A shutdown does not write the config file. Unsaved changes from the web UI are
-lost on a restart. State buckets and history are in memory, so a restart also
-loses them.
+lost on a restart. History is in memory, so a restart also loses it. State
+buckets are in memory too, unless the server started with `--state-dir`. Then a
+shutdown first stops the graph at a [savepoint](/operating/durability), and a
+restart continues exactly where the shutdown stopped.
 
 kayak is pid 1 in the container, and it handles `SIGTERM` itself. Set a stop
 timeout longer than 15 s: `docker stop --time`, `stop_grace_period` in compose,

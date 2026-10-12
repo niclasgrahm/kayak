@@ -12,6 +12,30 @@ history, not here.
 
 ## Unreleased
 
+### Added
+
+- **Checkpoints, with `--state-dir`.** The server snapshots every
+  pipeline's state at a consistent cut every `checkpoint.interval_secs`
+  (10 by default, in the server config): transform state, state buckets,
+  input positions and an s3 output's open part. A restart restores them, so
+  state counts each message once across a crash. A graceful stop takes a
+  final savepoint first, so a restart replays nothing. Rewindable inputs
+  (`kafka`, `postgres`, `clickhouse`, and `http` with its new write-ahead
+  log) rewind to the checkpoint and replay; inputs with nothing upstream to
+  replay (`nats`, `mqtt`, `opcua`, `indu`, …) keep consistent state, and
+  lose what was in flight. See *operating → durability*.
+
+### Changed
+
+- **Under checkpointing, a failing output holds its pipeline.** It retries
+  on its backoff instead of dropping the batch, since completing a
+  checkpoint past a dropped batch is the loss checkpoints exist to prevent.
+  Without `--state-dir` nothing changes, and the cost on the hot path is
+  nil.
+- **An input `buffer` is cancel-safe.** A batch it was gathering was lost
+  when another branch of the run loop won the race; it now lives on the
+  input.
+
 ## 0.2.2 — 2026-10-09
 
 **Patch**: additions and a fix, nothing an existing config has to change

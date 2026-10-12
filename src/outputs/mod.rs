@@ -42,4 +42,29 @@ pub trait OutputDestination: Send + 'static {
     async fn finish(&mut self) -> Result<()> {
         Ok(())
     }
+
+    /// Make everything emitted so far durable at the destination — called at
+    /// every checkpoint barrier, before the checkpoint's acks may fire. See
+    /// `docs/durability.md`.
+    ///
+    /// The default does nothing, which is right for every output whose `emit`
+    /// only returns once the destination has the batch (a postgres insert, an
+    /// http request). An output that buffers — a file in the page cache, a
+    /// producer's queue — flushes here. An error fails the checkpoint for the
+    /// pipeline's region; the run loop carries on and the next one covers it.
+    async fn checkpoint(&mut self) -> Result<()> {
+        Ok(())
+    }
+
+    /// What this output is holding that it has accepted but not yet written —
+    /// the s3 output's unuploaded part. `None` (the default) for every output
+    /// that holds nothing once [`OutputDestination::checkpoint`] has returned.
+    fn snapshot(&self) -> Option<serde_json::Value> {
+        None
+    }
+
+    /// Take back what [`OutputDestination::snapshot`] returned, before `init`.
+    fn restore(&mut self, _state: serde_json::Value) -> Result<()> {
+        Ok(())
+    }
 }

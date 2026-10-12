@@ -53,6 +53,7 @@ fn guarded_server() -> anyhow::Result<Router> {
     .collect();
     let config = ServerConfig {
         history: HistoryConfig::default(),
+        checkpoint: kayak_core::server_config::CheckpointConfig::default(),
         auth: AuthConfig::Basic { users },
     };
     let auth = Arc::new(Auth::from_config(&config, &kayak::secrets::EnvStore)?);
@@ -581,6 +582,7 @@ fn jwt_config(jwks_url: &str) -> anyhow::Result<ServerConfig> {
     }))?;
     Ok(ServerConfig {
         history: HistoryConfig::default(),
+        checkpoint: kayak_core::server_config::CheckpointConfig::default(),
         auth,
     })
 }

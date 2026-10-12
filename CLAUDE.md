@@ -363,7 +363,9 @@ Documented in `kayak_core::state`'s module docs and `website/pipelines/state.md`
   checkpointed *input positions* would be worse than none — a core nats
   subscription has no replay, so restoring a half-finished piece of work whose
   remaining messages were never delivered yields an answer that is wrong
-  invisibly. A durable backend starts at the input, not here.
+  invisibly. Durability is the checkpoints' job (see "checkpoints" below): a
+  bucket is *copied* at a consistent cut beside the inputs' positions, and the
+  store itself gains nothing on the per-message path.
 - **Every bucket is bounded and there is no unbounded spelling.** Enforced in
   the store rather than by the transforms, so a new stateful component can't
   forget.
@@ -1136,7 +1138,8 @@ it:
 2. `AppState::begin_shutdown()` cancels the server's `CancellationToken`, which
    is what ends the `/events` streams,
 3. axum's `with_graceful_shutdown` stops accepting and drains,
-4. `AppState::shutdown()` cancels every pipeline and awaits the run loops.
+4. `AppState::shutdown()` — under checkpointing, first a **savepoint** (see
+   "checkpoints" below) — cancels every pipeline and awaits the run loops.
 
 Steps 2 and 3 are one step in the wrong order — an SSE response never completes
 on its own, so a drain that started first would wait on an attached browser
@@ -1171,6 +1174,92 @@ unhandled signal is *ignored* and `docker stop` was a 10-second wait for a
 `requested()` itself has no test and that is deliberate — the only honest one
 raises a real signal at the test binary every other test shares. It is kept to
 two branchless lines for that reason; everything it reaches is tested directly.
+
+### Checkpoints (`src/checkpoint/`, `docs/durability.md`)
+
+`--state-dir` turns them on; without it nothing below runs and nothing on the
+hot path changes (the trigger arm is `pending()`, acks fire at the end of the
+pass as always). `docs/durability.md` is the design and the Flink comparison;
+`website/operating/durability.md` is the operator's page. What it buys is
+**exactly-once state and at-least-once output** across a crash, and a graceful
+restart (shutdown, revert) that replays nothing.
+
+The shape: the coordinator bumps an epoch every `interval_secs`; **roots** (no
+`pipeline` input) take the barrier from a `watch` between two passes, everyone
+else receives it in band down the edge (`pipeline::Edge`), `Merged` **aligns**
+several upstreams' barriers, and at its barrier a run loop runs
+`take_checkpoint`: outputs durable (`OutputDestination::checkpoint`, or
+`finish` at a savepoint) → snapshot (`Transform::snapshot`,
+`OutputDestination::snapshot`, the input positions) → submit with its held acks
+→ forward the barrier → wait at its bucket. A **region** (connected component by
+edges and shared buckets) commits when every member has submitted; the writer
+task fsyncs the files, renames the manifest over its old self, and only then
+fires the acks.
+
+Positions ride on the **ack** (`Ack::defers_to_checkpoint`, `position`,
+`absorb`), because that is what survives read-ahead: the position recorded is
+the last one the run loop *processed*, never how far an input has read. Held
+acks coalesce per input in `PendingAcks`, so memory is per partition, not per
+message. Kafka stores offsets only after the manifest naming them is durable,
+and re-commits the manifest's offsets for its group on restore; sql inputs
+checkpoint their watermark (held back at a tie split by `max_batch`); the `http`
+input logs each post to `inputs::wal` and fsyncs before the 202.
+
+Every one of these rules was found by the chaos tests in `tests/checkpoint.rs`
+(thirty crashes at arbitrary points, invariant: message `n` always carries
+`seq = n+1`), and each one is load-bearing:
+
+- **Epochs never restart.** A new process carries on from the manifest's
+  highest epoch; snapshot files are named by epoch, and a reused number
+  overwrites a file the committed manifest still names.
+- **A pipeline joins before it subscribes.** `create_runtime` joins the
+  coordinator before building inputs; otherwise an upstream can find itself
+  alone in its region, commit, and ack batches the newcomer never snapshotted.
+- **A pipeline that stops without a savepoint stays, dead** (`Member::alive`),
+  and holds its region's checkpoints until it is rebuilt or deleted — Flink's
+  failed-task rule. Recomputing the region without it let an upstream commit
+  past what it never processed. A clean leave is only after submitting a stop
+  barrier.
+- **One process per state directory** — `Store::open` takes an exclusive lock.
+  Two coordinators garbage-collect each other's files.
+- **Forward before waiting at the bucket**, or a writer downstream of another
+  writer deadlocks on it. A dead co-writer fails the bucket at once rather than
+  making the living wait out the timeout.
+- **`Buffered` (input buffer) is cancel-safe**: its batch lives on the struct.
+  It was held in `next`'s locals and lost whenever the run loop's `select!`
+  dropped the future — a bug before checkpoints, made frequent by the trigger
+  arm. A barrier makes it hand on what it holds first.
+- **Under checkpointing a failing output is retried, not dropped**, and only
+  that output; a transform error still drops (it fails the same on replay).
+- **Restore is per component and only to an unchanged config** (compared as
+  JSON at the same index). Inputs take their position at build time through
+  `BuildCtx::restored_position`, since an input `buffer` moves the input into a
+  task the moment it is built.
+
+Three performance rules, each measured against `main` with `kayak-bench`
+(paired, interleaved runs) and each worth around a tenth of a busy pipeline's
+throughput when broken — **paid by every pipeline, checkpointed or not**:
+
+- **`Delivery` stays two fields.** Widening it from 24 to 48 bytes (an input
+  index and a barrier) cost ~10% at the per-pass floor, because it is moved
+  through several futures on every pass. So a barrier is a `BarrierAck` on an
+  empty batch, and the input index is a `FromInput` wrapper `Merged` puts only
+  round acks that defer. Ask before adding a field.
+- **The trigger is never polled on a busy pass.** A root asks
+  `Participant::trigger_ready` (an atomic load) between passes; the `select!`
+  arm sits *after* the input and is a pointer-wide `poll_fn` whose wait is boxed
+  once and kept (`Participant::poll_trigger`). An `async` arm first in the
+  biased `select!` registered a waiter every pass.
+- **No extra `async` layer around the run loop's `select!`** — a helper `async
+  fn` measured a few percent; sync helpers (`report_inbound`, `settle`) are
+  free. `take_checkpoint` is `Box::pin`ned so its state is not part of every
+  pass's.
+
+Adding a rewindable input: hand back an ack that defers and carries a
+`position()` (plus `absorb` so they coalesce), and read
+`ctx.restored_position` in `build`. Adding an output that buffers: implement
+`checkpoint` (make it durable) or `snapshot`/`restore` (carry it). Known gaps
+are in `docs/durability.md` under "not in this change".
 
 ### The static assets (`src/site.rs`)
 
