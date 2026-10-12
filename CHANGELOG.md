@@ -12,6 +12,11 @@ history, not here.
 
 ## Unreleased
 
+## 0.2.3 — 2026-10-12
+
+**Patch**: an opt-in feature and a fix. Every config that loaded on 0.2.2
+still loads, and the server config's new `checkpoint` section is optional.
+
 ### Added
 
 - **Checkpoints, with `--state-dir`.** The server snapshots every
