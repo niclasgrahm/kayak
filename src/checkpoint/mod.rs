@@ -216,6 +216,22 @@ enum Job {
         acks: Vec<(PipelineId, PendingAcks)>,
     },
     Forget(PipelineId),
+    /// Keep only these pipelines' and buckets' entries.
+    Retain {
+        pipelines: HashSet<PipelineId>,
+        buckets: HashSet<String>,
+    },
+}
+
+/// What [`Checkpoints::restore_buckets`] did with each bucket the manifest
+/// names.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct BucketRestore {
+    pub restored: Vec<String>,
+    /// Declared, but not as it was when the checkpoint was taken.
+    pub changed: Vec<String>,
+    /// Not declared at all any more.
+    pub undeclared: Vec<String>,
 }
 
 /// The checkpoint coordinator. One per server, shared by every run loop.
@@ -355,31 +371,59 @@ impl Checkpoints {
     }
 
     /// Fill `buckets` from the last committed checkpoint — every bucket the
-    /// manifest names whose declaration is unchanged.
-    pub fn restore_buckets(&self, buckets: &Buckets) {
+    /// manifest names whose declaration is unchanged — and say what became of
+    /// each.
+    ///
+    /// A bucket the config no longer declares is not a bucket whose
+    /// declaration changed: one is an edit that cost somebody their state and
+    /// is worth a warning, the other is a rename or a removal whose checkpoint
+    /// is simply left over (and dropped by [`Checkpoints::retain`] at the next
+    /// config load). So the undeclared ones are named once, together, at info.
+    pub fn restore_buckets(&self, buckets: &Buckets) -> BucketRestore {
         let entries: Vec<(String, Entry)> = self
             .lock_manifest()
             .buckets
             .iter()
             .map(|(name, entry)| (name.clone(), entry.clone()))
             .collect();
+        let mut report = BucketRestore::default();
         for (name, entry) in entries {
+            if !buckets.contains(&name) {
+                report.undeclared.push(name);
+                continue;
+            }
             match self.store.read_bucket(&entry) {
                 Ok(Some(snapshot)) => {
                     let keys = snapshot.entries.len();
                     if buckets.restore(&name, snapshot) {
                         tracing::info!("restored state bucket '{name}' ({keys} keys) from its checkpoint");
+                        report.restored.push(name);
                     } else {
                         tracing::warn!(
                             "state bucket '{name}' was not restored: its declaration has changed \
                              since the checkpoint"
                         );
+                        report.changed.push(name);
                     }
                 }
                 Ok(None) => {}
                 Err(e) => tracing::error!("could not read the checkpoint of bucket '{name}': {e:#}"),
             }
         }
+        if !report.undeclared.is_empty() {
+            tracing::info!(
+                "the checkpoint holds state buckets this config does not declare, which were not \
+                 restored: {}",
+                report.undeclared.join(", ")
+            );
+        }
+        report
+    }
+
+    /// The manifest as last committed.
+    #[must_use]
+    pub fn manifest(&self) -> Manifest {
+        self.lock_manifest().clone()
     }
 
     /// The epoch last committed for `id`.
@@ -478,6 +522,26 @@ impl Checkpoints {
         // submits on the way down can put the entry back after the forget
         self.lock().members.remove(id);
         let _ = self.writer.send(Job::Forget(id.to_string()));
+        self.signal();
+    }
+
+    /// A config has been loaded: drop the checkpoint of every pipeline and
+    /// bucket it does not name, so a renamed or removed one does not keep its
+    /// snapshot on disk forever.
+    ///
+    /// The config is the line rather than what happens to be running, because
+    /// a pipeline named in the file that failed to build is still meant to be
+    /// there and must not lose its checkpoint for having failed. Called with
+    /// the pipelines lock held and before the config's pipelines are built,
+    /// so the job is queued ahead of any commit a pipeline created afterwards
+    /// makes, and through the writer, so it is ordered with the commits
+    /// already queued.
+    pub fn retain(&self, pipelines: HashSet<PipelineId>, buckets: HashSet<String>) {
+        // a member the config no longer names is gone for good — the old
+        // graph's, stopped or dead — and must not hold its region for ever;
+        // the same reasoning as `forget`
+        self.lock().members.retain(|id, _| pipelines.contains(id));
+        let _ = self.writer.send(Job::Retain { pipelines, buckets });
         self.signal();
     }
 
@@ -748,17 +812,20 @@ impl Checkpoints {
     /// time, so commits land in the order regions completed.
     fn write(&self, job: Job) {
         match job {
-            Job::Forget(id) => {
-                let mut manifest = self.lock_manifest().clone();
-                if manifest.pipelines.remove(&id).is_some() {
-                    if let Err(e) = self.store.commit(&manifest) {
-                        tracing::error!("could not drop '{id}' from the checkpoint: {e:#}");
-                        return;
-                    }
-                    self.store.collect_garbage(&manifest);
-                    *self.lock_manifest() = manifest;
+            Job::Forget(id) => self.prune(|manifest| manifest.pipelines.remove(&id).is_some()),
+            Job::Retain { pipelines, buckets } => self.prune(|manifest| {
+                let before = (manifest.pipelines.len(), manifest.buckets.len());
+                manifest.pipelines.retain(|id, _| pipelines.contains(id));
+                manifest.buckets.retain(|name, _| buckets.contains(name));
+                let gone = before.0 - manifest.pipelines.len() + before.1 - manifest.buckets.len();
+                if gone > 0 {
+                    tracing::info!(
+                        "dropped {gone} checkpoint entries for pipelines and state buckets the \
+                         config no longer names"
+                    );
                 }
-            }
+                gone > 0
+            }),
             Job::Commit {
                 epoch,
                 pipelines,
@@ -798,6 +865,22 @@ impl Checkpoints {
                 self.signal();
             }
         }
+    }
+
+    /// Take entries out of the manifest, commit it and collect the files it
+    /// no longer names. `edit` says whether it changed anything; nothing is
+    /// written when it did not.
+    fn prune(&self, edit: impl FnOnce(&mut Manifest) -> bool) {
+        let mut manifest = self.lock_manifest().clone();
+        if !edit(&mut manifest) {
+            return;
+        }
+        if let Err(e) = self.store.commit(&manifest) {
+            tracing::error!("could not drop entries from the checkpoint: {e:#}");
+            return;
+        }
+        self.store.collect_garbage(&manifest);
+        *self.lock_manifest() = manifest;
     }
 
     fn commit_files(
