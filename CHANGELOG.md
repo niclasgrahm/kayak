@@ -22,6 +22,13 @@ history, not here.
   build puts the old one back. Replacing a pipeline that has stopped starts
   it again. Under checkpointing the old config stops at a barrier, so
   components whose config is unchanged resume exactly where they were.
+- **The `indu` output writes state streams.** A `series` entry takes
+  `value_kind: string` and then sends the field's strings — a machine's
+  state, `running` or `fault` — which Indu (from `S-17.10`) stores, charts
+  and alerts on as text. The default is `number`, as before, and a series
+  sends only values of its kind: a string in a numeric series is skipped,
+  not sent, because Indu refuses the other kind and a refused row fails the
+  batch. Every existing config loads unchanged.
 
 ### Changed
 

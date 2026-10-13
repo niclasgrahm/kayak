@@ -211,8 +211,9 @@ Each message gives one reading for each entry in `series`. For example, a reduce
 | field | type | | description |
 | --- | --- | --- | --- |
 | `stream` | `string` | <Badge type="warning" text="required" /> | The name of the stream in Indu, for example `press-3/oee`. The name can contain `{field}` placeholders that the output fills from the message, for example `{machine}/oee`. Thus one output can write a stream for each machine. The output skips this series for a message that does not have the field of a placeholder. |
-| `value` | `string` | <Badge type="warning" text="required" /> | The field that contains the value, as a path (`oee`, `stats.mean`). The value must be a number. The output skips this series for a message where the value is missing or is not a number. The batch does not fail. |
+| `value` | `string` | <Badge type="warning" text="required" /> | The field that contains the value, as a path (`oee`, `stats.mean`). The value must be of the kind that `value_kind` names: a number by default. The output skips this series for a message where the value is missing or is of the other kind. The batch does not fail. |
 | `unit` | `string` | <Badge type="info" text="optional" /> | The unit that Indu records when it creates the stream, for example `%`. Indu ignores it when the stream exists. |
+| `value_kind` | `number` \| `string` | <Badge type="info" text="optional" /> | What the stream carries: `number`, the default, or `string` for a state such as `running` or `fault`. Indu creates the stream with this kind and refuses a value of the other kind for it, so the output sends only values of this kind. |
 
 
 ## `tidepool` {#output-tidepool}

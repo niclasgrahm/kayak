@@ -94,13 +94,17 @@ outputs:
         unit: "%"
       - stream: "{machine}/availability"
         value: stats.availability
+      - stream: "{machine}/state"
+        value: state
+        value_kind: string
     at: _meta.received_at
 ```
 
 The output writes one reading for each entry in `series`, for each message.
-For example, a reducer sends `{machine, oee, stats: {availability}}`. With the
-two entries above, the output writes two streams for each machine:
-`press-3/oee` and `press-3/availability`.
+For example, a reducer sends `{machine, oee, stats: {availability}, state}`.
+With the three entries above, the output writes three streams for each
+machine: `press-3/oee`, `press-3/availability` and `press-3/state`, the last
+one a string.
 
 - **`stream`**: the name of the stream in Indu (its `external_id`). It can
   hold `{field}` placeholders, which the output fills from the message. Thus
@@ -108,12 +112,18 @@ two entries above, the output writes two streams for each machine:
   an unknown stream when it first sees it. After that, the stream is a series
   like a sensor: the historian charts it, alerts can watch it, and you can put
   it in the org tree.
-- **`value`**: the field path of the number. If the field is missing or is not
-  a number, the output skips that message for that series only. The batch does
-  not fail. A message without the field of a placeholder is also skipped for
-  that series.
+- **`value`**: the field path of the value. If the field is missing or is not
+  of the series' `value_kind`, the output skips that message for that series
+  only. The batch does not fail. A message without the field of a placeholder
+  is also skipped for that series.
 - **`unit`**: Indu records the unit when it creates the stream. After that,
   Indu ignores it.
+- **`value_kind`**: `number` (the default) or `string`. A `string` series
+  writes a state, such as `running` or `fault`: Indu draws it as a state band,
+  and an alert on it compares text (`equals`, `contains`, `any`). Indu fixes a
+  stream's kind when it creates the stream and refuses the other kind after
+  that, so the output sends only values of this kind. A number in a `string`
+  series is skipped, and a string in a `number` series is skipped.
 - **`at`**: the field that holds the time of the reading, as an RFC 3339 string
   or as epoch milliseconds. Without it, the output uses the time when it sends
   the batch. An `envelope` on the input puts the receive time at

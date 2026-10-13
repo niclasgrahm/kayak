@@ -486,7 +486,8 @@ fn output_samples() -> Vec<(&'static str, Value)> {
             "indu",
             json!({"type": "indu", "connection": "indu", "at": "_meta.received_at",
                 "series": [{"stream": "{machine}/oee", "value": "oee", "unit": "%"},
-                           {"stream": "{machine}/availability", "value": "availability"}]}),
+                           {"stream": "{machine}/availability", "value": "availability"},
+                           {"stream": "{machine}/state", "value": "state", "value_kind": "string"}]}),
         ),
         (
             "kafka",
