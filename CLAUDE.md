@@ -22,6 +22,9 @@ cargo run -- --config example_config/config.json --secrets example_config/secret
                                     # frontend unless LEPTOS_SITE_ROOT is set — `just dev` is the one that
                                     # works. It binds 6767 (`listen::DEFAULT_ADDR`). --connections <path> is optional:
                                     # without it the file is derived from the config's name.
+cargo run -- check --config example_config/config.json --secrets example_config/secrets.json --data-dir dev_data
+                                    # would the server start with this? the server's flags with `check` in front;
+                                    # builds every pipeline, starts none, lists every problem, exits 1 on any.
 
 docker compose up                   # NATS :4222 + publisher on test.subject, kafka :9092 + publisher on test.events, mqtt :1883 + publisher on test.mqtt, redis :6379 + publisher on test.redis, opc ua (opc-plc) :50000, postgres :5432, clickhouse :8123, rustfs (s3) :9000 with the `events` bucket
 just test-http                      # hurl --test hurl/tests/*.hurl (needs the server running)
@@ -1128,6 +1131,49 @@ The run loop's `select!` is `biased` on purpose, and the cancellation check in i
 The file can be JSON or YAML (`kayak_core::ConfigFormat`), decided by the extension and nowhere else: `persist::read`/`persist::write` are the only two places a format exists, and everything past the parser has `Config`s that don't remember which it was. `POST /api/config/save` takes an optional `format`; without one the name decides. The `saved` snapshot behind `has_unsaved_changes` is *always* rendered as JSON — it's a fingerprint of the graph, not of the file.
 
 Three things to preserve. `persist::save_path` rejects anything but a bare file name and is a security boundary, not a nicety — the path comes from an HTTP request, so an unconstrained one is an arbitrary write; refuse, never normalise. `has_unsaved_changes` compares `render(current)` against the `saved` snapshot, which is exact *because* `render` is deterministic. And `revert` parses the file before tearing the runtime down, so a file broken by hand doesn't cost you the running graph.
+
+### `kayak check` (`src/check.rs`)
+
+The binary's one subcommand, and the reason `main.rs` has a `Cli` with an
+optional `Command` beside the flattened server `Args`: a bare `kayak --config …`
+must go on meaning "serve", because every deployment's command line and the
+image's `ENTRYPOINT` are flags only. `check` takes **the same `Args`**, so a
+deployment's command line with `check` in front checks what it would load;
+flags before the subcommand are refused (`args_conflicts_with_subcommands`)
+rather than silently belonging to the server.
+
+It answers "would the server start?" by **doing startup's work through
+startup's code** — `ChainStore::server`, `read_required`, `Auth::from_config`,
+`load_connections_file`, `persist::read`, `layout::read`, and each pipeline
+through `AppState::build_unstarted`, which shares `build_ctx` with
+`create_locked` so a checked pipeline and a started one cannot be built two
+ways. Don't add checker-only validation rules: a rule belongs in the
+component's `build()`, where the server enforces it too.
+
+Four things are load-bearing:
+
+- **Nothing runs, and that is structural.** The builds happen on a
+  current-thread runtime that is *entered but never driven*, so what a build
+  spawns (an input `buffer`'s pump, `Merged`'s tasks) is dropped unpolled.
+  `nothing_a_check_builds_is_run` fails if the runtime is ever driven. It is
+  also why `main` is a plain `fn` that builds the server's runtime itself: a
+  runtime cannot be dropped inside another one.
+- **Every problem, not the first** — and a pipeline under a failed upstream is
+  `skipped`, not another problem. A file that fails to load (secrets, data dir,
+  connections) stops the builds that depend on it, for the same reason: one
+  mistake should read as one line.
+- **The network is not asked.** Reachability is a different question, depends
+  on where the check runs, and CI should not dial production brokers. jwt keys
+  are not fetched (`prime` is skipped) and `--state-dir` is not opened — a
+  running server holds its lock. A `--connect` mode would run each output's
+  `init` under a timeout; not built.
+- **It creates what startup creates** — `--data-dir` and the `file` outputs'
+  directories — because the sandbox check is a check of where a path really
+  lands. Nothing else is written.
+
+An upstream declared further down the file is reported as such; the server
+would say "not found", which is true and points the wrong way. That order
+rule is the server's (it builds in file order), not the checker's.
 
 ### Shutdown (`src/shutdown.rs`)
 

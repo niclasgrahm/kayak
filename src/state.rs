@@ -441,7 +441,7 @@ impl AppState {
     /// the checks in [`crate::outputs::file::Root`] compare resolved paths, so
     /// a `--data-dir` that is itself a symlink (`/tmp` on macOS, which is
     /// really `/private/tmp`) would otherwise fail every one of them.
-    fn resolve_data_dir(data_dir: Option<PathBuf>) -> anyhow::Result<Option<Arc<PathBuf>>> {
+    pub(crate) fn resolve_data_dir(data_dir: Option<PathBuf>) -> anyhow::Result<Option<Arc<PathBuf>>> {
         data_dir
             .map(|dir| {
                 std::fs::create_dir_all(&dir)
@@ -598,7 +598,7 @@ impl AppState {
 
     /// Read whatever connections there are. A derived file that isn't there is
     /// no connections at all; one the operator named has to exist.
-    fn load_connections_file(&self) -> anyhow::Result<()> {
+    pub(crate) fn load_connections_file(&self) -> anyhow::Result<()> {
         let Some(path) = self.connections_path() else {
             return Ok(());
         };
@@ -997,7 +997,7 @@ impl AppState {
     /// and the reason the contents survive one is that a revert rebuilds every
     /// pipeline in the graph, so emptying the buckets would make an edit to an
     /// unrelated pipeline cost an hour of accumulated state.
-    fn adopt_buckets(&self, declared: StateBuckets) {
+    pub(crate) fn adopt_buckets(&self, declared: StateBuckets) {
         // Under checkpointing the buckets come from the last committed
         // checkpoint instead of carrying the live contents over: the pipelines
         // about to be rebuilt rewind their inputs to that checkpoint, and live
@@ -1437,13 +1437,37 @@ impl AppState {
         if app.contains_key(id.as_str()) {
             return Err(PipelineError::DuplicateId(id));
         }
+        let ctx = self.build_ctx(app, &pipeline);
+        // building the runtime only fails on things the config got wrong
+        // (unknown upstream, unbuildable component)
+        let join_handle = pipeline.start(ctx).map_err(|e| {
+            PipelineError::InvalidConfig(e.context(format!("failed to start pipeline '{id}'")))
+        })?;
+
+        let pipeline_handle = PipelineHandle {
+            join_handle,
+            shared: Arc::clone(&pipeline),
+        };
+        app.insert(id, pipeline_handle);
+        tracing::debug!("pipeline created: {}", pipeline.id);
+        Ok(pipeline)
+    }
+
+    /// The `BuildCtx` a pipeline of this server is built with — the one place
+    /// it is assembled, so a pipeline that is started and one that is only
+    /// checked (see [`crate::check`]) cannot be built two different ways.
+    fn build_ctx<'a>(
+        &self,
+        app: &'a mut HashMap<PipelineId, PipelineHandle>,
+        pipeline: &Pipeline,
+    ) -> BuildCtx<'a> {
         // a snapshot, taken before the map is borrowed: what this pipeline is
         // built from is the connections as they stand now, and editing one
         // later doesn't reach back into it
         let connections = Arc::new(self.connections());
-        let ctx = BuildCtx::with_secrets(
+        BuildCtx::with_secrets(
             app,
-            id.clone(),
+            pipeline.id.clone(),
             self.events.clone(),
             Arc::clone(&self.secrets),
         )
@@ -1459,20 +1483,50 @@ impl AppState {
         // first saved as, and from that save on a file-sourced script resolves
         // beside it.
         .with_script_dir(self.script_directory().map(Arc::new))
-        .with_checkpoints(self.checkpoints.clone());
-        // building the runtime only fails on things the config got wrong
-        // (unknown upstream, unbuildable component)
-        let join_handle = pipeline.start(ctx).map_err(|e| {
-            PipelineError::InvalidConfig(e.context(format!("failed to start pipeline '{id}'")))
-        })?;
+        .with_checkpoints(self.checkpoints.clone())
+    }
 
-        let pipeline_handle = PipelineHandle {
-            join_handle,
-            shared: Arc::clone(&pipeline),
+    /// A server that has read nothing yet, for [`crate::check`]: the config
+    /// path (if any) and the connections file are remembered, and nothing is
+    /// loaded or started until the checker asks for each step on its own.
+    pub(crate) fn for_check(
+        config: Option<&Path>,
+        secrets: Arc<dyn SecretStore>,
+        connections_file: Option<&Path>,
+        data_dir: Option<Arc<PathBuf>>,
+    ) -> Self {
+        let dir = match config.and_then(Path::parent) {
+            Some(dir) if !dir.as_os_str().is_empty() => dir.to_path_buf(),
+            _ => PathBuf::from("."),
         };
-        app.insert(id, pipeline_handle);
-        tracing::debug!("pipeline created: {}", pipeline.id);
-        Ok(pipeline)
+        let mut state = Self::with_secrets_in(dir, secrets);
+        state.data_dir = data_dir;
+        state.connections_file = connections_file.map(Path::to_path_buf);
+        *state.lock_config_path() = config.map(Path::to_path_buf);
+        state
+    }
+
+    /// Build a pipeline exactly as [`AppState::create_pipeline`] would, and
+    /// register it so the pipelines after it can name it as an upstream — but
+    /// start nothing. For [`crate::check`].
+    ///
+    /// The handle's task is an empty one: nothing reads it, and the checker
+    /// runs on a runtime that is never driven, so even that is never polled.
+    pub(crate) fn build_unstarted(&self, config: Config) -> anyhow::Result<()> {
+        let mut app = self.lock_pipelines();
+        let pipeline = Arc::new(Pipeline::new(config)?);
+        let id = pipeline.id.clone();
+        if app.contains_key(id.as_str()) {
+            anyhow::bail!(PipelineError::DuplicateId(id));
+        }
+        let ctx = self.build_ctx(&mut app, &pipeline);
+        pipeline.build_unstarted(ctx)?;
+        let handle = PipelineHandle {
+            join_handle: tokio::spawn(std::future::ready(())),
+            shared: pipeline,
+        };
+        app.insert(id, handle);
+        Ok(())
     }
 
     /// Builds one input the way a pipeline would, for a sample — see
