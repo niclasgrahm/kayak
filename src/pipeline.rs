@@ -1393,6 +1393,11 @@ impl Pipeline {
         }
         Ok(runtime)
     }
+    /// Build the run loop and throw it away: everything [`Pipeline::start`]
+    /// checks, and nothing it starts. See [`crate::check`].
+    pub(crate) fn build_unstarted(self: &Arc<Self>, ctx: BuildCtx) -> anyhow::Result<()> {
+        self.create_runtime(ctx).map(drop)
+    }
     pub fn start(self: &Arc<Self>, ctx: BuildCtx) -> anyhow::Result<tokio::task::JoinHandle<()>> {
         let runtime = self.create_runtime(ctx)?;
         Ok(tokio::task::spawn(async move {

@@ -10,6 +10,7 @@ use frontend::app::{App, shell};
 use leptos::config::get_configuration;
 use leptos_axum::{LeptosRoutes, generate_route_list};
 use std::path::PathBuf;
+use std::process::ExitCode;
 use std::sync::Arc;
 use tracing::Level;
 
@@ -18,7 +19,7 @@ use kayak::api_router;
 use kayak::auth::Auth;
 use kayak::banner;
 use kayak::listen;
-use kayak::secrets::{ChainStore, EnvStore, FileStore, SecretStore};
+use kayak::secrets::{ChainStore, SecretStore};
 use kayak::state::AppState;
 use kayak::checkpoint::{Checkpoints, Settings};
 use kayak::history::History;
@@ -26,7 +27,34 @@ use std::time::Duration;
 use kayak_core::server_config::ServerConfig;
 use std::net::SocketAddr;
 
+/// The binary is the server; `kayak check` is the one subcommand. A bare
+/// `kayak --config …` stays the way to serve, which is what keeps every
+/// deployment's command line (and the image's `ENTRYPOINT`) working unchanged.
 #[derive(Parser)]
+#[command(args_conflicts_with_subcommands = true)]
+struct Cli {
+    #[command(subcommand)]
+    command: Option<Command>,
+    #[command(flatten)]
+    serve: Args,
+}
+
+#[derive(clap::Subcommand)]
+enum Command {
+    /// Check that the server would start with this configuration, and exit.
+    ///
+    /// Takes the server's own flags, so a deployment's command line with
+    /// `check` in front checks exactly what that deployment would load: the
+    /// config, connections, secrets, data directory and server config files
+    /// are read and every pipeline is built — with nothing started and no
+    /// broker, database or identity provider contacted. Every problem is
+    /// listed, not just the first. Exits 0 when there are none and 1 when
+    /// there are. `--state-dir` is accepted and not opened, since a running
+    /// server holds its lock.
+    Check(Args),
+}
+
+#[derive(clap::Args)]
 struct Args {
     #[arg(long)]
     debug: bool,
@@ -92,17 +120,6 @@ struct Args {
     /// are saved and from `--data-dir`.
     #[arg(long)]
     state_dir: Option<PathBuf>,
-}
-
-/// The environment ahead of the secrets file, so an env var wins on a name
-/// collision.
-fn secret_store(path: Option<&PathBuf>) -> anyhow::Result<Arc<dyn SecretStore>> {
-    let mut stores: Vec<Box<dyn SecretStore>> = vec![Box::new(EnvStore)];
-    if let Some(path) = path {
-        tracing::info!("Loading secrets from {}", path.display());
-        stores.push(Box::new(FileStore::from_path(path)?));
-    }
-    Ok(Arc::new(ChainStore::new(stores)))
 }
 
 /// The server, from the config file if there is one and empty otherwise.
@@ -188,9 +205,51 @@ fn warn_if_open_to_the_network(config: &ServerConfig, addr: SocketAddr) {
 /// crypto and the secure channel, is left alone.
 const QUIET: &str = "opcua_crypto::certificate_store=off";
 
-#[tokio::main]
-async fn main() -> anyhow::Result<()> {
-    let args = Args::parse();
+fn main() -> anyhow::Result<ExitCode> {
+    let cli = Cli::parse();
+    match cli.command {
+        Some(Command::Check(args)) => Ok(check(&args)),
+        None => {
+            tokio::runtime::Builder::new_multi_thread()
+                .enable_all()
+                .build()
+                .context("failed to start the runtime")?
+                .block_on(serve(cli.serve))?;
+            Ok(ExitCode::SUCCESS)
+        }
+    }
+}
+
+/// `kayak check`. Synchronous on purpose: the checker brings a runtime of its
+/// own that it never drives, and that can't be dropped inside another one.
+fn check(args: &Args) -> ExitCode {
+    // warnings and up only: the report is the output, and a component's
+    // "loading x" lines on the way to it are noise
+    tracing_subscriber::fmt()
+        .with_env_filter(if args.debug {
+            format!("debug,{QUIET}")
+        } else {
+            format!("warn,{QUIET}")
+        })
+        .with_writer(std::io::stderr)
+        .init();
+    let report = kayak::check::check(&kayak::check::Options {
+        config: args.config.clone(),
+        connections: args.connections.clone(),
+        secrets: args.secrets.clone(),
+        data_dir: args.data_dir.clone(),
+        server_config: args.server_config.clone(),
+        state_dir: args.state_dir.clone(),
+    });
+    print!("{}", report.render());
+    if report.is_ok() {
+        ExitCode::SUCCESS
+    } else {
+        ExitCode::FAILURE
+    }
+}
+
+async fn serve(args: Args) -> anyhow::Result<()> {
     // before the subscriber is built, so no line of it is prefixed with a
     // timestamp and a level — see `kayak::banner`.
     println!("{}", banner::banner(banner::version()));
@@ -207,7 +266,9 @@ async fn main() -> anyhow::Result<()> {
         })
         .init();
 
-    let secrets = secret_store(args.secrets.as_ref()).context("failed to load secrets")?;
+    let secrets: Arc<dyn SecretStore> = Arc::new(
+        ChainStore::server(args.secrets.as_deref()).context("failed to load secrets")?,
+    );
     // the accounts resolve against the same store the pipelines do — one place
     // a `${NAME}` can come from, whether it is a broker's password or a login
     let secrets_for_auth = Arc::clone(&secrets);
@@ -329,4 +390,53 @@ async fn main() -> anyhow::Result<()> {
     // buffered part, which exists nowhere else.
     state.shutdown().await;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn parse(args: &[&str]) -> Result<Cli, clap::Error> {
+        Cli::try_parse_from(std::iter::once("kayak").chain(args.iter().copied()))
+    }
+
+    /// Every deployment's command line, and the image's `ENTRYPOINT`, is
+    /// flags with no subcommand — that has to go on meaning "serve".
+    #[test]
+    fn bare_flags_still_serve() -> Result<(), clap::Error> {
+        let cli = parse(&["--config", "c.json", "--listen", "0.0.0.0:6767"])?;
+        assert!(cli.command.is_none());
+        assert_eq!(cli.serve.config, Some(PathBuf::from("c.json")));
+        Ok(())
+    }
+
+    /// The same flags, `check` in front.
+    #[test]
+    fn check_takes_the_servers_flags() -> Result<(), clap::Error> {
+        let cli = parse(&[
+            "check",
+            "--config",
+            "c.json",
+            "--secrets",
+            "s.json",
+            "--state-dir",
+            "state",
+            "--listen",
+            "0.0.0.0:6767",
+        ])?;
+        let Some(Command::Check(args)) = cli.command else {
+            panic!("expected the check subcommand");
+        };
+        assert_eq!(args.config, Some(PathBuf::from("c.json")));
+        assert_eq!(args.secrets, Some(PathBuf::from("s.json")));
+        assert_eq!(args.state_dir, Some(PathBuf::from("state")));
+        Ok(())
+    }
+
+    /// Flags before the subcommand would be the server's, silently ignored by
+    /// the check — refused instead.
+    #[test]
+    fn flags_before_check_are_refused() {
+        assert!(parse(&["--config", "c.json", "check"]).is_err());
+    }
 }

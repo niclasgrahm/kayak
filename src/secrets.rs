@@ -107,6 +107,18 @@ impl ChainStore {
     pub fn new(stores: Vec<Box<dyn SecretStore>>) -> Self {
         Self { stores }
     }
+
+    /// The server's store: the environment ahead of the `--secrets` file, so
+    /// an env var wins on a name collision. One function because `kayak check`
+    /// has to resolve against exactly what the server would.
+    pub fn server(file: Option<&Path>) -> Result<Self> {
+        let mut stores: Vec<Box<dyn SecretStore>> = vec![Box::new(EnvStore)];
+        if let Some(path) = file {
+            tracing::info!("Loading secrets from {}", path.display());
+            stores.push(Box::new(FileStore::from_path(path)?));
+        }
+        Ok(Self::new(stores))
+    }
 }
 
 impl SecretStore for ChainStore {

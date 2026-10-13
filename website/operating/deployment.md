@@ -88,6 +88,50 @@ the `--secrets` file. Thus environment variables are sufficient, and you do not
 need a secrets file. The server does not start when a reference does not
 resolve. See [secrets](/io/secrets).
 
+## check a config before you deploy it
+
+`kayak check` tells you if the server would start with a configuration. It
+does not start the server. Put `check` in front of the flags that the server
+gets:
+
+```bash
+kayak check --config config.yaml --secrets secrets.json --data-dir data
+```
+
+The check reads the config, the connections, the secrets, the server config
+and the layout file. Then it builds every pipeline with the same code that the
+server uses. Thus it finds everything that stops the server at startup: an
+unknown upstream, a connection that does not exist or has the wrong kind, a
+`${NAME}` that does not resolve, a transform setting that the transform
+refuses, a `file` output outside `--data-dir`.
+
+```text
+error: pipeline 'sensors_archive': failed to resolve secrets in the password of connection 'local-postgres': secret 'POSTGRES_PASSWORD' is not set in the environment
+skipped: pipeline 'hot_alerts' (its upstream 'hot_readings' has problems)
+
+1 problem: the server would not start with this configuration
+```
+
+- **All problems.** The server stops at the first problem. The check lists all
+  of them. A pipeline below a broken pipeline is `skipped`. It is not an
+  additional problem.
+- **Exit status.** `0` when there are no problems, `1` when there are. Thus
+  you can use the check in CI, or before a rollout.
+- **No connections.** The check does not connect to a broker, a database or an
+  identity provider, and it does not start a pipeline. A pipeline that builds
+  but cannot reach its system fails after startup, not in the check.
+- **No state directory.** The check accepts `--state-dir`, but does not open
+  it. A running server locks that directory.
+- **Directories.** Like the server, the check creates `--data-dir` and the
+  directories of the `file` outputs below it.
+
+With the image, the entrypoint is the binary, so `check` is the first
+argument:
+
+```bash
+docker run --rm -v "$PWD:/kayak" ghcr.io/niclasgrahm/kayak:0.2.2 check --config config.yaml
+```
+
 ## docker
 
 Put the config, the connections and the server config in one directory:

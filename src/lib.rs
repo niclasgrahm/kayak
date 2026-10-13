@@ -12,6 +12,7 @@ pub mod auth;
 pub mod backoff;
 pub mod banner;
 pub mod buckets;
+pub mod check;
 pub mod checkpoint;
 pub mod config;
 pub mod connections;
