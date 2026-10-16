@@ -181,6 +181,31 @@ snapshot is restored only if that component's **own config is unchanged**
 not discard a transform's window, but editing the transform does. A position
 is restored the same way, per input.
 
+### What the checkpoint forgets
+
+A deleted pipeline's entry is dropped at once (`Checkpoints::forget`), so a
+pipeline created later under the same id does not inherit it. Everything else
+is pruned **against the config**: whenever a config file is loaded — startup
+and revert — every pipeline and bucket entry the file does not name is dropped
+from the manifest and its snapshot file collected (`Checkpoints::retain`).
+Without that, a renamed bucket or a pipeline removed from the file kept its
+snapshot on disk forever.
+
+The line is the config, not what happens to be running: a pipeline the file
+names but that is not currently registered keeps its checkpoint, because it is
+still meant to exist. The prune is a job on the writer task, queued under the
+pipelines lock before the file's pipelines are built, so it lands after every
+commit already queued (a revert's savepoint) and before any commit that
+follows. It also takes members the file no longer names out of the
+coordinator, so a dead pipeline removed from the config by a revert stops
+holding its region's checkpoints. A pipeline with no `id` in the file gets a
+random one per load and so never keeps a checkpoint across one; that was
+already true. A server with no config file never prunes.
+
+A bucket in the checkpoint that the config does not declare is reported once,
+at info, on restore; a declared bucket whose declaration changed is still a
+warning, since that one cost somebody their state.
+
 ### Stop with a savepoint
 
 Shutdown and revert no longer just cancel. They trigger a final checkpoint

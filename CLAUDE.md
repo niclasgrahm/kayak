@@ -1277,6 +1277,13 @@ Every one of these rules was found by the chaos tests in `tests/checkpoint.rs`
   arm. A barrier makes it hand on what it holds first.
 - **Under checkpointing a failing output is retried, not dropped**, and only
   that output; a transform error still drops (it fails the same on replay).
+- **The checkpoint is pruned against the config, not the running graph.**
+  `load_from_config_file` (startup, revert) calls `Checkpoints::retain` with
+  the file's pipeline ids and bucket names, under the pipelines lock and
+  before building, as a writer job (`Job::Retain`) so it is ordered with the
+  commits around it. A pipeline the file names but that is not registered
+  keeps its entry; an explicit delete is still `forget`. `restore_buckets`
+  tells an *undeclared* bucket (info, once) from a *changed* one (warn).
 - **Restore is per component and only to an unchanged config** (compared as
   JSON at the same index). Inputs take their position at build time through
   `BuildCtx::restored_position`, since an input `buffer` moves the input into a
