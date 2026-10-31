@@ -414,6 +414,115 @@ async fn a_revert_carries_state_across_the_rebuild() -> Result<()> {
     Ok(())
 }
 
+/// A replace checkpoints first, and the new config's unchanged components —
+/// here the `http` input and the counting script, at the same positions —
+/// restore from that checkpoint. So the replace replays nothing and counts
+/// nothing twice: the next post is the fourth message, counted fourth, and
+/// carries what the added transform stamps on it. Without the checkpoint the
+/// input would replay its logged posts into the bucket a second time.
+#[tokio::test]
+async fn a_replace_resumes_the_unchanged_components_exactly() -> Result<()> {
+    let dir = tempfile::tempdir()?;
+    let path = write_counter_config(dir.path())?;
+    let state = boot(&path, &dir.path().join("state")).await?;
+    let mut seen = subscribe(&state, "ingest")?;
+    for n in 1..=3 {
+        post(&state, n).await?;
+    }
+    assert_eq!(collect(&mut seen, 3).await?, vec![1, 2, 3]);
+
+    let mut config = serde_json::to_value(
+        &state
+            .pipeline_handles()
+            .into_iter()
+            .find(|p| p.id == "ingest")
+            .context("no pipeline 'ingest'")?
+            .config,
+    )?;
+    config["transforms"]
+        .as_array_mut()
+        .context("transforms is a list")?
+        .push(json!({
+            "type": "map",
+            "mappings": [{
+                "type": "constant",
+                "value": { "type": "text", "value": "v2" },
+                "as": "version"
+            }]
+        }));
+    state.replace_pipeline("ingest", serde_json::from_value(config)?).await?;
+
+    let mut seen = subscribe(&state, "ingest")?;
+    post(&state, 4).await?;
+    let messages = collect_messages(&mut seen, 1).await?;
+    assert_eq!(field(&messages, "n"), vec![4], "the replace replayed: {messages:?}");
+    assert_eq!(field(&messages, "seq"), vec![4], "counted twice or lost: {messages:?}");
+    assert_eq!(messages[0]["version"], json!("v2"), "the new config is not what runs");
+    state.shutdown().await;
+    Ok(())
+}
+
+/// The same promise with posts arriving *while* the pipeline is replaced. The
+/// old config stops at a checkpoint barrier rather than being cancelled after
+/// one, so there is no window in which it processes what the new config then
+/// replays: every message comes out exactly once, numbered as the n-th — and
+/// to the same subscriber, which the replace handed from one to the other.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn posts_during_a_replace_are_counted_exactly_once() -> Result<()> {
+    const POSTS: i64 = 300;
+    let dir = tempfile::tempdir()?;
+    let path = write_counter_config(dir.path())?;
+    let state = Arc::new(boot(&path, &dir.path().join("state")).await?);
+    let mut seen = subscribe(&state, "ingest")?;
+
+    let poster = {
+        let state = Arc::clone(&state);
+        tokio::spawn(async move {
+            for n in 0..POSTS {
+                // a 503 in the gap is the endpoint saying "again"
+                while state
+                    .ingest_durably("ingest", vec![json!({ "n": n })], PostMeta::default(), &Credentials::none())
+                    .await
+                    .is_err()
+                {
+                    tokio::time::sleep(Duration::from_millis(1)).await;
+                }
+            }
+        })
+    };
+    // mid-stream: let some through first
+    let first = collect_messages(&mut seen, 50).await?;
+    let mut config = serde_json::to_value(
+        &state
+            .pipeline_handles()
+            .into_iter()
+            .find(|p| p.id == "ingest")
+            .context("no pipeline 'ingest'")?
+            .config,
+    )?;
+    config["transforms"]
+        .as_array_mut()
+        .context("transforms is a list")?
+        .push(json!({
+            "type": "map",
+            "mappings": [{ "type": "constant", "value": { "type": "text", "value": "v2" }, "as": "version" }]
+        }));
+    state.replace_pipeline("ingest", serde_json::from_value(config)?).await?;
+    poster.await?;
+
+    let mut messages = first;
+    while i64::try_from(messages.len())? < POSTS {
+        messages.extend(collect_messages(&mut seen, 1).await?);
+    }
+    assert_counted_once(&messages, "across the replace");
+    let ns: Vec<i64> = field(&messages, "n");
+    let distinct: BTreeSet<i64> = ns.iter().copied().collect();
+    assert_eq!(ns.len(), distinct.len(), "a message came out twice");
+    assert_eq!(distinct, (0..POSTS).collect(), "a message was lost");
+    state.shutdown().await;
+    Ok(())
+}
+
 /// Deleting a pipeline takes its checkpoint and its logged posts with it: a
 /// pipeline created later under the same id starts from nothing rather than
 /// from a stranger's count.

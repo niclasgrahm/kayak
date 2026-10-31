@@ -61,6 +61,13 @@ pub struct Pipeline {
     /// what a card shows of a running script has to be what it was built from.
     #[serde(skip)]
     scripts: std::sync::OnceLock<Vec<Option<Arc<kayak_core::script::LoadedScript>>>>,
+    /// Stop at the next checkpoint barrier, as if it were a savepoint — but
+    /// for this pipeline alone. What a replace under checkpointing sets, so
+    /// the old config stops *exactly* where its last snapshot is and the new
+    /// one resumes there; see [`Pipeline::stop_at_next_barrier`]. Read only
+    /// when a barrier arrives, never on an ordinary pass.
+    #[serde(skip)]
+    stop_at_barrier: std::sync::atomic::AtomicBool,
 }
 
 /// What travels along an edge between two pipelines: batches, and — when
@@ -80,6 +87,26 @@ pub enum Edge {
 enum Downstream {
     Batches(mpsc::Sender<Arc<MessageBatch>>),
     Edges(mpsc::Sender<Edge>),
+}
+
+/// The downstreams of a pipeline that is being replaced, on their way from
+/// the old pipeline to the new one. Opaque on purpose: nothing but
+/// [`Pipeline::adopt_subscribers`] should do anything with them, and dropping
+/// them is what tells the downstreams their upstream is gone.
+#[must_use]
+pub struct Subscribers(Vec<Downstream>);
+
+impl Subscribers {
+    /// How many there are, for a log line.
+    #[must_use]
+    pub fn len(&self) -> usize {
+        self.0.len()
+    }
+
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
 }
 
 impl Downstream {
@@ -606,12 +633,20 @@ impl PipelineRuntime {
     /// on it. The disk write itself happens on the coordinator's writer task;
     /// the run loop does not wait for it.
     async fn take_checkpoint(&mut self, barrier: Barrier) -> bool {
+        // a savepoint for this pipeline alone, if a replace asked for one —
+        // see `Pipeline::stop_at_next_barrier`. Only this pipeline's own half
+        // of the checkpoint sees it: `barrier` itself is forwarded as it came.
+        let stop = barrier.stop
+            || self
+                .shared
+                .stop_at_barrier
+                .load(std::sync::atomic::Ordering::Relaxed);
         let Some(mut participant) = self.checkpoint.take() else {
-            return barrier.stop;
+            return stop;
         };
         let mut durable = true;
         for index in 0..self.initialised.min(self.outputs.len()) {
-            let result = if barrier.stop {
+            let result = if stop {
                 self.outputs[index].finish().await
             } else {
                 self.outputs[index].checkpoint().await
@@ -630,7 +665,7 @@ impl PipelineRuntime {
             }
         }
         let snapshot = durable.then(|| self.snapshot(&participant.positions()));
-        participant.submit(barrier, snapshot);
+        participant.submit(Barrier { stop, ..barrier }, snapshot);
 
         let mut gone = false;
         for tx in &self.shared.downstream_senders() {
@@ -644,7 +679,7 @@ impl PipelineRuntime {
             .bucket_barrier(bucket.as_deref(), barrier.epoch, &self.shared.cancellation_token)
             .await;
         self.checkpoint = Some(participant);
-        barrier.stop
+        stop
     }
 
     /// Ask this shared count whether anyone is watching, rather than assuming
@@ -1287,7 +1322,21 @@ impl Pipeline {
             // once every output has initialised.
             status: Mutex::new(RunStatus::Starting),
             scripts: std::sync::OnceLock::new(),
+            stop_at_barrier: std::sync::atomic::AtomicBool::new(false),
         })
+    }
+
+    /// Stop this pipeline's run loop at the next checkpoint barrier it takes,
+    /// the way a savepoint stops the whole graph: its outputs are finished
+    /// rather than checkpointed, its snapshot is submitted, and it leaves the
+    /// coordinator cleanly. The barrier it forwards is left as it was, so the
+    /// pipelines below it take an ordinary checkpoint and keep running.
+    ///
+    /// Nothing happens without checkpointing — there are no barriers — which
+    /// is why a caller pairs this with a trigger and a timeout.
+    pub(crate) fn stop_at_next_barrier(&self) {
+        self.stop_at_barrier
+            .store(true, std::sync::atomic::Ordering::Relaxed);
     }
 
     /// What the transform at `index` was compiled from, if it is one that
@@ -1436,6 +1485,28 @@ impl Pipeline {
     /// barriers between them, in the order they were produced.
     pub fn subscribe_edges(&self, tx: mpsc::Sender<Edge>) {
         self.lock_senders().push(Downstream::Edges(tx));
+    }
+
+    /// Take every downstream away from this pipeline, for a replacement to
+    /// [`Pipeline::adopt_subscribers`]. What lets `PUT /api/pipelines/{id}`
+    /// change a pipeline in the middle of a graph without the pipelines under
+    /// it noticing: their inputs keep the receiving end of the channel, so as
+    /// long as somebody holds the sending end they are not told the upstream
+    /// has gone — see [`crate::state::AppState::replace_pipeline`].
+    ///
+    /// A pass already underway holds its own clone of the list and may still
+    /// hand one batch on; the replacement waits for this pipeline's run loop
+    /// to end before it starts the new one, so the two never interleave.
+    pub(crate) fn take_subscribers(&self) -> Subscribers {
+        Subscribers(std::mem::take(&mut *self.lock_senders()))
+    }
+
+    /// Hand every batch this pipeline produces to the downstreams another one
+    /// had — the other half of [`Pipeline::take_subscribers`]. Ones whose
+    /// receiver went while they were in between are left behind.
+    pub(crate) fn adopt_subscribers(&self, subscribers: Subscribers) {
+        let mut senders = self.lock_senders();
+        senders.extend(subscribers.0.into_iter().filter(|tx| !tx.is_closed()));
     }
 
     /// How many downstreams this pipeline is currently handing batches to.

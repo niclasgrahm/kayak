@@ -229,6 +229,37 @@ fn scalar(value: &str) -> Span {
     span(kind, value)
 }
 
+/// The body of a `PUT /api/pipelines/{id}`, from what someone typed into the
+/// source view's editor — or what is wrong with it, in words for the bar.
+///
+/// The editor is always JSON, whatever the card displays, because JSON is
+/// what the endpoint takes and a browser can parse it without a YAML library
+/// in the bundle. Two things are settled here rather than left to the server:
+/// a config that is not an object is said in the editor's own terms, and the
+/// `id` — absent is filled in with this pipeline's, another one is refused,
+/// since a replace keeps the id and the server would refuse it anyway, after
+/// a round trip, in words about the API rather than about the box.
+pub fn replacement(text: &str, id: &str) -> Result<serde_json::Value, String> {
+    let mut value: serde_json::Value =
+        serde_json::from_str(text).map_err(|err| format!("not valid JSON: {err}"))?;
+    let Some(object) = value.as_object_mut() else {
+        return Err("a pipeline's config is a JSON object".to_string());
+    };
+    match object.get("id") {
+        None | Some(serde_json::Value::Null) => {
+            object.insert("id".to_string(), serde_json::Value::String(id.to_string()));
+        }
+        Some(serde_json::Value::String(named)) if named == id => {}
+        Some(other) => {
+            return Err(format!(
+                "the id is {other}, but this is \"{id}\"; editing keeps the id — to rename a \
+                 pipeline, add a new one and delete this one"
+            ));
+        }
+    }
+    Ok(value)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -356,5 +387,33 @@ state: null";
         assert!(at("outputs", 0).unwrap_or_default().contains("stdout"));
         assert_eq!(at("transforms", 2), None);
         Ok(())
+    }
+
+    #[test]
+    fn a_replacement_keeps_its_own_id() {
+        let body = replacement(r#"{"id": "p1", "inputs": []}"#, "p1");
+        assert_eq!(body, Ok(serde_json::json!({"id": "p1", "inputs": []})));
+    }
+
+    #[test]
+    fn a_replacement_without_an_id_is_given_the_pipelines() {
+        for text in [r#"{"inputs": []}"#, r#"{"id": null, "inputs": []}"#] {
+            let body = replacement(text, "p1");
+            assert_eq!(body, Ok(serde_json::json!({"id": "p1", "inputs": []})), "{text}");
+        }
+    }
+
+    #[test]
+    fn a_replacement_naming_another_id_is_refused() {
+        let Err(why) = replacement(r#"{"id": "p2"}"#, "p1") else {
+            panic!("a rename was let through");
+        };
+        assert!(why.contains("p2") && why.contains("p1"), "{why}");
+    }
+
+    #[test]
+    fn a_replacement_that_is_not_an_object_or_not_json_is_refused() {
+        assert!(replacement("[1, 2]", "p1").is_err_and(|why| why.contains("object")));
+        assert!(replacement("{\"id\": ", "p1").is_err_and(|why| why.contains("JSON")));
     }
 }

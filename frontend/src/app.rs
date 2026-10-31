@@ -6280,9 +6280,14 @@ fn SourceView(
     format: ConfigFormat,
     focus: RwSignal<Option<SourceFocus>>,
 ) -> impl IntoView {
+    let state = expect_context::<AppState>();
     let fetched = RwSignal::new(None::<Result<String, String>>);
     let id = StoredValue::new(pipeline_id);
+    // bumped after an edit is applied, so the view shows what now runs even
+    // if the card itself is not rebuilt
+    let version = RwSignal::new(0u32);
     Effect::new(move |_| {
+        version.track();
         leptos::task::spawn_local(async move {
             let result = ApiClient {
                 base: String::new(),
@@ -6329,28 +6334,160 @@ fn SourceView(
         });
     });
 
+    // The editor: `Some` while it is open, holding the text as typed. Always
+    // JSON — see `source::replacement` — so opening it on a YAML view fetches
+    // the JSON spelling first. The textarea is uncontrolled (written once,
+    // read on input), for the reason the modal's boxes are.
+    let draft = RwSignal::new(None::<String>);
+    let rejected = RwSignal::new(None::<String>);
+    let applying = RwSignal::new(false);
+    let open_editor = move || {
+        rejected.set(None);
+        if format == ConfigFormat::Json
+            && let Some(Ok(text)) = fetched.get_untracked()
+        {
+            draft.set(Some(text));
+            return;
+        }
+        leptos::task::spawn_local(async move {
+            let result = ApiClient {
+                base: String::new(),
+            }
+            .pipeline_config(&id.get_value(), ConfigFormat::Json)
+            .await;
+            match result {
+                Ok(source) => draft.set(Some(source.text)),
+                Err(err) => rejected.set(Some(format!("could not load the config: {err}"))),
+            }
+        });
+    };
+    let apply = move || {
+        if applying.get_untracked() {
+            return;
+        }
+        let Some(text) = draft.get_untracked() else {
+            return;
+        };
+        let body = match source::replacement(&text, &id.get_value()) {
+            Ok(body) => body,
+            Err(why) => {
+                rejected.set(Some(why));
+                return;
+            }
+        };
+        rejected.set(None);
+        applying.set(true);
+        leptos::task::spawn_local(async move {
+            let result = ApiClient {
+                base: String::new(),
+            }
+            .replace_pipeline(&id.get_value(), &body)
+            .await;
+            applying.set(false);
+            match result {
+                Ok(_) => {
+                    draft.set(None);
+                    version.update(|v| *v = v.wrapping_add(1));
+                    state.refresh();
+                }
+                // the server put the old config back, so the draft is kept
+                // for another try
+                Err(err) => rejected.set(Some(err.to_string())),
+            }
+        });
+    };
+
     let UseClipboardReturn { copy, copied, .. } = use_clipboard();
     view! {
         <div class="source" on:mousedown=move |ev: leptos::ev::MouseEvent| ev.stop_propagation()>
             <div class="source-bar">
-                <span title="the config this pipeline was built with, which is not \
-                             necessarily what is in the file until it is saved">
-                    "as running"
-                </span>
-                <button
-                    class="clear"
-                    title="copy the config to the clipboard"
-                    disabled=move || !matches!(fetched.get(), Some(Ok(_)))
-                    on:click=move |_| {
-                        if let Some(Ok(text)) = fetched.get_untracked() {
-                            copy(&text);
-                        }
+                {move || if draft.with(Option::is_some) {
+                    view! {
+                        <span title="the whole config, as JSON; applying it rebuilds the \
+                                     pipeline and keeps the pipelines below it attached">
+                            "editing as json"
+                        </span>
+                        <button
+                            class="clear"
+                            title="stop editing; nothing is changed"
+                            disabled=move || applying.get()
+                            on:click=move |_| {
+                                draft.set(None);
+                                rejected.set(None);
+                            }
+                        >
+                            "cancel"
+                        </button>
+                        <button
+                            class="clear apply"
+                            title="rebuild the pipeline with this config"
+                            disabled=move || applying.get()
+                            on:click=move |_| apply()
+                        >
+                            {move || if applying.get() { "applying…" } else { "apply" }}
+                        </button>
                     }
-                >
-                    {move || if copied.get() { "copied".to_string() } else { format!("copy {format}") }}
-                </button>
+                        .into_any()
+                } else {
+                    let copy = copy.clone();
+                    view! {
+                        <span title="the config this pipeline was built with, which is not \
+                                     necessarily what is in the file until it is saved">
+                            "as running"
+                        </span>
+                        <Show when=move || state.editing()>
+                            <button
+                                class="clear"
+                                title="change this pipeline's config"
+                                disabled=move || !matches!(fetched.get(), Some(Ok(_)))
+                                on:click=move |_| open_editor()
+                            >
+                                "edit"
+                            </button>
+                        </Show>
+                        <button
+                            class="clear"
+                            title="copy the config to the clipboard"
+                            disabled=move || !matches!(fetched.get(), Some(Ok(_)))
+                            on:click=move |_| {
+                                if let Some(Ok(text)) = fetched.get_untracked() {
+                                    copy(&text);
+                                }
+                            }
+                        >
+                            {move || if copied.get() { "copied".to_string() } else { format!("copy {format}") }}
+                        </button>
+                    }
+                        .into_any()
+                }}
             </div>
-            <div class="source-body wheel-scrolls" node_ref=body_ref>
+            {move || rejected.get().map(|why| view! { <div class="source-error">{why}</div> })}
+            {move || draft.with(Option::is_some).then(|| {
+                let initial = draft.get_untracked().unwrap_or_default();
+                view! {
+                    <textarea
+                        class="source-edit"
+                        spellcheck="false"
+                        aria-label="the pipeline's config, as JSON"
+                        prop:value=initial
+                        on:input=move |ev| draft.set(Some(event_target_value(&ev)))
+                        on:keydown=move |ev: leptos::ev::KeyboardEvent| {
+                            if ev.key() == "Enter" && (ev.meta_key() || ev.ctrl_key()) {
+                                ev.prevent_default();
+                                apply();
+                            } else if ev.key() == "Escape" {
+                                draft.set(None);
+                                rejected.set(None);
+                            }
+                        }
+                    ></textarea>
+                }
+            })}
+            <div
+                class="source-body wheel-scrolls"
+                class:hidden=move || draft.with(Option::is_some)
+                node_ref=body_ref
+            >
                 {move || match fetched.get() {
                     None => view! { <div class="empty">"loading…"</div> }.into_any(),
                     Some(Err(err)) => {

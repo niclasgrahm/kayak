@@ -96,6 +96,24 @@ re-derive. See the [docs site](../website/) for how the finished parts behave, a
 
 ## todo
 
+- [x] **`PUT /api/pipelines/{id}` — change a running pipeline in place.**
+      (done 2026-10-13: the downstreams are handed from the old pipeline to
+      the new one and never see it go; an `id` that isn't the path's, an
+      unknown upstream or connection and an upstream that would close a
+      cycle are refused before anything stops; a config that doesn't build
+      puts the old one back; the id is reserved for the length of the swap
+      (409 for a create, delete or second replace, 503 for a post). Under
+      checkpointing the old config stops *at* a barrier — a savepoint for one
+      pipeline — so unchanged components resume exactly. A card's source
+      view has an `edit` button that sends it. See "replacing a pipeline" in
+      `CLAUDE.md` and "change a pipeline" on the site. Found on the way: the
+      `http` input's log refused a post fsynced just as its input went, and
+      the client's retry was then processed twice — fixed.)
+- [ ] **edit a pipeline in the form, not as JSON.** The card's `edit` is the
+      whole config as a JSON text box. The "add pipeline" form could open on
+      an existing config instead, which needs a config → draft conversion (the
+      inverse of `form::build`) — the flat dotted-path map, list counts and
+      union tags included.
 - [x] basic authentication
       (done 2026-08-11: a `--server-config` file with an `auth` section, two
       roles, HTTP Basic for machines and a session cookie for the browser. Off
