@@ -126,6 +126,21 @@ impl ApiClient {
         Ok(resp.json::<PipelineDryRunResponse>().await?)
     }
 
+    /// Change a running pipeline in place: `PUT /api/pipelines/{id}`. The
+    /// server keeps its downstreams attached and puts the old config back if
+    /// the new one does not build, so a rejection here means nothing changed.
+    /// A `Value` for the reason `create_pipeline` takes one.
+    pub async fn replace_pipeline(&self, id: &str, config: &Value) -> Result<PipelineDto, ApiError> {
+        let resp = Request::put(&format!("{}/api/pipelines/{id}", self.base))
+            .json(config)?
+            .send()
+            .await?;
+        if !resp.ok() {
+            return Err(rejection(resp).await);
+        }
+        Ok(resp.json::<PipelineDto>().await?)
+    }
+
     pub async fn delete_pipeline(&self, id: &str) -> Result<(), ApiError> {
         let resp = Request::delete(&format!("{}/api/pipelines/{id}", self.base))
             .send()

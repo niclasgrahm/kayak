@@ -87,6 +87,79 @@ async fn delete_pipeline(app: &Router, id: &str) -> anyhow::Result<(StatusCode, 
     send(app, req).await
 }
 
+async fn put_pipeline(app: &Router, id: &str, config: &Value) -> anyhow::Result<(StatusCode, Value)> {
+    let req = Request::builder()
+        .method("PUT")
+        .uri(format!("/api/pipelines/{id}"))
+        .header(header::CONTENT_TYPE, "application/json")
+        .body(Body::from(serde_json::to_vec(config)?))?;
+    send(app, req).await
+}
+
+#[tokio::test]
+async fn replacing_a_pipeline_returns_200_and_the_new_config() -> anyhow::Result<()> {
+    let app = app();
+    post_stream(&app, &idle_config("p1")).await?;
+    let mut changed = idle_config("p1");
+    changed["transforms"] = json!([{ "type": "splitter", "out_size": 2 }]);
+
+    let (status, body) = put_pipeline(&app, "p1", &changed).await?;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["id"], json!("p1"));
+    assert_eq!(body["config"]["transforms"][0]["type"], json!("splitter"));
+
+    // and the listing agrees: one pipeline, the new config
+    let (_, listed) = get_pipelines(&app).await?;
+    let Some(items) = listed.as_array() else {
+        panic!("expected an array, got {listed}");
+    };
+    assert_eq!(items.len(), 1);
+    assert_eq!(items[0]["config"]["transforms"][0]["type"], json!("splitter"));
+    Ok(())
+}
+
+#[tokio::test]
+async fn replacing_an_unknown_pipeline_is_a_404() -> anyhow::Result<()> {
+    let (status, body) = put_pipeline(&app(), "nope", &idle_config("nope")).await?;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    assert!(body["error"].as_str().is_some_and(|e| e.contains("nope")), "{body}");
+    Ok(())
+}
+
+/// The id in the body and the id in the path disagreeing is the caller's
+/// mistake, and the running pipeline is left alone.
+#[tokio::test]
+async fn a_replace_naming_another_id_is_a_422() -> anyhow::Result<()> {
+    let app = app();
+    post_stream(&app, &idle_config("p1")).await?;
+
+    let (status, body) = put_pipeline(&app, "p1", &idle_config("p2")).await?;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{body}");
+    let (_, listed) = get_pipelines(&app).await?;
+    assert_eq!(listed[0]["id"], json!("p1"));
+    Ok(())
+}
+
+/// A config that does not build is a 422 like it is on create, and the old
+/// config is what runs afterwards.
+#[tokio::test]
+async fn a_replace_that_does_not_build_is_a_422_and_keeps_the_old_config() -> anyhow::Result<()> {
+    let app = app();
+    post_stream(&app, &idle_config("p1")).await?;
+    let mut broken = idle_config("p1");
+    broken["transforms"] = json!([{ "type": "reducer", "aggregations": [] }]);
+
+    let (status, body) = put_pipeline(&app, "p1", &broken).await?;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{body}");
+    assert!(
+        body["error"].as_str().is_some_and(|e| e.contains("old config")),
+        "{body}"
+    );
+    let (_, listed) = get_pipelines(&app).await?;
+    assert_eq!(listed[0]["config"]["transforms"], json!([]));
+    Ok(())
+}
+
 #[tokio::test]
 async fn creating_a_stream_returns_201_and_the_created_pipeline() -> anyhow::Result<()> {
     let app = app();

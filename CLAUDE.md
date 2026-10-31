@@ -22,6 +22,9 @@ cargo run -- --config example_config/config.json --secrets example_config/secret
                                     # frontend unless LEPTOS_SITE_ROOT is set — `just dev` is the one that
                                     # works. It binds 6767 (`listen::DEFAULT_ADDR`). --connections <path> is optional:
                                     # without it the file is derived from the config's name.
+cargo run -- check --config example_config/config.json --secrets example_config/secrets.json --data-dir dev_data
+                                    # would the server start with this? the server's flags with `check` in front;
+                                    # builds every pipeline, starts none, lists every problem, exits 1 on any.
 
 docker compose up                   # NATS :4222 + publisher on test.subject, kafka :9092 + publisher on test.events, mqtt :1883 + publisher on test.mqtt, redis :6379 + publisher on test.redis, opc ua (opc-plc) :50000, postgres :5432, clickhouse :8123, rustfs (s3) :9000 with the `events` bucket
 just test-http                      # hurl --test hurl/tests/*.hurl (needs the server running)
@@ -1129,6 +1132,102 @@ The file can be JSON or YAML (`kayak_core::ConfigFormat`), decided by the extens
 
 Three things to preserve. `persist::save_path` rejects anything but a bare file name and is a security boundary, not a nicety — the path comes from an HTTP request, so an unconstrained one is an arbitrary write; refuse, never normalise. `has_unsaved_changes` compares `render(current)` against the `saved` snapshot, which is exact *because* `render` is deterministic. And `revert` parses the file before tearing the runtime down, so a file broken by hand doesn't cost you the running graph.
 
+### Replacing a pipeline (`PUT /api/pipelines/{id}`)
+
+`AppState::replace_pipeline` changes a running pipeline's config under the same
+id — the one thing a delete and a create could not do, because a delete ends
+the only input of every pipeline under it and they stop. The order of the steps
+is the design, and the function's doc comment numbers them:
+
+1. **Refuse what can be refused while nothing has stopped**
+   (`check_replacement`): a body `id` that is not the path's, an unknown
+   upstream or connection, and an upstream that would **close a cycle** — new
+   with replacing, since a create can only name an upstream that already
+   exists, so a cycle was unrepresentable before. Itself counts.
+2. **Reserve the id** (`AppState::replacing`, a leaf lock taken after the
+   pipelines lock). Between taking the old pipeline out of the map and putting
+   the new one in, the id is in neither: a create, a delete or a second replace
+   in that window is a 409 (`PipelineError::Replacing`), and a post to its
+   `http` input a 503 rather than a 404 — "come back", not "gone for good".
+3. **Stop the old run loop completely** before building the new one, for
+   `revert`'s reason (two loops for one id share a consumer group, a client id,
+   an inbox). Under checkpointing it is stopped **at a barrier**:
+   `Pipeline::stop_at_next_barrier` makes its own half of the next checkpoint a
+   savepoint (outputs finished, snapshot submitted, a clean leave) while the
+   barrier it *forwards* stays ordinary, so the pipelines below take a normal
+   checkpoint and keep running. Cancelling after a separate checkpoint was the
+   first version, and it double-counted: the old loop went on processing what
+   the new one then replayed into the (live, shared) bucket.
+   `posts_during_a_replace_are_counted_exactly_once` fails the moment that
+   window comes back. The flag is read only when a barrier arrives.
+4. **Take the downstreams off it** (`Pipeline::take_subscribers`) only *after*
+   it stopped — they are in its checkpoint region and need its last barrier to
+   commit — and hold them, so the pipelines below never see their upstream go.
+5. **Build the new config; if it fails, build the old one again**, so a
+   mistake the checks cannot see into costs a restart rather than the pipeline.
+   A 422 either way, the build's cause chain kept; a 500 only when neither
+   builds.
+6. Hand the downstreams to whichever now runs (`adopt_subscribers`).
+
+Unlike a delete, the checkpoint and the `http` input's write-ahead log are
+**kept**: restore is per component and only to an unchanged config at the same
+index, so editing an output keeps a transform's window and an input's position.
+The inbox is evicted first *without* checkpointing (a post queued into an input
+about to be dropped would be lost) and only after the stop *with* it (an `http`
+input whose queue closed ends its loop before reaching the barrier, and what it
+accepts meanwhile is in its log).
+
+A replace **always rebuilds**, even an identical config: that is how a pipeline
+that has stopped is started again — and a downstream left stranded under a dead
+upstream resumes with it, since the dead pipeline still held its sender — and
+how a `file` script is read again. It writes nothing to disk, like every other
+edit. The card's edit button (`SourceView`) always edits JSON, whatever the view
+shows, so the browser needs no YAML parser; `source::replacement` is its pure
+half.
+
+### `kayak check` (`src/check.rs`)
+
+The binary's one subcommand, and the reason `main.rs` has a `Cli` with an
+optional `Command` beside the flattened server `Args`: a bare `kayak --config …`
+must go on meaning "serve", because every deployment's command line and the
+image's `ENTRYPOINT` are flags only. `check` takes **the same `Args`**, so a
+deployment's command line with `check` in front checks what it would load;
+flags before the subcommand are refused (`args_conflicts_with_subcommands`)
+rather than silently belonging to the server.
+
+It answers "would the server start?" by **doing startup's work through
+startup's code** — `ChainStore::server`, `read_required`, `Auth::from_config`,
+`load_connections_file`, `persist::read`, `layout::read`, and each pipeline
+through `AppState::build_unstarted`, which shares `build_ctx` with
+`create_locked` so a checked pipeline and a started one cannot be built two
+ways. Don't add checker-only validation rules: a rule belongs in the
+component's `build()`, where the server enforces it too.
+
+Four things are load-bearing:
+
+- **Nothing runs, and that is structural.** The builds happen on a
+  current-thread runtime that is *entered but never driven*, so what a build
+  spawns (an input `buffer`'s pump, `Merged`'s tasks) is dropped unpolled.
+  `nothing_a_check_builds_is_run` fails if the runtime is ever driven. It is
+  also why `main` is a plain `fn` that builds the server's runtime itself: a
+  runtime cannot be dropped inside another one.
+- **Every problem, not the first** — and a pipeline under a failed upstream is
+  `skipped`, not another problem. A file that fails to load (secrets, data dir,
+  connections) stops the builds that depend on it, for the same reason: one
+  mistake should read as one line.
+- **The network is not asked.** Reachability is a different question, depends
+  on where the check runs, and CI should not dial production brokers. jwt keys
+  are not fetched (`prime` is skipped) and `--state-dir` is not opened — a
+  running server holds its lock. A `--connect` mode would run each output's
+  `init` under a timeout; not built.
+- **It creates what startup creates** — `--data-dir` and the `file` outputs'
+  directories — because the sandbox check is a check of where a path really
+  lands. Nothing else is written.
+
+An upstream declared further down the file is reported as such; the server
+would say "not found", which is true and points the wrong way. That order
+rule is the server's (it builds in file order), not the checker's.
+
 ### Shutdown (`src/shutdown.rs`)
 
 `SIGTERM` and `SIGINT` both stop the process, and the **order** is the whole of
@@ -1225,6 +1324,11 @@ Every one of these rules was found by the chaos tests in `tests/checkpoint.rs`
 - **Forward before waiting at the bucket**, or a writer downstream of another
   writer deadlocks on it. A dead co-writer fails the bucket at once rather than
   making the living wait out the timeout.
+- **A logged post is durable even when its input has gone.** The WAL writer
+  used to answer "not durable" (a 503) for a post fsynced just as the input was
+  dropped — a replace, a revert, a shutdown — and the client sent it again
+  while the next build replayed it from the log: one post, processed twice.
+  `a_logged_post_is_durable_even_when_its_input_has_gone` pins it.
 - **`Buffered` (input buffer) is cancel-safe**: its batch lives on the struct.
   It was held in `next`'s locals and lost whenever the run loop's `select!`
   dropped the future — a bug before checkpoints, made frequent by the trigger
@@ -1626,8 +1730,6 @@ Three things are load-bearing:
   holds are about entries that are gone.
 
 The frontend has two routes behind `leptos_router` (`frontend/src/app.rs`): `/` is the pannable/zoomable canvas of pipeline "cards" fed by `ApiClient::list_pipelines()` plus the live event signal, and `/docs` is the generated reference — two tabs, components and HTTP API. `Navbar` is shared and reads `AppState` through `use_context` rather than `expect_context`, because only the canvas provides it.
-
-Of the older Askama templates, only `templates/index.html` and the dead `/ui` `index_handler` are left; both are slated for removal, and Askama goes with them.
 
 ### Seeing the data while building (sample, schema, dry run)
 

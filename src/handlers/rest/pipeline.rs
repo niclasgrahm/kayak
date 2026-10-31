@@ -25,6 +25,18 @@ pub async fn create_pipeline(
     Ok((StatusCode::CREATED, Json(body)))
 }
 
+/// Change a running pipeline in place — see `Operation::ReplacePipeline` in
+/// `kayak_core::api_docs`.
+pub async fn replace_pipeline(
+    State(state): State<Arc<AppState>>,
+    Path(pipeline_id): Path<String>,
+    Json(payload): Json<Config>,
+) -> Result<impl IntoResponse, AppError> {
+    let pipeline = state.replace_pipeline(&pipeline_id, payload).await?;
+    let body = serde_json::to_value(pipeline.view())?;
+    Ok((StatusCode::OK, Json(body)))
+}
+
 pub async fn delete_pipeline(
     State(state): State<Arc<AppState>>,
     Path(pipeline_id): Path<String>,

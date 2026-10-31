@@ -7654,7 +7654,7 @@
                 }
               }
             },
-            "description": "A pipeline with this id already runs."
+            "description": "A pipeline with this id already runs, or is replaced at this moment."
           },
           "422": {
             "content": {
@@ -7823,6 +7823,16 @@
             },
             "description": "No pipeline runs with that id."
           },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "The pipeline is replaced at this moment."
+          },
           "500": {
             "content": {
               "application/json": {
@@ -7843,6 +7853,117 @@
           }
         ],
         "summary": "Stop and remove a pipeline",
+        "tags": [
+          "pipelines"
+        ],
+        "x-kayak-access": "admin"
+      },
+      "put": {
+        "description": "Replaces the config of a running pipeline. The body is the whole new config, as for `POST /api/pipelines`. kayak stops the pipeline, builds the new config under the same id and starts it before it sends the response. A 200 means that the new config runs.\n\nDownstream pipelines stay attached. They are not rebuilt, and they receive the batches of the new config from the moment it starts. The canvas position, the history and the state buckets also stay. A component whose config is unchanged at the same position restores from the last checkpoint, if the server checkpoints.\n\nkayak always rebuilds, also when the body is the same as the running config. Thus, a `PUT` of the same config restarts a pipeline that has stopped, and reads a `file` script again.\n\nkayak refuses some mistakes before it stops anything: an `id` in the body that is not the id in the path, an unknown upstream or connection, and an upstream that would make a cycle. If the new config then does not build, kayak starts the old config again and the response is a 422.\n\nWhile the pipeline is replaced, posts to its `http` input get a 503, and other changes to the same id get a 409.\n\nThis endpoint writes nothing to disk.",
+        "operationId": "replacePipeline",
+        "parameters": [
+          {
+            "description": "The id of the pipeline.",
+            "in": "path",
+            "name": "pipeline_id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/Config"
+              }
+            }
+          },
+          "description": "The new config of the pipeline. The `id` can be left out. If it is there, it must be the id in the path.",
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PipelineDto"
+                }
+              }
+            },
+            "description": "The new config is built and runs."
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "No credentials, or credentials that were not recognised."
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "Signed in, but without the `admin` role this endpoint needs."
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "No pipeline runs with that id."
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "Another request changes this pipeline at the same time."
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "The new config does not build. Nothing changed: the old config runs, or was started again. For example, the `id` is not the id in the path, an upstream would make a cycle, or a component does not build."
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "The new config did not build, and the old config did not build again either. The pipeline no longer runs. The body describes both errors."
+          }
+        },
+        "security": [
+          {
+            "basicAuth": []
+          },
+          {
+            "cookieAuth": []
+          }
+        ],
+        "summary": "Change a running pipeline",
         "tags": [
           "pipelines"
         ],
@@ -8056,7 +8177,7 @@
                 }
               }
             },
-            "description": "The queue of the pipeline is full, because the pipeline reads slower than the requests arrive. The pipeline accepted nothing. Send the request again."
+            "description": "The queue of the pipeline is full, because the pipeline reads slower than the requests arrive. Or the pipeline is replaced at this moment. The pipeline accepted nothing. Send the request again."
           }
         },
         "security": [],

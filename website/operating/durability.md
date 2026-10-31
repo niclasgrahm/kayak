@@ -132,3 +132,10 @@ outputs whose writes are already synchronous — the databases, `http`, `kafka`
   rename: the checkpoint of the old name is dropped, and the new name starts
   empty. A pipeline still in the file keeps its checkpoint even if it failed to
   start.
+- **Changing a pipeline keeps its checkpoint.** `PUT /api/pipelines/{id}` stops
+  the old config at a checkpoint barrier, a savepoint for that pipeline alone.
+  The new config restores every component that is unchanged at the same place
+  in the chain, so nothing is replayed or counted twice. The pipelines around
+  it take an ordinary checkpoint and keep running. If the barrier does not
+  arrive within 10 s, kayak stops the old config without one, and the new
+  config replays from the last checkpoint that completed.

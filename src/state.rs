@@ -31,6 +31,16 @@ pub struct PipelineHandle {
 pub enum PipelineError {
     NotFound(PipelineId),
     DuplicateId(PipelineId),
+    /// Another request is replacing this pipeline right now — see
+    /// [`AppState::replace_pipeline`]. A 409 like [`PipelineError::DuplicateId`]:
+    /// the server's state disagrees with the request for as long as the
+    /// replace takes, and asking again afterwards is the fix.
+    Replacing(PipelineId),
+    /// A post to the `http` input of a pipeline that is being replaced: its
+    /// endpoint is down for as long as the swap takes. A 503 like
+    /// [`PipelineError::Backpressure`] — post again — and separate from it so
+    /// the answer says why rather than blaming a queue that isn't full.
+    Restarting(PipelineId),
     /// The pipeline is running, but nothing can be posted to it: it has no
     /// `http` input. A 404 like [`PipelineError::NotFound`], and deliberately
     /// distinct from it — one is fixed by creating the pipeline, the other by
@@ -92,6 +102,14 @@ impl std::fmt::Display for PipelineError {
                 "pipeline '{id}' requires a credential this post did not carry"
             ),
             Self::DuplicateId(id) => write!(f, "pipeline with id '{id}' already exists"),
+            Self::Restarting(id) => write!(
+                f,
+                "pipeline '{id}' is being replaced; its http input is back in a moment, post again"
+            ),
+            Self::Replacing(id) => write!(
+                f,
+                "pipeline '{id}' is being replaced by another request; try again when it is done"
+            ),
             Self::ConnectionInUse(id, used_by) => write!(
                 f,
                 "connection '{id}' is still used by {}",
@@ -289,6 +307,13 @@ pub struct AppState {
     /// *starts* its pipelines, and each one restores from — and joins — the
     /// coordinator as it is built.
     checkpoints: Option<Arc<Checkpoints>>,
+    /// The ids a [`AppState::replace_pipeline`] is working on. Between taking
+    /// the old pipeline out of the map and putting the new one in, the id is
+    /// in neither — and without this a create could take it in that window,
+    /// or a second replace could find nothing and answer 404 about a
+    /// pipeline that is about to exist again. A leaf lock, always taken
+    /// *after* the pipelines lock when both are held.
+    replacing: Mutex<std::collections::HashSet<PipelineId>>,
 }
 
 impl Default for AppState {
@@ -345,6 +370,7 @@ impl AppState {
             shutdown: tokio_util::sync::CancellationToken::new(),
             history: Arc::new(History::disabled()),
             checkpoints: None,
+            replacing: Mutex::new(std::collections::HashSet::new()),
         }
     }
 
@@ -441,7 +467,7 @@ impl AppState {
     /// the checks in [`crate::outputs::file::Root`] compare resolved paths, so
     /// a `--data-dir` that is itself a symlink (`/tmp` on macOS, which is
     /// really `/private/tmp`) would otherwise fail every one of them.
-    fn resolve_data_dir(data_dir: Option<PathBuf>) -> anyhow::Result<Option<Arc<PathBuf>>> {
+    pub(crate) fn resolve_data_dir(data_dir: Option<PathBuf>) -> anyhow::Result<Option<Arc<PathBuf>>> {
         data_dir
             .map(|dir| {
                 std::fs::create_dir_all(&dir)
@@ -598,7 +624,7 @@ impl AppState {
 
     /// Read whatever connections there are. A derived file that isn't there is
     /// no connections at all; one the operator named has to exist.
-    fn load_connections_file(&self) -> anyhow::Result<()> {
+    pub(crate) fn load_connections_file(&self) -> anyhow::Result<()> {
         let Some(path) = self.connections_path() else {
             return Ok(());
         };
@@ -1006,7 +1032,7 @@ impl AppState {
     /// and the reason the contents survive one is that a revert rebuilds every
     /// pipeline in the graph, so emptying the buckets would make an edit to an
     /// unrelated pipeline cost an hour of accumulated state.
-    fn adopt_buckets(&self, declared: StateBuckets) {
+    pub(crate) fn adopt_buckets(&self, declared: StateBuckets) {
         // Under checkpointing the buckets come from the last committed
         // checkpoint instead of carrying the live contents over: the pipelines
         // about to be rebuilt rewind their inputs to that checkpoint, and live
@@ -1429,7 +1455,283 @@ impl AppState {
 
     pub fn create_pipeline(&self, config: Config) -> Result<Arc<Pipeline>, PipelineError> {
         let mut app = self.lock_pipelines();
+        if let Some(id) = &config.id
+            && self.is_replacing(id)
+        {
+            return Err(PipelineError::Replacing(id.clone()));
+        }
         Self::create_locked(self, &mut app, config)
+    }
+
+    /// Evict `id`'s endpoint under the pipelines lock, the rule
+    /// `delete_pipeline` follows, and hand the guard back.
+    fn lock_pipelines_and_evict(&self, id: &str) -> MutexGuard<'_, HashMap<PipelineId, PipelineHandle>> {
+        let app = self.lock_pipelines();
+        self.inboxes.evict(id);
+        app
+    }
+
+    fn lock_replacing(&self) -> MutexGuard<'_, std::collections::HashSet<PipelineId>> {
+        self.replacing.lock().unwrap_or_else(|poisoned| {
+            tracing::warn!("replacing lock was poisoned; recovering");
+            poisoned.into_inner()
+        })
+    }
+
+    fn is_replacing(&self, id: &str) -> bool {
+        self.lock_replacing().contains(id)
+    }
+
+    /// Change a running pipeline's config, keeping its id and its place in
+    /// the graph — see `Operation::ReplacePipeline` for the contract.
+    ///
+    /// The order is the whole design:
+    ///
+    /// 1. **Refuse what can be refused while nothing has stopped**
+    ///    ([`AppState::check_replacement`]): a body naming another id, an
+    ///    upstream or connection that isn't there, an upstream that would
+    ///    close a cycle. These are the common mistakes, and catching them here
+    ///    costs the running pipeline nothing.
+    /// 2. **Reserve the id**, so nothing else can take it or change it while
+    ///    it is out of the map.
+    /// 3. **Stop the old run loop completely** before the new one is built,
+    ///    for the reason [`AppState::revert`] does: two loops for one id
+    ///    would share a consumer group, a client id, an inbox. Under
+    ///    checkpointing it is stopped *at a barrier* —
+    ///    [`Pipeline::stop_at_next_barrier`], a savepoint for one pipeline —
+    ///    so the snapshot the new config restores from is exactly where the
+    ///    old one stopped.
+    /// 4. **Take its downstreams off it** once it has stopped, and hold them,
+    ///    so the pipelines under it keep their end of the channel and never
+    ///    see it go.
+    /// 5. **Build the new config.** If it fails — a component the checks in
+    ///    step 1 cannot see into — the old config is built again, so a
+    ///    mistake costs a restart rather than the pipeline.
+    /// 6. Hand the downstreams to whichever of the two now runs.
+    ///
+    /// Always rebuilds, even for an identical config: that is how a pipeline
+    /// that has stopped is started again, and how a `file` script is read
+    /// again. Writes nothing to disk, like every other edit.
+    pub async fn replace_pipeline(
+        &self,
+        id: &str,
+        mut config: Config,
+    ) -> Result<Arc<Pipeline>, PipelineError> {
+        match &config.id {
+            Some(named) if named != id => {
+                return Err(PipelineError::InvalidConfig(anyhow::anyhow!(
+                    "the config names pipeline '{named}', but this is pipeline '{id}'; a \
+                     replace keeps the id, and renaming is a delete and a create"
+                )));
+            }
+            _ => config.id = Some(id.to_string()),
+        }
+
+        let running = {
+            let app = self.lock_pipelines();
+            let Some(handle) = app.get(id) else {
+                if self.is_replacing(id) {
+                    return Err(PipelineError::Replacing(id.to_string()));
+                }
+                return Err(PipelineError::NotFound(id.to_string()));
+            };
+            self.check_replacement(&app, id, &config)?;
+            let mut replacing = self.lock_replacing();
+            if !replacing.insert(id.to_string()) {
+                return Err(PipelineError::Replacing(id.to_string()));
+            }
+            // a loop that has ended takes no barrier, so asking it to stop at
+            // one would only wait out the grace period
+            !matches!(
+                handle.shared.status(),
+                kayak_core::RunStatus::Stopped | kayak_core::RunStatus::Failed
+            )
+        };
+        // released however this ends, early return included
+        let _reserved = Reserved { state: self, id };
+
+        // Out of the map, under the lock as `delete_pipeline` does it.
+        // Unlike a delete its checkpoint and its write-ahead log stay: the
+        // new config restores from them wherever a component is unchanged.
+        let at_barrier = running && self.checkpoints.is_some();
+        let (old, join_handle) = {
+            let mut app = self.lock_pipelines();
+            let Some(handle) = app.remove(id) else {
+                // gone between the check and here — by a revert, since a
+                // delete is refused while the id is reserved
+                return Err(PipelineError::NotFound(id.to_string()));
+            };
+            // Without checkpointing a post accepted now would sit in the
+            // queue of an input about to be dropped, so the endpoint goes
+            // first and a post in the gap is a 503 to retry. Under
+            // checkpointing it stays until the loop has stopped: an `http`
+            // input whose queue closed would end its loop before it reached
+            // the barrier, and what it accepts meanwhile is in its log —
+            // processed before the barrier, or replayed by the new config.
+            if !at_barrier {
+                self.inboxes.evict(id);
+            }
+            (handle.shared, handle.join_handle)
+        };
+
+        let subscribers = self.stop_replaced(id, &old, join_handle, at_barrier).await;
+        self.build_replacement(id, config, old, subscribers)
+    }
+
+    /// Stop the run loop of a pipeline being replaced, and take its
+    /// downstreams off it — steps 3 and 4 of [`AppState::replace_pipeline`].
+    async fn stop_replaced(
+        &self,
+        id: &str,
+        old: &Pipeline,
+        mut join_handle: tokio::task::JoinHandle<()>,
+        at_barrier: bool,
+    ) -> crate::pipeline::Subscribers {
+        // Under checkpointing the old run loop is stopped *at* a checkpoint
+        // barrier rather than cancelled, so its snapshot is exactly where it
+        // stopped: the new config's unchanged components resume there and
+        // nothing is processed twice — which matters most for a shared
+        // bucket, which a replace leaves live. Cancelling after a separate
+        // checkpoint would leave a window in which the old loop went on
+        // processing what the new one then replays.
+        let mut stopped = false;
+        if at_barrier && let Some(checkpoints) = &self.checkpoints {
+            old.stop_at_next_barrier();
+            let epoch = checkpoints.trigger();
+            stopped = tokio::time::timeout(SAVEPOINT_GRACE, &mut join_handle)
+                .await
+                .is_ok();
+            if !stopped || !checkpoints.wait_for(id, epoch, SAVEPOINT_GRACE).await {
+                tracing::warn!(
+                    "[{id}]\t replacing without a savepoint: checkpoint {epoch} did not complete \
+                     within {}s, so the new config's unchanged components replay from the last \
+                     one that did",
+                    SAVEPOINT_GRACE.as_secs()
+                );
+            }
+        }
+        if !stopped {
+            old.cancellation_token.cancel();
+            if tokio::time::timeout(TEARDOWN_GRACE, join_handle).await.is_err() {
+                tracing::warn!(
+                    "[{id}]\t the old run loop was still stopping after {}s; starting the new \
+                     config anyway",
+                    TEARDOWN_GRACE.as_secs()
+                );
+            }
+        }
+        // under the lock, which is what makes evicting by name safe — and a
+        // no-op if the old input already dropped its registration
+        drop(self.lock_pipelines_and_evict(id));
+        // Taken only now, after the old loop has forwarded its last barrier:
+        // the pipelines below it are in its checkpoint region and need that
+        // barrier to commit. Held here until the new config is built, so they
+        // never see their upstream go.
+        old.take_subscribers()
+    }
+
+    /// Build the new config of a pipeline being replaced, or the old one
+    /// again if it does not build, and hand it the downstreams — steps 5 and
+    /// 6 of [`AppState::replace_pipeline`].
+    fn build_replacement(
+        &self,
+        id: &str,
+        config: Config,
+        old: Arc<Pipeline>,
+        subscribers: crate::pipeline::Subscribers,
+    ) -> Result<Arc<Pipeline>, PipelineError> {
+        let mut app = self.lock_pipelines();
+        match Self::create_locked(self, &mut app, config) {
+            Ok(pipeline) => {
+                if !subscribers.is_empty() {
+                    tracing::debug!(
+                        "[{id}]\t handing {} downstream(s) to the new config",
+                        subscribers.len()
+                    );
+                }
+                pipeline.adopt_subscribers(subscribers);
+                tracing::info!("pipeline replaced: {id}");
+                Ok(pipeline)
+            }
+            Err(err) => {
+                let err = anyhow::Error::new(err);
+                let old_config = old.config.clone();
+                drop(old);
+                match Self::create_locked(self, &mut app, old_config) {
+                    Ok(restored) => {
+                        restored.adopt_subscribers(subscribers);
+                        tracing::info!(
+                            "[{id}]\t the new config did not build, so the old one runs again"
+                        );
+                        Err(PipelineError::InvalidConfig(err.context(format!(
+                            "the new config did not build, so nothing changed: the old config \
+                             of pipeline '{id}' runs again"
+                        ))))
+                    }
+                    Err(again) => {
+                        tracing::error!(
+                            "[{id}]\t neither the new config nor the old one built; the \
+                             pipeline no longer runs"
+                        );
+                        Err(PipelineError::Internal(anyhow::anyhow!(
+                            "the new config of pipeline '{id}' did not build ({err:#}), and the \
+                             old config did not build again either ({:#}); the pipeline no \
+                             longer runs",
+                            anyhow::Error::new(again)
+                        )))
+                    }
+                }
+            }
+        }
+    }
+
+    /// The mistakes a replace can refuse before anything is stopped.
+    ///
+    /// The cycle is the one that is new with replacing. A create can never
+    /// close one, because an upstream has to be running before anything can
+    /// name it — but a replace can point a pipeline at one of its own
+    /// descendants, and a cycle is a graph whose batches go round forever.
+    /// Itself counts: a pipeline fed by itself is the shortest cycle there is.
+    fn check_replacement(
+        &self,
+        app: &HashMap<PipelineId, PipelineHandle>,
+        id: &str,
+        config: &Config,
+    ) -> Result<(), PipelineError> {
+        let below = descendants(app, id);
+        for upstream in config.upstreams() {
+            if upstream == id {
+                return Err(PipelineError::InvalidConfig(anyhow::anyhow!(
+                    "pipeline '{id}' cannot be its own upstream"
+                )));
+            }
+            if below.contains(upstream.as_str()) {
+                return Err(PipelineError::InvalidConfig(anyhow::anyhow!(
+                    "pipeline '{upstream}' is fed by '{id}', so making it an upstream of \
+                     '{id}' would close a cycle"
+                )));
+            }
+            if !app.contains_key(upstream.as_str()) {
+                if self.is_replacing(upstream) {
+                    return Err(PipelineError::Replacing(upstream.clone()));
+                }
+                return Err(PipelineError::InvalidConfig(anyhow::anyhow!(
+                    "upstream pipeline '{upstream}' not found"
+                )));
+            }
+        }
+        let unknown = self.unknown_connections(std::slice::from_ref(config));
+        if !unknown.is_empty() {
+            return Err(PipelineError::InvalidConfig(anyhow::anyhow!(
+                "no connection is configured under {}",
+                unknown
+                    .iter()
+                    .map(|name| format!("'{name}'"))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            )));
+        }
+        Ok(())
     }
 
     /// The body of [`AppState::create_pipeline`], against a guard the caller
@@ -1446,13 +1748,37 @@ impl AppState {
         if app.contains_key(id.as_str()) {
             return Err(PipelineError::DuplicateId(id));
         }
+        let ctx = self.build_ctx(app, &pipeline);
+        // building the runtime only fails on things the config got wrong
+        // (unknown upstream, unbuildable component)
+        let join_handle = pipeline.start(ctx).map_err(|e| {
+            PipelineError::InvalidConfig(e.context(format!("failed to start pipeline '{id}'")))
+        })?;
+
+        let pipeline_handle = PipelineHandle {
+            join_handle,
+            shared: Arc::clone(&pipeline),
+        };
+        app.insert(id, pipeline_handle);
+        tracing::debug!("pipeline created: {}", pipeline.id);
+        Ok(pipeline)
+    }
+
+    /// The `BuildCtx` a pipeline of this server is built with — the one place
+    /// it is assembled, so a pipeline that is started and one that is only
+    /// checked (see [`crate::check`]) cannot be built two different ways.
+    fn build_ctx<'a>(
+        &self,
+        app: &'a mut HashMap<PipelineId, PipelineHandle>,
+        pipeline: &Pipeline,
+    ) -> BuildCtx<'a> {
         // a snapshot, taken before the map is borrowed: what this pipeline is
         // built from is the connections as they stand now, and editing one
         // later doesn't reach back into it
         let connections = Arc::new(self.connections());
-        let ctx = BuildCtx::with_secrets(
+        BuildCtx::with_secrets(
             app,
-            id.clone(),
+            pipeline.id.clone(),
             self.events.clone(),
             Arc::clone(&self.secrets),
         )
@@ -1468,20 +1794,50 @@ impl AppState {
         // first saved as, and from that save on a file-sourced script resolves
         // beside it.
         .with_script_dir(self.script_directory().map(Arc::new))
-        .with_checkpoints(self.checkpoints.clone());
-        // building the runtime only fails on things the config got wrong
-        // (unknown upstream, unbuildable component)
-        let join_handle = pipeline.start(ctx).map_err(|e| {
-            PipelineError::InvalidConfig(e.context(format!("failed to start pipeline '{id}'")))
-        })?;
+        .with_checkpoints(self.checkpoints.clone())
+    }
 
-        let pipeline_handle = PipelineHandle {
-            join_handle,
-            shared: Arc::clone(&pipeline),
+    /// A server that has read nothing yet, for [`crate::check`]: the config
+    /// path (if any) and the connections file are remembered, and nothing is
+    /// loaded or started until the checker asks for each step on its own.
+    pub(crate) fn for_check(
+        config: Option<&Path>,
+        secrets: Arc<dyn SecretStore>,
+        connections_file: Option<&Path>,
+        data_dir: Option<Arc<PathBuf>>,
+    ) -> Self {
+        let dir = match config.and_then(Path::parent) {
+            Some(dir) if !dir.as_os_str().is_empty() => dir.to_path_buf(),
+            _ => PathBuf::from("."),
         };
-        app.insert(id, pipeline_handle);
-        tracing::debug!("pipeline created: {}", pipeline.id);
-        Ok(pipeline)
+        let mut state = Self::with_secrets_in(dir, secrets);
+        state.data_dir = data_dir;
+        state.connections_file = connections_file.map(Path::to_path_buf);
+        *state.lock_config_path() = config.map(Path::to_path_buf);
+        state
+    }
+
+    /// Build a pipeline exactly as [`AppState::create_pipeline`] would, and
+    /// register it so the pipelines after it can name it as an upstream — but
+    /// start nothing. For [`crate::check`].
+    ///
+    /// The handle's task is an empty one: nothing reads it, and the checker
+    /// runs on a runtime that is never driven, so even that is never polled.
+    pub(crate) fn build_unstarted(&self, config: Config) -> anyhow::Result<()> {
+        let mut app = self.lock_pipelines();
+        let pipeline = Arc::new(Pipeline::new(config)?);
+        let id = pipeline.id.clone();
+        if app.contains_key(id.as_str()) {
+            anyhow::bail!(PipelineError::DuplicateId(id));
+        }
+        let ctx = self.build_ctx(&mut app, &pipeline);
+        pipeline.build_unstarted(ctx)?;
+        let handle = PipelineHandle {
+            join_handle: tokio::spawn(std::future::ready(())),
+            shared: pipeline,
+        };
+        app.insert(id, handle);
+        Ok(())
     }
 
     /// Builds one input the way a pipeline would, for a sample — see
@@ -1563,6 +1919,9 @@ impl AppState {
 
     pub fn delete_pipeline(&self, id: &str) -> Result<(), PipelineError> {
         let mut app = self.lock_pipelines();
+        if self.is_replacing(id) {
+            return Err(PipelineError::Replacing(id.to_string()));
+        }
         let Some(handle) = app.remove(id) else {
             tracing::debug!("failed to delete pipeline: {} (not found)", id);
             return Err(PipelineError::NotFound(id.to_string()));
@@ -1664,7 +2023,13 @@ impl AppState {
             Err(IngestError::Full(_)) => Err(PipelineError::Backpressure(id.to_string())),
             Err(IngestError::Unauthorized(_)) => Err(PipelineError::Unauthorized(id.to_string())),
             Err(IngestError::NoInbox(_)) => {
-                if self.lock_pipelines().contains_key(id) {
+                let app = self.lock_pipelines();
+                if self.is_replacing(id) {
+                    // the endpoint is down for as long as the replace takes,
+                    // which is a "come back" — a 404 would tell a device the
+                    // pipeline it posts to is gone for good
+                    Err(PipelineError::Restarting(id.to_string()))
+                } else if app.contains_key(id) {
                     Err(PipelineError::NotAccepting(id.to_string()))
                 } else {
                     Err(PipelineError::NotFound(id.to_string()))
@@ -1672,4 +2037,40 @@ impl AppState {
             }
         }
     }
+}
+
+/// Releases a [`AppState::replace_pipeline`]'s claim on an id when the
+/// replace ends, however it ends.
+struct Reserved<'a> {
+    state: &'a AppState,
+    id: &'a str,
+}
+
+impl Drop for Reserved<'_> {
+    fn drop(&mut self) {
+        self.state.lock_replacing().remove(self.id);
+    }
+}
+
+/// Every pipeline fed by `id`, directly or through others.
+fn descendants<'a>(
+    app: &'a HashMap<PipelineId, PipelineHandle>,
+    id: &str,
+) -> std::collections::HashSet<&'a str> {
+    let mut found = std::collections::HashSet::new();
+    let mut frontier = vec![id.to_string()];
+    while let Some(current) = frontier.pop() {
+        for (child, handle) in app {
+            let fed = handle
+                .shared
+                .config
+                .upstreams()
+                .iter()
+                .any(|upstream| upstream.as_str() == current);
+            if fed && found.insert(child.as_str()) {
+                frontier.push(child.clone());
+            }
+        }
+    }
+    found
 }

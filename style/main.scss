@@ -3996,3 +3996,49 @@ button.section-kind.foldable {
     min-height: 0;
   }
 }
+
+// The source view's editor: the config as JSON, in a box as tall as the view
+// it replaces, and what the server said about the last apply above it.
+.source-body.hidden {
+  display: none;
+}
+
+.source-edit {
+  box-sizing: border-box;
+  width: 100%;
+  min-height: 220px;
+  resize: vertical;
+  margin: 0;
+  padding: 4px 8px;
+  border: none;
+  outline: none;
+  background: var(--bg-canvas);
+  color: var(--text);
+  font-family: var(--font-mono);
+  font-size: 11px;
+  line-height: 16px;
+  white-space: pre;
+  tab-size: 2;
+}
+
+.card.maximized .source-edit {
+  min-height: 60vh;
+}
+
+.source-bar .clear.apply {
+  margin-left: 0;
+  color: var(--text);
+}
+
+.source-bar .clear + .clear {
+  margin-left: 0;
+}
+
+.source-error {
+  padding: 4px 8px;
+  border-bottom: 1px solid var(--border);
+  color: var(--error, #e06c75);
+  font-size: 10px;
+  white-space: pre-wrap;
+  user-select: text;
+}

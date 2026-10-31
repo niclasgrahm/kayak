@@ -66,7 +66,9 @@ where
             }
             // the pipeline is there and behind, which is a "come back" rather
             // than a "you asked for the wrong thing"
-            Some(PipelineError::Backpressure(_)) => StatusCode::SERVICE_UNAVAILABLE,
+            Some(PipelineError::Backpressure(_) | PipelineError::Restarting(_)) => {
+                StatusCode::SERVICE_UNAVAILABLE
+            }
             // an `http` input's own credential, not the server's sign-in. No
             // `WWW-Authenticate` here for the reason `auth::refuse` gives: the
             // header is indistinguishable to a browser from a demand for the
@@ -77,6 +79,7 @@ where
             // and both are fixed by doing something else first
             Some(
                 PipelineError::DuplicateId(_)
+                | PipelineError::Replacing(_)
                 | PipelineError::ConnectionInUse(..)
                 | PipelineError::ConfigExists(_),
             ) => StatusCode::CONFLICT,

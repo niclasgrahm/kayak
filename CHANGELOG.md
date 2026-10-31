@@ -12,6 +12,24 @@ history, not here.
 
 ## Unreleased
 
+### Added
+
+- **A running pipeline can be changed in place**, with `PUT
+  /api/pipelines/{id}` or the `edit` button on a card's source view. The
+  pipelines below it stay attached and never see it go. A body naming
+  another id, an unknown upstream or connection, and an upstream that would
+  close a cycle are refused before anything stops; a config that fails to
+  build puts the old one back. Replacing a pipeline that has stopped starts
+  it again. Under checkpointing the old config stops at a barrier, so
+  components whose config is unchanged resume exactly where they were.
+
+### Fixed
+
+- **A post to an `http` input is no longer processed twice around a
+  restart of its pipeline.** Under checkpointing, a post logged just as
+  its input was dropped (a replace, a revert, a shutdown) was answered 503
+  and also replayed from the log, so the client's retry counted it again.
+
 ## 0.2.3 — 2026-10-12
 
 **Patch**: an opt-in feature and a fix. Every config that loaded on 0.2.2
