@@ -12,6 +12,12 @@ history, not here.
 
 ## Unreleased
 
+## 0.2.4 — 2026-10-31
+
+**Patch**: additions, fixes and dependency updates. Every config that loaded
+on 0.2.3 still loads; the new fields (`write`, `value_kind`) are optional and
+default to what happened before.
+
 ### Added
 
 - **A running pipeline can be changed in place**, with `PUT
@@ -59,6 +65,15 @@ history, not here.
   restart of its pipeline.** Under checkpointing, a post logged just as
   its input was dropped (a replace, a revert, a shutdown) was answered 503
   and also replayed from the log, so the client's retry counted it again.
+
+### Security
+
+- **Dependencies updated past the advisories published since 0.2.3**:
+  rustls 0.23.46 and rustls-webpki 0.103.16 (certificate verification and
+  TLS handshake fixes), webpki-roots 1.0.11, tokio 1.54.1, libz-sys 1.1.31.
+  The mqtt client no longer compiles in its TLS stack, which kayak never
+  used (the mqtt connection is plain TCP), so the old rustls-webpki it
+  pinned is gone too.
 
 ## 0.2.3 — 2026-10-12
 
