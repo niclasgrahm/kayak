@@ -21,17 +21,26 @@
 //!
 //! Anything but a **full** acceptance. Indu answers `207` for a batch it
 //! partly refused, and the refused rows are terminal — a stream the key may
-//! not write to, a value that is not a number — so a `207` is reported with
-//! the row errors quoted rather than counted as delivered. A message that
-//! simply lacks a series' field is skipped for that series before the request
-//! is built: a reducer that emits `oee` for some machines and not others is
-//! not an error.
+//! not write to, a value of the other kind than the stream carries — so a
+//! `207` is reported with the row errors quoted rather than counted as
+//! delivered. A message that simply lacks a series' field is skipped for that
+//! series before the request is built: a reducer that emits `oee` for some
+//! machines and not others is not an error.
+//!
+//! # Numbers, or a state
+//!
+//! A series sends numbers unless it says `value_kind: string`, and then it
+//! sends strings. The kind is declared rather than read off the value because
+//! Indu fixes a stream's kind when it creates it and refuses the other kind
+//! for its whole life: an output that sent whatever it found would turn one
+//! `"n/a"` in a numeric field into a refused row and a failed batch. A value
+//! of the wrong kind is skipped, as a missing one is.
 
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, anyhow};
-use kayak_core::config::{InduOutputConfig, InduSeries};
+use kayak_core::config::{InduOutputConfig, InduSeries, InduValueKind};
 use reqwest::header::{AUTHORIZATION, CONTENT_TYPE, HeaderValue};
 use reqwest::{Client, Url};
 use serde_json::{Value, json};
@@ -147,8 +156,9 @@ pub struct InduOutput {
     sequence: u64,
 }
 
-/// One reading, as Indu's wire format spells it.
-fn reading(stream: &str, at: &str, value: f64, unit: Option<&str>) -> Value {
+/// One reading, as Indu's wire format spells it. `value` is a JSON number or
+/// string, already checked against the series' kind.
+fn reading(stream: &str, at: &str, value: &Value, unit: Option<&str>) -> Value {
     let mut row = json!({ "stream": stream, "at": at, "value": value });
     if let Some(unit) = unit
         && let Some(object) = row.as_object_mut()
@@ -204,6 +214,15 @@ fn timestamp(at: Option<&str>, message: &Value, now: &str) -> Option<String> {
     }
 }
 
+/// The value if it is of the series' kind, as Indu should receive it; `None`
+/// for the other kind, which the series skips.
+fn of_kind(kind: InduValueKind, value: &Value) -> Option<Value> {
+    match kind {
+        InduValueKind::Number => value.as_f64().map(|n| json!(n)),
+        InduValueKind::String => value.as_str().map(|s| Value::String(s.to_string())),
+    }
+}
+
 impl InduOutput {
     /// The rows a batch becomes: one per message per series, skipping a
     /// message that lacks a series' value or a placeholder's field.
@@ -214,13 +233,15 @@ impl InduOutput {
                 continue;
             };
             for entry in &self.series {
-                let Some(value) = fields::get(message, &entry.value).and_then(Value::as_f64) else {
+                let Some(value) = fields::get(message, &entry.value)
+                    .and_then(|value| of_kind(entry.value_kind.unwrap_or_default(), value))
+                else {
                     continue;
                 };
                 let Some(stream) = render(&entry.stream, message) else {
                     continue;
                 };
-                rows.push(reading(&stream, &at, value, entry.unit.as_deref()));
+                rows.push(reading(&stream, &at, &value, entry.unit.as_deref()));
             }
         }
         rows
@@ -397,11 +418,13 @@ mod tests {
                     stream: "{machine}/oee".to_string(),
                     value: "oee".to_string(),
                     unit: Some("%".to_string()),
+                    value_kind: None,
                 },
                 InduSeries {
                     stream: "{machine}/availability".to_string(),
                     value: "stats.availability".to_string(),
                     unit: None,
+                    value_kind: None,
                 },
             ],
             at: Some("at".to_string()),
@@ -461,6 +484,75 @@ mod tests {
         // press-5 has no `at` field, and `at` names one: skipped, because a
         // reading with a made-up time is worse than no reading
         assert!(rows.iter().all(|r| r["stream"] != "press-5/oee"));
+    }
+
+    #[test]
+    fn a_string_series_sends_strings_and_a_number_series_numbers() {
+        // A state stream: the series says so, and only strings go to it. A
+        // number in that field is skipped, as a string in a numeric field is,
+        // because Indu refuses the other kind for a stream's whole life and a
+        // refused row fails the batch.
+        let concrete = InduOutput {
+            url: ok(Url::parse("http://127.0.0.1:59999/ingest/v1/streams")),
+            described: String::new(),
+            credential: HeaderValue::from_static("Bearer x"),
+            series: vec![
+                InduSeries {
+                    stream: "{machine}/state".to_string(),
+                    value: "state".to_string(),
+                    unit: None,
+                    value_kind: Some(InduValueKind::String),
+                },
+                InduSeries {
+                    stream: "{machine}/oee".to_string(),
+                    value: "oee".to_string(),
+                    unit: None,
+                    value_kind: Some(InduValueKind::Number),
+                },
+            ],
+            at: None,
+            client: Client::new(),
+            gate: Gate::new(),
+            sequence: 0,
+        };
+        let batch: MessageBatch = vec![
+            Arc::new(json!({"machine": "line-1", "state": "fault", "oee": 0.5})),
+            Arc::new(json!({"machine": "line-2", "state": 3, "oee": "n/a"})),
+            Arc::new(json!({"machine": "line-3", "state": "", "oee": 1})),
+        ];
+        let rows = concrete.rows(&batch, "NOW");
+        let sent: Vec<(String, Value)> = rows
+            .iter()
+            .map(|r| (r["stream"].as_str().unwrap_or("").to_string(), r["value"].clone()))
+            .collect();
+        assert_eq!(
+            sent,
+            vec![
+                ("line-1/state".to_string(), json!("fault")),
+                ("line-1/oee".to_string(), json!(0.5)),
+                // an empty state is still a state; Indu decides what it means
+                ("line-3/state".to_string(), json!("")),
+                ("line-3/oee".to_string(), json!(1.0)),
+            ],
+        );
+    }
+
+    #[test]
+    fn the_value_kind_is_number_unless_a_series_says_otherwise() {
+        let series: InduSeries =
+            ok(serde_json::from_value(json!({"stream": "s", "value": "v"})));
+        assert_eq!(series.value_kind, None);
+        assert_eq!(series.value_kind.unwrap_or_default(), InduValueKind::Number);
+        let state: InduSeries = ok(serde_json::from_value(
+            json!({"stream": "s", "value": "v", "value_kind": "string"}),
+        ));
+        assert_eq!(state.value_kind, Some(InduValueKind::String));
+        assert!(
+            serde_json::from_value::<InduSeries>(
+                json!({"stream": "s", "value": "v", "value_kind": "bool"})
+            )
+            .is_err()
+        );
     }
 
     #[test]

@@ -586,13 +586,32 @@ pub struct InduSeries {
     /// the field of a placeholder.
     pub stream: String,
     /// The field that contains the value, as a path (`oee`, `stats.mean`). The
-    /// value must be a number. The output skips this series for a message
-    /// where the value is missing or is not a number. The batch does not fail.
+    /// value must be of the kind that `value_kind` names: a number by default.
+    /// The output skips this series for a message where the value is missing
+    /// or is of the other kind. The batch does not fail.
     pub value: String,
     /// The unit that Indu records when it creates the stream, for example `%`.
     /// Indu ignores it when the stream exists.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub unit: Option<String>,
+    /// What the stream carries: `number`, the default, or `string` for a
+    /// state such as `running` or `fault`. Indu creates the stream with this
+    /// kind and refuses a value of the other kind for it, so the output sends
+    /// only values of this kind.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub value_kind: Option<InduValueKind>,
+}
+
+/// The kind of value that an `indu` series carries.
+#[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, JsonSchema, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum InduValueKind {
+    /// A number, for example an OEE or a temperature. The default.
+    #[default]
+    Number,
+    /// A string, for example the state of a machine. Indu shows the stream as
+    /// a state, and an alert on it compares text.
+    String,
 }
 
 /// Writes messages into Indu Cloud as streams through

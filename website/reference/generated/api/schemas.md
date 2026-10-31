@@ -2438,8 +2438,19 @@ One pipeline. kayak merges all inputs into one stream. The stream goes through t
           ]
         },
         "value": {
-          "description": "The field that contains the value, as a path (`oee`, `stats.mean`). The\nvalue must be a number. The output skips this series for a message\nwhere the value is missing or is not a number. The batch does not fail.",
+          "description": "The field that contains the value, as a path (`oee`, `stats.mean`). The\nvalue must be of the kind that `value_kind` names: a number by default.\nThe output skips this series for a message where the value is missing\nor is of the other kind. The batch does not fail.",
           "type": "string"
+        },
+        "value_kind": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/InduValueKind"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "What the stream carries: `number`, the default, or `string` for a\nstate such as `running` or `fault`. Indu creates the stream with this\nkind and refuses a value of the other kind for it, so the output sends\nonly values of this kind."
         }
       },
       "required": [
@@ -2447,6 +2458,21 @@ One pipeline. kayak merges all inputs into one stream. The stream goes through t
         "value"
       ],
       "type": "object"
+    },
+    "InduValueKind": {
+      "description": "The kind of value that an `indu` series carries.",
+      "oneOf": [
+        {
+          "const": "number",
+          "description": "A number, for example an OEE or a temperature. The default.",
+          "type": "string"
+        },
+        {
+          "const": "string",
+          "description": "A string, for example the state of a machine. Indu shows the stream as\na state, and an alert on it compares text.",
+          "type": "string"
+        }
+      ]
     },
     "InputConfig": {
       "oneOf": [
@@ -11711,8 +11737,19 @@ One pipeline as the API reports it: the id that it runs under, the config that k
           ]
         },
         "value": {
-          "description": "The field that contains the value, as a path (`oee`, `stats.mean`). The\nvalue must be a number. The output skips this series for a message\nwhere the value is missing or is not a number. The batch does not fail.",
+          "description": "The field that contains the value, as a path (`oee`, `stats.mean`). The\nvalue must be of the kind that `value_kind` names: a number by default.\nThe output skips this series for a message where the value is missing\nor is of the other kind. The batch does not fail.",
           "type": "string"
+        },
+        "value_kind": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/InduValueKind"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "What the stream carries: `number`, the default, or `string` for a\nstate such as `running` or `fault`. Indu creates the stream with this\nkind and refuses a value of the other kind for it, so the output sends\nonly values of this kind."
         }
       },
       "required": [
@@ -11720,6 +11757,21 @@ One pipeline as the API reports it: the id that it runs under, the config that k
         "value"
       ],
       "type": "object"
+    },
+    "InduValueKind": {
+      "description": "The kind of value that an `indu` series carries.",
+      "oneOf": [
+        {
+          "const": "number",
+          "description": "A number, for example an OEE or a temperature. The default.",
+          "type": "string"
+        },
+        {
+          "const": "string",
+          "description": "A string, for example the state of a machine. Indu shows the stream as\na state, and an alert on it compares text.",
+          "type": "string"
+        }
+      ]
     },
     "InputConfig": {
       "oneOf": [
