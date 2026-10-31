@@ -553,6 +553,88 @@ async fn a_deleted_pipeline_leaves_nothing_for_its_successor() -> Result<()> {
     Ok(())
 }
 
+/// A bucket the config no longer declares is reported as undeclared — not as
+/// one whose declaration changed, which is a different fact and the only one
+/// worth a warning.
+#[tokio::test]
+async fn an_undeclared_bucket_is_not_reported_as_a_changed_one() -> Result<()> {
+    let dir = tempfile::tempdir()?;
+    let path = write_counter_config(dir.path())?;
+    let state = boot(&path, &dir.path().join("state")).await?;
+    let mut seen = subscribe(&state, "ingest")?;
+    post(&state, 1).await?;
+    assert_eq!(collect(&mut seen, 1).await?, vec![1]);
+    let checkpoints = state.checkpoints().context("checkpointing is on")?.clone();
+    let epoch = checkpoints.trigger();
+    anyhow::ensure!(checkpoints.wait_for("ingest", epoch, WAIT).await, "never committed");
+    anyhow::ensure!(checkpoints.manifest().buckets.contains_key("totals"), "the bucket was not checkpointed");
+
+    let report = checkpoints.restore_buckets(&Buckets::new());
+    assert_eq!(report.undeclared, vec!["totals".to_string()]);
+    assert!(report.changed.is_empty(), "{report:?}");
+
+    let changed: kayak_core::state::StateBuckets =
+        serde_json::from_value(json!({ "totals": { "max_keys": 5 } }))?;
+    let report = checkpoints.restore_buckets(&Buckets::from_config(&changed));
+    assert_eq!(report.changed, vec!["totals".to_string()]);
+    assert!(report.undeclared.is_empty(), "{report:?}");
+    state.shutdown().await;
+    Ok(())
+}
+
+/// Loading a config drops the checkpoint of every pipeline and bucket it no
+/// longer names — entries and files both — and keeps the ones it does.
+#[tokio::test]
+async fn a_config_load_drops_the_checkpoints_of_what_it_no_longer_names() -> Result<()> {
+    let dir = tempfile::tempdir()?;
+    let path = write_counter_config(dir.path())?;
+    let state = boot(&path, &dir.path().join("state")).await?;
+    let mut seen = subscribe(&state, "ingest")?;
+    post(&state, 1).await?;
+    assert_eq!(collect(&mut seen, 1).await?, vec![1]);
+    let checkpoints = state.checkpoints().context("checkpointing is on")?.clone();
+    let epoch = checkpoints.trigger();
+    anyhow::ensure!(checkpoints.wait_for("ingest", epoch, WAIT).await, "never committed");
+
+    // the pipeline and its bucket are renamed, and a stateless one stays
+    let config = json!({
+        "state": { "sums": { "max_keys": 10 } },
+        "pipelines": [{
+            "id": "renamed",
+            "inputs": [{ "type": "http" }],
+            "transforms": [{ "type": "script", "source": { "type": "inline", "code": "emit(msg);" } }],
+            "state": { "bucket": "sums" }
+        }]
+    });
+    std::fs::write(&path, serde_json::to_vec_pretty(&config)?)?;
+    state.revert().await?;
+
+    let gone = |m: &kayak::checkpoint::Manifest| {
+        !m.pipelines.contains_key("ingest") && !m.buckets.contains_key("totals")
+    };
+    let deadline = tokio::time::Instant::now() + WAIT;
+    while !gone(&checkpoints.manifest()) && tokio::time::Instant::now() < deadline {
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+    let manifest = checkpoints.manifest();
+    assert!(gone(&manifest), "stale entries outlived the config: {manifest:?}");
+
+    // and the files went with them: what is on disk is what the manifest names
+    let epoch = checkpoints.trigger();
+    anyhow::ensure!(checkpoints.wait_for("renamed", epoch, WAIT).await, "never committed");
+    let manifest = checkpoints.manifest();
+    assert!(manifest.pipelines.contains_key("renamed"), "{manifest:?}");
+    for (sub, entries) in [("pipelines", &manifest.pipelines), ("buckets", &manifest.buckets)] {
+        let named: BTreeSet<String> = entries.values().filter_map(|e| e.file.clone()).collect();
+        let on_disk: BTreeSet<String> = std::fs::read_dir(dir.path().join("state").join(sub))?
+            .filter_map(|e| e.ok()?.file_name().into_string().ok())
+            .collect();
+        assert_eq!(on_disk, named, "{sub}/ holds files the manifest does not name");
+    }
+    state.shutdown().await;
+    Ok(())
+}
+
 /// A pipeline fed by two others aligns their barriers: what one upstream sent
 /// after its barrier waits until the other's has arrived too, so the
 /// downstream's snapshot holds exactly what both upstreams counted as sent —

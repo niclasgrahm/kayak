@@ -23,6 +23,14 @@ history, not here.
   it again. Under checkpointing the old config stops at a barrier, so
   components whose config is unchanged resume exactly where they were.
 
+### Changed
+
+- **A checkpoint no longer keeps what the config file has dropped.** When
+  the file is loaded (startup, revert), the checkpoints of pipelines and
+  buckets it no longer names are deleted, so a rename starts the new name
+  empty and the old snapshot stops taking disk. A pipeline still in the
+  file keeps its checkpoint even if it failed to start.
+
 ### Fixed
 
 - **A post to an `http` input is no longer processed twice around a

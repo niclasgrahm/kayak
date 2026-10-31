@@ -14,7 +14,7 @@ use kayak_core::config::Config;
 use kayak_core::connections::ConnectionKind;
 use kayak_core::state::{ConfigFile, StateBuckets};
 pub use kayak_core::{ConfigFormat, ConnectionId, Connections, LayoutFile, PipelineId, UiEvent};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, MutexGuard};
 
@@ -802,11 +802,20 @@ impl AppState {
         tracing::debug!("Loading configuration from {}...", path.display());
         let file = crate::persist::read(&path)?;
 
+        let buckets: HashSet<String> = file.state.iter().map(|(name, _)| name.clone()).collect();
         // the buckets have to exist before the pipelines that name them are
         // built, for the same reason the connections do
         self.adopt_buckets(file.state);
 
         let mut app = self.lock_pipelines();
+        // The checkpoint keeps what this file names and nothing else: a
+        // pipeline or bucket that was renamed or removed would otherwise keep
+        // its snapshot for ever. Under the pipelines lock and before anything
+        // is built, so it is queued ahead of every commit that follows.
+        if let Some(checkpoints) = &self.checkpoints {
+            let pipelines: HashSet<String> = file.pipelines.iter().filter_map(|c| c.id.clone()).collect();
+            checkpoints.retain(pipelines, buckets);
+        }
         for c in file.pipelines {
             let id = c.id.clone().unwrap_or_else(|| "<generated>".to_string());
             Self::create_locked(self, &mut app, c)

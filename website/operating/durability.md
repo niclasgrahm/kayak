@@ -127,6 +127,11 @@ outputs whose writes are already synchronous — the databases, `http`, `kafka`
   checkpoints. Mind this in a rolling deploy.
 - **Deleting a pipeline deletes its checkpoint** and its logged posts, so a
   pipeline created later under the same id starts from nothing.
+- **Removing a pipeline or bucket from the config file drops its checkpoint**
+  the next time the file is loaded (startup or revert). The same goes for a
+  rename: the checkpoint of the old name is dropped, and the new name starts
+  empty. A pipeline still in the file keeps its checkpoint even if it failed to
+  start.
 - **Changing a pipeline keeps its checkpoint.** `PUT /api/pipelines/{id}` stops
   the old config at a checkpoint barrier, a savepoint for that pipeline alone.
   The new config restores every component that is unchanged at the same place
