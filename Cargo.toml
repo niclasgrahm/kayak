@@ -74,7 +74,6 @@ embed-assets = ["dep:rust-embed"]
 [dependencies]
 kayak-core = { path = "kayak-core" }
 anyhow = "1.0.102"
-askama = "0.16.0"
 async-nats = "0.48.0"
 async-trait = "0.1.89"
 axum = "0.8.9"
@@ -114,7 +113,9 @@ rand = "0.10"
 object_store = { version = "0.14.1", default-features = false, features = ["aws"] }
 base64 = "0.22"
 subtle = "2"
-rumqttc = "0.25.1"
+# no `use-rustls`: the mqtt connection is plain TCP, and the feature pins an old
+# rustls-webpki that `cargo deny` would otherwise have to ignore
+rumqttc = { version = "0.25.1", default-features = false }
 redis = { version = "1.5.0", features = ["tokio-comp"] }
 async-opcua = { version = "0.19.0", default-features = false, features = ["client"] }
 rhai = { version = "1.25.1", features = ["sync"] }
