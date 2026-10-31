@@ -149,3 +149,38 @@ one a string.
 Indu shows a new stream under *Other streams* in the namespace, with the unit
 of the first batch. Move it to an org node to place it in the tree. The
 historian charts the stream live as the batches arrive.
+
+## the namespace
+
+The `indu_namespace` input reads the platform's unified namespace whole —
+the org tree, the devices placed in it, their sensors — every
+`interval_secs` (60 by default), and hands it on as **one batch per read**:
+
+```yaml
+inputs:
+  - type: indu_namespace
+    connection: indu
+    kinds: [org, device]      # default: org, device and sensor
+```
+
+Every node is a message, its id prefixed by kind as the platform writes it:
+
+```json
+{"id": "device:0192…", "parent_id": "org:0191…", "label": "Press 3", "kind": "device", "unit": null}
+```
+
+That is a parent–child table as it is. Sent to Tidepool with a
+[`write: replace`](./tidepool#replacing-a-table-dimensions-read-whole) output,
+it is a hierarchy dashboards filter by, and a node moved, renamed or deleted
+on the platform is moved, renamed or deleted there at the next read: the
+platform keeps no change feed for its tree, so reading it whole is how those
+are noticed at all.
+
+The platform answers at most 5 000 nodes and five levels per request, so a
+read walks the tree a branch at a time and is handed on only once it is
+complete; a branch that comes back cut is read again a level at a time. A
+node with more children than one answer holds can't be read whole, and fails
+the read, which is retried with the usual backoff. Leaving `sensor` out of
+`kinds` also saves reading them. What the key's role may not see isn't in the
+namespace either.
+

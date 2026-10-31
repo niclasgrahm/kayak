@@ -115,6 +115,11 @@ pub struct BuildCtx<'a> {
     /// `ack` on its [`kayak_core::config::InputConfig`]. Rides here for the
     /// same reason `envelope` does — see [`BuildCtx::ack_mode`].
     pub ack_mode: Option<AckMode>,
+    /// Whether the pipeline being built hands its outputs whole snapshots,
+    /// one per batch ([`kayak_core::config::Config::delivers_whole_snapshots`]):
+    /// set before its outputs are built, for the one output mode that
+    /// depends on it.
+    pub whole_snapshots: bool,
     /// The live state buckets, as they stand at the moment this pipeline is
     /// built — the same kind of snapshot the connections are, and held by
     /// [`crate::state::AppState`] for the same reason.
@@ -196,6 +201,7 @@ impl<'a> BuildCtx<'a> {
             inboxes: Arc::new(Inboxes::new()),
             envelope: None,
             ack_mode: None,
+            whole_snapshots: false,
             buckets: Arc::new(Buckets::new()),
             state: None,
             history: Arc::new(History::disabled()),

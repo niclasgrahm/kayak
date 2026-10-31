@@ -35,6 +35,7 @@ impl BuildInputConfig for InputKind {
             InputKind::Postgres(c) => c.build(ctx),
             InputKind::Clickhouse(c) => c.build(ctx),
             InputKind::HttpPoll(c) => c.build(ctx),
+            InputKind::InduNamespace(c) => c.build(ctx),
         }
     }
 }

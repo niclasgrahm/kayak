@@ -1418,6 +1418,7 @@ impl Pipeline {
             ctx.restored_position = None;
             inputs.push(built?);
         }
+        ctx.whole_snapshots = self.config.delivers_whole_snapshots();
         let mut outputs = Vec::with_capacity(self.config.outputs.len());
         for o in self.config.outputs.iter().cloned() {
             outputs.push(o.build(&mut ctx)?);

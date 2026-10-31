@@ -29,6 +29,14 @@ history, not here.
   sends only values of its kind: a string in a numeric series is skipped,
   not sent, because Indu refuses the other kind and a refused row fails the
   batch. Every existing config loads unchanged.
+- **The `indu_namespace` input** reads Indu's unified namespace — org tree,
+  devices, sensors — whole on a timer, one batch per read, every node a
+  message with its `parent_id`.
+- **`write: replace` on the `tidepool` output** sends each batch as the
+  table's whole contents, so what disappeared upstream disappears in
+  Tidepool too. Only in a pipeline that hands on whole snapshots (one
+  `indu_namespace` input, no transforms but `map` and `filter`), and only
+  into an upsert table. Needs a Tidepool with `PUT /v1/tables/{table}/rows`.
 
 ### Changed
 

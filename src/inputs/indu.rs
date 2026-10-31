@@ -152,7 +152,7 @@ impl BuildInput for InduInputConfig {
 
 /// The `Authorization` header the key becomes — sensitive, so a dumped
 /// request prints `Sensitive` rather than the key.
-fn credential(key: &str) -> Result<HeaderValue> {
+pub(crate) fn credential(key: &str) -> Result<HeaderValue> {
     let mut value = HeaderValue::try_from(format!("Bearer {key}"))
         .context("the indu api key cannot be sent as a header")?;
     value.set_sensitive(true);

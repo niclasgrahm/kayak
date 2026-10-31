@@ -659,6 +659,26 @@ and the card should say "`ok` is not a column" once rather than repeat row
 errors. `example_config`'s `sensors_to_tidepool` is the sample; it waits in
 `init` under `just dev` unless a Tidepool is running on :7070.
 
+### The indu_namespace input and `write: replace`
+
+`src/inputs/indu_namespace.rs` reads Indu's namespace (`GET
+/api/v1/namespace/nodes`) whole: a `poll::Reader`, like `http_poll`, whose
+`snapshot` walks the tree a branch at a time (the platform caps a reply at
+5 000 nodes and five levels, says `truncated`, and a cut branch is re-read a
+level at a time). Its `Schedule.max_batch` is `usize::MAX`, so the poller
+hands a read on as **one batch** — that is the guarantee the tidepool
+output's `write: replace` (a `PUT` of the batch as the table's whole
+contents) is built on.
+
+The guarantee is checked per pipeline, not per component:
+`Config::delivers_whole_snapshots` (one unbuffered `indu_namespace` input,
+transforms only `map`/`filter`) is put on `BuildCtx.whole_snapshots` by
+`create_runtime` before the outputs build, and a replace output refuses to
+build without it. Two more guards: `init` refuses an append table (from the
+table's `mode`), and a snapshot the mapping skips entirely is never sent,
+since an empty replace would empty the table. An empty namespace delivers no
+batch at all, so it never empties one either.
+
 ### The http output
 
 The pushing half of the http family, and the one output with **no connection
