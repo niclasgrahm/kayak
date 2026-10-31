@@ -52,17 +52,26 @@ ENV RUSTFLAGS="-C strip=symbols"
 RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
   --mount=type=cache,target=/usr/local/cargo/git,sharing=locked \
   --mount=type=cache,target=/app/target,sharing=locked \
-# `--bin-features embed-assets` is what compiles `target/site` into the
-# binary. It is safe in one command because cargo-leptos builds the client
-# before the server, so the site directory is complete by the time the server
-# crate is compiled — `--frontend-only` then `--server-only` is the same thing
-# said explicitly, if that ordering ever stops holding.
+# `--bin-features embed-assets` compiles the built frontend into the binary,
+# and it takes three steps — the same three as `just build`. One command does
+# not work: cargo-leptos 0.3 compiles the server crate while the frontend's
+# wasm-bindgen step is still running, so the embed got an empty `target/site`
+# and the image served a blank canvas. Building the frontend first is not
+# enough on its own either, because a `--server-only` build clears
+# `target/site` before it compiles. So the frontend is copied out to /out/site,
+# outside cargo-leptos' reach and outside the cache mount (a stale bundle from
+# the last build can't be picked up), and `KAYAK_SITE_DIR` points the embed
+# there. `build.rs` refuses to compile a directory with no bundle in it, so a
+# regression here fails the build instead of shipping.
 #
 # `--precompress` would work too (the server negotiates br and gzip out of the
 # embed), at the cost of carrying three copies of the WASM bundle in the
 # binary. Left off: the trade is a deployment's to make.
-  cargo leptos build --release --bin-features embed-assets \
-  && mkdir -p /out \
+  cargo leptos build --release --frontend-only \
+  && rm -rf /out && mkdir -p /out \
+  && cp -R target/site /out/site \
+  && KAYAK_SITE_DIR=/out/site \
+    cargo leptos build --release --server-only --bin-features embed-assets \
   && cp target/release/kayak /out/kayak
 
 # ---- runtime --------------------------------------------------------------

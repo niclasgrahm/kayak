@@ -15,6 +15,11 @@ data := "dev_data"
 # nothing to add to a shell profile.
 bin_dir := env("CARGO_HOME", home_directory() / ".cargo") / "bin"
 
+# The copy of the built frontend `just build` compiles into the binary. Under
+# `target/` so `cargo clean` takes it, but not `target/site`, which a
+# `--server-only` build empties. See the comment on `build`.
+embed_site := "target/embedded-site"
+
 # `cargo leptos watch` is what sets LEPTOS_SITE_ADDR and builds the WASM, which
 # is why this doesn't just `cargo run` — that binds :3000 and serves no
 # frontend. Everything the sample connects to comes up with `docker compose up`;
@@ -174,12 +179,21 @@ pr *ARGS:
 # 404 in the network tab. With it the binary is the whole thing. See
 # `src/site.rs`.
 #
-# One command works because cargo-leptos builds the client before the server;
-# the site directory is complete by the time the server crate compiles.
+# Three steps, not one, and both splits are forced. cargo-leptos 0.3 compiles
+# the server crate *while* the frontend's wasm-bindgen step is still running,
+# so a single `cargo leptos build --bin-features embed-assets` embeds whatever
+# `target/site` holds at that moment — nothing, on a clean build. And a
+# `--server-only` build clears `target/site` before compiling, so the frontend
+# has to be copied somewhere cargo-leptos doesn't own and the embed pointed
+# there (`KAYAK_SITE_DIR`, read by `build.rs`). `build.rs` refuses to compile a
+# directory with no bundle in it, so getting this wrong is a build error rather
+# than a blank canvas.
 
 # release build — the server binary with the frontend compiled into it
 build:
-  cargo leptos build --release --bin-features embed-assets
+  cargo leptos build --release --frontend-only
+  rm -rf {{embed_site}} && cp -R target/site {{embed_site}}
+  KAYAK_SITE_DIR={{embed_site}} cargo leptos build --release --server-only --bin-features embed-assets
   @echo "built target/release/kayak — the frontend is inside it, nothing else to copy"
 
 # Copies what `build` produced rather than going through `cargo install`, and
@@ -202,9 +216,9 @@ install: build
 # built, so they are not in `just ci` — everything else about serving those
 # files is tested against an in-memory double and does run there.
 
-# the embed's own tests; needs a `just build` (or any cargo-leptos build) first
+# the embed's own tests; needs a `just build` first
 test-embed:
-  cargo test --features embed-assets --lib site::
+  KAYAK_SITE_DIR={{embed_site}} cargo test --features embed-assets --lib site::
 
 # The SQL inputs against the real postgres and clickhouse in the compose file.
 # Not part of `ci` for the reason nothing else in `just test` needs a network:
