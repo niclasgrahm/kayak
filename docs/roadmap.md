@@ -216,9 +216,11 @@ re-derive. See the [docs site](../website/) for how the finished parts behave, a
       wire-compatible. (The bench does not need it — `testing::LoadInput` is
       deliberately not a config kind, since an input whose purpose is to
       saturate a core does not belong in a file people commit.)
-- [ ] make sure to clean up old template based UI stuff
+- [x] make sure to clean up old template based UI stuff
       (2026-08-04: `/docs` and `templates/docs.html` are gone — Askama is now
-      only used by the dead `/ui` index handler, which is all that's left)
+      only used by the dead `/ui` index handler, which is all that's left.
+      Done 2026-10-31: the handler, `templates/` and Askama are gone, which
+      also took `basic-toml`'s unmaintained advisory with it.)
 - [x] map message fields onto real database columns, with types
       (done 2026-08-10: `columns` on the postgres output, plus `create_table`,
       `primary_key` and `indexes`. The mapping and its logical types live in
