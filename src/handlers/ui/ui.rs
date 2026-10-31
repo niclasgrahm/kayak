@@ -2,35 +2,16 @@ use std::sync::Arc;
 
 use tokio_stream::wrappers::{BroadcastStream, errors::BroadcastStreamRecvError};
 
-use askama::Template;
 use axum::{
     extract::State,
     response::sse::{Event, KeepAlive, Sse},
-    response::{Html, IntoResponse},
 };
 
 use futures_util::stream::Stream;
 use std::convert::Infallible;
 use tokio_stream::StreamExt as _;
 
-use crate::handlers::error::AppError;
 use crate::state::AppState;
-
-// axum handlers have to be async even when they do no awaiting
-#[allow(clippy::unused_async)]
-pub async fn index_handler(
-    State(state): State<Arc<AppState>>,
-) -> Result<impl IntoResponse, AppError> {
-    #[derive(Template)]
-    #[template(path = "index.html")]
-    struct Tmpl {
-        pipelines: Vec<String>,
-    }
-    let template = Tmpl {
-        pipelines: state.get_pipeline_ids(),
-    };
-    Ok(Html(template.render()?))
-}
 
 // pub async fn topology_handler(State(state): State<Arc<AppState>>) -> impl IntoResponse {
 //     // returns pipelines and edges
