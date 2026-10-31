@@ -48,6 +48,9 @@ history, not here.
 
 ### Fixed
 
+- **A card shrinks back when a section closes.** A card whose log was
+  opened and shut again kept the log's height as empty space, and pushed
+  the cards below it down for good, until a reload.
 - **The release binary and image always carry the web UI.** The build
   could compile the server before the frontend had been written, and then
   shipped a binary that served a blank canvas. The frontend is now built
