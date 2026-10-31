@@ -18,6 +18,7 @@ The layers are in sequence from the cheapest to the most expensive:
 | `tests/config.rs` | the JSON wire format of every component kind |
 | `tests/pipeline.rs` | the run loop: the transform chain, error tolerance, fan-out, cancellation, UI events |
 | `tests/graph.rs` | `AppState`: ids, upstream wiring, lifecycle |
+| `tests/replace.rs` | changing a running pipeline: the downstreams stay attached, mistakes are refused before anything stops, a config that does not build puts the old one back, the id is reserved during the swap |
 | `tests/api.rs` | the HTTP surface and its status codes, through `tower::oneshot` |
 | `tests/persist.rs` | the config file: an edit does not write it, a save does, a save cannot leave its directory, and a revert loads it again |
 | `tests/live_sql.rs` | the sql inputs against a real postgres and clickhouse (`just test-live`, not in `just ci`) |

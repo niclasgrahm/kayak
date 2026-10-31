@@ -40,9 +40,45 @@ This endpoint writes nothing to disk. To write the config file, use `POST /api/c
 | status | body | description |
 | --- | --- | --- |
 | `201` | [PipelineDto](#schema-pipelinedto) | The pipeline is built and runs. The body contains its id. |
-| `409` | [ApiError](#schema-apierror) | A pipeline with this id already runs. |
+| `409` | [ApiError](#schema-apierror) | A pipeline with this id already runs, or is replaced at this moment. |
 | `422` | [ApiError](#schema-apierror) | The JSON is valid, but the pipeline does not build. For example, a connection is unknown, a secret is missing, or an upstream pipeline does not exist. |
 | `500` | [ApiError](#schema-apierror) | An error occurred on the server. The body describes the error. |
+
+### `PUT /api/pipelines/{pipeline_id}` {#put-api-pipelines--pipeline_id-}
+
+Change a running pipeline
+
+<Badge type="warning" text="admin" /> <Badge type="info" text="replacePipeline" /> — Signed-in users with the `admin` role.
+
+Replaces the config of a running pipeline. The body is the whole new config, as for `POST /api/pipelines`. kayak stops the pipeline, builds the new config under the same id and starts it before it sends the response. A 200 means that the new config runs.
+
+Downstream pipelines stay attached. They are not rebuilt, and they receive the batches of the new config from the moment it starts. The canvas position, the history and the state buckets also stay. A component whose config is unchanged at the same position restores from the last checkpoint, if the server checkpoints.
+
+kayak always rebuilds, also when the body is the same as the running config. Thus, a `PUT` of the same config restarts a pipeline that has stopped, and reads a `file` script again.
+
+kayak refuses some mistakes before it stops anything: an `id` in the body that is not the id in the path, an unknown upstream or connection, and an upstream that would make a cycle. If the new config then does not build, kayak starts the old config again and the response is a 422.
+
+While the pipeline is replaced, posts to its `http` input get a 503, and other changes to the same id get a 409.
+
+This endpoint writes nothing to disk.
+
+**path parameters**
+
+| name | description |
+| --- | --- |
+| `pipeline_id` | The id of the pipeline. |
+
+**request body** — [Config](#schema-config) The new config of the pipeline. The `id` can be left out. If it is there, it must be the id in the path.
+
+**responses**
+
+| status | body | description |
+| --- | --- | --- |
+| `200` | [PipelineDto](#schema-pipelinedto) | The new config is built and runs. |
+| `404` | [ApiError](#schema-apierror) | No pipeline runs with that id. |
+| `409` | [ApiError](#schema-apierror) | Another request changes this pipeline at the same time. |
+| `422` | [ApiError](#schema-apierror) | The new config does not build. Nothing changed: the old config runs, or was started again. For example, the `id` is not the id in the path, an upstream would make a cycle, or a component does not build. |
+| `500` | [ApiError](#schema-apierror) | The new config did not build, and the old config did not build again either. The pipeline no longer runs. The body describes both errors. |
 
 ### `DELETE /api/pipelines/{pipeline_id}` {#delete-api-pipelines--pipeline_id-}
 
@@ -66,6 +102,7 @@ This endpoint writes nothing to disk.
 | --- | --- | --- |
 | `204` | — | The pipeline is stopped and removed. |
 | `404` | [ApiError](#schema-apierror) | No pipeline runs with that id. |
+| `409` | [ApiError](#schema-apierror) | The pipeline is replaced at this moment. |
 | `500` | [ApiError](#schema-apierror) | An error occurred on the server. The body describes the error. |
 
 ### `POST /api/pipelines/{pipeline_id}/messages` {#post-api-pipelines--pipeline_id--messages}
@@ -97,7 +134,7 @@ This endpoint does not use the sign-in of the server. To protect it, set `auth` 
 | `202` | [IngestResponse](#schema-ingestresponse) | The pipeline accepted the messages. The body contains the number of messages. |
 | `404` | [ApiError](#schema-apierror) | No pipeline runs with that id, or the pipeline has no `http` input. |
 | `401` | [ApiError](#schema-apierror) | The input has `auth`, and the request did not satisfy it. This is the credential of the input, not the sign-in of the server. A server account does not give access to this endpoint. The token gives access to nothing else. |
-| `503` | [ApiError](#schema-apierror) | The queue of the pipeline is full, because the pipeline reads slower than the requests arrive. The pipeline accepted nothing. Send the request again. |
+| `503` | [ApiError](#schema-apierror) | The queue of the pipeline is full, because the pipeline reads slower than the requests arrive. Or the pipeline is replaced at this moment. The pipeline accepted nothing. Send the request again. |
 | `500` | [ApiError](#schema-apierror) | An error occurred on the server. The body describes the error. |
 
 ### `GET /api/pipelines/{pipeline_id}/history` {#get-api-pipelines--pipeline_id--history}

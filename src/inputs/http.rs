@@ -626,17 +626,24 @@ async fn write_log(
         writer = Some(held);
         match written {
             Ok(offsets) => {
+                let mut gone = false;
                 for (mut post, offset) in batch.into_iter().zip(offsets) {
                     post.offset = Some(offset);
                     let done = post.done.take();
                     // after the fsync and before the reply, so a post that has
-                    // been acknowledged is always either queued or logged
-                    if input.send(post).await.is_err() {
-                        return;
-                    }
+                    // been acknowledged is always either queued or logged.
+                    // An input that has gone — its pipeline stopping, for a
+                    // replace or a revert — does not make a logged post any
+                    // less durable: the next build replays it from the log.
+                    // Refusing it would have the client send it again, and
+                    // the replay would then process it twice.
+                    gone = gone || input.send(post).await.is_err();
                     if let Some(done) = done {
                         let _ = done.send(true);
                     }
+                }
+                if gone {
+                    return;
                 }
             }
             Err(e) => {
@@ -923,6 +930,32 @@ mod tests {
         )?;
 
         assert_eq!(*input.next().await?[0], json!({ "n": 1 }));
+        Ok(())
+    }
+
+    /// A post that reached the log after its input had gone — the pipeline
+    /// stopping for a replace, a revert or a shutdown — is still durable: it
+    /// is in the log, and the next build of the pipeline replays it. Answering
+    /// "not durable" turned it into a 503, the client sent it again, and the
+    /// replay then processed it a second time.
+    #[tokio::test]
+    async fn a_logged_post_is_durable_even_when_its_input_has_gone() -> anyhow::Result<()> {
+        let dir = tempfile::tempdir()?;
+        let inboxes = Arc::new(Inboxes::new());
+        let input = inboxes.register_logged(
+            "p1".to_string(),
+            4,
+            Envelope::none(),
+            None,
+            Some((dir.path(), 0)),
+        )?;
+        // queued for the log writer, which has not run yet on this runtime
+        let accepted = inboxes.send("p1", batch(1), PostMeta::default(), &Credentials::none())?;
+        drop(input);
+
+        assert!(accepted.durable().await, "a logged post was refused");
+        let (_, _, records) = crate::inputs::wal::open(dir.path())?;
+        assert_eq!(records.len(), 1, "the post is not in the log to be replayed");
         Ok(())
     }
 

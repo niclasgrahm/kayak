@@ -20,11 +20,43 @@ The `+` at the bottom edge of a card opens the same form. Its first input is a
 `pipeline` input that reads from that card.
 
 **Changes apply immediately.** A new pipeline starts at once. A delete stops
-the pipeline at once. There is no draft. The undo is `revert`, which loads the
+the pipeline at once. A [change](#change-a-pipeline) rebuilds it at once. There
+is no draft. The undo is `revert`, which loads the
 config file again.
 
 The connections tab has the same `+` and `×` for connections. kayak refuses to
 delete a connection that a pipeline uses.
+
+## change a pipeline {#change-a-pipeline}
+
+Open the config of a card and select the source view. In edit mode, the bar
+above the source has an `edit` button. It opens the config as JSON in a text
+box. `apply` (or ⌘/Ctrl+Enter) sends `PUT /api/pipelines/{id}`, and `cancel` (or
+Escape) closes the box and changes nothing.
+
+kayak stops the pipeline and starts the new config under the same id. Some
+things stay:
+
+- **The pipelines below it stay attached.** kayak does not rebuild them. They
+  receive the output of the new config from the moment it starts. A delete and
+  a create stop them, because their upstream disappears.
+- **The card, its history and the state buckets stay.**
+- **Under checkpointing, the unchanged components resume where the old config
+  stopped.** kayak stops the old config at a checkpoint, so nothing is
+  processed twice. See [durability](/operating/durability).
+
+Mistakes cost nothing:
+
+- kayak refuses some mistakes before it stops the pipeline: another `id`, an
+  unknown upstream or connection, and an upstream that would make a cycle.
+- If the new config does not build, kayak starts the old config again. The bar
+  shows the error, and the text box keeps your edit.
+
+`apply` always rebuilds the pipeline, also when you changed nothing. Use it to
+start a pipeline again after it stopped, or to read a `file` script again.
+
+The id cannot change. To rename a pipeline, add a new one and delete the old
+one.
 
 ## the form
 

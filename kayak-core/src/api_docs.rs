@@ -104,6 +104,7 @@ impl Method {
 pub enum Operation {
     ListPipelines,
     CreatePipeline,
+    ReplacePipeline,
     DeletePipeline,
     IngestMessages,
     ListConnections,
@@ -139,6 +140,7 @@ impl Operation {
         match self {
             Self::ListPipelines => "listPipelines",
             Self::CreatePipeline => "createPipeline",
+            Self::ReplacePipeline => "replacePipeline",
             Self::DeletePipeline => "deletePipeline",
             Self::IngestMessages => "ingestMessages",
             Self::ListConnections => "listConnections",
@@ -579,7 +581,8 @@ pub fn endpoints() -> Vec<ApiDoc> {
                 },
                 ResponseDoc {
                     status: 409,
-                    description: "A pipeline with this id already runs.",
+                    description: "A pipeline with this id already runs, or is replaced \
+                                  at this moment.",
                     body: Body::Json("ApiError"),
                 },
                 ResponseDoc {
@@ -590,6 +593,75 @@ pub fn endpoints() -> Vec<ApiDoc> {
                     body: Body::Json("ApiError"),
                 },
                 server_error(),
+            ],
+        },
+        ApiDoc {
+            path: "/api/pipelines/{pipeline_id}",
+            method: Method::Put,
+            operation: Operation::ReplacePipeline,
+            summary: "Change a running pipeline",
+            description: "Replaces the config of a running pipeline. The body is the whole \
+                          new config, as for `POST /api/pipelines`. kayak stops the \
+                          pipeline, builds the new config under the same id and starts it \
+                          before it sends the response. A 200 means that the new config \
+                          runs.\n\n\
+                          Downstream pipelines stay attached. They are not rebuilt, and \
+                          they receive the batches of the new config from the moment it \
+                          starts. The canvas position, the history and the state buckets \
+                          also stay. A component whose config is unchanged at the same \
+                          position restores from the last checkpoint, if the server \
+                          checkpoints.\n\n\
+                          kayak always rebuilds, also when the body is the same as the \
+                          running config. Thus, a `PUT` of the same config restarts a \
+                          pipeline that has stopped, and reads a `file` script again.\n\n\
+                          kayak refuses some mistakes before it stops anything: an `id` \
+                          in the body that is not the id in the path, an unknown \
+                          upstream or connection, and an upstream that would make a \
+                          cycle. If the new config then does not build, kayak starts \
+                          the old config again and the response is a 422.\n\n\
+                          While the pipeline is replaced, posts to its `http` input get \
+                          a 503, and other changes to the same id get a 409.\n\n\
+                          This endpoint writes nothing to disk.",
+            tag: Tag::Pipelines,
+            access: Access::Admin,
+            params: vec![ParamDoc {
+                name: "pipeline_id",
+                description: "The id of the pipeline.",
+            }],
+            query: vec![],
+            request: Some(RequestDoc {
+                body: Body::Json("Config"),
+                description: "The new config of the pipeline. The `id` can be left out. \
+                              If it is there, it must be the id in the path.",
+            }),
+            responses: vec![
+                ResponseDoc {
+                    status: 200,
+                    description: "The new config is built and runs.",
+                    body: Body::Json("PipelineDto"),
+                },
+                not_found("No pipeline runs with that id."),
+                ResponseDoc {
+                    status: 409,
+                    description: "Another request changes this pipeline at the same \
+                                  time.",
+                    body: Body::Json("ApiError"),
+                },
+                ResponseDoc {
+                    status: 422,
+                    description: "The new config does not build. Nothing changed: the \
+                                  old config runs, or was started again. For example, \
+                                  the `id` is not the id in the path, an upstream would \
+                                  make a cycle, or a component does not build.",
+                    body: Body::Json("ApiError"),
+                },
+                ResponseDoc {
+                    status: 500,
+                    description: "The new config did not build, and the old config did \
+                                  not build again either. The pipeline no longer runs. \
+                                  The body describes both errors.",
+                    body: Body::Json("ApiError"),
+                },
             ],
         },
         ApiDoc {
@@ -616,6 +688,11 @@ pub fn endpoints() -> Vec<ApiDoc> {
                     body: Body::None,
                 },
                 not_found("No pipeline runs with that id."),
+                ResponseDoc {
+                    status: 409,
+                    description: "The pipeline is replaced at this moment.",
+                    body: Body::Json("ApiError"),
+                },
                 server_error(),
             ],
         },
@@ -670,8 +747,9 @@ pub fn endpoints() -> Vec<ApiDoc> {
                 ResponseDoc {
                     status: 503,
                     description: "The queue of the pipeline is full, because the pipeline \
-                                  reads slower than the requests arrive. The pipeline \
-                                  accepted nothing. Send the request again.",
+                                  reads slower than the requests arrive. Or the pipeline \
+                                  is replaced at this moment. The pipeline accepted \
+                                  nothing. Send the request again.",
                     body: Body::Json("ApiError"),
                 },
                 server_error(),
@@ -1714,6 +1792,7 @@ mod tests {
             [
                 ("listPipelines", "read"),
                 ("createPipeline", "admin"),
+                ("replacePipeline", "admin"),
                 ("deletePipeline", "admin"),
                 // the data plane, not the control plane: a device posting
                 // readings is not an operator, and this endpoint gets its own
@@ -1786,6 +1865,7 @@ mod tests {
             let changes_the_graph = matches!(
                 endpoint.operation,
                 Operation::CreatePipeline
+                    | Operation::ReplacePipeline
                     | Operation::DeletePipeline
                     | Operation::CreateConnection
                     | Operation::DeleteConnection
@@ -1864,6 +1944,9 @@ mod tests {
             matching,
             [
                 "createPipeline",
+                // the id is being replaced by another request
+                "replacePipeline",
+                "deletePipeline",
                 "createConnection",
                 "deleteConnection",
                 // a save that asked not to overwrite, onto a name that is taken

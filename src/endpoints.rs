@@ -30,6 +30,7 @@ use crate::handlers::{
         openapi::{api_reference, get_openapi},
         pipeline::{
             create_pipeline, delete_pipeline, get_pipeline_config, get_pipelines, ingest_messages,
+            replace_pipeline,
         },
         sample::sample_input,
         script::{dry_run_script, get_pipeline_script},
@@ -87,6 +88,7 @@ fn handler_for(doc: &ApiDoc) -> MethodRouter<Arc<AppState>> {
     match doc.operation {
         Operation::ListPipelines => route_of(method, get_pipelines),
         Operation::CreatePipeline => route_of(method, create_pipeline),
+        Operation::ReplacePipeline => route_of(method, replace_pipeline),
         Operation::DeletePipeline => route_of(method, delete_pipeline),
         Operation::IngestMessages => route_of(method, ingest_messages),
         Operation::ListConnections => route_of(method, get_connections),

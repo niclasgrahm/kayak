@@ -1132,6 +1132,59 @@ The file can be JSON or YAML (`kayak_core::ConfigFormat`), decided by the extens
 
 Three things to preserve. `persist::save_path` rejects anything but a bare file name and is a security boundary, not a nicety — the path comes from an HTTP request, so an unconstrained one is an arbitrary write; refuse, never normalise. `has_unsaved_changes` compares `render(current)` against the `saved` snapshot, which is exact *because* `render` is deterministic. And `revert` parses the file before tearing the runtime down, so a file broken by hand doesn't cost you the running graph.
 
+### Replacing a pipeline (`PUT /api/pipelines/{id}`)
+
+`AppState::replace_pipeline` changes a running pipeline's config under the same
+id — the one thing a delete and a create could not do, because a delete ends
+the only input of every pipeline under it and they stop. The order of the steps
+is the design, and the function's doc comment numbers them:
+
+1. **Refuse what can be refused while nothing has stopped**
+   (`check_replacement`): a body `id` that is not the path's, an unknown
+   upstream or connection, and an upstream that would **close a cycle** — new
+   with replacing, since a create can only name an upstream that already
+   exists, so a cycle was unrepresentable before. Itself counts.
+2. **Reserve the id** (`AppState::replacing`, a leaf lock taken after the
+   pipelines lock). Between taking the old pipeline out of the map and putting
+   the new one in, the id is in neither: a create, a delete or a second replace
+   in that window is a 409 (`PipelineError::Replacing`), and a post to its
+   `http` input a 503 rather than a 404 — "come back", not "gone for good".
+3. **Stop the old run loop completely** before building the new one, for
+   `revert`'s reason (two loops for one id share a consumer group, a client id,
+   an inbox). Under checkpointing it is stopped **at a barrier**:
+   `Pipeline::stop_at_next_barrier` makes its own half of the next checkpoint a
+   savepoint (outputs finished, snapshot submitted, a clean leave) while the
+   barrier it *forwards* stays ordinary, so the pipelines below take a normal
+   checkpoint and keep running. Cancelling after a separate checkpoint was the
+   first version, and it double-counted: the old loop went on processing what
+   the new one then replayed into the (live, shared) bucket.
+   `posts_during_a_replace_are_counted_exactly_once` fails the moment that
+   window comes back. The flag is read only when a barrier arrives.
+4. **Take the downstreams off it** (`Pipeline::take_subscribers`) only *after*
+   it stopped — they are in its checkpoint region and need its last barrier to
+   commit — and hold them, so the pipelines below never see their upstream go.
+5. **Build the new config; if it fails, build the old one again**, so a
+   mistake the checks cannot see into costs a restart rather than the pipeline.
+   A 422 either way, the build's cause chain kept; a 500 only when neither
+   builds.
+6. Hand the downstreams to whichever now runs (`adopt_subscribers`).
+
+Unlike a delete, the checkpoint and the `http` input's write-ahead log are
+**kept**: restore is per component and only to an unchanged config at the same
+index, so editing an output keeps a transform's window and an input's position.
+The inbox is evicted first *without* checkpointing (a post queued into an input
+about to be dropped would be lost) and only after the stop *with* it (an `http`
+input whose queue closed ends its loop before reaching the barrier, and what it
+accepts meanwhile is in its log).
+
+A replace **always rebuilds**, even an identical config: that is how a pipeline
+that has stopped is started again — and a downstream left stranded under a dead
+upstream resumes with it, since the dead pipeline still held its sender — and
+how a `file` script is read again. It writes nothing to disk, like every other
+edit. The card's edit button (`SourceView`) always edits JSON, whatever the view
+shows, so the browser needs no YAML parser; `source::replacement` is its pure
+half.
+
 ### `kayak check` (`src/check.rs`)
 
 The binary's one subcommand, and the reason `main.rs` has a `Cli` with an
@@ -1271,6 +1324,11 @@ Every one of these rules was found by the chaos tests in `tests/checkpoint.rs`
 - **Forward before waiting at the bucket**, or a writer downstream of another
   writer deadlocks on it. A dead co-writer fails the bucket at once rather than
   making the living wait out the timeout.
+- **A logged post is durable even when its input has gone.** The WAL writer
+  used to answer "not durable" (a 503) for a post fsynced just as the input was
+  dropped — a replace, a revert, a shutdown — and the client sent it again
+  while the next build replayed it from the log: one post, processed twice.
+  `a_logged_post_is_durable_even_when_its_input_has_gone` pins it.
 - **`Buffered` (input buffer) is cancel-safe**: its batch lives on the struct.
   It was held in `next`'s locals and lost whenever the run loop's `select!`
   dropped the future — a bug before checkpoints, made frequent by the trigger
