@@ -146,6 +146,15 @@ fn polling_input_samples() -> Vec<(&'static str, Value)> {
                 "max_batch": 500
             }),
         ),
+        (
+            "indu_namespace",
+            json!({
+                "type": "indu_namespace",
+                "connection": "indu",
+                "interval_secs": 300,
+                "kinds": ["org", "device"]
+            }),
+        ),
     ]
 }
 
@@ -481,7 +490,7 @@ fn output_samples() -> Vec<(&'static str, Value)> {
         ),
         ("tidepool", json!({"type": "tidepool", "connection": "local-tidepool", "table": "readings",
             "columns": [{"name": "value", "type": "decimal", "nullable": false}],
-            "retry_seconds": 60, "timeout_seconds": 10})),
+            "retry_seconds": 60, "timeout_seconds": 10, "write": "replace"})),
         (
             "indu",
             json!({"type": "indu", "connection": "indu", "at": "_meta.received_at",
@@ -1351,5 +1360,38 @@ fn neither_transforms_nor_outputs_is_a_required_field() -> anyhow::Result<()> {
     );
     assert!(!required.contains(&"transforms"), "{required:?}");
     assert!(!required.contains(&"outputs"), "{required:?}");
+    Ok(())
+}
+
+/// What a `tidepool` output's `write: replace` builds on: a pipeline whose
+/// batches are whole snapshots. One `indu_namespace` input, unbuffered, and
+/// nothing between it and the outputs that splits, joins or holds back.
+#[test]
+fn only_a_pipeline_of_one_snapshot_input_delivers_whole_snapshots() -> anyhow::Result<()> {
+    let pipeline = |inputs: Value, transforms: Value| -> anyhow::Result<Config> {
+        Ok(serde_json::from_value(json!({
+            "id": "tree", "inputs": inputs, "transforms": transforms, "outputs": [],
+        }))?)
+    };
+    let namespace = json!({"type": "indu_namespace", "connection": "indu"});
+    let map = json!({"type": "map", "mappings": []});
+    assert!(pipeline(json!([namespace]), json!([]))?.delivers_whole_snapshots());
+    assert!(pipeline(json!([namespace]), json!([map]))?.delivers_whole_snapshots());
+
+    let buffered = json!({"type": "indu_namespace", "connection": "indu",
+                          "buffer": {"type": "batch", "size": 10, "window_seconds": 1}});
+    let poll = json!({"type": "http_poll", "url": "https://erp.example.com/m", "interval_secs": 60});
+    let reduce = json!({"type": "buffer", "size": 10});
+    for (inputs, transforms) in [
+        (json!([buffered]), json!([])),
+        (json!([poll]), json!([])),
+        (json!([namespace, namespace]), json!([])),
+        (json!([namespace]), json!([reduce])),
+    ] {
+        assert!(
+            !pipeline(inputs.clone(), transforms.clone())?.delivers_whole_snapshots(),
+            "{inputs} → {transforms}"
+        );
+    }
     Ok(())
 }

@@ -234,6 +234,7 @@ A refused batch fails. The error gives the problems by row and column. The outpu
 | `on_extra_fields` | `ignore` \| `error` | <Badge type="info" text="optional" /> | What to do with a message that has fields that no column reads. |
 | `retry_seconds` | `integer` | <Badge type="info" text="optional" /> | The maximum time to try one batch again while the server is busy or cannot be reached, in s. The default is 30. |
 | `timeout_seconds` | `integer` | <Badge type="info" text="optional" /> | The maximum time for one request, in s. The default is 30. |
+| `write` | `rows` \| `replace` | <Badge type="info" text="optional" /> | `rows` (the default) writes each batch's rows; `replace` sends each batch as the table's **whole contents**, and Tidepool deletes every row it doesn't list. Only for an upsert table, and only in a pipeline whose batches are whole snapshots: one `indu_namespace` input, and no transforms but `map` and `filter`. |
 
 **`columns` — each entry**
 

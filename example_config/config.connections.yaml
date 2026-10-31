@@ -41,3 +41,7 @@ local-s3:
 local-tidepool:
   type: tidepool
   url: http://localhost:7070
+local-indu:
+  type: indu
+  url: http://localhost:8080
+  api_key: ${INDU_API_KEY}

@@ -2384,6 +2384,37 @@ One pipeline. kayak merges all inputs into one stream. The stream goes through t
       "title": "indu",
       "type": "object"
     },
+    "InduNamespaceInputConfig": {
+      "description": "Reads Indu's unified namespace whole — the org tree, the devices placed\nin it, their sensors — through `GET /api/v1/namespace/nodes`, every\n`interval_secs`, under the connection's API key.\n\nEvery node is a message: `{\"id\": \"device:0192…\", \"parent_id\":\n\"org:0191…\", \"label\": \"Press 3\", \"kind\": \"device\", \"unit\": null}`, ids\nprefixed by kind as the platform writes them, so the three id spaces\nnever collide, and `parent_id` null at a root. That is a parent–child\ntable as it is: a Tidepool `hierarchy` reads it directly.\n\nOne read is one batch, however many nodes it holds — the namespace is\nread a branch at a time where the platform caps a reply, and handed on\nonly once it is complete — so a `tidepool` output with `write: replace`\ncan treat each batch as the whole tree, and a node removed on the\nplatform is removed downstream at the next read. The platform has no\nchange feed for its tree; reading it whole is how a move, a rename or a\ndeletion is noticed at all.",
+      "properties": {
+        "connection": {
+          "description": "name of the indu connection to read through — see \"connections\".",
+          "type": "string",
+          "x-connection": "indu"
+        },
+        "interval_secs": {
+          "description": "how long to wait between reads, in seconds, from the end of one to\nthe start of the next. Defaults to 60. The first read happens as soon\nas the pipeline starts.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "kinds": {
+          "description": "which kinds of node to hand on: `org`, `device`, `sensor`, `stream`.\nDefaults to org, device and sensor. Leaving out the deeper kinds also\nsaves reading them: without sensors, devices aren't expanded.",
+          "items": {
+            "$ref": "#/$defs/NamespaceKind"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "connection"
+      ],
+      "title": "indu_namespace",
+      "type": "object"
+    },
     "InduOutputConfig": {
       "description": "Writes messages into Indu Cloud as streams through\n`POST /ingest/v1/streams`. A stream is a series that is not a sensor.\n\nEach message gives one reading for each entry in `series`. For example, a\nreducer that sends `{machine, oee, availability}` with two series entries\nwrites two streams for each machine. Indu creates an unknown stream when\nthe key of the connection has permission to create streams. If Indu does\nnot accept all rows, the batch fails. The error contains the row errors\nfrom Indu.",
       "properties": {
@@ -2624,6 +2655,19 @@ One pipeline. kayak merges all inputs into one stream. The stream goes through t
           "properties": {
             "type": {
               "const": "http_poll",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type"
+          ],
+          "type": "object"
+        },
+        {
+          "$ref": "#/$defs/InduNamespaceInputConfig",
+          "properties": {
+            "type": {
+              "const": "indu_namespace",
               "type": "string"
             }
           },
@@ -3291,6 +3335,16 @@ One pipeline. kayak merges all inputs into one stream. The stream goes through t
           "type": "string"
         }
       ]
+    },
+    "NamespaceKind": {
+      "description": "A kind of node in Indu's namespace: `org` (a site, area, line or cell:\nanything in the org tree), `device`, `sensor`, or `stream` (a\ntransformation of a sensor's readings, or an external series).",
+      "enum": [
+        "org",
+        "device",
+        "sensor",
+        "stream"
+      ],
+      "type": "string"
     },
     "NatsConfig": {
       "description": "Subscribes to a nats subject and parses each message as JSON.\n\nThe input skips a payload that is not JSON and writes a warning to the log.\nThe input opens the connection on the first read.",
@@ -4877,6 +4931,10 @@ One pipeline. kayak merges all inputs into one stream. The stream goes through t
             "integer",
             "null"
           ]
+        },
+        "write": {
+          "$ref": "#/$defs/TidepoolWrite",
+          "description": "`rows` (the default) writes each batch's rows; `replace` sends each\nbatch as the table's **whole contents**, and Tidepool deletes every\nrow it doesn't list. Only for an upsert table, and only in a pipeline\nwhose batches are whole snapshots: one `indu_namespace` input, and no\ntransforms but `map` and `filter`."
         }
       },
       "required": [
@@ -4885,6 +4943,21 @@ One pipeline. kayak merges all inputs into one stream. The stream goes through t
       ],
       "title": "tidepool",
       "type": "object"
+    },
+    "TidepoolWrite": {
+      "description": "How a `tidepool` output writes a batch.",
+      "oneOf": [
+        {
+          "const": "rows",
+          "description": "the batch's rows, upserted by key on an upsert table",
+          "type": "string"
+        },
+        {
+          "const": "replace",
+          "description": "the batch as the table's whole contents (`PUT`)",
+          "type": "string"
+        }
+      ]
     },
     "TimeFormat": {
       "description": "How a [`Mapping::TimeBucket`] writes a time.",
@@ -11683,6 +11756,37 @@ One pipeline as the API reports it: the id that it runs under, the config that k
       "title": "indu",
       "type": "object"
     },
+    "InduNamespaceInputConfig": {
+      "description": "Reads Indu's unified namespace whole — the org tree, the devices placed\nin it, their sensors — through `GET /api/v1/namespace/nodes`, every\n`interval_secs`, under the connection's API key.\n\nEvery node is a message: `{\"id\": \"device:0192…\", \"parent_id\":\n\"org:0191…\", \"label\": \"Press 3\", \"kind\": \"device\", \"unit\": null}`, ids\nprefixed by kind as the platform writes them, so the three id spaces\nnever collide, and `parent_id` null at a root. That is a parent–child\ntable as it is: a Tidepool `hierarchy` reads it directly.\n\nOne read is one batch, however many nodes it holds — the namespace is\nread a branch at a time where the platform caps a reply, and handed on\nonly once it is complete — so a `tidepool` output with `write: replace`\ncan treat each batch as the whole tree, and a node removed on the\nplatform is removed downstream at the next read. The platform has no\nchange feed for its tree; reading it whole is how a move, a rename or a\ndeletion is noticed at all.",
+      "properties": {
+        "connection": {
+          "description": "name of the indu connection to read through — see \"connections\".",
+          "type": "string",
+          "x-connection": "indu"
+        },
+        "interval_secs": {
+          "description": "how long to wait between reads, in seconds, from the end of one to\nthe start of the next. Defaults to 60. The first read happens as soon\nas the pipeline starts.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "kinds": {
+          "description": "which kinds of node to hand on: `org`, `device`, `sensor`, `stream`.\nDefaults to org, device and sensor. Leaving out the deeper kinds also\nsaves reading them: without sensors, devices aren't expanded.",
+          "items": {
+            "$ref": "#/$defs/NamespaceKind"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "connection"
+      ],
+      "title": "indu_namespace",
+      "type": "object"
+    },
     "InduOutputConfig": {
       "description": "Writes messages into Indu Cloud as streams through\n`POST /ingest/v1/streams`. A stream is a series that is not a sensor.\n\nEach message gives one reading for each entry in `series`. For example, a\nreducer that sends `{machine, oee, availability}` with two series entries\nwrites two streams for each machine. Indu creates an unknown stream when\nthe key of the connection has permission to create streams. If Indu does\nnot accept all rows, the batch fails. The error contains the row errors\nfrom Indu.",
       "properties": {
@@ -11923,6 +12027,19 @@ One pipeline as the API reports it: the id that it runs under, the config that k
           "properties": {
             "type": {
               "const": "http_poll",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type"
+          ],
+          "type": "object"
+        },
+        {
+          "$ref": "#/$defs/InduNamespaceInputConfig",
+          "properties": {
+            "type": {
+              "const": "indu_namespace",
               "type": "string"
             }
           },
@@ -12590,6 +12707,16 @@ One pipeline as the API reports it: the id that it runs under, the config that k
           "type": "string"
         }
       ]
+    },
+    "NamespaceKind": {
+      "description": "A kind of node in Indu's namespace: `org` (a site, area, line or cell:\nanything in the org tree), `device`, `sensor`, or `stream` (a\ntransformation of a sensor's readings, or an external series).",
+      "enum": [
+        "org",
+        "device",
+        "sensor",
+        "stream"
+      ],
+      "type": "string"
     },
     "NatsConfig": {
       "description": "Subscribes to a nats subject and parses each message as JSON.\n\nThe input skips a payload that is not JSON and writes a warning to the log.\nThe input opens the connection on the first read.",
@@ -14201,6 +14328,10 @@ One pipeline as the API reports it: the id that it runs under, the config that k
             "integer",
             "null"
           ]
+        },
+        "write": {
+          "$ref": "#/$defs/TidepoolWrite",
+          "description": "`rows` (the default) writes each batch's rows; `replace` sends each\nbatch as the table's **whole contents**, and Tidepool deletes every\nrow it doesn't list. Only for an upsert table, and only in a pipeline\nwhose batches are whole snapshots: one `indu_namespace` input, and no\ntransforms but `map` and `filter`."
         }
       },
       "required": [
@@ -14209,6 +14340,21 @@ One pipeline as the API reports it: the id that it runs under, the config that k
       ],
       "title": "tidepool",
       "type": "object"
+    },
+    "TidepoolWrite": {
+      "description": "How a `tidepool` output writes a batch.",
+      "oneOf": [
+        {
+          "const": "rows",
+          "description": "the batch's rows, upserted by key on an upsert table",
+          "type": "string"
+        },
+        {
+          "const": "replace",
+          "description": "the batch as the table's whole contents (`PUT`)",
+          "type": "string"
+        }
+      ]
     },
     "TimeFormat": {
       "description": "How a [`Mapping::TimeBucket`] writes a time.",
@@ -15145,6 +15291,37 @@ Take a few messages from an input, without creating a pipeline.
       "title": "indu",
       "type": "object"
     },
+    "InduNamespaceInputConfig": {
+      "description": "Reads Indu's unified namespace whole — the org tree, the devices placed\nin it, their sensors — through `GET /api/v1/namespace/nodes`, every\n`interval_secs`, under the connection's API key.\n\nEvery node is a message: `{\"id\": \"device:0192…\", \"parent_id\":\n\"org:0191…\", \"label\": \"Press 3\", \"kind\": \"device\", \"unit\": null}`, ids\nprefixed by kind as the platform writes them, so the three id spaces\nnever collide, and `parent_id` null at a root. That is a parent–child\ntable as it is: a Tidepool `hierarchy` reads it directly.\n\nOne read is one batch, however many nodes it holds — the namespace is\nread a branch at a time where the platform caps a reply, and handed on\nonly once it is complete — so a `tidepool` output with `write: replace`\ncan treat each batch as the whole tree, and a node removed on the\nplatform is removed downstream at the next read. The platform has no\nchange feed for its tree; reading it whole is how a move, a rename or a\ndeletion is noticed at all.",
+      "properties": {
+        "connection": {
+          "description": "name of the indu connection to read through — see \"connections\".",
+          "type": "string",
+          "x-connection": "indu"
+        },
+        "interval_secs": {
+          "description": "how long to wait between reads, in seconds, from the end of one to\nthe start of the next. Defaults to 60. The first read happens as soon\nas the pipeline starts.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "kinds": {
+          "description": "which kinds of node to hand on: `org`, `device`, `sensor`, `stream`.\nDefaults to org, device and sensor. Leaving out the deeper kinds also\nsaves reading them: without sensors, devices aren't expanded.",
+          "items": {
+            "$ref": "#/$defs/NamespaceKind"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "connection"
+      ],
+      "title": "indu_namespace",
+      "type": "object"
+    },
     "InputConfig": {
       "oneOf": [
         {
@@ -15295,6 +15472,19 @@ Take a few messages from an input, without creating a pipeline.
           "properties": {
             "type": {
               "const": "http_poll",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type"
+          ],
+          "type": "object"
+        },
+        {
+          "$ref": "#/$defs/InduNamespaceInputConfig",
+          "properties": {
+            "type": {
+              "const": "indu_namespace",
               "type": "string"
             }
           },
@@ -15453,6 +15643,16 @@ Take a few messages from an input, without creating a pipeline.
           "type": "string"
         }
       ]
+    },
+    "NamespaceKind": {
+      "description": "A kind of node in Indu's namespace: `org` (a site, area, line or cell:\nanything in the org tree), `device`, `sensor`, or `stream` (a\ntransformation of a sensor's readings, or an external series).",
+      "enum": [
+        "org",
+        "device",
+        "sensor",
+        "stream"
+      ],
+      "type": "string"
     },
     "NatsConfig": {
       "description": "Subscribes to a nats subject and parses each message as JSON.\n\nThe input skips a payload that is not JSON and writes a warning to the log.\nThe input opens the connection on the first read.",

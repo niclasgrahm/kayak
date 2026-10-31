@@ -178,6 +178,7 @@ async fn the_repository_config_file_starts_a_working_graph() -> anyhow::Result<(
                 ("CLICKHOUSE_PASSWORD", "hunter2"),
                 ("S3_ACCESS_KEY_ID", "rustfsadmin"),
                 ("S3_SECRET_ACCESS_KEY", "rustfsadmin"),
+                ("INDU_API_KEY", "indu.ak.example"),
             ],
         )),
         None,

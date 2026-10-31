@@ -850,6 +850,31 @@ pub struct TidepoolOutputConfig {
     /// The maximum time for one request, in s. The default is 30.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub timeout_seconds: Option<u64>,
+    /// `rows` (the default) writes each batch's rows; `replace` sends each
+    /// batch as the table's **whole contents**, and Tidepool deletes every
+    /// row it doesn't list. Only for an upsert table, and only in a pipeline
+    /// whose batches are whole snapshots: one `indu_namespace` input, and no
+    /// transforms but `map` and `filter`.
+    #[serde(default, skip_serializing_if = "TidepoolWrite::is_default")]
+    pub write: TidepoolWrite,
+}
+
+/// How a `tidepool` output writes a batch.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Deserialize, Serialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum TidepoolWrite {
+    /// the batch's rows, upserted by key on an upsert table
+    #[default]
+    Rows,
+    /// the batch as the table's whole contents (`PUT`)
+    Replace,
+}
+
+impl TidepoolWrite {
+    #[must_use]
+    pub fn is_default(&self) -> bool {
+        *self == Self::Rows
+    }
 }
 
 /// Publishes each message in the batch to a kafka topic, one record for each
@@ -1491,6 +1516,55 @@ pub struct HttpPollConfig {
     pub max_batch: Option<usize>,
 }
 
+/// Reads Indu's unified namespace whole — the org tree, the devices placed
+/// in it, their sensors — through `GET /api/v1/namespace/nodes`, every
+/// `interval_secs`, under the connection's API key.
+///
+/// Every node is a message: `{"id": "device:0192…", "parent_id":
+/// "org:0191…", "label": "Press 3", "kind": "device", "unit": null}`, ids
+/// prefixed by kind as the platform writes them, so the three id spaces
+/// never collide, and `parent_id` null at a root. That is a parent–child
+/// table as it is: a Tidepool `hierarchy` reads it directly.
+///
+/// One read is one batch, however many nodes it holds — the namespace is
+/// read a branch at a time where the platform caps a reply, and handed on
+/// only once it is complete — so a `tidepool` output with `write: replace`
+/// can treat each batch as the whole tree, and a node removed on the
+/// platform is removed downstream at the next read. The platform has no
+/// change feed for its tree; reading it whole is how a move, a rename or a
+/// deletion is noticed at all.
+#[derive(Clone, Debug, Deserialize, Serialize, JsonSchema)]
+#[schemars(title = "indu_namespace")]
+pub struct InduNamespaceInputConfig {
+    /// name of the indu connection to read through — see "connections".
+    #[schemars(extend("x-connection" = "indu"))]
+    pub connection: ConnectionId,
+    /// how long to wait between reads, in seconds, from the end of one to
+    /// the start of the next. Defaults to 60. The first read happens as soon
+    /// as the pipeline starts.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub interval_secs: Option<u64>,
+    /// which kinds of node to hand on: `org`, `device`, `sensor`, `stream`.
+    /// Defaults to org, device and sensor. Leaving out the deeper kinds also
+    /// saves reading them: without sensors, devices aren't expanded.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub kinds: Vec<NamespaceKind>,
+}
+
+/// A kind of node in Indu's namespace: `org` (a site, area, line or cell:
+/// anything in the org tree), `device`, `sensor`, or `stream` (a
+/// transformation of a sensor's readings, or an external series).
+#[derive(
+    Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Deserialize, Serialize, JsonSchema,
+)]
+#[serde(rename_all = "snake_case")]
+pub enum NamespaceKind {
+    Org,
+    Device,
+    Sensor,
+    Stream,
+}
+
 #[derive(Clone, Debug, Deserialize, Serialize, JsonSchema)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum InputKind {
@@ -1506,6 +1580,7 @@ pub enum InputKind {
     Postgres(PostgresInputConfig),
     Clickhouse(ClickhouseInputConfig),
     HttpPoll(HttpPollConfig),
+    InduNamespace(InduNamespaceInputConfig),
 }
 /// How an input collects its messages into batches before the transforms.
 ///
@@ -1741,6 +1816,26 @@ pub struct Config {
 }
 
 impl Config {
+    /// Whether every batch this pipeline's outputs see is one whole snapshot
+    /// of what its input reads — what a `tidepool` output's `write: replace`
+    /// needs, since it deletes whatever a batch doesn't list.
+    ///
+    /// One input that reads whole snapshots as one batch each, unbuffered,
+    /// and no transform that splits, joins or holds back batches: `map` and
+    /// `filter` see one batch and hand on one.
+    #[must_use]
+    pub fn delivers_whole_snapshots(&self) -> bool {
+        let whole_input = matches!(
+            self.inputs.as_slice(),
+            [only] if only.buffer.is_none() && matches!(only.kind, InputKind::InduNamespace(_))
+        );
+        whole_input
+            && self
+                .transforms
+                .iter()
+                .all(|t| matches!(t.kind, TransformKind::Map(_) | TransformKind::Filter(_)))
+    }
+
     /// The pipelines this one reads from: one per `pipeline` input, in the
     /// order they're declared. That is the whole of what makes the pipelines a
     /// graph rather than a list, so both the canvas layout and the config-file
@@ -1767,7 +1862,8 @@ impl Config {
                 | InputKind::Indu(_)
                 | InputKind::Postgres(_)
                 | InputKind::Clickhouse(_)
-                | InputKind::HttpPoll(_) => None,
+                | InputKind::HttpPoll(_)
+                | InputKind::InduNamespace(_) => None,
             })
             .collect()
     }
@@ -1791,6 +1887,7 @@ impl Config {
             InputKind::Redis(c) => Some(&c.connection),
             InputKind::Opcua(c) => Some(&c.connection),
             InputKind::Indu(c) => Some(&c.connection),
+            InputKind::InduNamespace(c) => Some(&c.connection),
             InputKind::Postgres(c) => Some(&c.connection),
             InputKind::Clickhouse(c) => Some(&c.connection),
             InputKind::Dummy(_)

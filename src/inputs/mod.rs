@@ -14,6 +14,7 @@ pub mod envelope;
 pub mod http;
 pub mod http_poll;
 pub mod indu;
+pub mod indu_namespace;
 pub mod kafka;
 pub mod mqtt;
 pub mod nats;

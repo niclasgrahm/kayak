@@ -42,7 +42,7 @@ use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, anyhow, bail};
 use kayak_core::columns::{ColumnType, ExtraFieldPolicy, MissingColumnPolicy};
-use kayak_core::config::TidepoolOutputConfig;
+use kayak_core::config::{TidepoolOutputConfig, TidepoolWrite};
 use rand::RngExt;
 use reqwest::header::{AUTHORIZATION, CONTENT_TYPE, HeaderValue, RETRY_AFTER};
 use reqwest::{Client, StatusCode, Url};
@@ -75,6 +75,17 @@ impl BuildOutput for TidepoolOutputConfig {
         // anything else is a typo rather than something to escape
         let table = Identifier::parse(&self.table, "table name")
             .context("the tidepool output cannot be built")?;
+        // a replace deletes what a batch doesn't list, so a batch has to be
+        // everything there is
+        let replace = self.write == TidepoolWrite::Replace;
+        if replace && !ctx.whole_snapshots {
+            bail!(
+                "the tidepool output for '{}' replaces the table with each batch, so its \
+                 pipeline must hand it whole snapshots: one `indu_namespace` input, unbuffered, \
+                 and no transforms but `map` and `filter`",
+                self.table
+            );
+        }
         let layout = Layout::build(&self)?;
         let connection = ctx
             .tidepool_connection(&self.connection)
@@ -144,6 +155,7 @@ impl BuildOutput for TidepoolOutputConfig {
             keys: format!("{}:{run:016x}", ctx.pipeline_id),
             sequence: 0,
             stale: false,
+            replace,
         }))
     }
 }
@@ -339,6 +351,9 @@ fn token(text: &str, column_type: ColumnType) -> String {
 #[derive(Debug, Deserialize)]
 struct TableInfo {
     name: String,
+    /// `append` or `upsert`; only an upsert table can be replaced.
+    #[serde(default)]
+    mode: Option<String>,
     columns: Vec<ColumnInfo>,
 }
 
@@ -408,6 +423,8 @@ pub struct TidepoolOutput {
     sequence: u64,
     /// The table may have changed: read it again before the next batch.
     stale: bool,
+    /// `write: replace`: each batch is the table's whole contents (`PUT`).
+    replace: bool,
 }
 
 impl TidepoolOutput {
@@ -447,12 +464,24 @@ impl TidepoolOutput {
                 self.described
             )
         })?;
+        if self.replace && table.mode.as_deref().is_some_and(|m| m != "upsert") {
+            bail!(
+                "{} is an {} table; only an upsert table has keys to replace its rows by",
+                self.described,
+                table.mode.as_deref().unwrap_or("?")
+            );
+        }
         self.layout.check(&table)
     }
 
     async fn attempt(&self, body: &str, key: &str) -> Attempt {
+        let method = if self.replace {
+            self.client.put(self.rows_url.clone())
+        } else {
+            self.client.post(self.rows_url.clone())
+        };
         let request = self
-            .authorized(self.client.post(self.rows_url.clone()))
+            .authorized(method)
             .header(CONTENT_TYPE, "application/x-ndjson")
             .header(IDEMPOTENCY_HEADER, key)
             .body(body.to_string());
@@ -557,6 +586,13 @@ impl OutputDestination for TidepoolOutput {
             .with_context(|| format!("failed to map a message onto '{}'", self.table))?;
         // every message was skipped by the mapping, or there were none
         if body.is_empty() {
+            if self.replace && !message_batch.is_empty() {
+                bail!(
+                    "every message of the snapshot was skipped mapping it onto '{}'; replacing \
+                     the table with nothing would empty it, so nothing was sent",
+                    self.table
+                );
+            }
             return Ok(());
         }
         let started = Instant::now();
@@ -655,6 +691,8 @@ mod tests {
         gets: Mutex<usize>,
         keys: Mutex<HashSet<String>>,
         rows: Mutex<Vec<Value>>,
+        /// Bodies sent with `PUT`.
+        puts: Mutex<Vec<String>>,
     }
 
     fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
@@ -689,6 +727,26 @@ mod tests {
             )
                 .into_response()
         }
+    }
+
+    /// `PUT`: the rows are the table now, as the real one keeps them.
+    async fn replace_rows(
+        State(fake): State<Arc<Fake>>,
+        headers: HeaderMap,
+        body: Bytes,
+    ) -> axum::response::Response {
+        let text = String::from_utf8_lossy(&body).to_string();
+        lock(&fake.puts).push(text.clone());
+        let lines: Vec<Value> = text
+            .lines()
+            .filter(|l| !l.trim().is_empty())
+            .filter_map(|l| serde_json::from_str(l).ok())
+            .collect();
+        let _ = headers;
+        let written = lines.len() as u64;
+        *lock(&fake.rows) = lines;
+        axum::Json(json!({"written": written, "replaced": 0, "missing": 0, "epoch": 7}))
+            .into_response()
     }
 
     async fn write_rows(
@@ -746,7 +804,10 @@ mod tests {
         *lock(&fake.table) = readings();
         let app = Router::new()
             .route("/v1/tables/{table}", get(describe_table))
-            .route("/v1/tables/{table}/rows", post(write_rows))
+            .route(
+                "/v1/tables/{table}/rows",
+                post(write_rows).put(replace_rows),
+            )
             .with_state(Arc::clone(&fake));
         let listener = ok(tokio::net::TcpListener::bind("127.0.0.1:0").await);
         let addr = ok(listener.local_addr());
@@ -791,6 +852,7 @@ mod tests {
             on_extra_fields: ExtraFieldPolicy::Ignore,
             retry_seconds: Some(5),
             timeout_seconds: None,
+            write: TidepoolWrite::Rows,
         }
     }
 
@@ -818,11 +880,93 @@ mod tests {
         .collect();
         let mut ctx = BuildCtx::with_secrets(&mut pipelines, "plant".to_string(), events, secrets)
             .with_connections(Arc::new(connections));
+        // what a pipeline of one `indu_namespace` input says when it builds
+        ctx.whole_snapshots = config.write == TidepoolWrite::Replace;
         config.build(&mut ctx)
     }
 
     fn build(config: TidepoolOutputConfig, url: &str) -> Result<Box<dyn OutputDestination>> {
         build_with(config, url, None, None)
+    }
+
+    #[test]
+    fn a_replace_needs_a_pipeline_of_whole_snapshots() {
+        let mut replace = config(Vec::new());
+        replace.write = TidepoolWrite::Replace;
+        let mut pipelines = HashMap::new();
+        let (events, _rx) = tokio::sync::broadcast::channel(4);
+        let connections: Connections = [(
+            "tidepool".to_string(),
+            ConnectionKind::Tidepool(TidepoolConnection {
+                url: "http://127.0.0.1:1".to_string(),
+                token: None,
+                allow_http: None,
+            }),
+        )]
+        .into_iter()
+        .collect();
+        let mut ctx = BuildCtx::new(&mut pipelines, "plant".to_string(), events)
+            .with_connections(Arc::new(connections));
+        let Err(e) = replace.clone().build(&mut ctx) else {
+            panic!("a replace built in a pipeline that doesn't hand on whole snapshots");
+        };
+        assert!(format!("{e:#}").contains("whole snapshots"), "{e:#}");
+        ctx.whole_snapshots = true;
+        assert!(replace.build(&mut ctx).is_ok());
+    }
+
+    #[tokio::test]
+    async fn a_replace_puts_the_batch_as_the_whole_table() {
+        let (fake, url) = tidepool().await;
+        lock(&fake.table)["mode"] = json!("upsert");
+        let mut replace = config(Vec::new());
+        replace.write = TidepoolWrite::Replace;
+        let mut output = ok(build(replace, &url));
+        ok(output.init().await);
+        *lock(&fake.rows) = vec![json!({"machine": "gone"})];
+        ok(output
+            .emit(batch(vec![
+                json!({"machine": "m1", "at": "2026-10-10T10:00:00Z"}),
+                json!({"machine": "m2", "at": "2026-10-10T10:00:00Z"}),
+            ]))
+            .await);
+        assert_eq!(lock(&fake.puts).len(), 1, "one PUT");
+        assert!(lock(&fake.posts).is_empty(), "and no POST");
+        let machines: Vec<Value> = lock(&fake.rows)
+            .iter()
+            .map(|r| r["machine"].clone())
+            .collect();
+        assert_eq!(machines, [json!("m1"), json!("m2")]);
+    }
+
+    #[tokio::test]
+    async fn a_replace_into_an_append_table_fails_the_start() {
+        let (fake, url) = tidepool().await;
+        lock(&fake.table)["mode"] = json!("append");
+        let mut replace = config(Vec::new());
+        replace.write = TidepoolWrite::Replace;
+        let mut output = ok(build(replace, &url));
+        let e = failure(output.init().await, "an append table can't be replaced");
+        assert!(format!("{e:#}").contains("only an upsert table"), "{e:#}");
+    }
+
+    #[tokio::test]
+    async fn a_replace_that_maps_to_nothing_sends_nothing() {
+        let (fake, url) = tidepool().await;
+        lock(&fake.table)["mode"] = json!("upsert");
+        let mut columns = mapped();
+        columns[0].on_missing = Some(MissingColumnPolicy::SkipRow);
+        let mut replace = config(columns);
+        replace.write = TidepoolWrite::Replace;
+        let mut output = ok(build(replace, &url));
+        ok(output.init().await);
+        // no `tag`: every message is skipped by the mapping
+        let e = failure(
+            output.emit(batch(vec![json!({"value": 1})])).await,
+            "a snapshot that maps to nothing would empty the table",
+        );
+        assert!(format!("{e:#}").contains("would empty it"), "{e:#}");
+        assert!(lock(&fake.puts).is_empty());
     }
 
     #[test]

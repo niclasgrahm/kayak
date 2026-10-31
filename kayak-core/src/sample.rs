@@ -154,6 +154,9 @@ pub fn for_input(kind: &str) -> Option<Sampling> {
         // the pipeline: the reply is the snapshot, and asking twice takes
         // nothing away from anyone.
         "http_poll" => Sampling::Ready,
+        // reads, like `http_poll`: the namespace is the same for the sample
+        // as for the pipeline
+        "indu_namespace" => Sampling::Ready,
         // A consumer group is shared state: joining the pipeline's would
         // rebalance it and commit offsets on its behalf, i.e. take messages
         // away from the thing it is supposed to be showing.

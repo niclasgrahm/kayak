@@ -649,6 +649,17 @@ pipelines:
     - name: recorded_at
       type: timestamp
       field: ts
+- id: namespace_to_tidepool
+  inputs:
+  - type: indu_namespace
+    connection: local-indu
+    interval_secs: 60
+  transforms: []
+  outputs:
+  - type: tidepool
+    connection: local-tidepool
+    table: namespace
+    write: replace
 - id: slow_requests
   inputs:
   - type: pipeline

@@ -127,6 +127,10 @@
     {
       "link": "/reference/inputs#input-http-poll",
       "text": "http_poll"
+    },
+    {
+      "link": "/reference/inputs#input-indu-namespace",
+      "text": "indu_namespace"
     }
   ],
   "outputs": [

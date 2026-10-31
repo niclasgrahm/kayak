@@ -117,3 +117,32 @@ A `400`, a `404`, a `422` or another `409` fails the batch at once.
 
 Send large batches. Put a `buffer` on the input, for example 1 second or a few
 thousand messages. One request for each message is slow.
+
+## replacing a table: dimensions read whole
+
+Some systems can only be read whole: an asset tree, a product catalogue, a
+list of machines. Upserting what they say keeps changes and additions in
+step, but never notices what was *removed* there. `write: replace` sends each
+batch as the table's whole contents (`PUT`), and Tidepool deletes every row
+the batch doesn't list, in one step that becomes visible at once:
+
+```yaml
+- id: namespace_to_tidepool
+  inputs:
+    - type: indu_namespace
+      connection: indu
+  outputs:
+    - type: tidepool
+      connection: tidepool
+      table: namespace
+      write: replace
+```
+
+A batch has to be everything there is, so `write: replace` builds only in a
+pipeline that hands on whole snapshots, one per batch: a single
+[`indu_namespace`](./indu#the-namespace) input with no `buffer`, and no
+transforms but `map` and `filter`. Anything else is refused when the pipeline
+builds. The table must be an upsert table, which is checked on start. A
+snapshot the mapping skips entirely is never sent: replacing a table with
+nothing would empty it.
+

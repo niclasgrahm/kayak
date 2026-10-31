@@ -153,6 +153,17 @@ pub fn for_input(kind: &str) -> Option<Vec<MetaFieldDoc>> {
                  tell one snapshot from the next.",
             ),
         ],
+        "indu_namespace" => vec![
+            MetaFieldDoc::new(
+                "connection",
+                "name of the indu connection the namespace was read through",
+            ),
+            MetaFieldDoc::new(
+                "polled_at",
+                "when the read that returned this node started, RFC 3339: the \
+                 same on every node of one snapshot",
+            ),
+        ],
         "postgres" | "clickhouse" => vec![
             MetaFieldDoc::new("connection", "The name of the connection that the input read from."),
             MetaFieldDoc::new(
