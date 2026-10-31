@@ -1,7 +1,9 @@
 # changelog
 
 Notable changes, newest first. Versions are the git tags the container images
-are published under — see "running it" in the readme.
+are published under — see "running it" in the readme. Each version's section
+is also the notes of its GitHub Release, copied out by the release workflow
+when the tag is pushed, so write it for that reader too.
 
 kayak is pre-1.0, so the middle number is the one that moves when something
 breaks: a change that stops an existing config file loading is a `0.x` bump,
