@@ -13,6 +13,12 @@
 # so `latest` is the tip of main and a release tag is the only thing that ever
 # produces a version number.
 #
+# A version tag also gets a GitHub Release (`release-notes`), once the images
+# exist: its changelog section, the image tags and a compare link, written by
+# `scripts/release-notes.sh`. The changelog is the one place release notes are
+# written; this only copies them, and `tests/release_notes.rs` fails `just ci`
+# for a version the script can't produce notes for.
+#
 # ---- why this is two jobs and not one `platforms:` line -------------------
 #
 # The image is built once per architecture on a runner of *that* architecture,
@@ -147,3 +153,30 @@ jobs:
           docker buildx imagetools inspect \
             ${{ env.REGISTRY }}/${{ env.IMAGE }}:${{ steps.meta.outputs.version }} \
             --format '{{ range .Manifest.Manifests }}{{ .Platform.OS }}/{{ .Platform.Architecture }} {{ end }}'
+
+  # A version tag's GitHub Release, with its changelog section as the notes.
+  # After `merge` so the images the notes name exist by the time anyone reads
+  # them, and never for a push to main, which has no version to release.
+  release-notes:
+    needs: merge
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: publish the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+        # A release that already exists — written by hand, or by an earlier
+        # run of this job — is left alone rather than overwritten.
+        run: |
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            echo "$TAG already has a release; leaving it as it is"
+            exit 0
+          fi
+          scripts/release-notes.sh "$TAG" "$GITHUB_REPOSITORY" > notes.md
+          gh release create "$TAG" --verify-tag --title "$TAG" --notes-file notes.md
+        shell: bash
