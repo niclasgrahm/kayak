@@ -345,7 +345,17 @@ textarea {
   display: flex;
   flex-direction: column;
 
-  > header {
+  // The title bar and the sections, at their natural height. `flex: none` is
+  // what makes it the thing to measure: the layout gives the card itself a
+  // `min-height` of whatever it last reported, so the card's own box can only
+  // grow, while this one shrinks as soon as a section closes. See `Card`.
+  > .card-content {
+    display: flex;
+    flex-direction: column;
+    flex: none;
+  }
+
+  > .card-content > header {
     background: var(--bg-titlebar);
     padding: 8px 10px;
     font-weight: 600;
@@ -433,7 +443,7 @@ textarea {
       0 4px 16px rgba(0, 0, 0, 0.45);
     z-index: 5;
 
-    > header {
+    > .card-content > header {
       background: rgba(105, 156, 232, 0.25);
     }
   }
@@ -449,27 +459,33 @@ textarea {
   // whatever is left over, so making a card taller buys more log rather than
   // empty space under one.
   &.pinned {
-    > .section-config {
-      min-height: 0;
-      overflow: hidden;
-    }
-
-    // the bar keeps its height and the tail takes the rest, so a taller card
-    // buys log rather than empty space under one. Only while the log is open:
-    // a collapsed section is a heading and nothing else, and stretching it
-    // would put the two below it at the bottom of an empty card.
-    > .section-logs.open {
+    // the box is given here, so the content takes it rather than its own size
+    > .card-content {
       flex: 1;
       min-height: 0;
 
-      > .log {
-        flex: 1;
+      > .section-config {
         min-height: 0;
+        overflow: hidden;
       }
 
-      .log-body {
+      // the bar keeps its height and the tail takes the rest, so a taller card
+      // buys log rather than empty space under one. Only while the log is open:
+      // a collapsed section is a heading and nothing else, and stretching it
+      // would put the two below it at the bottom of an empty card.
+      > .section-logs.open {
         flex: 1;
-        max-height: none;
+        min-height: 0;
+
+        > .log {
+          flex: 1;
+          min-height: 0;
+        }
+
+        .log-body {
+          flex: 1;
+          max-height: none;
+        }
       }
     }
   }
@@ -482,7 +498,7 @@ textarea {
     box-shadow: 0 10px 28px rgba(0, 0, 0, 0.6);
     border-color: var(--accent);
 
-    > header.draggable {
+    > .card-content > header.draggable {
       cursor: grabbing;
     }
   }

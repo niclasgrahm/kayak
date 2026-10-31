@@ -8039,27 +8039,43 @@ pub fn Card(pipeline_id: PipelineId, config: Config, status: RunStatus) -> impl 
         },
     );
 
-    // Report our rendered height back to the layout so the row below clears us.
-    // Only on a real change: the layout writes positions, and a write here on
-    // every measurement would bounce between the two.
+    // Report our height back to the layout so the row below clears us. Only
+    // on a real change: the layout writes positions, and a write here on every
+    // measurement would bounce between the two.
     //
-    // Border box, not the default content box: the layout and the edges want
-    // the height the card actually occupies on screen, borders included, or
-    // every edge lands a couple of pixels inside the card it points at.
+    // What is measured is the *content*, never the card. The layout hands the
+    // card its height back as a `min-height`, snapped up to the grid, so the
+    // card's own box is always at least what it reported last time — measuring
+    // that was a ratchet, and a card whose log was opened and shut again kept
+    // the log's height as empty space for good. `.card-content` holds the title
+    // bar and the sections at their natural height whatever the card's box is,
+    // so a section closing shrinks it and the card follows. See
+    // `graph::reported_height`.
+    //
+    // Border box, not the default content box, and the card's own borders on
+    // top: the layout and the edges want the height the card actually occupies
+    // on screen, or every edge lands a couple of pixels inside the card it
+    // points at.
     let card_ref = NodeRef::<leptos::html::Div>::new();
+    let content_ref = NodeRef::<leptos::html::Div>::new();
     let UseElementSizeReturn {
-        height: measured_height,
+        height: content_height,
         ..
     } = use_element_size_with_options(
-        card_ref,
+        content_ref,
         UseElementSizeOptions::default().box_(leptos::web_sys::ResizeObserverBoxOptions::BorderBox),
     );
     let measure_id = pipeline_id.clone();
     Effect::new(move |_| {
-        let height = measured_height.get();
-        if height <= 0.0 {
+        let content = content_height.get();
+        // Border and nothing else: `.card` is `overflow: hidden`, so there is
+        // no scrollbar in the difference.
+        let frame = card_ref
+            .get_untracked()
+            .map_or(0.0, |card| f64::from(card.offset_height() - card.client_height()));
+        let Some(height) = crate::graph::reported_height(content, frame) else {
             return;
-        }
+        };
         // A maximized card is as tall as the window, which is not a fact about
         // its content: reporting it would push every row below it apart and
         // then pull them back on restore. The last real measurement stands,
@@ -8232,93 +8248,97 @@ pub fn Card(pipeline_id: PipelineId, config: Config, status: RunStatus) -> impl 
                 if fixed_height() { None } else { Some(format!("{}px", position.get().height)) }
             }
         >
-            <header
-                // A maximized card is already where it is going to be: dragging
-                // it would only write a position no one can see being chosen.
-                class:draggable=move || state.editing() && !is_maximized.get()
-                on:mousedown=move |ev| {
-                    if state.editing() && !is_maximized.get() {
-                        grab(ev, Grab::Move);
-                    }
-                }
-                // double-click puts the card back under the automatic layout,
-                // which is the only way back once it has been moved
-                on:dblclick=move |_| {
-                    if state.editing() && !is_maximized.get() {
-                        canvas.unpin(&reset_id);
-                    }
-                }
-                title=move || {
-                    if state.editing() && !is_maximized.get() {
-                        "drag to move, double-click to lay out automatically"
-                    } else {
-                        ""
-                    }
-                }
-            >
-                <span class="card-title">{pipeline_id.clone()}</span>
-                // Only when there is something to say. A pipeline that is
-                // running is the overwhelming majority and a badge reading
-                // "running" on every card would be nine words of chrome
-                // saying nothing — while a pipeline whose run loop has ended
-                // looks, without this, exactly like a quiet one.
-                <Show when=move || !status.is_running()>
-                    <span
-                        class="card-status"
-                        class:starting=move || status == RunStatus::Starting
-                        title=match status {
-                            RunStatus::Starting => {
-                                "an output is not ready yet — retrying, and the pipeline will \
-                                 start on its own once it connects"
-                            }
-                            RunStatus::Stopped => "this pipeline's run loop was stopped",
-                            _ => {
-                                "this pipeline's run loop has ended — its input died, and \
-                                 nothing will come out of it until it is rebuilt"
-                            }
+            // The part of the card that is measured — see `content_ref`.
+            // Everything absolutely placed on the card stays outside it.
+            <div class="card-content" node_ref=content_ref>
+                <header
+                    // A maximized card is already where it is going to be: dragging
+                    // it would only write a position no one can see being chosen.
+                    class:draggable=move || state.editing() && !is_maximized.get()
+                    on:mousedown=move |ev| {
+                        if state.editing() && !is_maximized.get() {
+                            grab(ev, Grab::Move);
                         }
-                    >
-                        {status.as_str()}
-                    </span>
-                </Show>
-                // Not behind the edit-mode `<Show>`: filling the screen with a
-                // card is a way of reading it, and read-only wants it most.
-                <button
-                    class="card-maximize"
-                    // the press must not reach the drag handle underneath it
-                    on:mousedown=move |ev| ev.stop_propagation()
-                    on:dblclick=move |ev| ev.stop_propagation()
-                    on:click=move |_| canvas.toggle_maximized(&toggle_id.get_value())
-                    title=move || {
-                        if is_maximized.get() { "restore" } else { "maximize" }
                     }
-                    aria-label=move || {
-                        if is_maximized.get() { "restore" } else { "maximize" }
+                    // double-click puts the card back under the automatic layout,
+                    // which is the only way back once it has been moved
+                    on:dblclick=move |_| {
+                        if state.editing() && !is_maximized.get() {
+                            canvas.unpin(&reset_id);
+                        }
+                    }
+                    title=move || {
+                        if state.editing() && !is_maximized.get() {
+                            "drag to move, double-click to lay out automatically"
+                        } else {
+                            ""
+                        }
                     }
                 >
-                    {move || if is_maximized.get() { "⤡" } else { "⤢" }}
-                </button>
-            </header>
-            <CardSection
-                name="config"
-                class="section-config"
-                open=config_open
-                accessory=move || view! { <ConfigViewSwitch source=card_source /> }
-            >
-                <Inspector
-                    config=config.get_value()
-                    pipeline_id=stored_id.get_value()
-                    maximized=is_maximized
-                    source=card_source
-                />
-            </CardSection>
-            <CardSection name="stats" class="section-stats" open=stats_open>
-                <ThroughputChart stats reseed />
-                <FailureHistory failures names />
-            </CardSection>
-            <CardSection name="logs" class="section-logs" open=log_open>
-                <MessageLog messages filter names paused skipped />
-            </CardSection>
+                    <span class="card-title">{pipeline_id.clone()}</span>
+                    // Only when there is something to say. A pipeline that is
+                    // running is the overwhelming majority and a badge reading
+                    // "running" on every card would be nine words of chrome
+                    // saying nothing — while a pipeline whose run loop has ended
+                    // looks, without this, exactly like a quiet one.
+                    <Show when=move || !status.is_running()>
+                        <span
+                            class="card-status"
+                            class:starting=move || status == RunStatus::Starting
+                            title=match status {
+                                RunStatus::Starting => {
+                                    "an output is not ready yet — retrying, and the pipeline will \
+                                     start on its own once it connects"
+                                }
+                                RunStatus::Stopped => "this pipeline's run loop was stopped",
+                                _ => {
+                                    "this pipeline's run loop has ended — its input died, and \
+                                     nothing will come out of it until it is rebuilt"
+                                }
+                            }
+                        >
+                            {status.as_str()}
+                        </span>
+                    </Show>
+                    // Not behind the edit-mode `<Show>`: filling the screen with a
+                    // card is a way of reading it, and read-only wants it most.
+                    <button
+                        class="card-maximize"
+                        // the press must not reach the drag handle underneath it
+                        on:mousedown=move |ev| ev.stop_propagation()
+                        on:dblclick=move |ev| ev.stop_propagation()
+                        on:click=move |_| canvas.toggle_maximized(&toggle_id.get_value())
+                        title=move || {
+                            if is_maximized.get() { "restore" } else { "maximize" }
+                        }
+                        aria-label=move || {
+                            if is_maximized.get() { "restore" } else { "maximize" }
+                        }
+                    >
+                        {move || if is_maximized.get() { "⤡" } else { "⤢" }}
+                    </button>
+                </header>
+                <CardSection
+                    name="config"
+                    class="section-config"
+                    open=config_open
+                    accessory=move || view! { <ConfigViewSwitch source=card_source /> }
+                >
+                    <Inspector
+                        config=config.get_value()
+                        pipeline_id=stored_id.get_value()
+                        maximized=is_maximized
+                        source=card_source
+                    />
+                </CardSection>
+                <CardSection name="stats" class="section-stats" open=stats_open>
+                    <ThroughputChart stats reseed />
+                    <FailureHistory failures names />
+                </CardSection>
+                <CardSection name="logs" class="section-logs" open=log_open>
+                    <MessageLog messages filter names paused skipped />
+                </CardSection>
+            </div>
             // Downstream is *down*, so the handle for it sits on the bottom
             // edge — the face `sides_between` will route the new card's edge
             // out of. Left rather than centre because the log's "jump to

@@ -55,6 +55,21 @@ pub fn snap_up(value: f64) -> f64 {
     (value / GRID).ceil() * GRID
 }
 
+/// The height a content-sized card reports to the layout: what its content
+/// needs, plus its own frame (the borders), or nothing before it has rendered.
+///
+/// Deliberately a function of the content and not of the card's box. The
+/// layout hands a card its height back as a `min-height`, so the box is always
+/// at least what was reported last time; a report read off that box can grow
+/// but never come back down, and a card whose log was opened once kept the
+/// log's height as empty space for good. The content has no such floor, which
+/// is what lets a card shrink — and since nothing here reads the laid-out
+/// height, feeding it back changes nothing, so the loop still settles.
+#[must_use]
+pub fn reported_height(content: f64, frame: f64) -> Option<f64> {
+    (content > 0.0).then_some(content + frame)
+}
+
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct CardGeom {
     pub x: f64,
@@ -1741,6 +1756,76 @@ mod tests {
         .height;
         assert_eq!(height, 260.0);
         assert!(height >= 253.0, "the card would be clipped");
+    }
+
+    /// What the card's box is once the layout has given it `laid_out` as a
+    /// `min-height`: as tall as its content, or as tall as it was told,
+    /// whichever is more. That `max` is the ratchet `reported_height` exists
+    /// to stay out of.
+    fn rendered_box(content: f64, frame: f64, laid_out: f64) -> f64 {
+        (content + frame).max(laid_out)
+    }
+
+    /// Runs measure → lay out → render until it stops moving, starting from a
+    /// card the layout last placed at `laid_out`, and returns where it stops.
+    fn settle(content: f64, frame: f64, mut laid_out: f64) -> f64 {
+        let pipelines = [pipeline("a", None)];
+        for _ in 0..8 {
+            // what is reported is the content, not the box it was given
+            let Some(reported) = reported_height(content, frame) else {
+                return laid_out;
+            };
+            let next = geom(
+                &lay(&pipelines, &HashMap::from([("a".to_string(), reported)])),
+                "a",
+            )
+            .height;
+            if next == laid_out {
+                return next;
+            }
+            laid_out = next;
+        }
+        panic!("the measure → lay out loop did not settle");
+    }
+
+    /// The regression: opening a card's log and shutting it again left the
+    /// card as tall as the log had made it. Once the content is smaller, the
+    /// card has to come back down to it — not stay at the height it was given.
+    #[test]
+    fn a_card_shrinks_when_its_content_does() {
+        let open = settle(560.0, 2.0, FALLBACK_CARD_HEIGHT);
+        assert_eq!(open, 580.0);
+
+        let shut = settle(198.0, 2.0, open);
+        assert_eq!(shut, 200.0, "the card kept the log's height after it shut");
+        assert!(
+            rendered_box(198.0, 2.0, shut) <= shut,
+            "the card is taller than the layout thinks it is"
+        );
+    }
+
+    /// The report includes the frame, so the edges land on the border and not
+    /// a couple of pixels inside it.
+    #[test]
+    fn a_reported_height_includes_the_frame() {
+        assert_eq!(reported_height(238.0, 2.0), Some(240.0));
+    }
+
+    /// An element that hasn't rendered measures zero, and reporting that would
+    /// lay the card out with no height at all.
+    #[test]
+    fn an_unrendered_card_reports_nothing() {
+        assert_eq!(reported_height(0.0, 2.0), None);
+    }
+
+    /// A report that doesn't depend on the height it was given settles in one
+    /// step from anywhere, larger or smaller — that's the no-oscillation half
+    /// of the bargain, kept while shrinking.
+    #[test]
+    fn the_reported_height_settles_from_any_starting_height() {
+        for start in [0.0, 100.0, 253.0, 260.0, 900.0] {
+            assert_eq!(settle(253.0, 2.0, start), 260.0, "from {start}");
+        }
     }
 
     /// The measure → lay out → render loop feeds the height it computes back
