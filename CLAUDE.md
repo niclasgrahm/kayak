@@ -9,10 +9,10 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 ```bash
 just dev                            # dev server on :6767 against example_config/ (hot reload; makes secrets.json if absent)
 cargo leptos watch                  # the same without a config — hot reload on 127.0.0.1:6767 (builds WASM + server)
-just build                          # production build — `cargo leptos build --release
-                                    # --bin-features embed-assets`, i.e. one binary with the
-                                    # frontend compiled into it. See "the static assets" below.
-just test-embed                     # the embed's own tests; needs a `just build` first
+just build                          # production build — frontend, then a copy of it, then the
+                                    # server with `--bin-features embed-assets`, i.e. one binary
+                                    # with the frontend compiled into it. See "the static assets" below.
+just test-embed                     # the embed's own tests; needs a `just build` first (reads target/embedded-site)
 cargo check                         # fast type check of the whole workspace
 just ci                             # lint + test — what GitHub Actions runs
 just test                           # cargo test --all-targets (offline: no NATS, no server)
@@ -1381,7 +1381,7 @@ directory that `LEPTOS_SITE_ROOT` points at. A binary moved without that
 directory serves a page whose bundle 404s, which reads as a blank canvas rather
 than as a missing file; that is the failure this removes.
 
-Four things are load-bearing:
+Five things are load-bearing:
 
 - **It is a cargo feature, `embed-assets`, and it is off by default.**
   `target/site` is a *build output*, so embedding it makes the root crate
@@ -1389,8 +1389,23 @@ Four things are load-bearing:
   WASM toolchain in front of `cargo check`, `cargo test` and `just ci`. `just
   build` and the `Dockerfile` pass `--bin-features embed-assets`; nothing in
   the dev loop does, which is also what keeps `cargo leptos watch`'s hot reload
-  working. That one command is safe because cargo-leptos builds the client
-  before the server.
+  working.
+- **What is embedded is a copy, built first, named by `KAYAK_SITE_DIR`.**
+  `#[folder = "$KAYAK_SITE_DIR"]`, and `build.rs` sets that variable (default
+  `target/site`) after checking the directory holds `pkg/kayak.{js,wasm,css}`
+  (`src/embed_check.rs`, shared with a test by `#[path]`) — and fails the build
+  if not. Both halves were found the hard way: the release image once served a
+  blank canvas because one `cargo leptos build --bin-features embed-assets`
+  compiles the server **while** wasm-bindgen is still running (cargo-leptos
+  0.3 does *not* build the client first), so the embed got an empty
+  `target/site` and nothing said so — `is_embedded()` is a feature flag, not a
+  look inside. Building `--frontend-only` first doesn't fix it alone, because a
+  `--server-only` build clears `target/site` before compiling. So `just build`
+  and the `Dockerfile` build the frontend, copy `target/site` out (to
+  `target/embedded-site`, `/out/site`), and build the server with
+  `KAYAK_SITE_DIR` pointing there. Don't collapse that back into one command;
+  the check would now fail it rather than ship it, but only on a clean build —
+  on a warm one it would embed last build's bundle.
 - **The fallback is layered, not replaced.** `site::fallback` looks in the
   embed and hands everything else to `leptos_axum::file_and_error_handler`,
   which is what renders the shell with a 404 for a path that is neither a route

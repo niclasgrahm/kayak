@@ -355,7 +355,8 @@ docker build -t kayak .
 docker run -p 6767:6767 kayak
 ```
 
-The build stage runs `cargo leptos build --release --bin-features embed-assets`.
+The build stage builds the same way `just build` does (see below): the
+frontend, then the server with the frontend compiled in.
 The cargo registry and `target/` are BuildKit cache mounts. Thus a rebuild is
 incremental, and no build artifact goes into a layer. The builder installs
 `cmake` to compile `librdkafka`. TLS is rustls and zlib is vendored, so the
@@ -367,8 +368,16 @@ A release build compiles the web UI into the binary: the WASM bundle, the
 stylesheet and the API reference renderer. Thus a release is one file.
 
 ```bash
-just build   # cargo leptos build --release --bin-features embed-assets
+just build
 ```
+
+`just build` builds the frontend first (`--frontend-only`), copies the site
+directory to `target/embedded-site`, and then builds the server
+(`--server-only --bin-features embed-assets`) with `KAYAK_SITE_DIR` set to that
+copy. One `cargo leptos build --bin-features embed-assets` is not enough:
+cargo-leptos compiles the server while the frontend is still being built, so the
+binary could get an empty site. The build fails if the directory that
+`KAYAK_SITE_DIR` names does not hold the bundle.
 
 The `embed-assets` feature is off in development builds. Without it, the server
 reads the files from `target/site`, through `LEPTOS_SITE_ROOT`. Thus

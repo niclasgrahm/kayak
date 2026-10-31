@@ -40,6 +40,10 @@ history, not here.
 
 ### Fixed
 
+- **The release binary and image always carry the web UI.** The build
+  could compile the server before the frontend had been written, and then
+  shipped a binary that served a blank canvas. The frontend is now built
+  first and checked: a release build without the bundle fails instead.
 - **A post to an `http` input is no longer processed twice around a
   restart of its pipeline.** Under checkpointing, a post logged just as
   its input was dropped (a replace, a revert, a shutdown) was answered 503

@@ -23,13 +23,20 @@
 //! compile until the frontend has been built, which would make `cargo check`,
 //! `cargo test` and `just ci` all depend on a WASM toolchain and a
 //! `cargo leptos` run. So the embed is behind `embed-assets`, which nothing in
-//! the development loop turns on and which the `Dockerfile` passes to
-//! `cargo leptos build --release --bin-features embed-assets`.
+//! the development loop turns on and which `just build` and the `Dockerfile`
+//! pass to cargo-leptos.
 //!
-//! That ordering is safe because cargo-leptos builds the client before the
-//! server — it has to, since the server's shell links to files the client
-//! build names. Building the two halves separately (`--frontend-only` then
-//! `--server-only`) is the same thing said explicitly.
+//! # What is embedded is a copy, and it is checked
+//!
+//! The folder is `$KAYAK_SITE_DIR`, which `build.rs` sets — to the variable's
+//! own value, else `target/site` — only after `embed_check` has found the
+//! bundle there; an empty directory fails the build. Both halves exist because
+//! the obvious version shipped a blank canvas: one `cargo leptos build
+//! --bin-features embed-assets` compiles the server while wasm-bindgen is
+//! still running, so the embed saw an empty `target/site`, and a
+//! `--server-only` build after a `--frontend-only` one clears `target/site`
+//! before compiling. So the release builds the frontend, copies it out of
+//! cargo-leptos' reach, and points `KAYAK_SITE_DIR` at the copy.
 //!
 //! # The fallback is layered, not replaced
 //!
@@ -307,7 +314,7 @@ fn if_none_match(headers: &HeaderMap, etag: &str) -> bool {
 /// path of the machine it was built on.
 #[cfg(feature = "embed-assets")]
 #[derive(rust_embed::Embed)]
-#[folder = "target/site"]
+#[folder = "$KAYAK_SITE_DIR"]
 // wasm-bindgen's TypeScript declarations. Nothing ever requests them over
 // HTTP, and they are the only files cargo-leptos puts in the site directory
 // that a browser has no use for.
@@ -398,10 +405,10 @@ where
     }
 }
 
-/// The tests that need a built `target/site`, and therefore only run under
-/// `cargo test --features embed-assets` after a `cargo leptos build`. They are
-/// what proves the embed is wired to the right folder — everything else in
-/// this module is tested against the in-memory double below, which by
+/// The tests that need a built site, and therefore only run under
+/// `just test-embed` (which names `just build`'s copy) after a `just build`.
+/// They are what proves the embed is wired to the right folder — everything
+/// else in this module is tested against the in-memory double below, which by
 /// construction cannot notice a wrong path.
 #[cfg(all(test, feature = "embed-assets"))]
 mod embedded_tests {
@@ -712,5 +719,66 @@ mod tests {
         assert!(respond(&site(), "/nope.js", &headers(&[])).is_none());
         assert!(respond(&site(), "/api/pipelines", &headers(&[])).is_none());
         assert!(respond(&site(), "/../Cargo.toml", &headers(&[])).is_none());
+    }
+}
+
+/// The check `build.rs` makes before embedding, included the way the build
+/// script includes it so it is tested without a frontend build.
+#[cfg(test)]
+#[path = "embed_check.rs"]
+mod embed_check;
+
+#[cfg(test)]
+mod embed_check_tests {
+    use super::embed_check::{REQUIRED, missing};
+
+    fn site_with(files: &[(&str, &[u8])]) -> tempfile::TempDir {
+        let Ok(dir) = tempfile::tempdir() else {
+            panic!("a temporary directory");
+        };
+        for (name, bytes) in files {
+            let path = dir.path().join(name);
+            if let Some(parent) = path.parent() {
+                assert!(std::fs::create_dir_all(parent).is_ok());
+            }
+            assert!(std::fs::write(path, bytes).is_ok());
+        }
+        dir
+    }
+
+    /// The release image's failure: a site root cargo-leptos had cleared
+    /// before the server compiled. It has to be refused, not embedded.
+    #[test]
+    fn an_empty_site_root_is_missing_everything() {
+        let dir = site_with(&[]);
+        assert_eq!(missing(dir.path()), REQUIRED.to_vec());
+    }
+
+    #[test]
+    fn a_directory_that_does_not_exist_is_missing_everything() {
+        let dir = site_with(&[]);
+        assert_eq!(missing(&dir.path().join("nope")), REQUIRED.to_vec());
+    }
+
+    /// `scalar.js` alone is what the site root holds when `assets-dir` has
+    /// been copied and the wasm build has not finished.
+    #[test]
+    fn the_assets_dir_alone_is_not_a_site() {
+        let dir = site_with(&[
+            ("scalar.js", b"x"),
+            ("pkg/kayak.js", b"x"),
+            ("pkg/kayak.wasm", b""),
+        ]);
+        assert_eq!(missing(dir.path()), vec!["pkg/kayak.wasm", "pkg/kayak.css"]);
+    }
+
+    #[test]
+    fn a_built_site_is_missing_nothing() {
+        let dir = site_with(&[
+            ("pkg/kayak.js", b"x"),
+            ("pkg/kayak.wasm", b"x"),
+            ("pkg/kayak.css", b"x"),
+        ]);
+        assert_eq!(missing(dir.path()), Vec::<&str>::new());
     }
 }
