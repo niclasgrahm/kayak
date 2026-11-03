@@ -60,7 +60,11 @@ style-file = "style/main.scss"
 assets-dir = "assets"
 
 [features]
-default = []
+default = ["onnx"]
+# The `infer` transform: ONNX models run in process by tract, which is pure
+# Rust (no onnxruntime library to ship). On by default; a build without it
+# still reads a config naming `infer`, and refuses to build that pipeline.
+onnx = ["dep:tract-onnx", "dep:prost"]
 # Compile `target/site` — the WASM bundle, the stylesheet, the vendored
 # API-reference renderer — into the binary, so the release artifact is the
 # binary alone. Off by default because `target/site` is a *build output*:
@@ -125,6 +129,11 @@ rustfft = "6.4.1"
 # clock — a shift that starts at 06:00 has to start at 06:00 after the clocks
 # change — and that needs the zone rules, which chrono does not carry.
 chrono-tz = "0.10"
+tract-onnx = { version = "0.23", optional = true }
+# only to encode the tiny models `testing::onnx` writes; tract already
+# depends on it, so this adds nothing to the build
+prost = { version = "0.14", optional = true }
+sha2 = "0.10"
 
 [dev-dependencies]
 # The same rhai the runtime uses, with the feature that lets a test read the

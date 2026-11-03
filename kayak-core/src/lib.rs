@@ -12,6 +12,7 @@ pub mod docs;
 pub mod dry_run;
 pub mod format;
 pub mod history;
+pub mod infer;
 pub mod layout;
 pub mod mapping;
 pub mod metadata;

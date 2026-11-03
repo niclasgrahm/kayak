@@ -1760,6 +1760,7 @@ pub enum TransformKind {
     Detect(crate::streaming::DetectTransformConfig),
     Resample(crate::streaming::ResampleTransformConfig),
     Features(crate::streaming::FeaturesTransformConfig),
+    Infer(crate::infer::InferTransformConfig),
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, JsonSchema)]

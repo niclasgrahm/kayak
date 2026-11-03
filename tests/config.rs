@@ -338,6 +338,36 @@ fn streaming_transform_samples() -> Vec<(&'static str, Value)> {
     ]
 }
 
+/// A model run in process, with every knob set — the forecast shape, since
+/// it is the one with the most to spell.
+fn infer_transform_sample() -> (&'static str, Value) {
+    (
+        "infer",
+        json!({
+            "type": "infer",
+            "model": {"type": "file", "path": "models/forecast.onnx"},
+            "shape": {
+                "type": "window",
+                "size": 24,
+                "stride": 2,
+                "group_by": ["pump"],
+                "time": "ts",
+                "emit": {
+                    "type": "points",
+                    "step_seconds": 60.0,
+                    "step_field": "ahead",
+                    "time_field": "at",
+                    "mark": {"field": "origin", "inferred": "forecast", "observed": "observed"}
+                }
+            },
+            "inputs": ["flow", "pressure"],
+            "outputs": ["flow"],
+            "provenance": "_model",
+            "on_missing": "skip"
+        }),
+    )
+}
+
 /// The round trip to a model, with every knob set — the sample is also what
 /// the reference renders, so the spelling of each is pinned here.
 fn http_transform_sample() -> (&'static str, Value) {
@@ -362,6 +392,7 @@ fn http_transform_sample() -> (&'static str, Value) {
 fn chain_transform_samples() -> Vec<(&'static str, Value)> {
     vec![
         http_transform_sample(),
+        infer_transform_sample(),
         ("splitter", json!({"type": "splitter", "out_size": 2})),
         (
             "reducer",

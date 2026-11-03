@@ -2505,6 +2505,207 @@ One pipeline. kayak merges all inputs into one stream. The stream goes through t
         }
       ]
     },
+    "InferEmit": {
+      "description": "What the transform does with the answer for a window.",
+      "oneOf": [
+        {
+          "description": "Write the answer onto the reading that completed the window. Each\noutput gets an array of `horizon` values. The name of the output field\nis what tells a consumer that the values are inferred.",
+          "properties": {
+            "type": {
+              "const": "merge",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "Send one new message per horizon step, after the reading that completed\nthe window. Each message has the `group_by` fields, the step, the\noutputs as numbers and, with `step_seconds`, a time.",
+          "properties": {
+            "mark": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/InferMark"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Label each message as inferred or observed."
+            },
+            "step_field": {
+              "description": "The field for the step number, from 1 to the horizon. The default is\n`step`.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "step_seconds": {
+              "description": "The seconds between two forecast steps. With it, each point gets a\ntime: the time of the last reading plus `step × step_seconds`.",
+              "format": "double",
+              "type": [
+                "number",
+                "null"
+              ]
+            },
+            "time_field": {
+              "description": "The field for the time of a point. The default is the window's\n`time` field, or `time` if the window has none.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "type": {
+              "const": "points",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "InferMark": {
+      "description": "A field that tells the forecast points from the readings.",
+      "properties": {
+        "field": {
+          "description": "The field the label is written to, for example `origin`.",
+          "type": "string"
+        },
+        "inferred": {
+          "description": "The label of a message the model made, for example `forecast`.",
+          "type": "string"
+        },
+        "observed": {
+          "description": "The label of every other message that leaves the transform, for example\n`observed`. Leave it out to label only the forecast points.",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "field",
+        "inferred"
+      ],
+      "type": "object"
+    },
+    "InferShape": {
+      "description": "How the messages become the input tensor of the model.",
+      "oneOf": [
+        {
+          "description": "Each message is one row. The batch is a `[messages, inputs]` tensor and\nthe model must answer `[messages, outputs]`, or `[messages]` for one\noutput. The transform writes each answer onto its message.",
+          "properties": {
+            "type": {
+              "const": "rows",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "The last `size` readings of each series. The tensor is\n`[1, size, inputs]` and the model must answer `[1, horizon]`, or\n`[1, horizon, outputs]`. The model runs once the window is full, then\nagain after each `stride` readings. Needs a state bucket on the\npipeline.",
+          "properties": {
+            "emit": {
+              "$ref": "#/$defs/InferEmit",
+              "description": "What the transform does with the answer. The default is `merge`."
+            },
+            "group_by": {
+              "description": "The fields that identify a series, as in `reduce`. Leave it out for\none series.",
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "size": {
+              "description": "The number of readings the model takes.",
+              "format": "uint",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "stride": {
+              "description": "Run the model after this many new readings. The default is 1, every\nreading.",
+              "format": "uint",
+              "minimum": 0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "time": {
+              "description": "The field that holds the time of each reading, as an RFC 3339\nstring or as milliseconds since the epoch. Leave it out to use the\narrival time. The forecast points count their time from it.",
+              "type": [
+                "string",
+                "null"
+              ],
+              "x-message-field": true
+            },
+            "type": {
+              "const": "window",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "size"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "InferTransformConfig": {
+      "description": "Runs an ONNX model on the stream, in process.\n\nGive the model as a `.onnx` file beside the config. `inputs` names the\nmessage fields that make the input tensor, in the sequence the model\nexpects them. `outputs` names the fields the answer goes to, one per column\nof the model's output. The model must have one input of type `float` and\nkayak reads its first output.\n\nWith `shape: rows`, each message is one row and gets its answer. With\n`shape: window`, the transform keeps the last readings of each series in\nthe pipeline's state bucket and forecasts from them. The answer is merged\nonto the reading, or sent as forecast points that `mark` can label.\n\nkayak loads the model and runs it once on zeros when it builds the\npipeline, so a wrong path, a wrong shape or an operator that kayak cannot\nrun stops the build. To change the model, write the new file under a new\nname and replace the pipeline with the new `path`. If the new model does not\nbuild, the old one keeps running.",
+      "properties": {
+        "inputs": {
+          "description": "The numeric fields that make one row of the tensor, in the sequence\nthat the model expects.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "model": {
+          "$ref": "#/$defs/ModelSource",
+          "description": "The model file."
+        },
+        "on_missing": {
+          "$ref": "#/$defs/MissingFieldPolicy",
+          "description": "What to do with a message that does not have an input field or a group\nfield. The default is `error`. With `skip`, the message passes through\nwithout an answer."
+        },
+        "outputs": {
+          "description": "The fields that the answer goes to, one per output column of the model.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "provenance": {
+          "description": "Write the model's path and sha256 under this field, on each message\nthat has an answer. Leave it out to write nothing.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "shape": {
+          "$ref": "#/$defs/InferShape",
+          "description": "How the messages become the input tensor."
+        }
+      },
+      "required": [
+        "model",
+        "shape",
+        "inputs",
+        "outputs"
+      ],
+      "title": "infer",
+      "type": "object"
+    },
     "InputConfig": {
       "oneOf": [
         {
@@ -3235,6 +3436,29 @@ One pipeline. kayak merges all inputs into one stream. The stream goes through t
           "const": "skip",
           "description": "Do not use that message in that aggregation. An aggregation with no\nvalues gives `null`, or `0` for the counts.",
           "type": "string"
+        }
+      ]
+    },
+    "ModelSource": {
+      "description": "Where the model file is.",
+      "oneOf": [
+        {
+          "description": "An `.onnx` file beside the config file.",
+          "properties": {
+            "path": {
+              "description": "The path, relative to the directory of the config file, for\nexample `models/pump_forecast_v1.onnx`. It must end in `.onnx` and\nstay in that directory. kayak reads the file when it builds the\npipeline. To use a changed file, replace the pipeline or revert.",
+              "type": "string"
+            },
+            "type": {
+              "const": "file",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "path"
+          ],
+          "type": "object"
         }
       ]
     },
@@ -5202,6 +5426,19 @@ One pipeline. kayak merges all inputs into one stream. The stream goes through t
           "properties": {
             "type": {
               "const": "features",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type"
+          ],
+          "type": "object"
+        },
+        {
+          "$ref": "#/$defs/InferTransformConfig",
+          "properties": {
+            "type": {
+              "const": "infer",
               "type": "string"
             }
           },
@@ -8066,6 +8303,207 @@ Run a draft's transforms over some messages.
       ],
       "type": "string"
     },
+    "InferEmit": {
+      "description": "What the transform does with the answer for a window.",
+      "oneOf": [
+        {
+          "description": "Write the answer onto the reading that completed the window. Each\noutput gets an array of `horizon` values. The name of the output field\nis what tells a consumer that the values are inferred.",
+          "properties": {
+            "type": {
+              "const": "merge",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "Send one new message per horizon step, after the reading that completed\nthe window. Each message has the `group_by` fields, the step, the\noutputs as numbers and, with `step_seconds`, a time.",
+          "properties": {
+            "mark": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/InferMark"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Label each message as inferred or observed."
+            },
+            "step_field": {
+              "description": "The field for the step number, from 1 to the horizon. The default is\n`step`.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "step_seconds": {
+              "description": "The seconds between two forecast steps. With it, each point gets a\ntime: the time of the last reading plus `step × step_seconds`.",
+              "format": "double",
+              "type": [
+                "number",
+                "null"
+              ]
+            },
+            "time_field": {
+              "description": "The field for the time of a point. The default is the window's\n`time` field, or `time` if the window has none.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "type": {
+              "const": "points",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "InferMark": {
+      "description": "A field that tells the forecast points from the readings.",
+      "properties": {
+        "field": {
+          "description": "The field the label is written to, for example `origin`.",
+          "type": "string"
+        },
+        "inferred": {
+          "description": "The label of a message the model made, for example `forecast`.",
+          "type": "string"
+        },
+        "observed": {
+          "description": "The label of every other message that leaves the transform, for example\n`observed`. Leave it out to label only the forecast points.",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "field",
+        "inferred"
+      ],
+      "type": "object"
+    },
+    "InferShape": {
+      "description": "How the messages become the input tensor of the model.",
+      "oneOf": [
+        {
+          "description": "Each message is one row. The batch is a `[messages, inputs]` tensor and\nthe model must answer `[messages, outputs]`, or `[messages]` for one\noutput. The transform writes each answer onto its message.",
+          "properties": {
+            "type": {
+              "const": "rows",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "The last `size` readings of each series. The tensor is\n`[1, size, inputs]` and the model must answer `[1, horizon]`, or\n`[1, horizon, outputs]`. The model runs once the window is full, then\nagain after each `stride` readings. Needs a state bucket on the\npipeline.",
+          "properties": {
+            "emit": {
+              "$ref": "#/$defs/InferEmit",
+              "description": "What the transform does with the answer. The default is `merge`."
+            },
+            "group_by": {
+              "description": "The fields that identify a series, as in `reduce`. Leave it out for\none series.",
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "size": {
+              "description": "The number of readings the model takes.",
+              "format": "uint",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "stride": {
+              "description": "Run the model after this many new readings. The default is 1, every\nreading.",
+              "format": "uint",
+              "minimum": 0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "time": {
+              "description": "The field that holds the time of each reading, as an RFC 3339\nstring or as milliseconds since the epoch. Leave it out to use the\narrival time. The forecast points count their time from it.",
+              "type": [
+                "string",
+                "null"
+              ],
+              "x-message-field": true
+            },
+            "type": {
+              "const": "window",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "size"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "InferTransformConfig": {
+      "description": "Runs an ONNX model on the stream, in process.\n\nGive the model as a `.onnx` file beside the config. `inputs` names the\nmessage fields that make the input tensor, in the sequence the model\nexpects them. `outputs` names the fields the answer goes to, one per column\nof the model's output. The model must have one input of type `float` and\nkayak reads its first output.\n\nWith `shape: rows`, each message is one row and gets its answer. With\n`shape: window`, the transform keeps the last readings of each series in\nthe pipeline's state bucket and forecasts from them. The answer is merged\nonto the reading, or sent as forecast points that `mark` can label.\n\nkayak loads the model and runs it once on zeros when it builds the\npipeline, so a wrong path, a wrong shape or an operator that kayak cannot\nrun stops the build. To change the model, write the new file under a new\nname and replace the pipeline with the new `path`. If the new model does not\nbuild, the old one keeps running.",
+      "properties": {
+        "inputs": {
+          "description": "The numeric fields that make one row of the tensor, in the sequence\nthat the model expects.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "model": {
+          "$ref": "#/$defs/ModelSource",
+          "description": "The model file."
+        },
+        "on_missing": {
+          "$ref": "#/$defs/MissingFieldPolicy",
+          "description": "What to do with a message that does not have an input field or a group\nfield. The default is `error`. With `skip`, the message passes through\nwithout an answer."
+        },
+        "outputs": {
+          "description": "The fields that the answer goes to, one per output column of the model.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "provenance": {
+          "description": "Write the model's path and sha256 under this field, on each message\nthat has an answer. Leave it out to write nothing.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "shape": {
+          "$ref": "#/$defs/InferShape",
+          "description": "How the messages become the input tensor."
+        }
+      },
+      "required": [
+        "model",
+        "shape",
+        "inputs",
+        "outputs"
+      ],
+      "title": "infer",
+      "type": "object"
+    },
     "KeepPolicy": {
       "description": "Which fields of the input message a `map` keeps.",
       "oneOf": [
@@ -8494,6 +8932,29 @@ Run a draft's transforms over some messages.
           "const": "skip",
           "description": "Do not use that message in that aggregation. An aggregation with no\nvalues gives `null`, or `0` for the counts.",
           "type": "string"
+        }
+      ]
+    },
+    "ModelSource": {
+      "description": "Where the model file is.",
+      "oneOf": [
+        {
+          "description": "An `.onnx` file beside the config file.",
+          "properties": {
+            "path": {
+              "description": "The path, relative to the directory of the config file, for\nexample `models/pump_forecast_v1.onnx`. It must end in `.onnx` and\nstay in that directory. kayak reads the file when it builds the\npipeline. To use a changed file, replace the pipeline or revert.",
+              "type": "string"
+            },
+            "type": {
+              "const": "file",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "path"
+          ],
+          "type": "object"
         }
       ]
     },
@@ -9612,6 +10073,19 @@ Run a draft's transforms over some messages.
           "properties": {
             "type": {
               "const": "features",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type"
+          ],
+          "type": "object"
+        },
+        {
+          "$ref": "#/$defs/InferTransformConfig",
+          "properties": {
+            "type": {
+              "const": "infer",
               "type": "string"
             }
           },
@@ -11877,6 +12351,207 @@ One pipeline as the API reports it: the id that it runs under, the config that k
         }
       ]
     },
+    "InferEmit": {
+      "description": "What the transform does with the answer for a window.",
+      "oneOf": [
+        {
+          "description": "Write the answer onto the reading that completed the window. Each\noutput gets an array of `horizon` values. The name of the output field\nis what tells a consumer that the values are inferred.",
+          "properties": {
+            "type": {
+              "const": "merge",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "Send one new message per horizon step, after the reading that completed\nthe window. Each message has the `group_by` fields, the step, the\noutputs as numbers and, with `step_seconds`, a time.",
+          "properties": {
+            "mark": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/InferMark"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Label each message as inferred or observed."
+            },
+            "step_field": {
+              "description": "The field for the step number, from 1 to the horizon. The default is\n`step`.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "step_seconds": {
+              "description": "The seconds between two forecast steps. With it, each point gets a\ntime: the time of the last reading plus `step × step_seconds`.",
+              "format": "double",
+              "type": [
+                "number",
+                "null"
+              ]
+            },
+            "time_field": {
+              "description": "The field for the time of a point. The default is the window's\n`time` field, or `time` if the window has none.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "type": {
+              "const": "points",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "InferMark": {
+      "description": "A field that tells the forecast points from the readings.",
+      "properties": {
+        "field": {
+          "description": "The field the label is written to, for example `origin`.",
+          "type": "string"
+        },
+        "inferred": {
+          "description": "The label of a message the model made, for example `forecast`.",
+          "type": "string"
+        },
+        "observed": {
+          "description": "The label of every other message that leaves the transform, for example\n`observed`. Leave it out to label only the forecast points.",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "field",
+        "inferred"
+      ],
+      "type": "object"
+    },
+    "InferShape": {
+      "description": "How the messages become the input tensor of the model.",
+      "oneOf": [
+        {
+          "description": "Each message is one row. The batch is a `[messages, inputs]` tensor and\nthe model must answer `[messages, outputs]`, or `[messages]` for one\noutput. The transform writes each answer onto its message.",
+          "properties": {
+            "type": {
+              "const": "rows",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "The last `size` readings of each series. The tensor is\n`[1, size, inputs]` and the model must answer `[1, horizon]`, or\n`[1, horizon, outputs]`. The model runs once the window is full, then\nagain after each `stride` readings. Needs a state bucket on the\npipeline.",
+          "properties": {
+            "emit": {
+              "$ref": "#/$defs/InferEmit",
+              "description": "What the transform does with the answer. The default is `merge`."
+            },
+            "group_by": {
+              "description": "The fields that identify a series, as in `reduce`. Leave it out for\none series.",
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "size": {
+              "description": "The number of readings the model takes.",
+              "format": "uint",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "stride": {
+              "description": "Run the model after this many new readings. The default is 1, every\nreading.",
+              "format": "uint",
+              "minimum": 0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "time": {
+              "description": "The field that holds the time of each reading, as an RFC 3339\nstring or as milliseconds since the epoch. Leave it out to use the\narrival time. The forecast points count their time from it.",
+              "type": [
+                "string",
+                "null"
+              ],
+              "x-message-field": true
+            },
+            "type": {
+              "const": "window",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "size"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "InferTransformConfig": {
+      "description": "Runs an ONNX model on the stream, in process.\n\nGive the model as a `.onnx` file beside the config. `inputs` names the\nmessage fields that make the input tensor, in the sequence the model\nexpects them. `outputs` names the fields the answer goes to, one per column\nof the model's output. The model must have one input of type `float` and\nkayak reads its first output.\n\nWith `shape: rows`, each message is one row and gets its answer. With\n`shape: window`, the transform keeps the last readings of each series in\nthe pipeline's state bucket and forecasts from them. The answer is merged\nonto the reading, or sent as forecast points that `mark` can label.\n\nkayak loads the model and runs it once on zeros when it builds the\npipeline, so a wrong path, a wrong shape or an operator that kayak cannot\nrun stops the build. To change the model, write the new file under a new\nname and replace the pipeline with the new `path`. If the new model does not\nbuild, the old one keeps running.",
+      "properties": {
+        "inputs": {
+          "description": "The numeric fields that make one row of the tensor, in the sequence\nthat the model expects.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "model": {
+          "$ref": "#/$defs/ModelSource",
+          "description": "The model file."
+        },
+        "on_missing": {
+          "$ref": "#/$defs/MissingFieldPolicy",
+          "description": "What to do with a message that does not have an input field or a group\nfield. The default is `error`. With `skip`, the message passes through\nwithout an answer."
+        },
+        "outputs": {
+          "description": "The fields that the answer goes to, one per output column of the model.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "provenance": {
+          "description": "Write the model's path and sha256 under this field, on each message\nthat has an answer. Leave it out to write nothing.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "shape": {
+          "$ref": "#/$defs/InferShape",
+          "description": "How the messages become the input tensor."
+        }
+      },
+      "required": [
+        "model",
+        "shape",
+        "inputs",
+        "outputs"
+      ],
+      "title": "infer",
+      "type": "object"
+    },
     "InputConfig": {
       "oneOf": [
         {
@@ -12607,6 +13282,29 @@ One pipeline as the API reports it: the id that it runs under, the config that k
           "const": "skip",
           "description": "Do not use that message in that aggregation. An aggregation with no\nvalues gives `null`, or `0` for the counts.",
           "type": "string"
+        }
+      ]
+    },
+    "ModelSource": {
+      "description": "Where the model file is.",
+      "oneOf": [
+        {
+          "description": "An `.onnx` file beside the config file.",
+          "properties": {
+            "path": {
+              "description": "The path, relative to the directory of the config file, for\nexample `models/pump_forecast_v1.onnx`. It must end in `.onnx` and\nstay in that directory. kayak reads the file when it builds the\npipeline. To use a changed file, replace the pipeline or revert.",
+              "type": "string"
+            },
+            "type": {
+              "const": "file",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "path"
+          ],
+          "type": "object"
         }
       ]
     },
@@ -14599,6 +15297,19 @@ One pipeline as the API reports it: the id that it runs under, the config that k
           "properties": {
             "type": {
               "const": "features",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type"
+          ],
+          "type": "object"
+        },
+        {
+          "$ref": "#/$defs/InferTransformConfig",
+          "properties": {
+            "type": {
+              "const": "infer",
               "type": "string"
             }
           },

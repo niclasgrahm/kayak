@@ -10,6 +10,8 @@ state:
     max_keys: 8
   line1_tags:
     max_keys: 1
+  pump_windows:
+    max_keys: 16
 pipelines:
 - id: heartbeat
   inputs:
@@ -785,3 +787,35 @@ pipelines:
     timeout_seconds: 5
   outputs:
   - type: stdout
+- id: pump_forecast
+  state:
+    bucket: pump_windows
+  inputs:
+  - type: http
+  transforms:
+  - type: infer
+    model:
+      type: file
+      path: models/pump_forecast_v1.onnx
+    shape:
+      type: window
+      size: 24
+      group_by:
+      - pump
+      time: time
+      emit:
+        type: points
+        step_seconds: 0.5
+        mark:
+          field: origin
+          inferred: forecast
+          observed: observed
+    inputs:
+    - flow
+    outputs:
+    - flow
+    provenance: model
+  outputs:
+  - type: http
+    url: http://127.0.0.1:6768/forecasts
+    body: batch

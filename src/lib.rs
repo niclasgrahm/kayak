@@ -157,6 +157,9 @@ pub struct BuildCtx<'a> {
     /// *third* directory boundary distinct from both `data_dir` and
     /// [`AppState`]'s `save_dir`.
     pub script_dir: Option<Arc<PathBuf>>,
+    /// The optimised ONNX models the running pipelines share — see
+    /// [`crate::transforms::infer::Models`]. A fresh, empty set by default.
+    pub models: Arc<crate::transforms::infer::Models>,
     /// The server's checkpoint coordinator, when it checkpoints (`--state-dir`).
     ///
     /// `None` — the default — is a server that keeps nothing across a restart,
@@ -207,6 +210,7 @@ impl<'a> BuildCtx<'a> {
             history: Arc::new(History::disabled()),
             watchers: crate::events::Watchers::attached(),
             script_dir: None,
+            models: Arc::new(crate::transforms::infer::Models::new()),
             checkpoints: None,
             restored_position: None,
         }
@@ -252,6 +256,14 @@ impl<'a> BuildCtx<'a> {
     #[must_use]
     pub fn with_data_dir(mut self, data_dir: Option<Arc<PathBuf>>) -> Self {
         self.data_dir = data_dir;
+        self
+    }
+
+    /// The same, with the server's shared set of loaded models rather than a
+    /// private one.
+    #[must_use]
+    pub fn with_models(mut self, models: Arc<crate::transforms::infer::Models>) -> Self {
+        self.models = models;
         self
     }
 

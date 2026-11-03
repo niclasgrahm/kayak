@@ -106,29 +106,9 @@ fn read_file(path: &str, script_dir: Option<&Path>) -> Result<String> {
              --config"
         )
     };
-
-    let relative = relative_path(path)?;
-    let file = script_dir.join(&relative);
+    let file = locate(path, script_dir, &SCRIPT)?;
     let text = std::fs::read_to_string(&file)
         .with_context(|| format!("failed to read the script file '{path}'"))?;
-
-    // Re-checked after canonicalizing rather than trusting the join, for the
-    // reason the file output re-checks its landing directory: every component
-    // of `relative` is a plain name, but a *symlink* planted inside the
-    // directory can still point out of it, and only asking the filesystem where
-    // we actually landed catches that.
-    let landed = std::fs::canonicalize(&file)
-        .with_context(|| format!("failed to resolve the script file '{path}'"))?;
-    let root = std::fs::canonicalize(script_dir)
-        .with_context(|| format!("failed to resolve {}", script_dir.display()))?;
-    ensure!(
-        landed.starts_with(&root),
-        "the script file '{path}' resolves to {}, which is outside the config's directory ({}). \
-         A symlink pointing out of it is not a way through it",
-        landed.display(),
-        root.display()
-    );
-
     ensure!(
         !text.trim().is_empty(),
         "the script file '{path}' is empty"
@@ -136,31 +116,76 @@ fn read_file(path: &str, script_dir: Option<&Path>) -> Result<String> {
     Ok(text)
 }
 
+/// What a file beside the config is, for the messages that refuse its path.
+pub struct Beside {
+    /// What the file is called in a sentence: "a script file".
+    pub noun: &'static str,
+    /// A path that would have been accepted, for the messages that refuse one.
+    pub example: &'static str,
+}
+
+const SCRIPT: Beside = Beside {
+    noun: "a script file",
+    example: "scripts/enrich.rhai",
+};
+
+/// Where `path` lands under `dir`, under the rules in the module docs: a
+/// relative path of ordinary names, re-checked after canonicalizing. The
+/// rules for every file a config names beside itself — a script, a module, a
+/// model — so there is one boundary rather than one per kind of file.
+pub fn locate(path: &str, dir: &Path, what: &Beside) -> Result<PathBuf> {
+    let relative = relative_path(path, what)?;
+    let file = dir.join(&relative);
+
+    // Re-checked after canonicalizing rather than trusting the join, for the
+    // reason the file output re-checks its landing directory: every component
+    // of `relative` is a plain name, but a *symlink* planted inside the
+    // directory can still point out of it, and only asking the filesystem where
+    // we actually landed catches that.
+    let landed = std::fs::canonicalize(&file)
+        .with_context(|| format!("failed to read {} '{path}'", what.noun))?;
+    let root = std::fs::canonicalize(dir)
+        .with_context(|| format!("failed to resolve {}", dir.display()))?;
+    ensure!(
+        landed.starts_with(&root),
+        "{} '{path}' resolves to {}, which is outside the config's directory ({}). \
+         A symlink pointing out of it is not a way through it",
+        what.noun,
+        landed.display(),
+        root.display()
+    );
+    Ok(landed)
+}
+
 /// `path` as a relative path of ordinary names, or an error saying why it
 /// isn't one. Every rejection here is a path that *could* have been made to
 /// work by rewriting it, and none of them are — see the module docs.
-fn relative_path(path: &str) -> Result<PathBuf> {
+fn relative_path(path: &str, what: &Beside) -> Result<PathBuf> {
     let trimmed = path.trim();
     ensure!(
         !trimmed.is_empty(),
-        "a script file needs a path, e.g. 'scripts/enrich.rhai'"
+        "{} needs a path, e.g. '{}'",
+        what.noun,
+        what.example
     );
     let path = Path::new(trimmed);
     ensure!(
         path.is_relative(),
-        "'{trimmed}' is an absolute path. A script file is resolved against the config file's \
-         directory, so its path has to be relative to it"
+        "'{trimmed}' is an absolute path. {} is resolved against the config file's \
+         directory, so its path has to be relative to it",
+        capitalized(what.noun)
     );
     for component in path.components() {
         match component {
             Component::Normal(_) => {}
             Component::ParentDir => bail!(
-                "'{trimmed}' contains '..'. A script has to live under the config file's \
-                 directory, and the path is refused rather than trimmed"
+                "'{trimmed}' contains '..'. {} has to live under the config file's \
+                 directory, and the path is refused rather than trimmed",
+                capitalized(what.noun)
             ),
             Component::CurDir => bail!(
-                "'{trimmed}' contains '.'. Write the path as a plain relative path, e.g. \
-                 'scripts/enrich.rhai'"
+                "'{trimmed}' contains '.'. Write the path as a plain relative path, e.g. '{}'",
+                what.example
             ),
             Component::RootDir | Component::Prefix(_) => {
                 bail!("'{trimmed}' is not a relative path: it names a filesystem root")
@@ -168,6 +193,11 @@ fn relative_path(path: &str) -> Result<PathBuf> {
         }
     }
     Ok(path.to_path_buf())
+}
+
+fn capitalized(noun: &str) -> String {
+    let mut chars = noun.chars();
+    chars.next().map_or_else(String::new, |first| first.to_uppercase().chain(chars).collect())
 }
 
 #[cfg(test)]

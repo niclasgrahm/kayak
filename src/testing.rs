@@ -769,3 +769,109 @@ pub fn ctx_with_bucket<'a>(
     });
     ctx
 }
+
+/// Tiny ONNX models, written out in code so a test says what it runs — for
+/// the `infer` transform's tests here and the replace tests in `tests/`.
+#[cfg(feature = "onnx")]
+pub mod onnx {
+    use prost::Message;
+    use tract_onnx::pb;
+
+    fn floats(name: &str, dims: &[i64], values: &[f32]) -> pb::TensorProto {
+        pb::TensorProto {
+            name: name.into(),
+            dims: dims.to_vec(),
+            data_type: pb::tensor_proto::DataType::Float as i32,
+            float_data: values.to_vec(),
+            ..Default::default()
+        }
+    }
+
+    fn ints(name: &str, values: &[i64]) -> pb::TensorProto {
+        pb::TensorProto {
+            name: name.into(),
+            dims: vec![i64::try_from(values.len()).unwrap_or_default()],
+            data_type: pb::tensor_proto::DataType::Int64 as i32,
+            int64_data: values.to_vec(),
+            ..Default::default()
+        }
+    }
+
+    fn node(op: &str, inputs: &[&str], output: &str) -> pb::NodeProto {
+        pb::NodeProto {
+            op_type: op.into(),
+            input: inputs.iter().map(ToString::to_string).collect(),
+            output: vec![output.into()],
+            ..Default::default()
+        }
+    }
+
+    fn value(name: &str) -> pb::ValueInfoProto {
+        pb::ValueInfoProto {
+            name: name.into(),
+            r#type: Some(pb::TypeProto {
+                value: Some(pb::type_proto::Value::TensorType(pb::type_proto::Tensor {
+                    elem_type: pb::tensor_proto::DataType::Float as i32,
+                    shape: None,
+                })),
+                ..Default::default()
+            }),
+            ..Default::default()
+        }
+    }
+
+    fn encode(nodes: Vec<pb::NodeProto>, initializer: Vec<pb::TensorProto>) -> Vec<u8> {
+        pb::ModelProto {
+            ir_version: 7,
+            opset_import: vec![pb::OperatorSetIdProto {
+                domain: String::new(),
+                version: 13,
+            }],
+            graph: Some(pb::GraphProto {
+                name: "test".into(),
+                node: nodes,
+                initializer,
+                input: vec![value("x")],
+                output: vec![value("y")],
+                ..Default::default()
+            }),
+            ..Default::default()
+        }
+        .encode_to_vec()
+    }
+
+    /// Rows of `[a, b]` → `[a + b, a − b]`.
+    #[must_use]
+    pub fn sum_and_difference() -> Vec<u8> {
+        encode(
+            vec![node("MatMul", &["x", "w"], "y")],
+            vec![floats("w", &[2, 2], &[1.0, 1.0, 1.0, -1.0])],
+        )
+    }
+
+    /// Rows of `[a, b]` → `[2a, 2b]`: another model of the same shape.
+    #[must_use]
+    pub fn doubling() -> Vec<u8> {
+        encode(
+            vec![node("MatMul", &["x", "w"], "y")],
+            vec![floats("w", &[2, 2], &[2.0, 0.0, 0.0, 2.0])],
+        )
+    }
+
+    /// A window of three readings of one input → `[last + 1, last + 2]`.
+    #[must_use]
+    pub fn last_plus_step() -> Vec<u8> {
+        encode(
+            vec![
+                node("Reshape", &["x", "flat"], "r"),
+                node("MatMul", &["r", "w"], "p"),
+                node("Add", &["p", "b"], "y"),
+            ],
+            vec![
+                ints("flat", &[1, 3]),
+                floats("w", &[3, 2], &[0.0, 0.0, 0.0, 0.0, 1.0, 1.0]),
+                floats("b", &[2], &[1.0, 2.0]),
+            ],
+        )
+    }
+}

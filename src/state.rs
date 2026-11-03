@@ -233,6 +233,9 @@ pub struct AppState {
     /// and go with the pipelines themselves — the registration is owned by the
     /// input, so a deleted pipeline's endpoint disappears with its run loop.
     inboxes: Arc<Inboxes>,
+    /// The optimised ONNX models the `infer` transforms run, shared by file
+    /// and shape — see [`crate::transforms::infer::Models`].
+    models: Arc<crate::transforms::infer::Models>,
     /// The rendered form of the graph as last loaded or saved, which is what
     /// "unsaved changes" is measured against.
     ///
@@ -362,6 +365,7 @@ impl AppState {
             save_dir,
             data_dir: None,
             inboxes: Arc::new(Inboxes::new()),
+            models: Arc::new(crate::transforms::infer::Models::new()),
             saved: Mutex::new(None),
             layout: Mutex::new(LayoutFile::default()),
             buckets: Mutex::new(Arc::new(Buckets::new())),
@@ -1491,7 +1495,12 @@ impl AppState {
     ///    ([`AppState::check_replacement`]): a body naming another id, an
     ///    upstream or connection that isn't there, an upstream that would
     ///    close a cycle. These are the common mistakes, and catching them here
-    ///    costs the running pipeline nothing.
+    ///    costs the running pipeline nothing. Every `infer` model the new
+    ///    config runs is loaded and optimised here too
+    ///    ([`AppState::prepare_models`]), outside every lock: a model that
+    ///    cannot run is refused with the old loop untouched, and the build in
+    ///    step 5 takes the prepared plan rather than optimising inside the
+    ///    stop — which is the pause a model swap would otherwise cost.
     /// 2. **Reserve the id**, so nothing else can take it or change it while
     ///    it is out of the map.
     /// 3. **Stop the old run loop completely** before the new one is built,
@@ -1526,6 +1535,8 @@ impl AppState {
             }
             _ => config.id = Some(id.to_string()),
         }
+        // held to the end of the replace, so the build finds the plans here
+        let _prepared = self.prepare_models(&config)?;
 
         let running = {
             let app = self.lock_pipelines();
@@ -1576,6 +1587,30 @@ impl AppState {
 
         let subscribers = self.stop_replaced(id, &old, join_handle, at_barrier).await;
         self.build_replacement(id, config, old, subscribers)
+    }
+
+    /// Load and optimise every model `config`'s `infer` transforms run, for
+    /// [`AppState::replace_pipeline`]'s step 1. The plans are shared by file
+    /// and shape and held weakly, so what is returned has to be held until
+    /// the build has taken them.
+    fn prepare_models(
+        &self,
+        config: &Config,
+    ) -> Result<Vec<Arc<crate::transforms::infer::Model>>, PipelineError> {
+        let dir = self.script_directory();
+        config
+            .transforms
+            .iter()
+            .filter_map(|t| match &t.kind {
+                kayak_core::config::TransformKind::Infer(infer) => Some(infer),
+                _ => None,
+            })
+            .map(|infer| {
+                self.models
+                    .prepare(infer, dir.as_deref())
+                    .map_err(PipelineError::InvalidConfig)
+            })
+            .collect()
     }
 
     /// Stop the run loop of a pipeline being replaced, and take its
@@ -1785,6 +1820,7 @@ impl AppState {
         .with_connections(connections)
         .with_data_dir(self.data_dir.clone())
         .with_inboxes(Arc::clone(&self.inboxes))
+        .with_models(Arc::clone(&self.models))
         .with_buckets(self.buckets())
         .with_state(pipeline.config.state.clone())
         .with_history(Arc::clone(&self.history))
@@ -1874,6 +1910,7 @@ impl AppState {
         .with_connections(connections)
         .with_data_dir(self.data_dir.clone())
         .with_inboxes(Arc::clone(&self.inboxes))
+        .with_models(Arc::clone(&self.models))
         .with_buckets(self.buckets())
         .with_history(Arc::clone(&self.history))
         .with_watchers(self.watchers.clone())
@@ -1909,6 +1946,7 @@ impl AppState {
         .with_connections(connections)
         .with_data_dir(self.data_dir.clone())
         .with_inboxes(Arc::clone(&self.inboxes))
+        .with_models(Arc::clone(&self.models))
         .with_buckets(buckets)
         .with_history(Arc::clone(&self.history))
         .with_watchers(self.watchers.clone())
