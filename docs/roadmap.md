@@ -670,20 +670,38 @@ Roughly in dependency order:
       its own feature, and read the ARIMA module before trusting it. The old
       [`arima`](https://crates.io/crates/arima) crate is tiny and dormant —
       read it for the algorithm, don't depend on it.
-- [ ] **`infer`, tier three, behind a `tract` feature.** Run an ONNX model
-      per message or per batch. `model` is a path under the config directory
-      with the `file` script source's boundary rules, loaded once at build so
-      a wrong path refuses the build; `inputs` maps field paths onto the tensor
-      in order, the way `columns` maps fields onto a table, `outputs` names
-      the fields the result lands in, `on_missing` as elsewhere. One transform
-      covers isolation forests, boosted trees, small autoencoders and exported
-      scikit-learn pipelines, and the training stays where the data scientists
-      are. [`tract-onnx`](https://lib.rs/crates/tract-onnx) (Sonos, 0.23.6,
-      Sep 2026, MIT/Apache, pure Rust, ~20 MB of deps) is the pick: no C++
-      runtime, so the Dockerfile stays a two-stage build with nothing to copy
-      in. [`ort`](https://lib.rs/crates/ort) (2.0.0-rc.13, wraps Microsoft's
-      onnxruntime, widest op coverage, GPU) is the fallback if a model tract
-      cannot run, at the cost of a 6–22 MB shared library in the image.
+- [x] **`infer`, tier three, behind the `onnx` feature (on by default).**
+      Runs an ONNX model with [`tract-onnx`](https://lib.rs/crates/tract-onnx)
+      (0.23, pure Rust, so the Dockerfile copies nothing in). Built
+      2026-11-02; `kayak_core::infer` is the declaration,
+      `src/transforms/infer.rs` the evaluation, `examples/forecast/` the whole
+      loop (train, feed, score, swap). What was decided:
+      - `model` is a tagged union, `{type: file, path}` today, under the
+        `file` script source's boundary (now `script::source::locate`, shared)
+        plus one rule: only `.onnx` is ever opened, since `secrets.json` lives
+        in the same directory.
+      - `shape` is `rows` (each message a row, the batch the tensor) or
+        `window` (the last `size` readings per `group_by` key, kept in the
+        pipeline's state bucket, so a swapped model needs no warm-up). `emit`
+        is on the window arm only: `merge` (an array per output on the
+        reading) or `points` (one message per step ahead).
+      - **Labelling what the model made is config, not guesswork.** Under
+        `merge` the field name is the label; under `points`, `mark: {field,
+        inferred, observed?}` writes one field on the points and, if asked,
+        on everything else. `provenance` writes `{path, sha256}` on what the
+        model made, so a forecast can be traced to its model after a swap.
+      - A model is **proved at build by running it on zeros**, and the answer's
+        shape checked against `outputs` (and the horizon read off it).
+      - **Swapping is a replace with a new path.** `AppState::prepare_models`
+        loads and optimises the new model in replace's step 1, before the old
+        loop stops, so a broken model is a 422 with the old one untouched and
+        the stop no longer includes optimising. Plans are shared in `Models`
+        by sha256 and shape, held weakly. Give each version a new file name;
+        overwriting in place loses the fallback.
+      Not done yet: an object-store arm for `model` (an `s3` connection and a
+      key; the union is there for it), the loaded model's sha on the card
+      (the `loaded_script` treatment), several model inputs or outputs, and
+      `ort` as a fallback for a model tract cannot run.
 
 Not planned, and why: **training in the pipeline** — `smartcore` (0.6.14, Aug
 2026) and `linfa` (0.8.1, Dec 2025) are both well maintained and everything

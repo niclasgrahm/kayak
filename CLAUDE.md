@@ -951,6 +951,52 @@ these two are what make "behind http" a good place. Three things:
 ingest endpoint (`body: message`, since ingest takes one message or an
 array), the way `heartbeat_to_webhook` stands in for a webhook.
 
+### The infer transform (ONNX in process)
+
+`kayak_core::infer` is the declaration, `src/transforms/infer.rs` the
+evaluation (tract, behind the default-on `onnx` feature — a build without it
+still parses the config and refuses to build the pipeline). The in-process
+half of "the model round trip": `features` + `http` is the other. Four things
+are load-bearing:
+
+- **A model is proved at build by running it once on zeros.** An ONNX output
+  shape can be symbolic, so the trial run is the only way to check it against
+  `outputs` and to read a window model's horizon. Everything a model can be
+  wrong about is a refused build, which is what makes a swap safe.
+- **The model file follows the script file's boundary**
+  (`script::source::locate`, shared, with a `Beside` naming the kind of file
+  for the messages) **plus one rule: only `.onnx` is opened** — the module
+  import's appended-extension argument, since `secrets.json` lives there.
+- **A swap is a replace with a new path, and the model is prepared before
+  the stop.** `AppState::prepare_models` runs in step 1 of
+  `replace_pipeline`, outside every lock: a model that can't run is a 422
+  with the old loop untouched, and the build takes the prepared plan from
+  `Models` (keyed by sha256 and fixed shape, held **weakly**, so the returned
+  `Arc`s must be held until the build). Optimising inside the stop was the
+  pause a swap would otherwise cost. Overwriting a file in place loses the
+  fallback (the old config reads the new bytes) — documented, not prevented.
+- **The window lives in the bucket** (`{"window": [[millis, [inputs]]…],
+  "since": n}` under `infer:<outputs>`), so a model with the same `size`
+  forecasts from its first reading after a swap. What the model made is
+  labelled by config: the field name under `merge`, `mark` under `points`,
+  and `provenance` (`{path, sha256}`) on both.
+
+**A run goes to tokio's blocking pool** (`Model::infer` → `offload`, a
+`spawn_blocking`): tract has no `.await` in it, so run on the loop's task it
+would hold a worker for its whole length, and as many busy models as cores
+would stall every pipeline, the API and the feed.
+`a_model_run_does_not_hold_the_runtime` fails on an inline run. Not
+`block_in_place`, which panics on the current-thread runtimes the tests and
+`kayak check` use. This protects the *rest* of the server only: the pipeline
+still waits for its model, a load still happens on the build's thread, and the
+weights are still the server's memory — one heavy enough to matter belongs
+behind `http`.
+`testing::onnx` writes tiny models in code (prost over tract's own protobuf
+types) so tests say what they run. The sample's `pump_forecast` runs the
+committed `example_config/models/pump_forecast_v1.onnx` (from
+`examples/forecast/train.py`); `tests/graph.rs` loads it, so retraining it
+must keep its shape.
+
 ### Secrets
 
 Config fields that can hold credentials are typed `Secret` (`kayak-core::config`), not `String`. They all live on *connections* now rather than on components. `Secret` only ever holds the *unresolved* `${NAME}` template, which is what makes it safe to serialize back out of `GET /api/pipelines` and to compile for wasm. Resolution happens at build time via `ctx.resolve()` and yields a `secrets::Resolved`, whose `Display`/`Debug` print the template rather than the value — so error contexts can name a connection without leaking it. Reaching the real value takes `.expose()`; flag new call sites in review, and never put a `Resolved` into anything `Serialize`. Stores (`EnvStore`, `FileStore`, `ChainStore`) live in `src/secrets.rs`; `main.rs` chains env ahead of `--secrets <file>`. `src/testing.rs` has `MapSecretStore` for tests. See `website/io/secrets.md`.

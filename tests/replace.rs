@@ -401,3 +401,107 @@ async fn the_id_is_reserved_while_it_is_replaced() -> anyhow::Result<()> {
     silent.abort();
     Ok(())
 }
+
+// ── swapping a model ────────────────────────────────────────────────────────
+
+/// `scorer` running an `infer` transform over a constant stream, on whichever
+/// model `path` names.
+#[cfg(feature = "onnx")]
+fn scoring(path: &str) -> anyhow::Result<Config> {
+    config(json!({
+        "id": "scorer",
+        "inputs": [{ "type": "dummy", "duration": 0 }],
+        "transforms": [{
+            "type": "infer",
+            "model": { "type": "file", "path": path },
+            "shape": { "type": "rows" },
+            "inputs": ["value", "value"],
+            "outputs": ["sum", "diff"]
+        }],
+        "outputs": [{ "type": "stdout" }]
+    }))
+}
+
+/// A config beside `models/`, loaded with `scorer` on `v1`.
+#[cfg(feature = "onnx")]
+fn model_project() -> anyhow::Result<(tempfile::TempDir, AppState)> {
+    use kayak::testing::onnx;
+    let dir = tempfile::tempdir()?;
+    std::fs::create_dir_all(dir.path().join("models"))?;
+    std::fs::write(
+        dir.path().join("models/v1.onnx"),
+        onnx::sum_and_difference(),
+    )?;
+    std::fs::write(dir.path().join("models/v2.onnx"), onnx::doubling())?;
+    std::fs::write(dir.path().join("models/broken.onnx"), b"not a model")?;
+    let path = dir.path().join("config.json");
+    std::fs::write(
+        &path,
+        serde_json::to_string(&json!([scoring("models/v1.onnx")?]))?,
+    )?;
+    Ok((dir, AppState::from_config(&path)?))
+}
+
+/// Waits for a batch whose `diff` is not zero — which `v1` (`a − a`) never
+/// writes and `v2` (`2a`) does.
+#[cfg(feature = "onnx")]
+async fn a_batch_from_v2(rx: &mut mpsc::Receiver<Arc<kayak_core::MessageBatch>>) -> Option<()> {
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            let batch = rx.recv().await?;
+            if batch
+                .iter()
+                .any(|m| m["diff"].as_f64().is_some_and(|d| d != 0.0))
+            {
+                return Some(());
+            }
+        }
+    })
+    .await
+    .ok()
+    .flatten()
+}
+
+/// The model swap: a replace naming the new file runs it, and the pipelines
+/// under the replaced one stay attached through it.
+#[cfg(feature = "onnx")]
+#[tokio::test]
+async fn a_replace_naming_a_new_model_runs_it() -> anyhow::Result<()> {
+    let (_dir, state) = model_project()?;
+    let child = state.create_pipeline(downstream_of("child", "scorer")?)?;
+    let (tx, mut rx) = mpsc::channel(64);
+    child.subscribe(tx);
+
+    state
+        .replace_pipeline("scorer", scoring("models/v2.onnx")?)
+        .await?;
+
+    assert!(
+        a_batch_from_v2(&mut rx).await.is_some(),
+        "the new model's answers never arrived"
+    );
+    Ok(())
+}
+
+/// A model that cannot run is refused **before** the old run loop is touched —
+/// loaded and checked in step 1, not found out by the build in step 5 — so
+/// the old model never stops answering.
+#[cfg(feature = "onnx")]
+#[tokio::test]
+async fn a_model_that_cannot_run_is_refused_with_the_old_one_still_running() -> anyhow::Result<()> {
+    let (_dir, state) = model_project()?;
+    let before = running(&state, "scorer")?;
+
+    let err = state
+        .replace_pipeline("scorer", scoring("models/broken.onnx")?)
+        .await;
+    let Err(PipelineError::InvalidConfig(err)) = err else {
+        panic!(
+            "expected InvalidConfig, got {:?}",
+            err.map(|p| p.id.clone())
+        );
+    };
+    assert!(format!("{err:#}").contains("broken.onnx"), "{err:#}");
+    untouched(&state, &before)?;
+    Ok(())
+}

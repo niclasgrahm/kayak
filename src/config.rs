@@ -84,6 +84,7 @@ impl BuildTransformConfig for TransformConfig {
             TransformKind::Detect(c) => c.build(ctx),
             TransformKind::Resample(c) => c.build(ctx),
             TransformKind::Features(c) => c.build(ctx),
+            TransformKind::Infer(c) => c.build(ctx),
         }
     }
 }

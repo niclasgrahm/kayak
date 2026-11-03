@@ -10,6 +10,7 @@ pub mod features;
 pub mod filter;
 pub mod keyed;
 pub mod http;
+pub mod infer;
 pub mod map;
 pub mod pivot;
 pub mod reduce;
