@@ -230,6 +230,15 @@ test-embed:
 test-live:
   cargo test --test live_sql -- --ignored
 
+# The snowflake components against a real account, which nothing in compose
+# can stand in for. Needs SNOWFLAKE_ACCOUNT, SNOWFLAKE_USER, SNOWFLAKE_TOKEN or
+# SNOWFLAKE_PRIVATE_KEY, SNOWFLAKE_WAREHOUSE, SNOWFLAKE_DATABASE and
+# SNOWFLAKE_SCHEMA, and uses warehouse credits.
+
+# the snowflake input and output against a real account
+test-snowflake:
+  cargo test --test live_snowflake -- --ignored
+
 # smoke test against a server that is already running on :6767
 test-http:
   hurl --test hurl/tests/*.hurl

@@ -1092,6 +1092,19 @@
               "type"
             ],
             "type": "object"
+          },
+          {
+            "$ref": "#/components/schemas/SnowflakeConnection",
+            "properties": {
+              "type": {
+                "const": "snowflake",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type"
+            ],
+            "type": "object"
           }
         ]
       },
@@ -1241,6 +1254,19 @@
             "properties": {
               "type": {
                 "const": "tidepool",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type"
+            ],
+            "type": "object"
+          },
+          {
+            "$ref": "#/components/schemas/SnowflakeConnection",
+            "properties": {
+              "type": {
+                "const": "snowflake",
                 "type": "string"
               }
             },
@@ -3489,6 +3515,19 @@
             "type": "object"
           },
           {
+            "$ref": "#/components/schemas/SnowflakeInputConfig",
+            "properties": {
+              "type": {
+                "const": "snowflake",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type"
+            ],
+            "type": "object"
+          },
+          {
             "$ref": "#/components/schemas/HttpPollConfig",
             "properties": {
               "type": {
@@ -4820,6 +4859,19 @@
             "properties": {
               "type": {
                 "const": "clickhouse",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type"
+            ],
+            "type": "object"
+          },
+          {
+            "$ref": "#/components/schemas/SnowflakeOutputConfig",
+            "properties": {
+              "type": {
+                "const": "snowflake",
                 "type": "string"
               }
             },
@@ -6472,6 +6524,220 @@
           "method"
         ],
         "title": "smooth",
+        "type": "object"
+      },
+      "SnowflakeAuth": {
+        "description": "How kayak signs in to Snowflake. The `type` field selects the method.\n\nThe SQL API does not accept a password. Thus, a user that has only a\npassword cannot connect.",
+        "oneOf": [
+          {
+            "description": "An RSA key pair. kayak signs a short-lived token with the private key.\nRegister the public key on the user with `ALTER USER ... SET\nRSA_PUBLIC_KEY`. Use this method for a service user.",
+            "properties": {
+              "private_key": {
+                "$ref": "#/components/schemas/Secret",
+                "description": "The private key, as an unencrypted PKCS#8 PEM that starts with\n`-----BEGIN PRIVATE KEY-----`. Use a `${NAME}` secret reference for\nthis value. kayak has no way to open an encrypted key."
+              },
+              "type": {
+                "const": "key_pair",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "private_key"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "A token that you get from Snowflake: a programmatic access token or an\nOAuth access token. kayak does not renew the token. When the token\nexpires, the pipeline fails until you change the value.",
+            "properties": {
+              "token": {
+                "$ref": "#/components/schemas/Secret",
+                "description": "The token. Use a `${NAME}` secret reference for this value."
+              },
+              "type": {
+                "const": "token",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "token"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "SnowflakeConnection": {
+        "description": "A Snowflake account, the user that kayak connects as, and the warehouse that\nruns the statements. kayak uses the SQL API of Snowflake. The output or the\ninput sets the table.\n\n`warehouse`, `database`, `schema` and `role` go to Snowflake as you write\nthem. Snowflake compares them with case, so write them as `SHOW` lists them.\nThis is usually in upper case.\n\nA statement that kayak runs starts the warehouse if the warehouse is\nsuspended. Thus, a short `interval_secs` on an input or small batches on an\noutput can keep the warehouse running and cost credits all day.",
+        "properties": {
+          "account": {
+            "description": "The account identifier, as `orgname-accountname`, for example\n`myorg-account1`. kayak uses it to find the server and to sign the\ntoken. For an account locator, write only the locator (`xy12345`) and\nwrite the full address in `url`.",
+            "type": "string"
+          },
+          "allow_http": {
+            "description": "Permit an `http://` url with no TLS. The default is false. The\ncredentials go with every request, as plain text. Use it only for a local\ntest server.",
+            "type": [
+              "boolean",
+              "null"
+            ]
+          },
+          "auth": {
+            "$ref": "#/components/schemas/SnowflakeAuth",
+            "description": "How kayak signs in."
+          },
+          "database": {
+            "description": "The database to use. The database must exist. The output makes tables.\nIt does not make databases.",
+            "type": "string"
+          },
+          "role": {
+            "description": "The role to use. The default is the default role of the user.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "schema": {
+            "description": "The schema to use. The schema must exist. A `table` with a schema\n(`staging.readings`) replaces this value.",
+            "type": "string"
+          },
+          "statement_timeout_seconds": {
+            "description": "How long one statement can run before Snowflake cancels it, in seconds.\nThe default is 300. A long statement keeps the warehouse running.",
+            "format": "uint64",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "url": {
+            "description": "The url of the server, when `account` does not give it. Use it for an\naccount locator with a region, for private connectivity or for an account\nin China. For example,\n`https://xy12345.us-east-2.aws.snowflakecomputing.com`.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "user": {
+            "description": "The user to connect as.",
+            "type": "string"
+          },
+          "warehouse": {
+            "description": "The warehouse that runs the statements.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "account",
+          "user",
+          "auth",
+          "warehouse",
+          "database",
+          "schema"
+        ],
+        "title": "snowflake",
+        "type": "object"
+      },
+      "SnowflakeInputConfig": {
+        "description": "Reads a Snowflake table, view or query at an interval and sends each row as\na message. It uses the SQL API of Snowflake.\n\nEach read uses the warehouse. A short `interval_secs` can keep the warehouse\nrunning and cost credits all day. The modes, the watermark and the limits of\nan incremental read are the same as on the `postgres` input.\n\nSnowflake folds a name with no quotes to upper case, and so does this input.\n`table`, `columns` and the cursor `field` go to upper case. Each message has\nthe column names as Snowflake gives them, which is usually in upper case: a\ncolumn `sensor` arrives as the field `SENSOR`. To get other field names, use\n`AS \"sensor\"` in a `query` or a `map` transform.\n\nA timestamp is ISO 8601 with nine fractional digits, and an instant with no\nzone of its own is read as UTC. A whole number is a number up to 64 bits and\na string above that. A decimal column with a precision above 15 is always a\nstring, because a JSON number cannot keep its digits. A `VARIANT` gives the\nvalue that it holds.",
+        "properties": {
+          "columns": {
+            "description": "The columns to read, in order. Leave it empty to read all columns. For\nan incremental input, the list must include `field`.",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "connection": {
+            "description": "The name of the snowflake connection to read through. Declare the\nconnection in the connections file.",
+            "type": "string",
+            "x-connection": "snowflake"
+          },
+          "interval_secs": {
+            "description": "The time between two reads, in seconds. The time starts at the end of a\nread. Thus, two reads never overlap. The first read occurs when the\npipeline starts.",
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "max_batch": {
+            "description": "The maximum number of rows in one batch. The default is 1. The input\nputs rows that it already read into a batch. It does not wait for more\nrows to fill a batch.",
+            "format": "uint",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "mode": {
+            "$ref": "#/components/schemas/PollMode",
+            "description": "Whether each read returns all rows (`snapshot`) or only the rows after\nthe last read (`incremental`)."
+          },
+          "page_size": {
+            "description": "The maximum number of rows that one query returns. The default is\n1000. When a page is full, the input reads the next page immediately.\nThe interval starts after a page that is not full. A `snapshot` ignores\nthis field and reads all rows in one query.",
+            "format": "uint",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "query": {
+            "description": "A `SELECT` to read in place of a table. The input puts the query in a\nsubquery. It adds the cursor condition, the `ORDER BY` and the page\nlimit outside the subquery. Thus, the query needs no placeholder and no\n`ORDER BY`.\n\nWrite one statement with no semicolon at the end. You can use all SQL\nthat the server accepts in a subquery, for example `WITH`.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "table": {
+            "description": "The table or view to read, as `name` or `schema.name`. Give exactly one\nof `table` and `query`.",
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "connection",
+          "interval_secs",
+          "mode"
+        ],
+        "title": "snowflake",
+        "type": "object"
+      },
+      "SnowflakeOutputConfig": {
+        "description": "Inserts each batch into a Snowflake table through the SQL API, one statement\nfor each batch. A batch that is larger than 8 MiB becomes more statements.\n\n`columns` has the same format as on the `postgres` output. Each entry names\na column, its type and the field to read. The default `field` is the name of\nthe column. Without `columns`, the table has a `PAYLOAD` column of type\n`VARIANT` that contains each message.\n\nSnowflake folds a name with no quotes to upper case, and so does this output.\n`table` and each column `name` go to upper case: `readings` is the table\n`READINGS`. A field name on the message does not change. Thus, a table that\nhas a lower case name in quotes cannot be used.\n\nEach statement uses the warehouse. Put a `buffer` on the input, so that\nstatements are large and few. Snowflake does not enforce keys, so this output\nhas none. A retry that follows a lost connection does not write the rows two\ntimes.\n\nThe output creates the table if it does not exist. Set `create_table` to\nfalse for a table that another system owns. The output does not change an\nexisting table.",
+        "properties": {
+          "columns": {
+            "description": "The column for each message field. If you do not set it, the output\nkeeps each full message in a `PAYLOAD` column of type `VARIANT`.",
+            "items": {
+              "$ref": "#/components/schemas/ColumnMapping"
+            },
+            "type": "array"
+          },
+          "connection": {
+            "description": "The name of the snowflake connection to insert through. Declare the\nconnection in the connections file. The connection gives the account,\nthe warehouse, the database and the schema.",
+            "type": "string",
+            "x-connection": "snowflake"
+          },
+          "create_table": {
+            "description": "Create the table on start if it does not exist. The default is true.",
+            "type": [
+              "boolean",
+              "null"
+            ]
+          },
+          "on_extra_fields": {
+            "$ref": "#/components/schemas/ExtraFieldPolicy",
+            "description": "What to do with a message that has fields that no column reads."
+          },
+          "table": {
+            "description": "The table to insert into. The output creates it if it does not exist.\nYou can add a schema (`staging.readings`). This schema replaces the\nschema of the connection. Use only letters, digits and underscores.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "connection",
+          "table"
+        ],
+        "title": "snowflake",
         "type": "object"
       },
       "SplitterTransformConfig": {

@@ -1461,7 +1461,8 @@ mod tests {
                 "redis",
                 "opcua",
                 "indu",
-                "tidepool"
+                "tidepool",
+                "snowflake"
             ]
         );
 

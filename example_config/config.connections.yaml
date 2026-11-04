@@ -5,6 +5,18 @@ local-clickhouse:
   user: kayak
   password: ${CLICKHOUSE_PASSWORD}
   allow_http: true
+local-snowflake:
+  type: snowflake
+  account: myorg-account1
+  user: KAYAK
+  auth:
+    type: token
+    token: ${SNOWFLAKE_TOKEN}
+  warehouse: COMPUTE_WH
+  database: KAYAK
+  schema: PUBLIC
+  url: http://localhost:8099
+  allow_http: true
 local-files:
   type: file
   root: dev_data/events

@@ -623,6 +623,68 @@ hold a null from quietly holding a zero.
 `Date32`; the connection is the HTTP interface with `allow_http` following the
 s3 connection's rule, since the credentials go with every insert.
 
+### The snowflake components
+
+`snowflake` as an input and an output, both over the SQL API because there is no
+Rust driver to lean on. Three files, and the split is the one `outbound.rs` draws:
+`src/snowflake.rs` is the wire (`Session`: signing in, submitting, waiting,
+partitions, retries, plus `fake`, the server every test here uses),
+`src/inputs/snowflake.rs` is a `poll::Reader` plus how a row reads, and
+`src/outputs/snowflake.rs` is a `ColumnPlan` plus the DDL and how a batch is
+carried. Neither component knows the API exists.
+
+Six decisions are load-bearing:
+
+- **The server renders dates and times, on every request.** The `*_output_format`
+  parameters are in the body of every statement. Left alone the API sends epoch
+  seconds with an offset biased by 1440, and its own documentation disagrees with
+  itself about the format. Account and user settings for these are ignored by the
+  API, so the rendering can't move under a pipeline. Don't replace this with date
+  arithmetic on this side.
+- **A batch is one bound JSON document** (`[["a","1.5"],["b",null]]`) that the
+  statement flattens with `LATERAL FLATTEN` and casts column by column. `VALUES`
+  takes no `PARSE_JSON`, so a `VARIANT` can't be inserted through it, and array
+  binding isn't documented for this API. Every value is text the plan has checked,
+  which is `$n::text::NUMERIC` spelled the way this server spells it. A batch over
+  `MAX_DOCUMENT_BYTES` becomes several statements.
+- **A retry is the same `requestId`, with `retry=true` only on a repeat.** That is
+  the API's promise not to run a statement that already succeeded, and it is what
+  makes retrying an insert safe when the reply was lost. A new statement gets a new
+  id. The statement handle stays out of error text: it differs per attempt, and an
+  error's text is a `history` key.
+- **Names fold to upper case and are then quoted** (`snowflake::fold`), applied to
+  the config before it reaches `Plan` or `ColumnPlan`, so neither of those learned
+  anything. `readings` means what `CREATE TABLE readings` made. The field a column
+  reads is written out first, since that is the column's name as the config spelled
+  it and the message still spells it that way. The cost is that a table created
+  quoted in lower case can't be named on the output side; it is on the roadmap
+  rather than guessed at.
+- **The cursor is rendered and read back with one explicit format**
+  (`CursorType`), with nine fractional digits. At the default three, a watermark
+  reads the rows it was taken from again forever. So the probe runs before the first
+  page as well as the rest, and a `FLOAT` or `VARIANT` cursor is refused at once.
+- **Whether a number is a JSON number is decided by the column, not the value**
+  (`decode_fixed`), so a field can't change type on the data's say-so. A whole
+  number is the exception (64 bits, then a string), because `NUMBER(38, 0)` is what
+  every `INTEGER` is declared as.
+
+`account` is refused with a period in it rather than guessed at: the docs have a
+period mean a region on the host and something to replace in the token, and the
+account is put into a host that credentials are sent to. `url` says the host
+outright. `statement_timeout_seconds` defaults to 300 against the server's two days,
+because an unbounded statement is an unbounded warehouse bill, and that is the shape
+of the operational warning on this component: **any statement starts a suspended
+warehouse**, so a short `interval_secs` or small batches keep it running.
+
+**No real account has been behind the fake.** `tests/live_snowflake.rs` (`just
+test-snowflake`, `#[ignore]`d out of `just ci`, needs `SNOWFLAKE_*`) is where
+anything the docs leave open gets settled: what a later partition's body looks
+like (`partition_rows` reads both shapes it could be, and detects gzip from the
+bytes), how a `VARIANT` arrives, and whether an underscore in an account stays in
+the token's claims. The sample's `local-snowflake` points at `:8099`, where nothing
+listens, so `just dev` sends nothing to Snowflake and costs nothing; both sample
+pipelines stay in `init`/retry there, like `sensors_to_tidepool`.
+
 ### The tidepool output
 
 The third consumer of the column mapping, and the first whose table is not

@@ -34,6 +34,7 @@ impl BuildInputConfig for InputKind {
             InputKind::Indu(c) => c.build(ctx),
             InputKind::Postgres(c) => c.build(ctx),
             InputKind::Clickhouse(c) => c.build(ctx),
+            InputKind::Snowflake(c) => c.build(ctx),
             InputKind::HttpPoll(c) => c.build(ctx),
             InputKind::InduNamespace(c) => c.build(ctx),
         }
@@ -103,6 +104,7 @@ impl BuildOutputConfig for OutputConfig {
             OutputKind::Nats(c) => c.build(ctx),
             OutputKind::Postgres(c) => c.build(ctx),
             OutputKind::Clickhouse(c) => c.build(ctx),
+            OutputKind::Snowflake(c) => c.build(ctx),
             OutputKind::Mqtt(c) => c.build(ctx),
             OutputKind::Redis(c) => c.build(ctx),
             OutputKind::Http(c) => c.build(ctx),

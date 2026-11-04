@@ -811,6 +811,53 @@ pub struct ClickhouseOutputConfig {
     pub on_extra_fields: ExtraFieldPolicy,
 }
 
+/// Inserts each batch into a Snowflake table through the SQL API, one statement
+/// for each batch. A batch that is larger than 8 MiB becomes more statements.
+///
+/// `columns` has the same format as on the `postgres` output. Each entry names
+/// a column, its type and the field to read. The default `field` is the name of
+/// the column. Without `columns`, the table has a `PAYLOAD` column of type
+/// `VARIANT` that contains each message.
+///
+/// Snowflake folds a name with no quotes to upper case, and so does this output.
+/// `table` and each column `name` go to upper case: `readings` is the table
+/// `READINGS`. A field name on the message does not change. Thus, a table that
+/// has a lower case name in quotes cannot be used.
+///
+/// Each statement uses the warehouse. Put a `buffer` on the input, so that
+/// statements are large and few. Snowflake does not enforce keys, so this output
+/// has none. A retry that follows a lost connection does not write the rows two
+/// times.
+///
+/// The output creates the table if it does not exist. Set `create_table` to
+/// false for a table that another system owns. The output does not change an
+/// existing table.
+#[derive(Clone, Debug, Deserialize, Serialize, JsonSchema)]
+#[schemars(title = "snowflake")]
+pub struct SnowflakeOutputConfig {
+    /// The name of the snowflake connection to insert through. Declare the
+    /// connection in the connections file. The connection gives the account,
+    /// the warehouse, the database and the schema.
+    #[schemars(extend("x-connection" = "snowflake"))]
+    pub connection: ConnectionId,
+    /// The table to insert into. The output creates it if it does not exist.
+    /// You can add a schema (`staging.readings`). This schema replaces the
+    /// schema of the connection. Use only letters, digits and underscores.
+    pub table: String,
+    /// The column for each message field. If you do not set it, the output
+    /// keeps each full message in a `PAYLOAD` column of type `VARIANT`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub columns: Vec<ColumnMapping>,
+    /// Create the table on start if it does not exist. The default is true.
+    // omitted rather than written as `null` when absent, so a config saved back
+    // out is the file someone hand-wrote — same rule as the postgres port
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub create_table: Option<bool>,
+    /// What to do with a message that has fields that no column reads.
+    #[serde(default, skip_serializing_if = "ExtraFieldPolicy::is_default")]
+    pub on_extra_fields: ExtraFieldPolicy,
+}
+
 /// Writes each batch into a Tidepool table, one request for each batch.
 ///
 /// The table must exist in the Tidepool project. On start, the output checks
@@ -1473,6 +1520,35 @@ pub struct ClickhouseInputConfig {
     pub poll: SqlPollConfig,
 }
 
+/// Reads a Snowflake table, view or query at an interval and sends each row as
+/// a message. It uses the SQL API of Snowflake.
+///
+/// Each read uses the warehouse. A short `interval_secs` can keep the warehouse
+/// running and cost credits all day. The modes, the watermark and the limits of
+/// an incremental read are the same as on the `postgres` input.
+///
+/// Snowflake folds a name with no quotes to upper case, and so does this input.
+/// `table`, `columns` and the cursor `field` go to upper case. Each message has
+/// the column names as Snowflake gives them, which is usually in upper case: a
+/// column `sensor` arrives as the field `SENSOR`. To get other field names, use
+/// `AS "sensor"` in a `query` or a `map` transform.
+///
+/// A timestamp is ISO 8601 with nine fractional digits, and an instant with no
+/// zone of its own is read as UTC. A whole number is a number up to 64 bits and
+/// a string above that. A decimal column with a precision above 15 is always a
+/// string, because a JSON number cannot keep its digits. A `VARIANT` gives the
+/// value that it holds.
+#[derive(Clone, Debug, Deserialize, Serialize, JsonSchema)]
+#[schemars(title = "snowflake")]
+pub struct SnowflakeInputConfig {
+    /// The name of the snowflake connection to read through. Declare the
+    /// connection in the connections file.
+    #[schemars(extend("x-connection" = "snowflake"))]
+    pub connection: ConnectionId,
+    #[serde(flatten)]
+    pub poll: SqlPollConfig,
+}
+
 /// Gets a url at an interval and sends the full reply each time.
 ///
 /// Each read is a `GET`. A reply that is an array gives one message for each
@@ -1579,6 +1655,7 @@ pub enum InputKind {
     Indu(InduInputConfig),
     Postgres(PostgresInputConfig),
     Clickhouse(ClickhouseInputConfig),
+    Snowflake(SnowflakeInputConfig),
     HttpPoll(HttpPollConfig),
     InduNamespace(InduNamespaceInputConfig),
 }
@@ -1779,6 +1856,7 @@ pub enum OutputKind {
     Nats(NatsOutputConfig),
     Postgres(PostgresOutputConfig),
     Clickhouse(ClickhouseOutputConfig),
+    Snowflake(SnowflakeOutputConfig),
     Mqtt(MqttOutputConfig),
     Redis(RedisOutputConfig),
     Http(HttpOutputConfig),
@@ -1863,6 +1941,7 @@ impl Config {
                 | InputKind::Indu(_)
                 | InputKind::Postgres(_)
                 | InputKind::Clickhouse(_)
+                | InputKind::Snowflake(_)
                 | InputKind::HttpPoll(_)
                 | InputKind::InduNamespace(_) => None,
             })
@@ -1891,6 +1970,7 @@ impl Config {
             InputKind::InduNamespace(c) => Some(&c.connection),
             InputKind::Postgres(c) => Some(&c.connection),
             InputKind::Clickhouse(c) => Some(&c.connection),
+            InputKind::Snowflake(c) => Some(&c.connection),
             InputKind::Dummy(_)
             | InputKind::Http(_)
             | InputKind::HttpPoll(_)
@@ -1901,6 +1981,7 @@ impl Config {
             OutputKind::Nats(c) => Some(&c.connection),
             OutputKind::Postgres(c) => Some(&c.connection),
             OutputKind::Clickhouse(c) => Some(&c.connection),
+            OutputKind::Snowflake(c) => Some(&c.connection),
             OutputKind::File(c) => Some(&c.connection),
             OutputKind::S3(c) => Some(&c.connection),
             OutputKind::Mqtt(c) => Some(&c.connection),

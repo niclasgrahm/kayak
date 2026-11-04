@@ -24,7 +24,9 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use axum::{Json, extract::State, response::IntoResponse};
-use kayak_core::config::{ClickhouseInputConfig, InputConfig, InputKind, PostgresInputConfig};
+use kayak_core::config::{
+    ClickhouseInputConfig, InputConfig, InputKind, PostgresInputConfig, SnowflakeInputConfig,
+};
 use kayak_core::sample::{SampleRequest, SampleResponse, SampleStage, Sampling};
 use kayak_core::sql::{PollMode, StartFrom};
 use serde_json::Value;
@@ -152,7 +154,8 @@ fn prepare(mut input: InputConfig, notes: &mut Vec<String>) -> InputConfig {
     // empty would read as a broken connection. Said only when it was done:
     // an input already reading from the oldest rows is left alone.
     if let InputKind::Postgres(PostgresInputConfig { poll, .. })
-    | InputKind::Clickhouse(ClickhouseInputConfig { poll, .. }) = &mut input.kind
+    | InputKind::Clickhouse(ClickhouseInputConfig { poll, .. })
+    | InputKind::Snowflake(SnowflakeInputConfig { poll, .. }) = &mut input.kind
         && let PollMode::Incremental { start_from, .. } = &mut poll.mode
         && start_from.unwrap_or_default() == StartFrom::Newest
     {
@@ -230,6 +233,23 @@ mod tests {
             panic!("still a postgres input");
         };
         assert_eq!(postgres.poll.start_from(), Some(StartFrom::Oldest));
+        assert_eq!(notes.len(), 1);
+
+        let mut notes = Vec::new();
+        let prepared = prepare(
+            input(serde_json::json!({
+                "type": "snowflake",
+                "connection": "sf",
+                "table": "readings",
+                "interval_secs": 5,
+                "mode": {"type": "incremental", "field": "id"},
+            })),
+            &mut notes,
+        );
+        let InputKind::Snowflake(snowflake) = &prepared.kind else {
+            panic!("still a snowflake input");
+        };
+        assert_eq!(snowflake.poll.start_from(), Some(StartFrom::Oldest));
         assert_eq!(notes.len(), 1);
 
         let mut notes = Vec::new();

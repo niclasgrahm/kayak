@@ -32,6 +32,7 @@ pub mod pipeline;
 pub mod secrets;
 pub mod server_config;
 pub mod shutdown;
+pub mod snowflake;
 pub mod site;
 pub mod state;
 pub mod stats;
@@ -54,7 +55,7 @@ use std::path::PathBuf;
 use kayak_core::connections::{
     ClickhouseConnection, Connections, FileConnection, InduConnection, KafkaConnection,
     MqttConnection, NatsConnection, OpcuaConnection, PostgresConnection, RedisConnection,
-    S3Connection, TidepoolConnection,
+    S3Connection, SnowflakeConnection, TidepoolConnection,
 };
 
 /// Threaded through every `build()` call. It carries the pipeline map — needed
@@ -309,6 +310,10 @@ impl<'a> BuildCtx<'a> {
 
     pub fn clickhouse_connection(&self, id: &str) -> anyhow::Result<&ClickhouseConnection> {
         Ok(self.connections.clickhouse(id)?)
+    }
+
+    pub fn snowflake_connection(&self, id: &str) -> anyhow::Result<&SnowflakeConnection> {
+        Ok(self.connections.snowflake(id)?)
     }
 
     pub fn file_connection(&self, id: &str) -> anyhow::Result<&FileConnection> {

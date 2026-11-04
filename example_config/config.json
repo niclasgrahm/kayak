@@ -970,6 +970,69 @@
       ]
     },
     {
+      "id": "sensors_to_snowflake",
+      "inputs": [
+        {
+          "type": "pipeline",
+          "upstream": "sensors",
+          "buffer": {
+            "type": "batch",
+            "size": 1000,
+            "window_seconds": 60
+          }
+        }
+      ],
+      "transforms": [],
+      "outputs": [
+        {
+          "type": "snowflake",
+          "connection": "local-snowflake",
+          "table": "sensor_readings",
+          "columns": [
+            {
+              "name": "sensor",
+              "type": "text"
+            },
+            {
+              "name": "value",
+              "type": "float"
+            },
+            {
+              "name": "recorded_at",
+              "type": "timestamp",
+              "field": "ts"
+            },
+            {
+              "name": "raw",
+              "type": "json",
+              "message": true
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "readings_from_snowflake",
+      "inputs": [
+        {
+          "type": "snowflake",
+          "connection": "local-snowflake",
+          "table": "sensor_readings",
+          "interval_secs": 300,
+          "mode": {
+            "type": "incremental",
+            "field": "recorded_at"
+          }
+        }
+      ],
+      "transforms": [],
+      "outputs": [
+        {
+          "type": "stdout"
+        }
+      ]
+    },
+    {
       "id": "sensors_to_tidepool",
       "inputs": [
         {

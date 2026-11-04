@@ -72,10 +72,10 @@ component.
 
 | | |
 | --- | --- |
-| **inputs** (12) | `nats` · `kafka` · `mqtt` · `redis` · `opcua` · `http` · `http_poll` · `postgres` · `clickhouse` · `indu` · `pipeline` · `dummy` |
+| **inputs** (13) | `nats` · `kafka` · `mqtt` · `redis` · `opcua` · `http` · `http_poll` · `postgres` · `clickhouse` · `snowflake` · `indu` · `pipeline` · `dummy` |
 | **transforms** (18) | `filter` · `map` · `reducer` · `splitter` · `buffer` · `remember` · `recall` · `http` · `script` · `deadband` · `throttle` · `pivot` · `derive` · `rolling` · `smooth` · `detect` · `resample` · `features` |
-| **outputs** (12) | `postgres` · `clickhouse` · `s3` · `file` · `kafka` · `nats` · `mqtt` · `redis` · `http` · `indu` · `tidepool` · `stdout` |
-| **connections** (11) | `kafka` · `nats` · `mqtt` · `redis` · `postgres` · `clickhouse` · `s3` · `file` · `opcua` · `indu` · `tidepool` |
+| **outputs** (13) | `postgres` · `clickhouse` · `snowflake` · `s3` · `file` · `kafka` · `nats` · `mqtt` · `redis` · `http` · `indu` · `tidepool` · `stdout` |
+| **connections** (12) | `kafka` · `nats` · `mqtt` · `redis` · `postgres` · `clickhouse` · `snowflake` · `s3` · `file` · `opcua` · `indu` · `tidepool` |
 
 Also in the product:
 
@@ -84,7 +84,7 @@ Also in the product:
 - **Acknowledgement modes** (`ack: on_receipt`, `ack: on_delivery`). With
   `on_delivery`, a `kafka` or `mqtt` input acknowledges a message after the
   outputs of the pipeline return.
-- **Column mapping** for the `postgres` and `clickhouse` outputs (and a check
+- **Column mapping** for the `postgres`, `clickhouse` and `snowflake` outputs (and a check
   of the table for `tidepool`).
 - **Rotation** for the `file` and `s3` outputs, by row count or by time.
 - **The `opcua` input**: a monitored item per node, one message for each value
@@ -165,7 +165,7 @@ Say this on the page. It helps the reader to make a correct decision.
 - **One process.** No cluster, no distributed state, no exactly-once delivery
   across machines.
 - **State and history are in memory.** A restart clears them.
-- **No table migrations.** The `postgres` and `clickhouse` outputs create a
+- **No table migrations.** The `postgres`, `clickhouse` and `snowflake` outputs create a
   table if it does not exist. They do not change an existing table.
 - **No expression language.** `map` does one operation per mapping. Use
   `script` for more.

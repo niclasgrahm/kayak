@@ -228,6 +228,82 @@ impl ClickhouseConnection {
     }
 }
 
+/// How kayak signs in to Snowflake. The `type` field selects the method.
+///
+/// The SQL API does not accept a password. Thus, a user that has only a
+/// password cannot connect.
+#[derive(Clone, Debug, Deserialize, Serialize, JsonSchema, PartialEq, Eq)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum SnowflakeAuth {
+    /// An RSA key pair. kayak signs a short-lived token with the private key.
+    /// Register the public key on the user with `ALTER USER ... SET
+    /// RSA_PUBLIC_KEY`. Use this method for a service user.
+    KeyPair {
+        /// The private key, as an unencrypted PKCS#8 PEM that starts with
+        /// `-----BEGIN PRIVATE KEY-----`. Use a `${NAME}` secret reference for
+        /// this value. kayak has no way to open an encrypted key.
+        private_key: Secret,
+    },
+    /// A token that you get from Snowflake: a programmatic access token or an
+    /// OAuth access token. kayak does not renew the token. When the token
+    /// expires, the pipeline fails until you change the value.
+    Token {
+        /// The token. Use a `${NAME}` secret reference for this value.
+        token: Secret,
+    },
+}
+
+/// A Snowflake account, the user that kayak connects as, and the warehouse that
+/// runs the statements. kayak uses the SQL API of Snowflake. The output or the
+/// input sets the table.
+///
+/// `warehouse`, `database`, `schema` and `role` go to Snowflake as you write
+/// them. Snowflake compares them with case, so write them as `SHOW` lists them.
+/// This is usually in upper case.
+///
+/// A statement that kayak runs starts the warehouse if the warehouse is
+/// suspended. Thus, a short `interval_secs` on an input or small batches on an
+/// output can keep the warehouse running and cost credits all day.
+#[derive(Clone, Debug, Deserialize, Serialize, JsonSchema, PartialEq, Eq)]
+#[schemars(title = "snowflake")]
+pub struct SnowflakeConnection {
+    /// The account identifier, as `orgname-accountname`, for example
+    /// `myorg-account1`. kayak uses it to find the server and to sign the
+    /// token. For an account locator, write only the locator (`xy12345`) and
+    /// write the full address in `url`.
+    pub account: String,
+    /// The user to connect as.
+    pub user: String,
+    /// How kayak signs in.
+    pub auth: SnowflakeAuth,
+    /// The warehouse that runs the statements.
+    pub warehouse: String,
+    /// The database to use. The database must exist. The output makes tables.
+    /// It does not make databases.
+    pub database: String,
+    /// The schema to use. The schema must exist. A `table` with a schema
+    /// (`staging.readings`) replaces this value.
+    pub schema: String,
+    /// The role to use. The default is the default role of the user.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub role: Option<String>,
+    /// The url of the server, when `account` does not give it. Use it for an
+    /// account locator with a region, for private connectivity or for an account
+    /// in China. For example,
+    /// `https://xy12345.us-east-2.aws.snowflakecomputing.com`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub url: Option<String>,
+    /// Permit an `http://` url with no TLS. The default is false. The
+    /// credentials go with every request, as plain text. Use it only for a local
+    /// test server.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub allow_http: Option<bool>,
+    /// How long one statement can run before Snowflake cancels it, in seconds.
+    /// The default is 300. A long statement keeps the warehouse running.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub statement_timeout_seconds: Option<u64>,
+}
+
 /// A Tidepool server and its ingest token. The `tidepool` output sets the
 /// table. You declare the tables in the Tidepool project. kayak does not make
 /// them.
@@ -306,6 +382,7 @@ pub enum ConnectionKind {
     Opcua(OpcuaConnection),
     Indu(InduConnection),
     Tidepool(TidepoolConnection),
+    Snowflake(SnowflakeConnection),
 }
 
 impl ConnectionKind {
@@ -325,6 +402,7 @@ impl ConnectionKind {
             Self::Opcua(_) => OPCUA,
             Self::Indu(_) => INDU,
             Self::Tidepool(_) => TIDEPOOL,
+            Self::Snowflake(_) => SNOWFLAKE,
         }
     }
 }
@@ -340,6 +418,7 @@ pub const REDIS: &str = "redis";
 pub const OPCUA: &str = "opcua";
 pub const INDU: &str = "indu";
 pub const TIDEPOOL: &str = "tidepool";
+pub const SNOWFLAKE: &str = "snowflake";
 
 /// The body of `POST /api/connections`: the name in `id`, and the fields of
 /// the connection beside it. The body has the same shape as one entry in the
@@ -447,6 +526,13 @@ impl Connections {
         match self.lookup(id, CLICKHOUSE)? {
             ConnectionKind::Clickhouse(c) => Ok(c),
             other => Err(ConnectionError::wrong_kind(id, CLICKHOUSE, other)),
+        }
+    }
+
+    pub fn snowflake(&self, id: &str) -> Result<&SnowflakeConnection, ConnectionError> {
+        match self.lookup(id, SNOWFLAKE)? {
+            ConnectionKind::Snowflake(c) => Ok(c),
+            other => Err(ConnectionError::wrong_kind(id, SNOWFLAKE, other)),
         }
     }
 

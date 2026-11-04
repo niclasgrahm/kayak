@@ -47,7 +47,7 @@ several inputs pauses the faster ones while it waits for the slowest barrier
 
 | Class | Inputs | What recovery means |
 |---|---|---|
-| **Rewindable** — has a position | `kafka`, `postgres`, `clickhouse`, `http` (with the write-ahead log below) | The position is part of the checkpoint; restore rewinds to it. |
+| **Rewindable** — has a position | `kafka`, `postgres`, `clickhouse`, `snowflake`, `http` (with the write-ahead log below) | The position is part of the checkpoint; restore rewinds to it. |
 | **Fed by another pipeline** | `pipeline` | No position: the upstream's barrier travels down the edge, and everything the upstream sent before it is processed before the downstream snapshots. |
 | **Gone once received** | `nats` (core), `redis` (pub/sub), `mqtt`, `opcua`, `indu`, `dummy`, `http_poll` | Nothing upstream can replay. State stays consistent with what was processed; messages in flight at the crash are lost. Said plainly on the reference pages. |
 

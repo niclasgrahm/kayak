@@ -14,6 +14,18 @@ history, not here.
 
 ## Unreleased
 
+### Added
+
+- **`snowflake` input, output and connection**, over the SQL API. The input
+  reads a `table` or a `query` on a timer, as a `snapshot` or `incremental`
+  above a watermark, like the other database inputs. The output inserts one
+  statement per batch through the same `columns` mapping, and creates the table
+  if it is not there. Sign in with an RSA `key_pair` or a `token`. Names fold to
+  upper case, as Snowflake folds them, so a column `sensor` arrives as the field
+  `SENSOR`. A statement starts a suspended warehouse, so a short interval or
+  small batches cost credits all day: see
+  [database outputs](website/io/database-outputs.md#performance-and-cost).
+
 ## 0.2.4 — 2026-10-31
 
 **Patch**: additions, fixes and dependency updates. Every config that loaded

@@ -332,6 +332,7 @@ without a config of your own:
 ```bash
 docker run -p 6767:6767 \
   -e NATS_PASSWORD=hunter2 -e POSTGRES_PASSWORD=hunter2 -e CLICKHOUSE_PASSWORD=hunter2 \
+  -e SNOWFLAKE_TOKEN=hunter2 \
   -e S3_ACCESS_KEY_ID=rustfsadmin -e S3_SECRET_ACCESS_KEY=rustfsadmin \
   ghcr.io/niclasgrahm/kayak:0.2.2 \
   --config /usr/share/kayak/example/config.json --data-dir /kayak/dev_data
@@ -343,7 +344,7 @@ The sample needs two things:
   start);
 - `--data-dir`, because the sample has a `file` output.
 
-The pipelines that use nats, kafka, postgres, clickhouse and s3 report
+The pipelines that use nats, kafka, postgres, clickhouse, snowflake and s3 report
 connection errors until the container can reach those systems. `docker compose
 up` in the repository starts them. `heartbeat` and its outputs work without
 them.

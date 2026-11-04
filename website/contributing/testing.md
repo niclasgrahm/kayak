@@ -22,6 +22,7 @@ The layers are in sequence from the cheapest to the most expensive:
 | `tests/api.rs` | the HTTP surface and its status codes, through `tower::oneshot` |
 | `tests/persist.rs` | the config file: an edit does not write it, a save does, a save cannot leave its directory, and a revert loads it again |
 | `tests/live_sql.rs` | the sql inputs against a real postgres and clickhouse (`just test-live`, not in `just ci`) |
+| `tests/live_snowflake.rs` | the snowflake input and output against a real account (`just test-snowflake`, not in `just ci`) |
 | `hurl/tests/*.hurl` | one smoke test against a server that runs (`just test-http`) |
 
 ## when you add a component
@@ -114,6 +115,15 @@ Two kafka behaviors cause confusion:
   partition to the new server.
 
 This is the normal behavior of kafka.
+
+**Snowflake.** Nothing in `docker-compose.yaml` speaks the SQL API.
+`snowflake::fake` is a fake server on a real socket, and the tests of
+`snowflake`, `inputs::snowflake` and `outputs::snowflake` use it. It can show what
+kayak sends. It cannot show what Snowflake does with it. For that, set
+`SNOWFLAKE_ACCOUNT`, `SNOWFLAKE_USER`, `SNOWFLAKE_WAREHOUSE`,
+`SNOWFLAKE_DATABASE`, `SNOWFLAKE_SCHEMA` and one of `SNOWFLAKE_TOKEN` and
+`SNOWFLAKE_PRIVATE_KEY`, and run `just test-snowflake`. Each test makes its own
+table and drops it. These tests use warehouse credits.
 
 **postgres and ClickHouse.** postgres listens on :5432 and ClickHouse on :8123.
 Both have the database `kayak`, the role `kayak` and the password `hunter2`.

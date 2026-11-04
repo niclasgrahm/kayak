@@ -149,7 +149,7 @@ pub fn for_input(kind: &str) -> Option<Sampling> {
         // newest rows the sampler starts it from the oldest instead, and says
         // so at the time, since a quiet table would otherwise sample empty
         // with a table full of rows behind it.
-        "postgres" | "clickhouse" => Sampling::Ready,
+        "postgres" | "clickhouse" | "snowflake" => Sampling::Ready,
         // A GET, which the api answers the same way for the sample as for
         // the pipeline: the reply is the snapshot, and asking twice takes
         // nothing away from anyone.

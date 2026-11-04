@@ -7,7 +7,7 @@
 //! — the schedule, the paging, the watermark — lives in the server crate and
 //! is shared by every database that gets an input, the way [`crate::columns`]
 //! is shared by every database that gets an output. This module is the mirror
-//! of that one: the postgres and clickhouse inputs declare no polling concepts
+//! of that one: the database inputs declare no polling concepts
 //! of their own, only how their server spells a query.
 //!
 //! # A table and a query are the same thing

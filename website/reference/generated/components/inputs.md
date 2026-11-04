@@ -730,6 +730,85 @@ This component takes no configuration.
 | `polled_at` | The start time of the read that returned the row, as RFC 3339. All rows of one read have the same value. Use it to tell one snapshot from the next. The time comes from the clock of kayak, not from the database server. |
 
 
+## `snowflake` {#input-snowflake}
+
+Reads a Snowflake table, view or query at an interval and sends each row as a message. It uses the SQL API of Snowflake.
+
+Each read uses the warehouse. A short `interval_secs` can keep the warehouse running and cost credits all day. The modes, the watermark and the limits of an incremental read are the same as on the `postgres` input.
+
+Snowflake folds a name with no quotes to upper case, and so does this input. `table`, `columns` and the cursor `field` go to upper case. Each message has the column names as Snowflake gives them, which is usually in upper case: a column `sensor` arrives as the field `SENSOR`. To get other field names, use `AS "sensor"` in a `query` or a `map` transform.
+
+A timestamp is ISO 8601 with nine fractional digits, and an instant with no zone of its own is read as UTC. A whole number is a number up to 64 bits and a string above that. A decimal column with a precision above 15 is always a string, because a JSON number cannot keep its digits. A `VARIANT` gives the value that it holds.
+
+| field | type | | description |
+| --- | --- | --- | --- |
+| `connection` | `snowflake` connection | <Badge type="warning" text="required" /> | The name of the snowflake connection to read through. Declare the connection in the connections file. |
+| `interval_secs` | `integer` | <Badge type="warning" text="required" /> | The time between two reads, in seconds. The time starts at the end of a read. Thus, two reads never overlap. The first read occurs when the pipeline starts. |
+| `mode` | `snapshot \| incremental` | <Badge type="warning" text="required" /> | Whether each read returns all rows (`snapshot`) or only the rows after the last read (`incremental`). |
+| `columns` | `list of string` | <Badge type="info" text="optional" /> | The columns to read, in order. Leave it empty to read all columns. For an incremental input, the list must include `field`. |
+| `max_batch` | `integer` | <Badge type="info" text="optional" /> | The maximum number of rows in one batch. The default is 1. The input puts rows that it already read into a batch. It does not wait for more rows to fill a batch. |
+| `page_size` | `integer` | <Badge type="info" text="optional" /> | The maximum number of rows that one query returns. The default is 1000. When a page is full, the input reads the next page immediately. The interval starts after a page that is not full. A `snapshot` ignores this field and reads all rows in one query. |
+| `query` | `string` | <Badge type="info" text="optional" /> | A `SELECT` to read in place of a table. The input puts the query in a subquery. It adds the cursor condition, the `ORDER BY` and the page limit outside the subquery. Thus, the query needs no placeholder and no `ORDER BY`. Write one statement with no semicolon at the end. You can use all SQL that the server accepts in a subquery, for example `WITH`. |
+| `table` | `string` | <Badge type="info" text="optional" /> | The table or view to read, as `name` or `schema.name`. Give exactly one of `table` and `query`. |
+| `ack` | `on_receipt` \| `on_delivery` | <Badge type="info" text="optional" /> | When the input acknowledges a message to its broker. The default is `on_receipt`. Only the `kafka` and `mqtt` inputs support `on_delivery`. The `mqtt` input requires a `qos` of `at_least_once` or higher for it. On all other inputs, `on_delivery` fails to build. |
+| `buffer` | `static \| tumbling \| batch` | <Badge type="info" text="optional" /> | Collect messages from this input into batches before the transforms. Use a count (`static`), a time (`tumbling`) or the first of the two (`batch`). The buffer never sends an empty batch. Available on all input types. This is not the `buffer` transform. |
+| `envelope` | `merge \| wrap` | <Badge type="info" text="optional" /> | Add metadata about the source of each message, for example the subject, the topic or the partition. The "metadata" section lists the fields. Available on all input types. If you do not set it, the input sends each message without changes. |
+
+**`mode` — `type: "snapshot"`**
+
+This component takes no configuration.
+
+**`mode` — `type: "incremental"`**
+
+| field | type | | description |
+| --- | --- | --- | --- |
+| `field` | `string` | <Badge type="warning" text="required" /> | The column that the input follows. The watermark is the highest value that the input sent. Each read asks for the rows above the watermark. The input does not read rows where the column is `null`. |
+| `lag_secs` | `integer` | <Badge type="info" text="optional" /> | For a timestamp column: the time to stay behind the current time, in seconds. A later read gets the rows that are less than this time before `now()`. This gives late transactions time to commit. Do not use it with a numeric column. The server refuses the query. |
+| `start_from` | `oldest` \| `newest` | <Badge type="info" text="optional" /> | Where the first read starts. With `newest`, the input reads only the rows added after the pipeline started. With `oldest`, it reads all rows first and then follows the table. The default is `newest`. |
+
+**`buffer` — `type: "static"`**
+
+| field | type | | description |
+| --- | --- | --- | --- |
+| `size` | `integer` | <Badge type="warning" text="required" /> | The number of messages in a batch. |
+
+**`buffer` — `type: "tumbling"`**
+
+| field | type | | description |
+| --- | --- | --- | --- |
+| `window_seconds` | `integer` | <Badge type="warning" text="required" /> | The time to collect messages, in s, from the first message. |
+
+**`buffer` — `type: "batch"`**
+
+| field | type | | description |
+| --- | --- | --- | --- |
+| `size` | `integer` | <Badge type="warning" text="required" /> | The number of messages that closes the batch immediately. |
+| `window_seconds` | `integer` | <Badge type="warning" text="required" /> | The maximum time to wait, in s, from the first message in the batch. |
+
+**`envelope` — `type: "merge"`**
+
+| field | type | | description |
+| --- | --- | --- | --- |
+| `meta` | `string` | <Badge type="info" text="optional" /> | The field for the metadata object. The default is `_meta`. |
+
+**`envelope` — `type: "wrap"`**
+
+| field | type | | description |
+| --- | --- | --- | --- |
+| `meta` | `string` | <Badge type="info" text="optional" /> | The field for the metadata object. The default is `_meta`. |
+| `payload` | `string` | <Badge type="info" text="optional" /> | The field for the original payload. The default is `value`. |
+
+**metadata** — what this input attaches to a message when its `envelope` is set.
+
+| field | holds |
+| --- | --- |
+| `pipeline` | The id of the pipeline that read the message. |
+| `input` | The type of the input that read the message, for example `nats`. |
+| `received_at` | The time when kayak read the message, as RFC 3339. This is the arrival time at this pipeline. It is not the time of the event in the message. |
+| `connection` | The name of the connection that the input read from. |
+| `polled_at` | The start time of the read that returned the row, as RFC 3339. All rows of one read have the same value. Use it to tell one snapshot from the next. The time comes from the clock of kayak, not from the database server. |
+
+
 ## `http_poll` {#input-http-poll}
 
 Gets a url at an interval and sends the full reply each time.
