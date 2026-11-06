@@ -135,6 +135,19 @@ fn polling_input_samples() -> Vec<(&'static str, Value)> {
             }),
         ),
         (
+            "snowflake",
+            json!({
+                "type": "snowflake",
+                "connection": "local-snowflake",
+                "table": "readings",
+                "columns": ["id", "recorded_at"],
+                "interval_secs": 300,
+                "mode": {"type": "incremental", "field": "recorded_at", "start_from": "oldest", "lag_secs": 60},
+                "page_size": 500,
+                "max_batch": 100
+            }),
+        ),
+        (
             "http_poll",
             json!({
                 "type": "http_poll",
@@ -492,6 +505,43 @@ fn chain_transform_samples() -> Vec<(&'static str, Value)> {
     ]
 }
 
+fn snowflake_output_sample() -> (&'static str, Value) {
+    (
+        "snowflake",
+        json!({
+            "type": "snowflake",
+            "connection": "local-snowflake",
+            "table": "staging.readings",
+            "columns": [
+                {"name": "sensor_id", "type": "text", "field": "sensor.id", "nullable": false},
+                {"name": "temperature", "type": "float", "on_missing": "skip_row"},
+                {"name": "raw", "type": "json", "message": true}
+            ],
+            "create_table": true,
+            "on_extra_fields": "error"
+        }),
+    )
+}
+
+fn snowflake_connection_sample() -> (&'static str, Value) {
+    (
+        "snowflake",
+        json!({
+            "type": "snowflake",
+            "account": "myorg-account1",
+            "user": "KAYAK",
+            "auth": {"type": "key_pair", "private_key": "${SNOWFLAKE_PRIVATE_KEY}"},
+            "warehouse": "COMPUTE_WH",
+            "database": "ANALYTICS",
+            "schema": "PUBLIC",
+            "role": "LOADER",
+            "url": "https://xy12345.us-east-2.aws.snowflakecomputing.com",
+            "allow_http": false,
+            "statement_timeout_seconds": 60
+        }),
+    )
+}
+
 fn output_samples() -> Vec<(&'static str, Value)> {
     vec![
         ("stdout", json!({"type": "stdout"})),
@@ -570,6 +620,7 @@ fn output_samples() -> Vec<(&'static str, Value)> {
                 "on_extra_fields": "error"
             }),
         ),
+        snowflake_output_sample(),
         (
             "mqtt",
             json!({
@@ -653,6 +704,7 @@ fn connection_samples() -> Vec<(&'static str, Value)> {
                 "allow_http": true
             }),
         ),
+        snowflake_connection_sample(),
         ("file", json!({"type": "file", "root": "./out/events"})),
         (
             "s3",

@@ -9,6 +9,7 @@ use kayak_core::Stage;
 
 pub mod ack;
 pub mod clickhouse;
+pub mod snowflake;
 pub mod dummy;
 pub mod envelope;
 pub mod http;

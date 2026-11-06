@@ -164,7 +164,7 @@ pub fn for_input(kind: &str) -> Option<Vec<MetaFieldDoc>> {
                  same on every node of one snapshot",
             ),
         ],
-        "postgres" | "clickhouse" => vec![
+        "postgres" | "clickhouse" | "snowflake" => vec![
             MetaFieldDoc::new("connection", "The name of the connection that the input read from."),
             MetaFieldDoc::new(
                 "polled_at",

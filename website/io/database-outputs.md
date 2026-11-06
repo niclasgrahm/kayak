@@ -1,7 +1,8 @@
 # database outputs and column mapping
 
-The `postgres` and `clickhouse` outputs insert messages into a table. Both use
-the same `columns` list to map message fields to typed columns.
+The `postgres`, `clickhouse` and `snowflake` outputs insert messages into a
+table. All three use the same `columns` list to map message fields to typed
+columns.
 
 ## postgres
 
@@ -165,8 +166,137 @@ the server parses timestamps and uuids.
 `create_table: false` still fails at startup if the server is not reachable.
 The output checks the connection when it starts.
 
+## snowflake
+
+The `snowflake` output uses the same `columns` list. To move a config to
+snowflake, change the `type` and the `connection`:
+
+```jsonc
+// config.json
+{ "type": "snowflake", "connection": "warehouse", "table": "sensor_readings",
+  "columns": [
+    { "name": "sensor",      "type": "text" },
+    { "name": "value",       "type": "float" },
+    { "name": "recorded_at", "type": "timestamp", "field": "ts" },
+    { "name": "raw",         "type": "json",      "message": true }
+  ] }
+```
+
+Without `columns`, the table has a `RECEIVED_AT` timestamp and a `PAYLOAD`
+column of type `VARIANT` that contains each message. A mapped table also gets
+`RECEIVED_AT`, unless a column has that name.
+
+### names go to upper case
+
+Snowflake folds a name with no quotes to upper case: `CREATE TABLE readings`
+makes the table `READINGS`. kayak does the same. The table above is
+`SENSOR_READINGS`, with the columns `SENSOR`, `VALUE`, `RECORDED_AT` and `RAW`.
+The name is then quoted, so that a column called `value` or `order` works.
+
+The field that a column reads does not change. The column `sensor` still reads
+the field `sensor` from the message.
+
+A table that has a lower case name in quotes cannot be used. kayak has no way
+to write that name.
+
+### what differs from postgres
+
+- **There are no keys.** Snowflake does not enforce a primary key or a unique
+  constraint, so the output does not declare them. Clustering costs credits, so
+  the output does not declare that either. Set `create_table` to false and make
+  the table yourself if you want them.
+- **`uuid` is a `VARCHAR(36)`.** Snowflake has no uuid type, so the server does
+  not check the format.
+- **`json` is a `VARIANT`.** The value is stored as JSON, not as text.
+- **`timestamp` is a `TIMESTAMP_TZ`.** A timestamp with no offset is read as UTC.
+
+### performance and cost
+
+**Each statement uses the warehouse, and a statement starts a suspended
+warehouse.** The output sends one statement for each batch. A batch that is
+larger than 8 MiB becomes more statements. If the batches are small and
+frequent, the warehouse never suspends and costs credits all day. Put a large
+`buffer` on the input:
+
+```jsonc
+{ "type": "pipeline", "upstream": "sensors",
+  "buffer": { "type": "batch", "size": 1000, "window_seconds": 60 } }
+```
+
+`sensors_to_snowflake` in the sample does this.
+
+### the connection {#snowflake-connection}
+
+The output uses the [SQL API](https://docs.snowflake.com/en/developer-guide/sql-api/index)
+of Snowflake. The connection has an `account`, a `user`, `auth`, a `warehouse`,
+a `database` and a `schema`.
+
+- `account` is `orgname-accountname`. kayak refuses a value with a period. For
+  an account locator with a region, write the locator in `account` and the full
+  address in `url`.
+- `warehouse`, `database`, `schema` and `role` go to Snowflake as you write them.
+  Snowflake compares them with case. Write them as `SHOW` lists them, which is
+  usually in upper case.
+- `auth` is a `key_pair` or a `token`. The SQL API does not accept a password.
+- `statement_timeout_seconds` limits one statement. The default is 300. The
+  default of the server is two days, which is a very long time to pay for a
+  mistake.
+
+```yaml
+# config.connections.yaml
+warehouse:
+  type: snowflake
+  account: myorg-account1
+  user: KAYAK
+  auth:
+    type: key_pair
+    private_key: ${SNOWFLAKE_PRIVATE_KEY}
+  warehouse: COMPUTE_WH
+  database: ANALYTICS
+  schema: PUBLIC
+```
+
+A `key_pair` is the method for a service user. kayak signs a token that lasts
+for one hour and makes a new one before it ends. The key must be an unencrypted
+PKCS#8 PEM. To make one and register it:
+
+```bash
+openssl genrsa 2048 | openssl pkcs8 -topk8 -inform PEM -nocrypt -out rsa_key.p8
+```
+
+```bash
+openssl rsa -in rsa_key.p8 -pubout
+```
+
+Then, in Snowflake, run `ALTER USER KAYAK SET RSA_PUBLIC_KEY='MIIB...'` with the
+lines between the `BEGIN` and `END` of the public key.
+
+A `token` is a programmatic access token or an OAuth access token. kayak does
+not renew a token. When it expires, the pipeline fails until you change the
+secret.
+
+### failures
+
+A statement that Snowflake refuses fails the batch, and the error gives the
+words of the server. The output tries again on `429`, `500`, `502`, `503`, `504`
+and on a lost connection. Each try uses the same request id, so Snowflake does
+not run a statement again if the statement has already succeeded. That is what
+makes a retry safe when the reply to an insert was lost.
+
+A statement that takes more than 45 seconds is not a failure. Snowflake answers
+`202`, and kayak asks again until the statement ends or its timeout is over.
+
+`create_table: false` still fails at startup if the account cannot be reached or
+the credentials are wrong. The output checks the connection when it starts.
+
 ## trying it
 
 `docker compose up` starts ClickHouse on `:8123` with the database `kayak` and
 the role `kayak`. The password is `hunter2`. That is the value of
 `${CLICKHOUSE_PASSWORD}` in `example_config/secrets.example.json`.
+
+Nothing in `docker-compose.yaml` can stand in for Snowflake. In the sample,
+`local-snowflake` points at `http://localhost:8099`, where nothing listens, so
+`sensors_to_snowflake` and `readings_from_snowflake` report that they cannot
+connect. This way, the sample sends nothing to Snowflake and costs nothing. To
+try them, change the connection to your own account.

@@ -64,7 +64,7 @@ not at all.
 
 | | inputs | after a crash |
 |---|---|---|
-| **rewindable** | `kafka`, `postgres` and `clickhouse` (incremental), `http` | resume exactly at the checkpoint |
+| **rewindable** | `kafka`, `postgres`, `clickhouse` and `snowflake` (incremental), `http` | resume exactly at the checkpoint |
 | **fed by another pipeline** | `pipeline` | covered by the upstream's checkpoint |
 | **not replayable** | `nats`, `redis`, `mqtt`, `opcua`, `indu`, `dummy`, `http_poll` | state stays consistent; messages in flight at the crash are lost |
 
@@ -73,7 +73,7 @@ not at all.
   says. On a restart the input commits the checkpoint's offsets for its group
   before subscribing, so the broker can never be behind the state that was
   restored.
-- **postgres / clickhouse.** The `incremental` watermark is part of the
+- **postgres / clickhouse / snowflake.** The `incremental` watermark is part of the
   checkpoint, so a restart resumes after it rather than from `start_from`.
   `snapshot` reads have nothing to resume: the next poll *is* the replay.
 - **http.** Every post is appended to a write-ahead log under the state

@@ -406,9 +406,17 @@ picking up."
       batch, and the table read again after a refusal. The `tidepool`
       *input*, subscribing to a live metric, is Tidepool's §15.3 and comes
       later.)
+- [x] **a `snowflake` connection, input and output** (done 2026-11-04, over
+      the SQL API, on the polling and column-mapping layers the other databases
+      use. See "the snowflake components" in `CLAUDE.md`. Tested offline against
+      a fake on a socket; `just test-snowflake` is the check against a real
+      account. Not built, each waiting for someone to ask: a name that is
+      case-sensitive (a lower case table in quotes cannot be named), `cluster_by`
+      on a created table, a passphrase for an encrypted private key, and Snowpipe
+      Streaming for ingest without a warehouse.)
 - [ ] **the connector list is thin.** nats, kafka, mqtt, redis, http, postgres,
-      clickhouse, opcua, indu and a dummy in; nats, kafka, mqtt, redis, http,
-      postgres, clickhouse, file, s3, indu, tidepool and stdout out — against
+      clickhouse, snowflake, opcua, indu and a dummy in; nats, kafka, mqtt, redis,
+      http, postgres, clickhouse, snowflake, file, s3, indu, tidepool and stdout out — against
       Benthos/Redpanda Connect's 300+. The five-touchpoint recipe for adding a
       component (config enum, `build()` arm, impl module, wire-format sample,
       doc comment) is cheap by design, but "cheap to add" isn't "already

@@ -96,10 +96,10 @@ it at `/docs`.
 
 | | |
 | --- | --- |
-| **inputs** | `nats`, `kafka`, `mqtt`, `redis`, `opcua`, `http` (other systems post to it), `http_poll`, `postgres`, `clickhouse`, `indu`, `pipeline` (the output of another pipeline), `dummy` (for tests) |
+| **inputs** | `nats`, `kafka`, `mqtt`, `redis`, `opcua`, `http` (other systems post to it), `http_poll`, `postgres`, `clickhouse`, `snowflake`, `indu`, `pipeline` (the output of another pipeline), `dummy` (for tests) |
 | **transforms** | `filter`, `map`, `reducer` (aggregate, with `group_by`), `splitter`, `buffer`, `remember` / `recall` (state buckets), `http` (call a service or a model), `script` (rhai), and the streaming statistics: `deadband`, `throttle`, `pivot`, `derive`, `rolling`, `smooth`, `detect`, `resample`, `features` |
-| **outputs** | `postgres` and `clickhouse` with column mapping, `file` and `s3` with rotation, `kafka`, `nats`, `mqtt`, `redis`, `http`, `indu`, `tidepool`, `stdout` |
-| **connections** | `kafka`, `nats`, `mqtt`, `redis`, `postgres`, `clickhouse`, `s3`, `file`, `opcua`, `indu`, `tidepool` |
+| **outputs** | `postgres`, `clickhouse` and `snowflake` with column mapping, `file` and `s3` with rotation, `kafka`, `nats`, `mqtt`, `redis`, `http`, `indu`, `tidepool`, `stdout` |
+| **connections** | `kafka`, `nats`, `mqtt`, `redis`, `postgres`, `clickhouse`, `snowflake`, `s3`, `file`, `opcua`, `indu`, `tidepool` |
 
 Each input can buffer by count, by time window, or by the first of the two.
 

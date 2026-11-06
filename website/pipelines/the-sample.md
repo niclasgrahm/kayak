@@ -50,6 +50,7 @@ sign-in. See [authentication](/operating/authentication).
 | `opcua_anomalies` | `opcua` | browses a folder, with a deadband on the input |
 | `readings_from_postgres` | `postgres` | incremental by `id`, from the newest row |
 | `sensor_peaks_from_clickhouse` | `clickhouse` | a snapshot of a `GROUP BY` query, every 30 s |
+| `readings_from_snowflake` | `snowflake` | the rows above a watermark on `recorded_at`, every 5 min |
 | `components_from_api` | `http_poll` | the component reference of the same server, every 5 minutes |
 
 `ingest` uses `wrap` because a client can post any JSON value to it, also a bare
@@ -155,6 +156,7 @@ merges the reply `{"accepted": 1}` under `ingest`.
 | `hot_readings` | `postgres` with `columns` and an index | postgres |
 | `sensors_60s_sum` | `postgres` with `columns`, table `sensor_sums` | postgres |
 | `sensors_to_clickhouse` | `clickhouse` | clickhouse |
+| `sensors_to_snowflake` | `snowflake` | snowflake |
 | `sensors_to_tidepool` | `tidepool` | Tidepool on port 7070 |
 
 `heartbeat_to_webhook` uses the port 6767 from `Cargo.toml`. If you change the

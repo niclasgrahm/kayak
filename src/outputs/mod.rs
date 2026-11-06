@@ -4,6 +4,7 @@ use std::sync::Arc;
 use crate::{BuildCtx, inputs::MessageBatch};
 
 pub mod clickhouse;
+pub mod snowflake;
 pub mod columns;
 pub mod file;
 pub mod http;

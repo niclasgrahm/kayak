@@ -48,6 +48,20 @@
     "type": "redis",
     "url": "redis://localhost:6379"
   },
+  "local-snowflake": {
+    "type": "snowflake",
+    "account": "myorg-account1",
+    "user": "KAYAK",
+    "auth": {
+      "type": "token",
+      "token": "${SNOWFLAKE_TOKEN}"
+    },
+    "warehouse": "COMPUTE_WH",
+    "database": "KAYAK",
+    "schema": "PUBLIC",
+    "url": "http://localhost:8099",
+    "allow_http": true
+  },
   "local-tidepool": {
     "type": "tidepool",
     "url": "http://localhost:7070"

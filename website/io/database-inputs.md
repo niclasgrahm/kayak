@@ -1,7 +1,7 @@
 # database inputs
 
-The `postgres` and `clickhouse` inputs run a query on a timer. Each row becomes
-one message, with the column names as its fields.
+The `postgres`, `clickhouse` and `snowflake` inputs run a query on a timer. Each
+row becomes one message, with the column names as its fields.
 
 ```jsonc
 // config.json — follow a table as rows are added to it
@@ -158,6 +158,41 @@ The ClickHouse input sends two settings with each request:
 - `date_time_output_format=iso`, so a `DateTime` arrives as
   `2026-01-01T12:00:00Z`. The postgres output refuses the default format.
 
+The Snowflake input sends no setting of that kind. The SQL API gives each row as
+an array of strings and a list of column types, and kayak makes the message from
+them:
+
+- Each timestamp is ISO 8601 with nine fractional digits, because the request
+  asks for that format. A `TIMESTAMP_NTZ` has no offset. The others do, and an
+  instant is shown in UTC.
+- A whole number is a JSON number up to 64 bits, and a string above that.
+- A decimal column with a precision of 15 or less is a JSON number. A decimal
+  column with a higher precision is always a string, because a JSON number
+  cannot keep its digits. The column decides this, so one field does not change
+  type from row to row.
+- A `VARIANT`, `OBJECT` or `ARRAY` gives the value that it holds.
+
+The cursor is `TO_VARCHAR(field, format)`. The next query reads it back with the
+same format. The format has nine fractional digits because a watermark rounded
+to milliseconds would read its own rows again, forever. An incremental read
+refuses a `FLOAT` cursor, because no format is known to keep its exact value, and
+refuses a type with no useful order, such as `VARIANT`.
+
+### snowflake: names and cost
+
+Snowflake folds a name with no quotes to upper case, and so does this input.
+`table`, `columns` and the cursor `field` go to upper case, and a `query` stays
+as you wrote it. Thus, a column `sensor` arrives as the field `SENSOR`. To get
+another name, use `AS "sensor"` in a `query` or a `map` transform.
+
+**Each read uses the warehouse, and a read starts a suspended warehouse.** If
+`interval_secs` is shorter than the auto-suspend time of the warehouse, the
+warehouse never suspends and costs credits all day. Use the longest interval that
+you can accept. See [the connection](/io/database-outputs#snowflake-connection) for how
+to connect and sign in.
+
 <!--@include: ../reference/generated/components/inputs/postgres.md-->
 
 <!--@include: ../reference/generated/components/inputs/clickhouse.md-->
+
+<!--@include: ../reference/generated/components/inputs/snowflake.md-->

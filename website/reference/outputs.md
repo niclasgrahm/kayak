@@ -15,8 +15,8 @@ from the system: a topic, a table, a path. Two outputs have no connection.
 `stdout` has nothing to connect to. The [`http` output](/io/sending-over-http)
 takes a `url`, because for a webhook the url is all that a connection holds.
 
-`postgres` and `clickhouse` map messages onto real columns. They share the
-same column mapping and differ only in DDL and wire format. See
+`postgres`, `clickhouse` and `snowflake` map messages onto real columns. They
+share the same column mapping and differ only in DDL and wire format. See
 [database outputs](/io/database-outputs).
 
 <!--@include: ./generated/components/outputs.md-->
